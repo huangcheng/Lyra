@@ -1,0 +1,71 @@
+{
+  "app": {
+    "name": "Lyra",
+    "tagline": "你的自托管邮件客户端"
+  },
+  "nav": {
+    "inbox": "收件箱",
+    "sent": "已发送",
+    "drafts": "草稿",
+    "trash": "垃圾邮件",
+    "spam": "垃圾邮件",
+    "archive": "归档",
+    "starred": "已加星标",
+    "accounts": "账户",
+    "settings": "设置"
+  },
+  "mail": {
+    "compose": "写邮件",
+    "reply": "回复",
+    "replyAll": "全部回复",
+    "forward": "转发",
+    "delete": "删除",
+    "archive": "归档",
+    "markRead": "标记为已读",
+    "markUnread": "标记为未读",
+    "star": "加星标",
+    "unstar": "取消星标",
+    "searchPlaceholder": "搜索邮件…",
+    "noMessages": "没有邮件",
+    "selectMessage": "选择一封邮件查看",
+    "from": "发件人",
+    "to": "收件人",
+    "cc": "抄送",
+    "date": "日期",
+    "subject": "主题",
+    "attachments": "附件",
+    "unread": "未读"
+  },
+  "auth": {
+    "login": "登录",
+    "logout": "退出登录",
+    "username": "用户名",
+    "password": "密码",
+    "totpCode": "TOTP 验证码",
+    "loginTitle": "登录 Lyra",
+    "loginError": "用户名或密码错误"
+  },
+  "sync": {
+    "syncing": "同步中…",
+    "syncComplete": "同步完成",
+    "syncError": "同步出错",
+    "lastSync": "上次同步"
+  },
+  "settings": {
+    "language": "语言",
+    "english": "English",
+    "chinese": "中文",
+    "theme": "主题",
+    "accounts": "邮件账户",
+    "addAccount": "添加账户"
+  },
+  "common": {
+    "loading": "加载中…",
+    "error": "错误",
+    "retry": "重试",
+    "cancel": "取消",
+    "save": "保存",
+    "confirm": "确认",
+    "back": "返回"
+  }
+}
