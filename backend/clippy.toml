@@ -1,0 +1,2 @@
+# clippy — warn on common footguns; CI/Makefile treat warnings as errors via -D warnings
+cognitive-complexity-threshold = 30

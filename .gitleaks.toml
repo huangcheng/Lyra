@@ -19,7 +19,7 @@ paths = [
     '''\.git/''',                # git internals
     '''node_modules/''',
     '''target/''',
-    '''\.orch/''',               # local orchestrator scratch
+    '''\.orch/''',               # local scratch (ignored)
 ]
 
 # ---------------------------------------------------------------------------

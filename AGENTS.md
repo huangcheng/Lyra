@@ -42,8 +42,8 @@ Update `AGENTS.md` (and the linked spec if needed) when any of these land:
 
 - [ ] New top-level packages / crates / apps, or a renamed layout  
 - [ ] Locked stack choice added, replaced, or version-pinned in practice  
-- [ ] New standard scripts (`dev`, `test`, `lint`, `migrate`, Docker entrypoints)  
-- [x] Secret-scan tooling: `.gitleaks.toml`, `.pre-commit-config.yaml`, `scripts/secretscan.sh`, `Makefile`
+- [x] Standard scripts: `make fmt`, `make lint`, `make check`, `make secretscan`  
+- [x] Secret-scan tooling: `.gitleaks.toml`, `.pre-commit-config.yaml`, `scripts/secretscan.sh`, `Makefile`  
 - [ ] New doc under `docs/product/` or `docs/specs/` that agents must read for common tasks  
 - [ ] Engineering rule learned from a bug or review (promote into standards, summarize here)
 
@@ -69,20 +69,30 @@ Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall
 
 ```
 Lyra/
-  AGENTS.md                 ← you are here (keep in sync with the project)
+  AGENTS.md
+  Makefile                  ← fmt / lint / check / secretscan
   docs/
-    product/                ← version / product scope
-    specs/                  ← engineering & technical specs
-  (apps / crates TBD)       ← update paths here when scaffolded
+    product/
+    specs/
+  frontend/                 ← Vite + React + oxlint + Prettier
+  backend/                  ← Rust + rustfmt + clippy
 ```
 
-Expected shape once scaffolded (adjust when real):
+| Area | Path | Notes |
+|------|------|--------|
+| Web UI | `frontend/` | React, TanStack Router (planned), shadcn mail, en/zh i18n |
+| API + sync | `backend/` | Rust + Axum (planned); sync engine as a deep module |
+| DB | TBD | SQLite + PostgreSQL |
 
-| Area | Likely home | Notes |
-|------|-------------|--------|
-| Web UI | frontend app | React, TanStack Router, shadcn mail, en/zh i18n |
-| API + sync | Rust (Axum) | Thin handlers; sync engine as a deep module |
-| DB | SQLite + PostgreSQL | One schema, dual backends via ORM |
+### Lint & format
+
+| Command | What it does |
+|---------|----------------|
+| `make fmt` | Prettier (frontend) + `cargo fmt` (backend) |
+| `make lint` | oxlint + tsc (frontend) + clippy `-D warnings` (backend) |
+| `make check` | format check + lint + secret scan |
+| `cd frontend && npm run check` | frontend only |
+| `cd backend && cargo clippy -- -D warnings` | backend only |
 
 ---
 
@@ -110,6 +120,14 @@ Full rules: `docs/specs/2026-08-20-lyra-engineering-standards.md`.
 - Tests at module seams; format/lint before done.
 - Match existing patterns; ask before replacing a locked stack choice.
 - **Secrets never in tree** — gitleaks enforced via pre-commit + `make secretscan`.
+
+---
+
+## Execution
+
+- Prefer **local** development and agent runs against a local checkout.
+- GitHub is the public source of truth; mirrors elsewhere are optional.
+- Do not document or commit private personal tooling, workflows, or tracker identifiers.
 
 ---
 
