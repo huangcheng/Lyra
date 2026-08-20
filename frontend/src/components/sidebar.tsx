@@ -4,6 +4,7 @@
  * Modeled after the shadcn mail example sidebar.
  */
 
+import { useState } from 'react';
 import { useMailStore } from '../stores/mail';
 import { useUIStore } from '../stores/ui';
 import { useAuthStore } from '../stores/auth';
@@ -50,8 +51,12 @@ export function Sidebar() {
   const accounts = useMailStore((s) => s.accounts);
   const setLocale = useUIStore((s) => s.setLocale);
   const setSelectedAccount = useUIStore((s) => s.setSelectedAccount);
+  const setComposeOpen = useUIStore((s) => s.setComposeOpen);
   const clearSession = useAuthStore((s) => s.clearSession);
   const user = useAuthStore((s) => s.user);
+  const token = useAuthStore((s) => s.token);
+
+  const [syncing, setSyncing] = useState(false);
 
   const handleLogout = () => {
     const token = useAuthStore.getState().token;
@@ -69,10 +74,48 @@ export function Sidebar() {
     window.location.href = path;
   };
 
+  const handleSync = async () => {
+    const accountId = selectedAccountId ?? accounts[0]?.id;
+    if (!accountId || !token) return;
+    setSyncing(true);
+    try {
+      await fetch(`/api/accounts/${accountId}/sync`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      // Reload data after sync
+      window.dispatchEvent(new CustomEvent('lyra:sync-complete'));
+    } catch {
+      // sync error handled by event stream
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
         <h1 className="sidebar-title">{t(locale, 'app.name')}</h1>
+        <div className="sidebar-header-actions">
+          <button
+            type="button"
+            className="sidebar-compose-btn"
+            onClick={() => setComposeOpen(true)}
+            title={t(locale, 'mail.compose')}
+          >
+            ✏️ {t(locale, 'mail.compose')}
+          </button>
+          <button
+            type="button"
+            className="sidebar-sync-btn"
+            onClick={handleSync}
+            disabled={syncing}
+            title={syncing ? t(locale, 'mail.syncing') : t(locale, 'mail.syncNow')}
+          >
+            {syncing ? '⏳' : '🔄'}{' '}
+            {syncing ? t(locale, 'mail.syncing') : t(locale, 'mail.syncNow')}
+          </button>
+        </div>
       </div>
 
       {/* Account selector */}

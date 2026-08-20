@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 use crate::auth::AuthState;
 use crate::imap::{ImapClient, ImapConfig, ImapError, ImapMessage, ImapSecurity};
+use crate::jmap::{JmapClient, JmapError};
+use crate::smtp::{OutboundMessage, SmtpAdapter, SmtpConfig, SmtpError, SmtpSecurity};
 use crate::storage::DbPool;
 
 // ── API types ───────────────────────────────────────────────────────
@@ -55,10 +57,16 @@ pub enum SyncError {
     Database(#[from] sqlx::Error),
     #[error("imap error: {0}")]
     Imap(#[from] ImapError),
+    #[error("jmap error: {0}")]
+    Jmap(#[from] JmapError),
+    #[error("smtp error: {0}")]
+    Smtp(#[from] SmtpError),
     #[error("authentication required")]
     Unauthorized,
     #[error("crypto error: {0}")]
     Crypto(String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl IntoResponse for SyncError {
@@ -66,8 +74,10 @@ impl IntoResponse for SyncError {
         let status = match self {
             SyncError::AccountNotFound => StatusCode::NOT_FOUND,
             SyncError::AccountDisabled => StatusCode::BAD_REQUEST,
-            SyncError::Database(_) | SyncError::Crypto(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            SyncError::Imap(_) => StatusCode::BAD_GATEWAY,
+            SyncError::Database(_) | SyncError::Crypto(_) | SyncError::InvalidInput(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            SyncError::Imap(_) | SyncError::Jmap(_) | SyncError::Smtp(_) => StatusCode::BAD_GATEWAY,
             SyncError::Unauthorized => StatusCode::UNAUTHORIZED,
         };
         (
@@ -80,11 +90,37 @@ impl IntoResponse for SyncError {
 
 // ── Routes ──────────────────────────────────────────────────────────
 
+/// Request to send a message.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendMessageRequest {
+    pub account_id: String,
+    pub to: Vec<serde_json::Value>,
+    pub subject: String,
+    pub body_text: Option<String>,
+    pub body_html: Option<String>,
+    pub cc: Option<Vec<serde_json::Value>>,
+    pub bcc: Option<Vec<serde_json::Value>>,
+    pub in_reply_to: Option<String>,
+    pub references: Option<String>,
+}
+
+/// Response for send operation.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendMessageResponse {
+    pub status: String,
+    pub message_id: String,
+}
+
 /// Routes for sync-related endpoints.
 pub fn routes() -> Router<AuthState> {
     Router::new()
         .route("/api/sync/status", get(sync_status))
         .route("/api/accounts/{account_id}/sync", post(trigger_sync))
+        .route("/api/messages/send", post(send_message))
+        .route("/api/folders", get(list_folders))
+        .route("/api/folders/{folder_id}/messages", get(list_messages))
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -123,16 +159,291 @@ async fn trigger_sync(
     Ok(Json(result))
 }
 
+/// Send a message via SMTP.
+///
+/// Loads the account, decrypts credentials, and sends via SMTP.
+#[allow(clippy::too_many_lines)]
+async fn send_message(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Json(body): Json<SendMessageRequest>,
+) -> Result<Json<SendMessageResponse>, SyncError> {
+    let user_id = get_user_id(&state, &headers).await?;
+    let pool = get_sqlite_pool(state.db());
+
+    // Load account
+    let row = sqlx::query(
+        r"
+        SELECT id, email_address, credential,
+               smtp_host, smtp_port, smtp_security, is_active
+        FROM mail_account
+        WHERE id = ? AND user_id = ?
+        ",
+    )
+    .bind(&body.account_id)
+    .bind(&user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(SyncError::AccountNotFound)?;
+
+    let is_active: bool = row.get("is_active");
+    if !is_active {
+        return Err(SyncError::AccountDisabled);
+    }
+
+    let smtp_host: Option<String> = row.get("smtp_host");
+    let smtp_port: Option<i32> = row.get("smtp_port");
+    let smtp_security: Option<String> = row.get("smtp_security");
+    let credential_json: String = row.get("credential");
+    let email_address: String = row.get("email_address");
+
+    let host =
+        smtp_host.ok_or_else(|| SyncError::InvalidInput("SMTP host not configured".into()))?;
+    let port = u16::try_from(smtp_port.unwrap_or(587)).unwrap_or(587);
+    let security = match smtp_security.as_deref() {
+        Some("tls") => SmtpSecurity::Tls,
+        Some("none") => SmtpSecurity::None,
+        _ => SmtpSecurity::Starttls,
+    };
+
+    // Decrypt password
+    let dek =
+        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let password = crate::smtp::decrypt_account_password(&credential_json, &dek)?;
+
+    let config = SmtpConfig {
+        host,
+        port,
+        security,
+        username: email_address.clone(),
+        password,
+    };
+
+    // Parse recipients
+    let to: Vec<(Option<String>, String)> = body
+        .to
+        .iter()
+        .filter_map(|v| {
+            if let Some(s) = v.as_str() {
+                Some((None, s.to_string()))
+            } else {
+                v.get("email").and_then(|e| e.as_str()).map(|email| {
+                    let name = v.get("name").and_then(|n| n.as_str()).map(String::from);
+                    (name, email.to_string())
+                })
+            }
+        })
+        .collect();
+
+    let cc: Vec<(Option<String>, String)> = body
+        .cc
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| {
+            if let Some(s) = v.as_str() {
+                Some((None, s.to_string()))
+            } else {
+                v.get("email").and_then(|e| e.as_str()).map(|email| {
+                    let name = v.get("name").and_then(|n| n.as_str()).map(String::from);
+                    (name, email.to_string())
+                })
+            }
+        })
+        .collect();
+
+    let bcc: Vec<(Option<String>, String)> = body
+        .bcc
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| {
+            if let Some(s) = v.as_str() {
+                Some((None, s.to_string()))
+            } else {
+                v.get("email").and_then(|e| e.as_str()).map(|email| {
+                    let name = v.get("name").and_then(|n| n.as_str()).map(String::from);
+                    (name, email.to_string())
+                })
+            }
+        })
+        .collect();
+
+    if to.is_empty() {
+        return Err(SyncError::InvalidInput("No recipients specified".into()));
+    }
+
+    let outbound = OutboundMessage {
+        from_email: email_address,
+        from_name: None,
+        to,
+        cc,
+        bcc,
+        subject: body.subject,
+        body_text: body.body_text,
+        body_html: body.body_html,
+        in_reply_to: body.in_reply_to,
+        references: body.references,
+    };
+
+    // Connect and send
+    let adapter = SmtpAdapter::connect(&config)?;
+    let message_id = adapter.send(&outbound).await?;
+
+    Ok(Json(SendMessageResponse {
+        status: "sent".into(),
+        message_id,
+    }))
+}
+
+/// Folder response for the API.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderResponse {
+    pub id: String,
+    pub account_id: String,
+    pub name: String,
+    pub role: Option<String>,
+    pub sort_order: i32,
+    pub total_messages: i32,
+    pub unread_messages: i32,
+}
+
+/// Message response for the API.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageResponse {
+    pub id: String,
+    pub account_id: String,
+    pub folder_id: String,
+    pub subject: Option<String>,
+    pub from_address: Option<String>,
+    pub to_addresses: Option<String>,
+    pub cc_addresses: Option<String>,
+    pub date: Option<String>,
+    pub snippet: Option<String>,
+    pub body_text: Option<String>,
+    pub body_html: Option<String>,
+    pub is_read: bool,
+    pub is_starred: bool,
+    pub has_attachments: bool,
+}
+
+/// List all folders for the authenticated user.
+async fn list_folders(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<FolderResponse>>, SyncError> {
+    let user_id = get_user_id(&state, &headers).await?;
+    let pool = get_sqlite_pool(state.db());
+
+    let rows = sqlx::query(
+        r"
+        SELECT f.id, f.account_id, f.name, f.role, f.sort_order,
+               f.total_messages, f.unread_messages
+        FROM folder f
+        JOIN mail_account a ON f.account_id = a.id
+        WHERE a.user_id = ?
+        ORDER BY f.sort_order, f.name
+        ",
+    )
+    .bind(&user_id)
+    .fetch_all(pool)
+    .await?;
+
+    let folders: Vec<FolderResponse> = rows
+        .iter()
+        .map(|row| FolderResponse {
+            id: row.get("id"),
+            account_id: row.get("account_id"),
+            name: row.get("name"),
+            role: row.get("role"),
+            sort_order: row.get("sort_order"),
+            total_messages: row.get("total_messages"),
+            unread_messages: row.get("unread_messages"),
+        })
+        .collect();
+
+    Ok(Json(folders))
+}
+
+/// List messages in a folder.
+async fn list_messages(
+    State(state): State<AuthState>,
+    Path(folder_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<MessageResponse>>, SyncError> {
+    let user_id = get_user_id(&state, &headers).await?;
+    let pool = get_sqlite_pool(state.db());
+
+    // Verify folder belongs to the user
+    let _check: String = sqlx::query_scalar(
+        r"
+        SELECT f.id FROM folder f
+        JOIN mail_account a ON f.account_id = a.id
+        WHERE f.id = ? AND a.user_id = ?
+        ",
+    )
+    .bind(&folder_id)
+    .bind(&user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(SyncError::AccountNotFound)?;
+
+    let rows = sqlx::query(
+        r"
+        SELECT id, account_id, folder_id, subject, from_address,
+               to_addresses, cc_addresses, date, snippet,
+               body_text, body_html, is_read, is_starred, has_attachments
+        FROM message
+        WHERE folder_id = ?
+        ORDER BY date DESC
+        LIMIT 500
+        ",
+    )
+    .bind(&folder_id)
+    .fetch_all(pool)
+    .await?;
+
+    let messages: Vec<MessageResponse> = rows
+        .iter()
+        .map(|row| MessageResponse {
+            id: row.get("id"),
+            account_id: row.get("account_id"),
+            folder_id: row.get("folder_id"),
+            subject: row.get("subject"),
+            from_address: row.get("from_address"),
+            to_addresses: row.get("to_addresses"),
+            cc_addresses: row.get("cc_addresses"),
+            date: row.get("date"),
+            snippet: row.get("snippet"),
+            body_text: row.get("body_text"),
+            body_html: row.get("body_html"),
+            is_read: row.get::<bool, _>("is_read"),
+            is_starred: row.get::<bool, _>("is_starred"),
+            has_attachments: row.get::<bool, _>("has_attachments"),
+        })
+        .collect();
+
+    Ok(Json(messages))
+}
+
 // ── Sync orchestration ──────────────────────────────────────────────
 
 /// Run a full sync for a mail account.
 ///
-/// 1. Load account + decrypt credentials
-/// 2. Connect to IMAP server
-/// 3. Sync folders (idempotent upsert)
-/// 4. For each folder: sync messages using UIDVALIDITY + UID cursor
-/// 5. Update `last_sync_at` on the account
-#[allow(clippy::too_many_lines)]
+/// **Prefers JMAP** when the account has a `jmap_base_url` configured.
+/// Falls back to IMAP otherwise.
+///
+/// JMAP flow:
+/// 1. Discover JMAP session via `/.well-known/jmap`
+/// 2. List mailboxes via `Mailbox/get`
+/// 3. For each mailbox: `Email/query` + `Email/get` to sync messages
+///
+/// IMAP flow:
+/// 1. Connect via IMAP
+/// 2. LIST folders
+/// 3. SELECT + UID SEARCH + FETCH for each folder
+///
+/// Both flows update `last_sync_at` on completion.
 pub async fn run_account_sync(
     db: &DbPool,
     user_id: &str,
@@ -140,11 +451,13 @@ pub async fn run_account_sync(
 ) -> Result<SyncResponse, SyncError> {
     let pool = get_sqlite_pool(db);
 
-    // 1. Load account
+    // 1. Load account — include jmap_base_url for JMAP detection
     let row = sqlx::query(
         r"
         SELECT id, email_address, protocol, credential,
-               imap_host, imap_port, imap_security, is_active, sync_enabled
+               imap_host, imap_port, imap_security,
+               jmap_base_url,
+               is_active, sync_enabled
         FROM mail_account
         WHERE id = ? AND user_id = ?
         ",
@@ -162,15 +475,58 @@ pub async fn run_account_sync(
         return Err(SyncError::AccountDisabled);
     }
 
-    let protocol: String = row.get("protocol");
-    if protocol != "imap" {
-        return Err(SyncError::AccountNotFound); // Only IMAP supported for now
-    }
+    let credential_json: String = row.get("credential");
+    let email_address: String = row.get("email_address");
+    let jmap_base_url: Option<String> = row.get("jmap_base_url");
+    let imap_host: Option<String> = row.get("imap_host");
 
+    // 2. Decrypt password
+    let dek =
+        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
+
+    // 3. Prefer JMAP when jmap_base_url is set; fall back to IMAP
+    let result = if let Some(ref base_url) = jmap_base_url {
+        let password = crate::jmap::decrypt_account_password(&credential_json, &dek)?;
+        match run_jmap_sync(pool, account_id, base_url, &email_address, &password).await {
+            Ok(result) => Ok(result),
+            Err(e) => {
+                tracing::warn!("JMAP sync failed ({e}), falling back to IMAP");
+                let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
+                run_imap_sync(pool, account_id, &row, &password).await
+            }
+        }
+    } else if imap_host.is_some() {
+        let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
+        run_imap_sync(pool, account_id, &row, &password).await
+    } else {
+        return Err(SyncError::InvalidInput(
+            "No JMAP base URL or IMAP host configured".into(),
+        ));
+    }?;
+
+    // Update last_sync_at
+    sqlx::query("UPDATE mail_account SET last_sync_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
+        .bind(account_id)
+        .execute(pool)
+        .await?;
+
+    Ok(result)
+}
+
+/// Run an IMAP-based sync for an account.
+///
+/// Connects to the IMAP server, lists folders, and syncs messages
+/// using UIDVALIDITY + UID cursors.
+#[allow(clippy::too_many_lines)]
+async fn run_imap_sync(
+    pool: &sqlx::SqlitePool,
+    account_id: &str,
+    row: &sqlx::sqlite::SqliteRow,
+    password: &str,
+) -> Result<SyncResponse, SyncError> {
     let imap_host: Option<String> = row.get("imap_host");
     let imap_port: Option<i32> = row.get("imap_port");
     let imap_security: Option<String> = row.get("imap_security");
-    let credential_json: String = row.get("credential");
     let email_address: String = row.get("email_address");
 
     let host = imap_host.ok_or_else(|| SyncError::Crypto("IMAP host not configured".into()))?;
@@ -181,23 +537,18 @@ pub async fn run_account_sync(
         _ => ImapSecurity::Tls,
     };
 
-    // 2. Decrypt password
-    let dek =
-        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
-    let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
-
     let config = ImapConfig {
         host,
         port,
         security,
         username: email_address,
-        password,
+        password: password.to_string(),
     };
 
-    // 3. Connect to IMAP
+    // Connect to IMAP
     let mut client = ImapClient::connect(&config).await?;
 
-    // 4. Sync folders
+    // Sync folders
     let folders = client.list_folders().await?;
     let mut folders_synced = 0;
 
@@ -206,7 +557,7 @@ pub async fn run_account_sync(
         folders_synced += 1;
     }
 
-    // 5. Sync messages in each folder
+    // Sync messages in each folder
     let mut total_new = 0;
     let mut total_updated = 0;
     let total_deleted = 0;
@@ -269,12 +620,6 @@ pub async fn run_account_sync(
         update_folder_counts(pool, &folder_id).await?;
     }
 
-    // 6. Update last_sync_at
-    sqlx::query("UPDATE mail_account SET last_sync_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
-        .bind(account_id)
-        .execute(pool)
-        .await?;
-
     // Clean logout
     let _ = client.logout().await;
 
@@ -286,6 +631,214 @@ pub async fn run_account_sync(
         messages_updated: total_updated,
         messages_deleted: total_deleted,
     })
+}
+
+/// Run a JMAP sync for an account.
+///
+/// Discovers the JMAP session, lists mailboxes, queries emails,
+/// and upserts them into the database.
+async fn run_jmap_sync(
+    pool: &sqlx::SqlitePool,
+    account_id: &str,
+    jmap_base_url: &str,
+    email: &str,
+    password: &str,
+) -> Result<SyncResponse, SyncError> {
+    // 1. Discover JMAP session
+    let client = JmapClient::discover(jmap_base_url, email, password).await?;
+
+    // 2. List mailboxes
+    let mailboxes = client.list_mailboxes().await?;
+    let mut folders_synced = 0;
+
+    for mb in &mailboxes {
+        upsert_folder(pool, account_id, &mb.name, mb.role.as_deref()).await?;
+        folders_synced += 1;
+    }
+
+    // 3. Sync emails per mailbox
+    let mut total_new = 0;
+    let mut total_updated = 0;
+
+    for mb in &mailboxes {
+        let folder_id = get_folder_id(pool, account_id, &mb.name).await?;
+
+        // Load stored JMAP state
+        let cursor = load_cursor(pool, account_id, &folder_id).await?;
+        let since_state = cursor.as_ref().and_then(|c| {
+            // JMAP uses state tokens, not UIDs
+            if c.uid_validity == 0 {
+                // This is a JMAP cursor (stored with uid_validity=0)
+                Some(c.last_uid.to_string()) // We store the query state hash as last_uid
+            } else {
+                None // IMAP cursor, start fresh
+            }
+        });
+
+        // Query emails
+        let query_result = client
+            .query_emails(&mb.id, since_state.as_deref(), Some(100))
+            .await?;
+
+        if query_result.ids.is_empty() {
+            continue;
+        }
+
+        // Fetch email objects
+        let emails = client.get_emails(&query_result.ids).await?;
+
+        // Upsert each email
+        for email_obj in &emails {
+            let was_new = upsert_jmap_message(pool, account_id, &folder_id, email_obj).await?;
+            if was_new {
+                total_new += 1;
+            } else {
+                total_updated += 1;
+            }
+        }
+
+        // Save JMAP cursor (use a hash of the query state for idempotency)
+        if let Some(ref qs) = query_result.query_state {
+            let state_hash = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                qs.hash(&mut h);
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    h.finish() as u32
+                }
+            };
+            save_cursor(pool, account_id, &folder_id, "jmap", 0, state_hash).await?;
+        }
+
+        update_folder_counts(pool, &folder_id).await?;
+    }
+
+    Ok(SyncResponse {
+        account_id: account_id.to_string(),
+        status: "completed".into(),
+        folders_synced,
+        messages_synced: total_new,
+        messages_updated: total_updated,
+        messages_deleted: 0,
+    })
+}
+
+/// Upsert a message from JMAP email data.
+///
+/// Returns `true` if the message was newly inserted, `false` if updated.
+async fn upsert_jmap_message(
+    pool: &sqlx::SqlitePool,
+    account_id: &str,
+    folder_id: &str,
+    email: &crate::jmap::JmapEmail,
+) -> Result<bool, SyncError> {
+    let external_id = &email.id;
+
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT id FROM message WHERE account_id = ? AND external_id = ?")
+            .bind(account_id)
+            .bind(external_id)
+            .fetch_optional(pool)
+            .await?;
+
+    let is_read = email.is_seen();
+    let is_starred = email.is_flagged();
+    let snippet = email.preview.clone().or_else(|| {
+        email.subject.as_ref().map(|s| {
+            if s.len() > 120 {
+                format!("{}...", &s[..117])
+            } else {
+                s.clone()
+            }
+        })
+    });
+
+    let from_json = email
+        .format_from()
+        .map(|f| serde_json::json!({ "raw": f }).to_string());
+    let to_json = email
+        .to_string_list()
+        .map(|t| serde_json::json!(vec![t]).to_string());
+    let cc_json = email.cc.as_ref().map(|addrs| {
+        let formatted: Vec<String> = addrs
+            .iter()
+            .map(|a| match (&a.name, &a.email) {
+                (Some(name), Some(email)) => format!("{name} <{email}>"),
+                (None, Some(email)) => email.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        serde_json::json!(formatted).to_string()
+    });
+
+    let flags_json = serde_json::to_string(&email.keywords).unwrap_or_else(|_| "{}".into());
+
+    if let Some(id) = existing {
+        sqlx::query(
+            r"
+            UPDATE message SET
+                is_read = ?,
+                is_starred = ?,
+                flags = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+            ",
+        )
+        .bind(is_read)
+        .bind(is_starred)
+        .bind(&flags_json)
+        .bind(&id)
+        .execute(pool)
+        .await?;
+
+        Ok(false)
+    } else {
+        let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+
+        sqlx::query(
+            r"
+            INSERT INTO message (
+                id, account_id, folder_id, external_id,
+                message_id_header, subject, from_address, to_addresses,
+                cc_addresses, date, is_read, is_starred,
+                flags, size_bytes, in_reply_to, references_headers,
+                snippet, has_attachments, body_text, body_html
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ",
+        )
+        .bind(&id)
+        .bind(account_id)
+        .bind(folder_id)
+        .bind(external_id)
+        .bind(email.message_id_header())
+        .bind(&email.subject)
+        .bind(&from_json)
+        .bind(&to_json)
+        .bind(&cc_json)
+        .bind(&email.received_at)
+        .bind(is_read)
+        .bind(is_starred)
+        .bind(&flags_json)
+        .bind(email.size.map(|s| i32::try_from(s).unwrap_or(i32::MAX)))
+        .bind(
+            email
+                .in_reply_to
+                .as_ref()
+                .and_then(|ids| ids.first())
+                .cloned(),
+        )
+        .bind(email.references.as_ref().map(|refs| refs.join(" ")))
+        .bind(&snippet)
+        .bind(email.has_attachment.unwrap_or(false))
+        .bind(email.body_text())
+        .bind(email.body_html())
+        .execute(pool)
+        .await?;
+
+        Ok(true)
+    }
 }
 
 // ── Database helpers ────────────────────────────────────────────────

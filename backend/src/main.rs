@@ -13,7 +13,9 @@ mod auth;
 mod config;
 mod crypto;
 mod imap;
+mod jmap;
 mod pim;
+mod smtp;
 mod storage;
 mod sync;
 
@@ -46,9 +48,7 @@ async fn main() -> anyhow::Result<()> {
     let frontend_dir = std::env::var("FRONTEND_DIR").unwrap_or_else(|_| "frontend/dist".into());
     let app = if PathBuf::from(&frontend_dir).is_dir() {
         let index = PathBuf::from(&frontend_dir).join("index.html");
-        api.fallback_service(
-            ServeDir::new(&frontend_dir).not_found_service(ServeFile::new(index)),
-        )
+        api.fallback_service(ServeDir::new(&frontend_dir).not_found_service(ServeFile::new(index)))
     } else {
         tracing::warn!("FRONTEND_DIR {frontend_dir} missing; API-only mode");
         api

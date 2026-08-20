@@ -11,11 +11,16 @@
 import { Sidebar } from './sidebar';
 import { MailList } from './mail-list';
 import { MailView } from './mail-view';
+import { ComposeDialog } from './compose-dialog';
 import { useUIStore } from '../stores/ui';
+import { useMailData } from '../lib/use-mail-data';
 import { cn } from '../lib/utils';
 
 export function MailLayout() {
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed);
+
+  // Initialize data fetching
+  useMailData();
 
   return (
     <div className="mail-layout">
@@ -30,6 +35,7 @@ export function MailLayout() {
       <div className="mail-layout-view">
         <MailView />
       </div>
+      <ComposeDialog />
     </div>
   );
 }
