@@ -86,9 +86,12 @@ Lyra/
       main.rs                   ← health + version routes, entry point
       config.rs                 ← env-based configuration
       auth.rs                   ← authentication stub
-      storage.rs                ← repository stub (SQLite + PostgreSQL)
+      storage.rs                ← storage seam (SQLite + PostgreSQL, migrations)
       sync.rs                   ← sync engine stub (JMAP/IMAP/SMTP)
-    README.md                   ← how to run
+    migrations/
+      sqlite/                   ← SQLite migration SQL files
+      postgres/                 ← PostgreSQL migration SQL files
+    README.md                   ← how to run + migration docs
   scripts/
     secretscan.sh               ← gitleaks scanner
 ```
@@ -96,8 +99,8 @@ Lyra/
 | Area | Path | Notes |
 |------|------|--------|
 | Web UI | `frontend/` | React, TanStack Router, shadcn mail, en/zh i18n |
-| API + sync | `backend/` | Rust + Axum; health + version routes, module stubs |
-| DB | TBD | SQLite + PostgreSQL |
+| API + sync | `backend/` | Rust + Axum; health + version routes, storage seam |
+| DB | `backend/migrations/` | sqlx; SQLite + PostgreSQL; auto-migrate on startup |
 
 ### Lint & format
 
