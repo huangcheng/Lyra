@@ -65,6 +65,10 @@ export function Sidebar() {
     clearSession();
   };
 
+  const handleNavigate = (path: string) => {
+    window.location.href = path;
+  };
+
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
@@ -91,6 +95,34 @@ export function Sidebar() {
         {folders.map((folder) => (
           <FolderItem key={folder.id} folder={folder} />
         ))}
+      </nav>
+
+      {/* Navigation links */}
+      <nav className="sidebar-nav">
+        <button
+          type="button"
+          className="sidebar-nav-item"
+          onClick={() => handleNavigate('/contacts')}
+        >
+          <span className="sidebar-icon">👤</span>
+          <span>{t(locale, 'nav.contacts')}</span>
+        </button>
+        <button
+          type="button"
+          className="sidebar-nav-item"
+          onClick={() => handleNavigate('/calendar')}
+        >
+          <span className="sidebar-icon">📅</span>
+          <span>{t(locale, 'nav.calendar')}</span>
+        </button>
+        <button
+          type="button"
+          className="sidebar-nav-item"
+          onClick={() => handleNavigate('/settings')}
+        >
+          <span className="sidebar-icon">⚙️</span>
+          <span>{t(locale, 'nav.settings')}</span>
+        </button>
       </nav>
 
       {/* Footer: user info + logout + language */}

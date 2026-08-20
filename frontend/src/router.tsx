@@ -14,6 +14,9 @@ import {
 } from '@tanstack/react-router';
 import { MailLayout } from './components/mail-layout';
 import { AuthPage } from './components/auth-page';
+import { SettingsPage } from './components/settings-page';
+import { ContactsPage } from './components/contacts-page';
+import { CalendarPage } from './components/calendar-page';
 import { useAuthStore } from './stores/auth';
 
 // ── Routes ─────────────────────────────────────────────────────
@@ -54,9 +57,51 @@ const loginRoute = createRoute({
   component: AuthPage,
 });
 
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/settings',
+  beforeLoad: () => {
+    const { isAuthenticated } = useAuthStore.getState();
+    if (!isAuthenticated) {
+      throw redirect({ to: '/login' });
+    }
+  },
+  component: SettingsPage,
+});
+
+const contactsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/contacts',
+  beforeLoad: () => {
+    const { isAuthenticated } = useAuthStore.getState();
+    if (!isAuthenticated) {
+      throw redirect({ to: '/login' });
+    }
+  },
+  component: ContactsPage,
+});
+
+const calendarRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/calendar',
+  beforeLoad: () => {
+    const { isAuthenticated } = useAuthStore.getState();
+    if (!isAuthenticated) {
+      throw redirect({ to: '/login' });
+    }
+  },
+  component: CalendarPage,
+});
+
 // ── Route tree ─────────────────────────────────────────────────
 
-const routeTree = rootRoute.addChildren([indexRoute, loginRoute]);
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  loginRoute,
+  settingsRoute,
+  contactsRoute,
+  calendarRoute,
+]);
 
 // ── Router factory ─────────────────────────────────────────────
 

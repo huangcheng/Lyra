@@ -12,15 +12,22 @@ import en from './en.json';
 import zh from './zh.json';
 import type { SupportedLocale } from '../types';
 
-type TranslationDict = Record<string, Record<string, string>>;
+type TranslationDict = Record<string, Record<string, unknown>>;
 
 const translations: Record<SupportedLocale, TranslationDict> = { en, zh };
 
 /**
  * Get a nested translation value by dot-separated key.
  * e.g. t("mail.compose") → "Compose" (en) / "写邮件" (zh)
+ *
+ * Supports simple interpolation: t(locale, "key", { name: "value" })
+ * Replaces {{name}} placeholders with provided values.
  */
-export function t(locale: SupportedLocale, key: string): string {
+export function t(
+  locale: SupportedLocale,
+  key: string,
+  params?: Record<string, string | number>,
+): string {
   const parts = key.split('.');
   let current: Record<string, unknown> = translations[locale];
 
@@ -37,11 +44,20 @@ export function t(locale: SupportedLocale, key: string): string {
           return key; // Key not found
         }
       }
-      return typeof current === 'string' ? current : key;
+      break;
     }
   }
 
-  return typeof current === 'string' ? current : key;
+  let result = typeof current === 'string' ? current : key;
+
+  // Apply interpolation if params provided
+  if (params) {
+    for (const [k, v] of Object.entries(params)) {
+      result = result.replace(`{{${k}}}`, String(v));
+    }
+  }
+
+  return result;
 }
 
 export type { SupportedLocale };

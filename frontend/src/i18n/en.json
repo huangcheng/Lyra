@@ -11,6 +11,8 @@
     "spam": "Spam",
     "archive": "Archive",
     "starred": "Starred",
+    "contacts": "Contacts",
+    "calendar": "Calendar",
     "accounts": "Accounts",
     "settings": "Settings"
   },
@@ -69,12 +71,56 @@
     "lastSync": "Last synced"
   },
   "settings": {
+    "title": "Settings",
     "language": "Language",
     "english": "English",
     "chinese": "中文",
     "theme": "Theme",
-    "accounts": "Mail Accounts",
-    "addAccount": "Add Account"
+    "accounts": {
+      "title": "Mail Accounts",
+      "add": "Add Account",
+      "edit": "Edit Account",
+      "empty": "No accounts configured. Add your first mail account to get started.",
+      "confirmDelete": "Are you sure you want to delete this account?",
+      "displayName": "Display Name",
+      "email": "Email Address",
+      "password": "Password",
+      "autoDetect": "Auto-detect",
+      "probing": "Detecting...",
+      "probeFound": "Server settings detected via {{source}}",
+      "imapSettings": "IMAP Settings",
+      "smtpSettings": "SMTP Settings",
+      "host": "Host",
+      "port": "Port",
+      "security": "Security",
+      "none": "None"
+    }
+  },
+  "contacts": {
+    "title": "Contacts",
+    "search": "Search contacts...",
+    "empty": "No contacts found",
+    "noName": "No name",
+    "email": "Email",
+    "phone": "Phone",
+    "organisation": "Organisation",
+    "selectContact": "Select a contact to view details"
+  },
+  "calendar": {
+    "title": "Calendar",
+    "calendars": "Calendars",
+    "today": "Today",
+    "allDay": "All day",
+    "noTitle": "No title",
+    "days": {
+      "sun": "Sun",
+      "mon": "Mon",
+      "tue": "Tue",
+      "wed": "Wed",
+      "thu": "Thu",
+      "fri": "Fri",
+      "sat": "Sat"
+    }
   },
   "common": {
     "loading": "Loading…",
@@ -83,6 +129,10 @@
     "cancel": "Cancel",
     "save": "Save",
     "confirm": "Confirm",
-    "back": "Back"
+    "back": "Back",
+    "edit": "Edit",
+    "delete": "Delete",
+    "add": "Add",
+    "search": "Search"
   }
 }

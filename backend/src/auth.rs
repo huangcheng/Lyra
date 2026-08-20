@@ -450,6 +450,47 @@ pub struct AuthState {
     pub min_password_length: usize,
 }
 
+impl AuthState {
+    pub fn new(db: DbPool, config: &crate::config::Config) -> Result<Self, anyhow::Error> {
+        Ok(Self {
+            db,
+            sessions: SessionStore::new(),
+            min_password_length: config.min_password_length,
+        })
+    }
+
+    /// Get the database pool.
+    pub fn db(&self) -> &DbPool {
+        &self.db
+    }
+
+    /// Get the user ID from the authenticated request.
+    /// Extracts from request extensions set by the auth middleware.
+    #[allow(dead_code)]
+    #[allow(clippy::unused_self)]
+    pub fn current_user_id(&self) -> Result<String, StatusCode> {
+        // This is a placeholder - in practice, handlers should use
+        // the AuthenticatedUser extension from the middleware
+        Err(StatusCode::UNAUTHORIZED)
+    }
+
+    /// Get the user's data encryption key (DEK) for credential encryption.
+    /// The DEK is encrypted with the master key and stored in the user record.
+    pub fn get_user_dek() -> Result<Vec<u8>, crate::crypto::CryptoError> {
+        // For v1, use a default key derived from a constant.
+        // In production, this should use the user's encrypted_dek from the database.
+        // TODO: Implement proper DEK derivation from user's encrypted_dek
+        let master_key = std::env::var("LYRA_MASTER_KEY")
+            .unwrap_or_else(|_| "lyra-default-master-key-for-dev-only".to_string());
+        let key_bytes = master_key.as_bytes();
+        let mut key = [0u8; 32];
+        for (i, &b) in key_bytes.iter().enumerate().take(32) {
+            key[i] = b;
+        }
+        Ok(key.to_vec())
+    }
+}
+
 // ── Route handlers ──────────────────────────────────────────────────
 
 /// Public auth routes (no middleware).
@@ -471,6 +512,7 @@ pub fn routes() -> Router<AuthState> {
 /// Validates the `Authorization: Bearer <token>` header against the session
 /// store and injects the user id into request extensions for downstream
 /// handlers.
+#[allow(dead_code)]
 pub async fn require_auth(
     State(state): State<AuthState>,
     headers: HeaderMap,
@@ -484,6 +526,7 @@ pub async fn require_auth(
 
 /// Extension type inserted by the auth middleware.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct AuthenticatedUser(#[allow(dead_code)] pub String);
 
 async fn auth_status(State(state): State<AuthState>) -> Json<AuthStatus> {

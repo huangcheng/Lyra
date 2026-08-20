@@ -40,11 +40,13 @@ impl DbPool {
 
 /// Shared application state containing the database pool.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct AppState {
     pub db: DbPool,
 }
 
 /// Storage module configuration and connection management.
+#[allow(dead_code)]
 pub struct Storage {
     pool: DbPool,
 }
@@ -349,6 +351,7 @@ fn collect_migration_files(dir: &PathBuf, direction: &str) -> anyhow::Result<Vec
 }
 
 /// Create the shared application state from environment configuration.
+#[allow(dead_code)]
 pub async fn create_app_state() -> anyhow::Result<AppState> {
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         tracing::warn!("DATABASE_URL not set; defaulting to sqlite:./data/lyra.db");
@@ -368,17 +371,20 @@ pub async fn create_app_state() -> anyhow::Result<AppState> {
 use crate::auth::AuthState;
 
 /// Routes for storage-related endpoints.
+#[allow(dead_code)]
 pub fn routes() -> Router<AuthState> {
     Router::new().route("/api/storage/status", get(storage_status))
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 pub struct StorageStatus {
     pub engine: String,
     pub ready: bool,
 }
 
 /// Reports storage readiness and engine type.
+#[allow(dead_code)]
 async fn storage_status(State(state): State<AuthState>) -> Json<StorageStatus> {
     Json(StorageStatus {
         engine: state.db.engine_name().to_string(),
