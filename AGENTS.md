@@ -117,7 +117,7 @@ Full rules: `docs/specs/2026-08-20-lyra-engineering-standards.md`.
 - **Deep modules** at real seams; hide protocols, SQL, and crypto.
 - Sync **idempotent** and resumable; typed errors; no secret logging.
 - Handlers thin; schema dual-DB; single-user now, multi-user-ready data shape.
-- Tests at module seams; format/lint before done.
+- Tests at module seams; format/lint before done (`make fmt` / `make lint` / `make check`).
 - Match existing patterns; ask before replacing a locked stack choice.
 - **Secrets never in tree** — gitleaks enforced via pre-commit + `make secretscan`.
 
