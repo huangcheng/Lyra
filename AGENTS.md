@@ -56,12 +56,13 @@ Detail lives in specs; this file stays short and accurate.
 | When | Read |
 |------|------|
 | Scoping features, v1 boundaries, non-goals | `docs/product/2026-08-20-lyra-v1-product-spec.md` |
+| Far-horizon multi-client order (API → desktop → mobile) | `docs/product/2026-08-20-lyra-multi-client-roadmap.md` |
 | Clean/robust code, deep modules, state roles, verification | `docs/specs/2026-08-20-lyra-engineering-standards.md` |
 | Data model, dual-DB schema, migrations | `docs/specs/2026-08-20-lyra-data-model-spec.md` |
 | Sync engine, protocols, auto-config | `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md` |
 | Other design/tech decisions | `docs/specs/YYYY-MM-DD-<topic>-spec.md` as added |
 
-Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall back to **IMAP**. Honor v1 non-goals (no collaboration suite, no SaaS, no multi-user UX yet).
+Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall back to **IMAP**. Honor v1 non-goals (no collaboration suite, no SaaS, no multi-user UX yet). Ship a **client-agnostic `/api/v1`**; native apps are far-horizon only.
 
 ---
 
@@ -72,7 +73,7 @@ Lyra/
   AGENTS.md
   Makefile                      ← fmt / lint / check / secretscan
   docs/
-    product/                    ← product spec
+    product/                    ← product spec + far-horizon multi-client roadmap
     specs/                      ← data model, sync, engineering standards
   frontend/                     ← Vite + React + TanStack Router + shadcn mail
     src/
@@ -135,6 +136,7 @@ Full rules: `docs/specs/2026-08-20-lyra-engineering-standards.md`.
 - **Deep modules** at real seams; hide protocols, SQL, and crypto.
 - Sync **idempotent** and resumable; typed errors; no secret logging.
 - Handlers thin; schema dual-DB; single-user now, multi-user-ready data shape.
+- **HTTP API is the UI surface** (`/api/v1`); web is a peer client — no web-only backend shortcuts.
 - Tests at module seams; format/lint before done (`make fmt` / `make lint` / `make check`).
 - Match existing patterns; ask before replacing a locked stack choice.
 - **Secrets never in tree** — gitleaks enforced via pre-commit + `make secretscan`.

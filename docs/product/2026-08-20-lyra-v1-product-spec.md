@@ -23,7 +23,7 @@ v1 is complete when all of the following are done:
 11. **Data layer** — carefully designed schema supporting SQLite and PostgreSQL  
 12. **Security basics** — HTTPS, encrypted credentials at rest, strong password policy for Lyra login  
 
-**Not required to complete v1:** team collaboration, SaaS hosting, multi-user logins, spam ML beyond provider flags, native mobile apps, GitHub/SSO/passkeys, Google/Outlook calendar APIs.
+**Not required to complete v1:** team collaboration, SaaS hosting, multi-user logins, spam ML beyond provider flags, native desktop/mobile apps, GitHub/SSO/passkeys, Google/Outlook calendar APIs.
 
 ---
 
@@ -63,7 +63,7 @@ Lyra is a **client**, not a mail server: it does not provide SMTP/IMAP service o
 - Not multi-user logins (single user now; design so multi-user can land later)  
 - Not SaaS / multi-tenant hosting  
 - Not Google/Outlook-specific calendar APIs  
-- Not native mobile apps (responsive web is enough)  
+- Not native desktop or mobile apps (responsive web is enough; see multi-client roadmap for later)  
 - Not SSO / GitHub / passkeys yet (optional TOTP only)  
 
 ---
@@ -149,7 +149,7 @@ v1 succeeds when a self-hoster can:
 | SaaS / multi-tenant | Possible future product surface |
 | SSO / GitHub / passkeys | After password + TOTP |
 | Google / Outlook calendar APIs | CardDAV/CalDAV only in v1 |
-| Native mobile apps | Responsive web first |
+| Native desktop / mobile apps | Responsive web first in v1; far-horizon order in `docs/product/2026-08-20-lyra-multi-client-roadmap.md` (API → desktop → mobile) |
 | Collaboration | Shared drafts, shared mailboxes — not a Lyra v1 goal |
 | Advanced spam / ML | Rely on provider flags unless a later spec says otherwise |
 
@@ -159,4 +159,5 @@ v1 succeeds when a self-hoster can:
 
 - Agent guidance (living): `AGENTS.md`  
 - Engineering standards: `docs/specs/2026-08-20-lyra-engineering-standards.md`  
+- Multi-client roadmap (far horizon): `docs/product/2026-08-20-lyra-multi-client-roadmap.md`  
 - Further technical specs: `docs/specs/`  

@@ -55,6 +55,17 @@ Rules:
 - Migrations and schema must work on both **SQLite** and **PostgreSQL**.
 - Shape data for single-user now, with ownership keys (or equivalent) so multi-user can land later — without building multi-user UX in v1.
 
+## HTTP API (client-agnostic)
+
+Lyra’s UI surface is a **versioned HTTP API**. The React app is a peer client, not a privileged front-end. Far-horizon native clients are described in `docs/product/2026-08-20-lyra-multi-client-roadmap.md`; do not build them in v1.
+
+- Expose product capability under **`/api/v1/...`**; avoid web-only backend shortcuts.
+- Prefer **OpenAPI** as the public contract as routes land.
+- Use **REST** for list/read/mutate; use an explicit event channel (**SSE**, per sync spec) for live sync — not HTML or ad-hoc web-only streams.
+- Return stable JSON error shapes; keep user-facing copy in clients (i18n), not in API payloads.
+- Auth must work for non-browser clients (token-based Lyra login).
+- Breaking changes go to `/api/v2/...`; keep prior versions until clients migrate.
+
 ## Verification
 
 - Test through the module interface (sync, protocol adapters, auth), not only UI snapshots.
