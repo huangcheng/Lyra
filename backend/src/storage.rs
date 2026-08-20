@@ -98,9 +98,7 @@ impl Storage {
                 );
             }
         } else {
-            anyhow::bail!(
-                "Unsupported DATABASE_URL scheme. Use 'sqlite:' or 'postgres://'."
-            );
+            anyhow::bail!("Unsupported DATABASE_URL scheme. Use 'sqlite:' or 'postgres://'.");
         };
 
         tracing::info!("Database pool created for {}", pool.engine_name());
@@ -121,10 +119,7 @@ impl Storage {
     pub async fn run_migrations(&self) -> anyhow::Result<()> {
         let migrations_dir = self.migrations_dir()?;
 
-        tracing::info!(
-            "Running migrations from {}",
-            migrations_dir.display()
-        );
+        tracing::info!("Running migrations from {}", migrations_dir.display());
 
         match &self.pool {
             DbPool::Sqlite(pool) => {
@@ -152,10 +147,7 @@ impl Storage {
 
         let dir = base.join("migrations").join(subdir);
         if !dir.exists() {
-            anyhow::bail!(
-                "Migrations directory not found: {}",
-                dir.display()
-            );
+            anyhow::bail!("Migrations directory not found: {}", dir.display());
         }
 
         Ok(dir)
@@ -324,10 +316,7 @@ fn strip_sql_comments(sql: &str) -> String {
 /// Collect migration files from a directory, returning (version, path) pairs.
 ///
 /// Files are expected to be named like `0001_init.up.sql` or `0001_init.down.sql`.
-fn collect_migration_files(
-    dir: &PathBuf,
-    direction: &str,
-) -> anyhow::Result<Vec<(i64, PathBuf)>> {
+fn collect_migration_files(dir: &PathBuf, direction: &str) -> anyhow::Result<Vec<(i64, PathBuf)>> {
     let mut migrations = Vec::new();
 
     let entries = std::fs::read_dir(dir)?;
@@ -340,10 +329,7 @@ fn collect_migration_files(
             continue;
         }
 
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // Match pattern: NNNN_name.{up,down}.sql
         if !filename.ends_with(&format!(".{direction}.sql")) {
@@ -352,9 +338,9 @@ fn collect_migration_files(
 
         // Extract version number
         let version_str = filename.split('_').next().unwrap_or("");
-        let version: i64 = version_str.parse().map_err(|_| {
-            anyhow::anyhow!("Invalid migration filename: {filename}")
-        })?;
+        let version: i64 = version_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid migration filename: {filename}"))?;
 
         migrations.push((version, path));
     }
