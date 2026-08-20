@@ -2,50 +2,59 @@
  * Auth page — orchestrates the authentication flow.
  *
  * Renders the appropriate UI based on the auth state machine.
+ * Syncs the session token from the XState machine to the Zustand store.
  */
 
 import { useMachine } from '@xstate/react';
 import { authMachine } from '../machines/auth';
 import { useAuthStore } from '../stores/auth';
 import { LoginForm } from './login-form';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 
 export function AuthPage() {
   const [state, send] = useMachine(authMachine);
   const authStore = useAuthStore();
+  const syncedRef = useRef(false);
 
-  // Sync machine state to Zustand store
+  // Sync machine state to Zustand store when authenticated
   useEffect(() => {
-    if (state.matches('authenticated')) {
-      // Machine is authenticated; fetch user info
-      const token = authStore.token;
-      if (token) {
-        fetch('/api/auth/me', {
-          headers: { Authorization: `Bearer ${token}` },
+    if (state.matches('authenticated') && state.context.token && !syncedRef.current) {
+      syncedRef.current = true;
+      const token = state.context.token;
+
+      // Store token in Zustand
+      authStore.setToken(token);
+
+      // Fetch user info with the token
+      fetch('/api/auth/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((res) => {
+          if (!res.ok) throw new Error('Failed to fetch user');
+          return res.json();
         })
-          .then((res) => res.json())
-          .then((user) => {
-            authStore.setUser({
-              id: user.id,
-              username: user.username,
-              displayName: user.display_name,
-              locale: user.locale,
-              totpEnabled: user.totp_enabled,
-            });
-          })
-          .catch(() => {
-            // Token may be invalid
-            authStore.clearSession();
+        .then((user) => {
+          authStore.setUser({
+            id: user.id,
+            username: user.username,
+            displayName: user.display_name,
+            locale: user.locale,
+            totpEnabled: user.totp_enabled,
           });
-      }
+        })
+        .catch(() => {
+          authStore.clearSession();
+          syncedRef.current = false;
+        });
     }
-  }, [state.value]);
+  }, [state, state.context.token, authStore]);
 
-  // Store the token when login/bootstrap succeeds
+  // Reset sync flag when leaving authenticated state
   useEffect(() => {
-    // When transitioning to authenticated, we need to capture the token
-    // from the machine's last event output
-  }, [state.value]);
+    if (!state.matches('authenticated')) {
+      syncedRef.current = false;
+    }
+  }, [state]);
 
   const handleLogin = (username: string, password: string) => {
     send({ type: 'LOGIN', username, password });
@@ -64,10 +73,9 @@ export function AuthPage() {
     send({ type: 'TOTP_SUBMIT', code });
   };
 
-  // If authenticated, we should have a token
-  // The parent component should handle rendering based on auth state
+  // If authenticated, the router will redirect to /
   if (state.matches('authenticated')) {
-    return null; // Parent will re-render
+    return null;
   }
 
   return (

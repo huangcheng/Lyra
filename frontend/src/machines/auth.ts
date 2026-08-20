@@ -15,6 +15,7 @@ interface AuthContext {
   password: string;
   totpCode: string;
   pendingToken: string | null;
+  token: string | null;
   error: string | null;
 }
 
@@ -38,6 +39,10 @@ interface StatusResponse {
 }
 
 const API_BASE = '/api/auth';
+
+function persistToken(token: string) {
+  localStorage.setItem('lyra_token', token);
+}
 
 async function fetchStatus(): Promise<StatusResponse> {
   const res = await fetch(`${API_BASE}/status`);
@@ -138,7 +143,25 @@ export const authMachine = setup({
       password: '',
       totpCode: '',
       pendingToken: null,
+      token: null,
       error: null,
+    }),
+    setLoginResult: assign(({ event }) => {
+      if (!('output' in event) || !event.output) return {};
+      const output = event.output as LoginResponse;
+      persistToken(output.token);
+      return {
+        token: output.token,
+        username: output.user.username,
+      };
+    }),
+    setTotpResult: assign(({ event }) => {
+      if (!('output' in event) || !event.output) return {};
+      const output = event.output as LoginResponse;
+      persistToken(output.token);
+      return {
+        token: output.token,
+      };
     }),
     setPendingToken: assign(({ event }) => {
       if (!('output' in event) || !event.output) return {};
@@ -179,6 +202,7 @@ export const authMachine = setup({
     password: '',
     totpCode: '',
     pendingToken: null,
+    token: null,
     error: null,
   },
   states: {
@@ -224,6 +248,7 @@ export const authMachine = setup({
           },
           {
             target: 'authenticated',
+            actions: 'setLoginResult',
           },
         ],
         onError: {
@@ -253,6 +278,7 @@ export const authMachine = setup({
         }),
         onDone: {
           target: 'authenticated',
+          actions: 'setTotpResult',
         },
         onError: {
           target: 'totpChallenge',
@@ -285,6 +311,7 @@ export const authMachine = setup({
         }),
         onDone: {
           target: 'authenticated',
+          actions: 'setLoginResult',
         },
         onError: {
           target: 'bootstrap',

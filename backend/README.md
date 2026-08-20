@@ -142,3 +142,52 @@ Or from the repo root: `make backend-fmt` / `make backend-lint`.
 - [Data model (dual-DB)](../docs/specs/2026-08-20-lyra-data-model-spec.md)
 - [Sync engine & protocols](../docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md)
 - [Engineering standards](../docs/specs/2026-08-20-lyra-engineering-standards.md)
+
+## Auth API demo
+
+Quick curl script demonstrating the auth flow end-to-end:
+
+```bash
+BASE=http://localhost:3000
+
+# 1. Bootstrap first user (only works when no user exists)
+echo "=== Bootstrap ==="
+curl -s -X POST $BASE/api/auth/bootstrap \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"Str0ngP@ss"}' | jq .
+# Returns: {"token":"...","user":{...},"requires_totp":false}
+
+# 2. Login with credentials
+echo "=== Login ==="
+RESP=$(curl -s -X POST $BASE/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"Str0ngP@ss"}')
+echo $RESP | jq .
+TOKEN=$(echo $RESP | jq -r '.token')
+
+# 3. Call protected route with token
+echo "=== Protected route (with token) ==="
+curl -s $BASE/api/storage/status \
+  -H "Authorization: Bearer $TOKEN" | jq .
+# Returns: {"engine":"sqlite","ready":true}
+
+# 4. Call protected route without token → 401
+echo "=== Protected route (no token) ==="
+curl -s -w '\nHTTP %{http_code}' $BASE/api/storage/status
+# Returns 401 Unauthorized
+
+# 5. Check auth status
+echo "\n=== Auth status ==="
+curl -s $BASE/api/auth/status | jq .
+# Returns: {"has_user":true,"totp_enabled":false}
+
+# 6. Get current user
+echo "=== Current user ==="
+curl -s $BASE/api/auth/me \
+  -H "Authorization: Bearer $TOKEN" | jq .
+
+# 7. Logout
+echo "=== Logout ==="
+curl -s -X POST $BASE/api/auth/logout \
+  -H "Authorization: Bearer $TOKEN" -w '\nHTTP %{http_code}'
+```

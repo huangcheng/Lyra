@@ -10,13 +10,28 @@ mod storage;
 mod sync;
 
 /// Build the Axum application with all routes.
+///
+/// Public auth routes (login, bootstrap, status, TOTP verify) are mounted
+/// without authentication. Protected routes (storage, sync, me) require a
+/// valid Bearer token via the `require_auth` middleware.
 fn app(auth_state: auth::AuthState) -> Router {
+    // Public auth routes — no token required
+    let public_auth = auth::routes();
+
+    // Protected API routes — require valid Bearer token
+    let protected = Router::new()
+        .merge(storage::routes())
+        .merge(sync::routes())
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state.clone(),
+            auth::require_auth,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/version", get(version))
-        .merge(auth::routes())
-        .merge(storage::routes())
-        .merge(sync::routes())
+        .merge(public_auth)
+        .merge(protected)
         .layer(CorsLayer::permissive())
         .with_state(auth_state)
 }
@@ -122,5 +137,61 @@ mod tests {
             .unwrap();
         let v: VersionResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(v.name, "lyra_backend");
+    }
+
+    #[tokio::test]
+    async fn protected_route_rejects_unauthenticated() {
+        let app = test_app().await;
+        let req = Request::builder()
+            .uri("/api/storage/status")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_flow_bootstrap_login_protected_route() {
+        use axum::http::header;
+
+        let app = test_app().await;
+
+        // 1. Bootstrap first user
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/bootstrap")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "username": "testuser",
+                    "password": "Str0ngP@ss"
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let login_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = login_resp["token"].as_str().unwrap();
+
+        // 2. Call protected route with token
+        let req = Request::builder()
+            .uri("/api/storage/status")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 3. Call protected route without token → 401
+        let req = Request::builder()
+            .uri("/api/storage/status")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

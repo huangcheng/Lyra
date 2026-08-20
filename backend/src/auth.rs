@@ -452,6 +452,7 @@ pub struct AuthState {
 
 // ── Route handlers ──────────────────────────────────────────────────
 
+/// Public auth routes (no middleware).
 pub fn routes() -> Router<AuthState> {
     Router::new()
         .route("/api/auth/status", get(auth_status))
@@ -464,6 +465,26 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/auth/totp/verify", post(totp_verify))
         .route("/api/auth/totp/disable", post(totp_disable))
 }
+
+/// Middleware that enforces Bearer token authentication.
+///
+/// Validates the `Authorization: Bearer <token>` header against the session
+/// store and injects the user id into request extensions for downstream
+/// handlers.
+pub async fn require_auth(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
+    let user_id = extract_session(&state, &headers).await?;
+    req.extensions_mut().insert(AuthenticatedUser(user_id));
+    Ok(next.run(req).await)
+}
+
+/// Extension type inserted by the auth middleware.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedUser(#[allow(dead_code)] pub String);
 
 async fn auth_status(State(state): State<AuthState>) -> Json<AuthStatus> {
     let has_user = has_any_user(&state.db).await.unwrap_or(false);

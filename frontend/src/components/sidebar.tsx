@@ -6,6 +6,7 @@
 
 import { useMailStore } from '../stores/mail';
 import { useUIStore } from '../stores/ui';
+import { useAuthStore } from '../stores/auth';
 import { t } from '../i18n';
 import type { MailFolder } from '../types';
 
@@ -49,6 +50,20 @@ export function Sidebar() {
   const accounts = useMailStore((s) => s.accounts);
   const setLocale = useUIStore((s) => s.setLocale);
   const setSelectedAccount = useUIStore((s) => s.setSelectedAccount);
+  const clearSession = useAuthStore((s) => s.clearSession);
+  const user = useAuthStore((s) => s.user);
+
+  const handleLogout = () => {
+    const token = useAuthStore.getState().token;
+    if (token) {
+      fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+    localStorage.removeItem('lyra_token');
+    clearSession();
+  };
 
   return (
     <aside className="sidebar">
@@ -78,8 +93,21 @@ export function Sidebar() {
         ))}
       </nav>
 
-      {/* Language switch */}
+      {/* Footer: user info + logout + language */}
       <div className="sidebar-footer">
+        {user && (
+          <div className="sidebar-user">
+            <span className="sidebar-username">{user.displayName || user.username}</span>
+            <button
+              type="button"
+              className="sidebar-logout"
+              onClick={handleLogout}
+              title={t(locale, 'auth.logout')}
+            >
+              {t(locale, 'auth.logout')}
+            </button>
+          </div>
+        )}
         <div className="language-switch">
           <button
             type="button"
