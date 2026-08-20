@@ -7,10 +7,10 @@
 use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
-use crate::storage::AppState;
+use crate::auth::AuthState;
 
 /// Routes for sync-related endpoints.
-pub fn routes() -> Router<AppState> {
+pub fn routes() -> Router<AuthState> {
     Router::new().route("/api/sync/status", get(sync_status))
 }
 
@@ -21,7 +21,7 @@ pub struct SyncStatus {
 }
 
 /// Stub: reports sync status.
-async fn sync_status(State(_state): State<AppState>) -> Json<SyncStatus> {
+async fn sync_status(State(_state): State<AuthState>) -> Json<SyncStatus> {
     Json(SyncStatus {
         active_accounts: 0,
         syncing: false,

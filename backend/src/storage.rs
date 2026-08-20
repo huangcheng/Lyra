@@ -365,8 +365,10 @@ pub async fn create_app_state() -> anyhow::Result<AppState> {
 
 // ── Axum routes ──────────────────────────────────────────────────────
 
+use crate::auth::AuthState;
+
 /// Routes for storage-related endpoints.
-pub fn routes() -> Router<AppState> {
+pub fn routes() -> Router<AuthState> {
     Router::new().route("/api/storage/status", get(storage_status))
 }
 
@@ -377,7 +379,7 @@ pub struct StorageStatus {
 }
 
 /// Reports storage readiness and engine type.
-async fn storage_status(State(state): State<AppState>) -> Json<StorageStatus> {
+async fn storage_status(State(state): State<AuthState>) -> Json<StorageStatus> {
     Json(StorageStatus {
         engine: state.db.engine_name().to_string(),
         ready: true,

@@ -2,6 +2,7 @@
  * TanStack Router setup for Lyra.
  *
  * Uses programmatic route definitions (no file-based routing for v1 shell).
+ * Auth-gated: redirects to login when not authenticated.
  */
 
 import {
@@ -9,8 +10,11 @@ import {
   createRootRoute,
   createRoute,
   Outlet,
+  redirect,
 } from '@tanstack/react-router';
 import { MailLayout } from './components/mail-layout';
+import { AuthPage } from './components/auth-page';
+import { useAuthStore } from './stores/auth';
 
 // ── Routes ─────────────────────────────────────────────────────
 
@@ -29,12 +33,30 @@ function RootLayout() {
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
+  beforeLoad: () => {
+    const { isAuthenticated } = useAuthStore.getState();
+    if (!isAuthenticated) {
+      throw redirect({ to: '/login' });
+    }
+  },
   component: MailLayout,
+});
+
+const loginRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/login',
+  beforeLoad: () => {
+    const { isAuthenticated } = useAuthStore.getState();
+    if (isAuthenticated) {
+      throw redirect({ to: '/' });
+    }
+  },
+  component: AuthPage,
 });
 
 // ── Route tree ─────────────────────────────────────────────────
 
-const routeTree = rootRoute.addChildren([indexRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, loginRoute]);
 
 // ── Router factory ─────────────────────────────────────────────
 

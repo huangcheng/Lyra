@@ -10,7 +10,7 @@ mod storage;
 mod sync;
 
 /// Build the Axum application with all routes.
-fn app(state: storage::AppState) -> Router {
+fn app(auth_state: auth::AuthState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/version", get(version))
@@ -18,7 +18,7 @@ fn app(state: storage::AppState) -> Router {
         .merge(storage::routes())
         .merge(sync::routes())
         .layer(CorsLayer::permissive())
-        .with_state(state)
+        .with_state(auth_state)
 }
 
 #[tokio::main]
@@ -35,12 +35,21 @@ async fn main() -> anyhow::Result<()> {
 
     // Create storage and run migrations
     tracing::info!("Initializing database...");
-    let state = storage::create_app_state().await?;
+    let app_state = storage::create_app_state().await?;
+
+    // Create session store
+    let sessions = auth::SessionStore::new();
+
+    let auth_state = auth::AuthState {
+        db: app_state.db.clone(),
+        sessions,
+        min_password_length: cfg.min_password_length,
+    };
 
     tracing::info!("Lyra backend starting on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app(state)).await?;
+    axum::serve(listener, app(auth_state)).await?;
 
     Ok(())
 }
@@ -78,8 +87,14 @@ mod tests {
 
     /// Create a test app with in-memory `SQLite`.
     async fn test_app() -> Router {
-        let state = storage::create_test_state().await;
-        app(state)
+        let app_state = storage::create_test_state().await;
+        let sessions = auth::SessionStore::new();
+        let auth_state = auth::AuthState {
+            db: app_state.db,
+            sessions,
+            min_password_length: 8,
+        };
+        app(auth_state)
     }
 
     #[tokio::test]

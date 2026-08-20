@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@tanstack/react-router": "^1.170.31",
+    "@xstate/react": "^6.1.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "rxjs": "^7.8.2",

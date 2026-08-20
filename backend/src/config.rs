@@ -7,14 +7,21 @@ use std::env;
 
 /// Application configuration loaded from environment variables.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields will be used when DB/storage layers are implemented.
 pub struct Config {
     /// Address to listen on (e.g. "0.0.0.0:3000").
     pub listen_addr: String,
     /// Database connection URL (`sqlite:///path` or `postgres://...`).
+    #[allow(dead_code)]
     pub database_url: String,
     /// Directory for storing message blobs and attachments.
+    #[allow(dead_code)]
     pub data_dir: String,
+    /// Session signing secret (32+ bytes, base64 encoded).
+    /// Loaded from `SESSION_SECRET` env var.
+    #[allow(dead_code)]
+    pub session_secret: Vec<u8>,
+    /// Minimum password length (default: 8).
+    pub min_password_length: usize,
 }
 
 impl Config {
@@ -22,11 +29,14 @@ impl Config {
     ///
     /// Required:
     ///   - `DATABASE_URL` — connection string
+    ///   - `SESSION_SECRET` — signing secret for session cookies (32+ bytes)
     ///
     /// Optional (with defaults):
     ///   - `LISTEN_ADDR` — default `0.0.0.0:3000`
     ///   - `DATA_DIR`    — default `./data`
     pub fn from_env() -> Self {
+        use rand::RngCore;
+
         let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
 
         let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -36,10 +46,32 @@ impl Config {
 
         let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
 
+        let session_secret = env::var("SESSION_SECRET").map_or_else(
+            |_| {
+                tracing::warn!(
+                    "SESSION_SECRET not set; generating ephemeral secret (sessions will not persist across restarts)"
+                );
+                // Generate a random 64-byte secret for dev/testing.
+                // In production this MUST be set via env var.
+                let mut rng = rand::thread_rng();
+                let mut bytes = vec![0u8; 64];
+                rng.fill_bytes(&mut bytes);
+                bytes
+            },
+            String::into_bytes,
+        );
+
+        let min_password_length: usize = env::var("MIN_PASSWORD_LENGTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+
         Self {
             listen_addr,
             database_url,
             data_dir,
+            session_secret,
+            min_password_length,
         }
     }
 }
@@ -57,11 +89,15 @@ mod tests {
             env::remove_var("LISTEN_ADDR");
             env::remove_var("DATABASE_URL");
             env::remove_var("DATA_DIR");
+            env::remove_var("SESSION_SECRET");
+            env::remove_var("MIN_PASSWORD_LENGTH");
         }
 
         let cfg = Config::from_env();
         assert_eq!(cfg.listen_addr, "0.0.0.0:3000");
         assert!(cfg.database_url.contains("sqlite"));
         assert_eq!(cfg.data_dir, "./data");
+        assert_eq!(cfg.min_password_length, 8);
+        assert!(cfg.session_secret.len() >= 32);
     }
 }

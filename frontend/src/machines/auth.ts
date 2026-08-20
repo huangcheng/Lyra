@@ -1,35 +1,127 @@
 /**
  * XState machine for the authentication flow.
  *
- * Multi-step flow: idle → authenticating → authenticated / error.
+ * Multi-step flow: checkingStatus → idle/bootstrap/login/totpChallenge
  * Handles login, optional TOTP verification, and session management.
  *
  * Role: FLOW LOGIC only. No data (→ Zustand), no async streams (→ RxJS).
  */
 
-import { setup, assign } from 'xstate';
+import { setup, assign, fromPromise } from 'xstate';
+import type { User } from '../stores/auth';
 
 interface AuthContext {
   username: string;
   password: string;
   totpCode: string;
+  pendingToken: string | null;
   error: string | null;
 }
 
 type AuthEvent =
   | { type: 'LOGIN'; username: string; password: string }
   | { type: 'TOTP_SUBMIT'; code: string }
+  | { type: 'BOOTSTRAP'; username: string; password: string; displayName?: string; locale?: string }
   | { type: 'LOGOUT' }
-  | { type: 'RESET' };
+  | { type: 'RESET' }
+  | { type: 'RETRY' };
+
+interface LoginResponse {
+  token: string;
+  user: User;
+  requires_totp: boolean;
+}
+
+interface StatusResponse {
+  has_user: boolean;
+  totp_enabled: boolean;
+}
+
+const API_BASE = '/api/auth';
+
+async function fetchStatus(): Promise<StatusResponse> {
+  const res = await fetch(`${API_BASE}/status`);
+  if (!res.ok) throw new Error('Failed to check status');
+  return res.json();
+}
+
+async function login(username: string, password: string): Promise<LoginResponse> {
+  const res = await fetch(`${API_BASE}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Invalid credentials');
+  }
+  return res.json();
+}
+
+async function bootstrap(
+  username: string,
+  password: string,
+  displayName?: string,
+  locale?: string,
+): Promise<LoginResponse> {
+  const res = await fetch(`${API_BASE}/bootstrap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, display_name: displayName, locale }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Bootstrap failed');
+  }
+  return res.json();
+}
+
+async function verifyTotp(pendingToken: string, code: string): Promise<LoginResponse> {
+  const res = await fetch(`${API_BASE}/totp/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pending_token: pendingToken, code }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Invalid TOTP code');
+  }
+  return res.json();
+}
 
 export const authMachine = setup({
   types: {} as {
     context: AuthContext;
     events: AuthEvent;
   },
+  actors: {
+    checkStatus: fromPromise(async () => fetchStatus()),
+    loginUser: fromPromise(async ({ input }: { input: { username: string; password: string } }) =>
+      login(input.username, input.password),
+    ),
+    bootstrapUser: fromPromise(
+      async ({
+        input,
+      }: {
+        input: { username: string; password: string; displayName?: string; locale?: string };
+      }) => bootstrap(input.username, input.password, input.displayName, input.locale),
+    ),
+    verifyTotpCode: fromPromise(
+      async ({ input }: { input: { pendingToken: string; code: string } }) =>
+        verifyTotp(input.pendingToken, input.code),
+    ),
+  },
   actions: {
     setCredentials: assign(({ event }) => {
       if (event.type !== 'LOGIN') return {};
+      return {
+        username: event.username,
+        password: event.password,
+        error: null,
+      };
+    }),
+    setBootstrapCredentials: assign(({ event }) => {
+      if (event.type !== 'BOOTSTRAP') return {};
       return {
         username: event.username,
         password: event.password,
@@ -45,29 +137,70 @@ export const authMachine = setup({
       username: '',
       password: '',
       totpCode: '',
+      pendingToken: null,
       error: null,
     }),
-    setError: assign(() => {
-      // In a real impl, the error comes from the API response.
-      return { error: 'Authentication failed' };
+    setPendingToken: assign(({ event }) => {
+      if (!('output' in event) || !event.output) return {};
+      const output = event.output as LoginResponse;
+      return { pendingToken: output.token };
     }),
+    setLoginError: assign(({ event }) => {
+      if (!('error' in event) || !event.error) return {};
+      const error = event.error as Error;
+      return { error: error.message || 'Authentication failed' };
+    }),
+    setGenericError: assign(() => ({
+      error: 'An unexpected error occurred',
+    })),
   },
   guards: {
-    hasTotp: ({ context }: { context: AuthContext }) => {
-      // Stub: in production this comes from the server response.
-      return context.totpCode.length > 0;
+    requiresTotp: ({ event }) => {
+      if (!('output' in event) || !event.output) return false;
+      const output = event.output as LoginResponse;
+      return output.requires_totp === true;
+    },
+    noUserExists: ({ event }) => {
+      if (!('output' in event) || !event.output) return false;
+      const output = event.output as StatusResponse;
+      return !output.has_user;
+    },
+    userExists: ({ event }) => {
+      if (!('output' in event) || !event.output) return false;
+      const output = event.output as StatusResponse;
+      return output.has_user;
     },
   },
 }).createMachine({
   id: 'auth',
-  initial: 'idle',
+  initial: 'checkingStatus',
   context: {
     username: '',
     password: '',
     totpCode: '',
+    pendingToken: null,
     error: null,
   },
   states: {
+    checkingStatus: {
+      invoke: {
+        src: 'checkStatus',
+        onDone: [
+          {
+            guard: 'noUserExists',
+            target: 'bootstrap',
+          },
+          {
+            guard: 'userExists',
+            target: 'idle',
+          },
+        ],
+        onError: {
+          target: 'idle',
+          actions: assign({ error: 'Failed to check status' }),
+        },
+      },
+    },
     idle: {
       on: {
         LOGIN: {
@@ -77,27 +210,98 @@ export const authMachine = setup({
       },
     },
     authenticating: {
-      // In production: invoke API call here.
-      // For now, immediately transition to authenticated.
-      always: {
-        target: 'authenticated',
+      invoke: {
+        src: 'loginUser',
+        input: ({ context }) => ({
+          username: context.username,
+          password: context.password,
+        }),
+        onDone: [
+          {
+            guard: 'requiresTotp',
+            target: 'totpChallenge',
+            actions: 'setPendingToken',
+          },
+          {
+            target: 'authenticated',
+          },
+        ],
+        onError: {
+          target: 'idle',
+          actions: 'setLoginError',
+        },
       },
+    },
+    totpChallenge: {
       on: {
-        LOGOUT: { target: 'idle', actions: 'clearSession' },
+        TOTP_SUBMIT: {
+          target: 'verifyingTotp',
+          actions: 'setTotpCode',
+        },
+        RESET: {
+          target: 'idle',
+          actions: 'clearSession',
+        },
+      },
+    },
+    verifyingTotp: {
+      invoke: {
+        src: 'verifyTotpCode',
+        input: ({ context }) => ({
+          pendingToken: context.pendingToken!,
+          code: context.totpCode,
+        }),
+        onDone: {
+          target: 'authenticated',
+        },
+        onError: {
+          target: 'totpChallenge',
+          actions: 'setLoginError',
+        },
       },
     },
     authenticated: {
       on: {
-        LOGOUT: { target: 'idle', actions: 'clearSession' },
+        LOGOUT: {
+          target: 'idle',
+          actions: 'clearSession',
+        },
+      },
+    },
+    bootstrap: {
+      on: {
+        BOOTSTRAP: {
+          target: 'bootstrapping',
+          actions: 'setBootstrapCredentials',
+        },
+      },
+    },
+    bootstrapping: {
+      invoke: {
+        src: 'bootstrapUser',
+        input: ({ context }) => ({
+          username: context.username,
+          password: context.password,
+        }),
+        onDone: {
+          target: 'authenticated',
+        },
+        onError: {
+          target: 'bootstrap',
+          actions: 'setLoginError',
+        },
       },
     },
     error: {
       on: {
-        LOGIN: {
-          target: 'authenticating',
-          actions: 'setCredentials',
+        RETRY: {
+          target: 'idle',
+          actions: 'clearError',
         },
-        RESET: { target: 'idle', actions: 'clearSession' },
+        RESET: {
+          target: 'idle',
+          actions: 'clearSession',
+        },
       },
     },
   },

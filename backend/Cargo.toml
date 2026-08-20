@@ -29,6 +29,12 @@ sqlx = { version = "0.8", features = [
 ] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v7", "serde"] }
+argon2 = { version = "0.5", features = ["std"] }
+rand = "0.8"
+totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
+base32 = "0.5"
+tower-cookies = { version = "0.11", features = ["signed"] }
+cookie = "0.18"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
