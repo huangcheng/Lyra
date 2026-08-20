@@ -13,6 +13,26 @@ Lyra is intended to be **open source**. Treat the tree as public forever.
 - Keep task tracking **outside** the public tree (or only in local-ignored paths). Commits and docs describe *what* changed, not private ticket links.
 - Prefer example.com / placeholders in docs and tests; no real mail accounts or hostnames that identify private infra.
 - Before committing, scan the diff for accidental PII, tokens, and tracker references.
+- **Secret-leak enforcement** is automated via gitleaks (see below). Install pre-commit hooks before contributing.
+
+### Secret-leak enforcement (gitleaks)
+
+| Tool | Purpose |
+|------|---------|
+| `.gitleaks.toml` | Config: default rules + custom `linear.app` URL deny + AWS/key patterns |
+| `.pre-commit-config.yaml` | Pre-commit hook (gitleaks runs on every commit) |
+| `scripts/secretscan.sh` | Standalone full-history scanner |
+| `make secretscan` | Entry point for full-history scan |
+
+**Quick start (contributors):**
+```bash
+brew install gitleaks          # or: https://github.com/gitleaks/gitleaks#installing
+pip install pre-commit         # or: brew install pre-commit
+pre-commit install             # activate the gitleaks hook
+make secretscan                # run a one-off full-history scan
+```
+
+Every commit is automatically scanned. CI should also run `make secretscan` on the full history.
 
 ---
 
@@ -23,6 +43,7 @@ Update `AGENTS.md` (and the linked spec if needed) when any of these land:
 - [ ] New top-level packages / crates / apps, or a renamed layout  
 - [ ] Locked stack choice added, replaced, or version-pinned in practice  
 - [ ] New standard scripts (`dev`, `test`, `lint`, `migrate`, Docker entrypoints)  
+- [x] Secret-scan tooling: `.gitleaks.toml`, `.pre-commit-config.yaml`, `scripts/secretscan.sh`, `Makefile`
 - [ ] New doc under `docs/product/` or `docs/specs/` that agents must read for common tasks  
 - [ ] Engineering rule learned from a bug or review (promote into standards, summarize here)
 
@@ -88,6 +109,7 @@ Full rules: `docs/specs/2026-08-20-lyra-engineering-standards.md`.
 - Handlers thin; schema dual-DB; single-user now, multi-user-ready data shape.
 - Tests at module seams; format/lint before done.
 - Match existing patterns; ask before replacing a locked stack choice.
+- **Secrets never in tree** — gitleaks enforced via pre-commit + `make secretscan`.
 
 ---
 

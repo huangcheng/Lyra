@@ -1,0 +1,75 @@
+# gitleaks configuration for Lyra
+# https://github.com/gitleaks/gitleaks
+
+title = "Lyra gitleaks config"
+
+# Use the built-in default rules as a baseline.
+# Extend with project-specific allow/deny rules below.
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Allow-lists (things gitleaks should ignore)
+# ---------------------------------------------------------------------------
+
+[allowlist]
+description = "Global allow-list"
+paths = [
+    '''\.gitleaks\.toml$''',    # this file itself
+    '''\.git/''',                # git internals
+    '''node_modules/''',
+    '''target/''',
+    '''\.orch/''',               # local orchestrator scratch
+]
+
+# ---------------------------------------------------------------------------
+# Custom rules
+# ---------------------------------------------------------------------------
+
+# Rule: flag private project-management URLs (linear.app)
+# Linear URLs must never appear in tracked source.
+[[rules]]
+id = "linear-url-leak"
+description = "Private project-management URL (linear.app)"
+regex = '''(?i)https?://[a-z0-9.-]*linear\.app/[^\s"'<>\])}]*'''
+keywords = ["linear"]
+tags = ["private-tracker", "url"]
+
+[rules.allowlist]
+description = "Allow inside gitleaks config itself (this rule definition)"
+paths = ['''\.gitleaks\.toml$''']
+
+# Rule: generic high-entropy secrets (AWS-style keys, etc.)
+[[rules]]
+id = "generic-api-key"
+description = "Generic API key or secret"
+regex = '''(?i)(api[_-]?key|secret|token|password|credential)\s*[:=]\s*['"]?[A-Za-z0-9+/=_\-]{20,}['"]?'''
+keywords = [
+    "api_key", "apikey", "secret", "token", "password", "credential",
+    "api-key", "SECRET", "TOKEN", "PASSWORD",
+]
+tags = ["api-key", "generic"]
+
+# Rule: AWS access key
+[[rules]]
+id = "aws-access-key"
+description = "AWS Access Key"
+regex = '''(?i)(?:^|[^A-Za-z0-9/+=])(?P<key>(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16})'''
+keywords = ["AKIA", "AGPA", "AIDA", "AROA", "AIPA", "ANPA", "ANVA", "ASIA"]
+tags = ["aws"]
+
+# Rule: AWS secret key
+[[rules]]
+id = "aws-secret-key"
+description = "AWS Secret Key"
+regex = '''(?i)aws[_\-]?secret[_\-]?access[_\-]?key\s*[:=]\s*['"]?[A-Za-z0-9/+=]{40}['"]?'''
+keywords = ["aws_secret", "aws-secret", "AWS_SECRET"]
+tags = ["aws"]
+
+# Rule: private keys
+[[rules]]
+id = "private-key"
+description = "Private key (PEM)"
+regex = '''-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'''
+keywords = ["PRIVATE KEY"]
+tags = ["private-key"]

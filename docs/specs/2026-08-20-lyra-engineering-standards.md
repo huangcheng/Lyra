@@ -60,6 +60,7 @@ Rules:
 - Test through the module interface (sync, protocol adapters, auth), not only UI snapshots.
 - Prefer a failing test that proves the bug, then the fix.
 - Before considering work done: `rustfmt` / `clippy`, ESLint / Prettier (or project equivalents once configured).
+- **Run `make secretscan`** (gitleaks) before merging or releasing. Pre-commit hooks enforce this locally; CI should run the full-history scan.
 
 ## Public-repo hygiene
 
