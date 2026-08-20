@@ -57,6 +57,7 @@ pub struct Account {
 
 /// Request to create a new mail account.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateAccountRequest {
     pub display_name: String,
     pub email_address: String,
@@ -73,6 +74,7 @@ pub struct CreateAccountRequest {
 
 /// Request to update an existing mail account.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateAccountRequest {
     pub display_name: Option<String>,
     pub email_address: Option<String>,
@@ -89,6 +91,7 @@ pub struct UpdateAccountRequest {
 
 /// Request to probe server configuration.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProbeRequest {
     pub email_address: String,
     pub domain: Option<String>,
