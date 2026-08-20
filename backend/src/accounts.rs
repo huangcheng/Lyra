@@ -36,6 +36,7 @@ pub fn routes() -> Router<AuthState> {
 
 /// A mail account as returned by the API.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Account {
     pub id: String,
     pub display_name: String,
@@ -95,6 +96,7 @@ pub struct ProbeRequest {
 
 /// Server configuration probe result.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProbeResult {
     pub found: bool,
     pub source: Option<String>,

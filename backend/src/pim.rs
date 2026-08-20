@@ -43,6 +43,7 @@ pub fn routes() -> Router<AuthState> {
 
 /// A contact as returned by the API.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Contact {
     pub id: String,
     pub account_id: String,
@@ -57,6 +58,7 @@ pub struct Contact {
 
 /// A calendar as returned by the API.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Calendar {
     pub id: String,
     pub account_id: String,
@@ -71,9 +73,10 @@ pub struct Calendar {
 
 /// A calendar event as returned by the API.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CalendarEvent {
     pub id: String,
-    pub calendar_id: String,
+    pub calendar_id: Option<String>,
     pub summary: Option<String>,
     pub description: Option<String>,
     pub dtstart: Option<String>,
@@ -154,7 +157,7 @@ async fn get_user_id(state: &AuthState, headers: &HeaderMap) -> Result<String, P
         .ok_or(PimError::Unauthorized)
 }
 
-/// Get SQLite pool from DbPool enum.
+/// Get SQLite pool from `DbPool` enum.
 fn get_sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
     match db {
         DbPool::Sqlite(pool) => pool,
@@ -305,7 +308,7 @@ async fn list_calendars(
             SELECT cal.id, cal.account_id, cal.name, cal.description,
                    cal.color, cal.timezone, cal.is_active,
                    cal.created_at, cal.updated_at
-            FROM calendar_event cal
+            FROM calendar cal
             JOIN mail_account a ON cal.account_id = a.id
             WHERE a.user_id = ? AND cal.account_id = ?
             ORDER BY cal.name
@@ -321,7 +324,7 @@ async fn list_calendars(
             SELECT cal.id, cal.account_id, cal.name, cal.description,
                    cal.color, cal.timezone, cal.is_active,
                    cal.created_at, cal.updated_at
-            FROM calendar_event cal
+            FROM calendar cal
             JOIN mail_account a ON cal.account_id = a.id
             WHERE a.user_id = ?
             ORDER BY cal.name
@@ -364,7 +367,7 @@ async fn get_calendar(
         SELECT cal.id, cal.account_id, cal.name, cal.description,
                cal.color, cal.timezone, cal.is_active,
                cal.created_at, cal.updated_at
-        FROM calendar_event cal
+        FROM calendar cal
         JOIN mail_account a ON cal.account_id = a.id
         WHERE cal.id = ? AND a.user_id = ?
         ",
@@ -402,7 +405,7 @@ async fn list_events(
     let _calendar = sqlx::query(
         r"
         SELECT cal.id
-        FROM calendar_event cal
+        FROM calendar cal
         JOIN mail_account a ON cal.account_id = a.id
         WHERE cal.id = ? AND a.user_id = ?
         ",
@@ -486,7 +489,7 @@ async fn get_event(
                e.location, e.is_all_day, e.status, e.recurrence_rule,
                e.created_at, e.updated_at
         FROM calendar_event e
-        JOIN calendar_event cal ON e.calendar_id = cal.id
+        JOIN calendar cal ON e.calendar_id = cal.id
         JOIN mail_account a ON cal.account_id = a.id
         WHERE e.id = ? AND a.user_id = ?
         ",
@@ -561,7 +564,7 @@ async fn sync_calendars(
     // TODO: Implement actual CalDAV sync
     // 1. Discover calendar URLs via PROPFIND
     // 2. Fetch calendar-multiget for events
-    // 3. Parse iCalendar data and store in calendar_event table
+    // 3. Parse iCalendar data and store in calendar and calendar_event tables
 
     Ok(Json(serde_json::json!({
         "status": "not_implemented",
@@ -569,7 +572,7 @@ async fn sync_calendars(
     })))
 }
 
-/// Parse a JSON array string into Vec<String>.
+/// Parse a JSON array string into `Vec<String>`.
 fn parse_json_array(json: Option<&str>) -> Vec<String> {
     json.and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default()

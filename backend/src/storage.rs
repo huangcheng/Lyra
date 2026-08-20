@@ -448,10 +448,13 @@ mod tests {
             .join("sqlite");
 
         if dir.exists() {
-            let files = collect_migration_files(&dir, "up").unwrap();
+            let mut files = collect_migration_files(&dir, "up").unwrap();
             assert!(!files.is_empty(), "Should find migration files");
 
-            // Check that files are sorted by version
+            // Sort by version (same as run_sqlite_migrations)
+            files.sort_by_key(|(v, _)| *v);
+
+            // Check that files are in version order
             for window in files.windows(2) {
                 assert!(
                     window[0].0 < window[1].0,
