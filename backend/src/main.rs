@@ -18,6 +18,8 @@ mod storage;
 mod sync;
 
 use axum::{Json, Router, http::StatusCode};
+use std::path::PathBuf;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -32,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     let db = storage.pool().clone();
     let auth_state = auth::AuthState::new(db, &config)?;
 
-    let app = Router::new()
+    let api = Router::new()
         .route("/health", axum::routing::get(health))
         .route("/version", axum::routing::get(version))
         .merge(accounts::routes())
@@ -40,6 +42,17 @@ async fn main() -> anyhow::Result<()> {
         .merge(sync::routes())
         .merge(auth::routes())
         .with_state(auth_state);
+
+    let frontend_dir = std::env::var("FRONTEND_DIR").unwrap_or_else(|_| "frontend/dist".into());
+    let app = if PathBuf::from(&frontend_dir).is_dir() {
+        let index = PathBuf::from(&frontend_dir).join("index.html");
+        api.fallback_service(
+            ServeDir::new(&frontend_dir).not_found_service(ServeFile::new(index)),
+        )
+    } else {
+        tracing::warn!("FRONTEND_DIR {frontend_dir} missing; API-only mode");
+        api
+    };
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!("listening on {}", config.listen_addr);

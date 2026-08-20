@@ -1,0 +1,31 @@
+services:
+  lyra:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      LISTEN_ADDR: 0.0.0.0:3000
+      DATABASE_URL: sqlite:/data/lyra.db
+      DATA_DIR: /data
+      RUST_LOG: info
+      # Set SESSION_SECRET in production (32+ bytes). Ephemeral if unset.
+      # SESSION_SECRET: replace-me-with-a-long-random-secret
+    volumes:
+      - lyra-data:/data
+    restart: unless-stopped
+
+  # Optional PostgreSQL — switch lyra.DATABASE_URL to:
+  # postgres://lyra:lyra@postgres:5432/lyra
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_USER: lyra
+  #     POSTGRES_PASSWORD: lyra
+  #     POSTGRES_DB: lyra
+  #   volumes:
+  #     - lyra-pg:/var/lib/postgresql/data
+  #   restart: unless-stopped
+
+volumes:
+  lyra-data:
+  # lyra-pg:
