@@ -44,7 +44,7 @@ Update `AGENTS.md` (and the linked spec if needed) when any of these land:
 - [ ] Locked stack choice added, replaced, or version-pinned in practice  
 - [x] Standard scripts: `make fmt`, `make lint`, `make check`, `make secretscan`  
 - [x] Secret-scan tooling: `.gitleaks.toml`, `.pre-commit-config.yaml`, `scripts/secretscan.sh`, `Makefile`  
-- [ ] New doc under `docs/product/` or `docs/specs/` that agents must read for common tasks  
+- [x] New doc under `docs/product/` or `docs/specs/` that agents must read for common tasks  
 - [ ] Engineering rule learned from a bug or review (promote into standards, summarize here)
 
 Detail lives in specs; this file stays short and accurate.
@@ -57,6 +57,8 @@ Detail lives in specs; this file stays short and accurate.
 |------|------|
 | Scoping features, v1 boundaries, non-goals | `docs/product/2026-08-20-lyra-v1-product-spec.md` |
 | Clean/robust code, deep modules, state roles, verification | `docs/specs/2026-08-20-lyra-engineering-standards.md` |
+| Data model, dual-DB schema, migrations | `docs/specs/2026-08-20-lyra-data-model-spec.md` |
+| Sync engine, protocols, auto-config | `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md` |
 | Other design/tech decisions | `docs/specs/YYYY-MM-DD-<topic>-spec.md` as added |
 
 Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall back to **IMAP**. Honor v1 non-goals (no collaboration suite, no SaaS, no multi-user UX yet).
@@ -65,23 +67,36 @@ Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall
 
 ## Project map (keep current)
 
-*Early repo — replace this section as code appears.*
-
 ```
 Lyra/
   AGENTS.md
-  Makefile                  ← fmt / lint / check / secretscan
+  Makefile                      ← fmt / lint / check / secretscan
   docs/
-    product/
-    specs/
-  frontend/                 ← Vite + React + oxlint + Prettier
-  backend/                  ← Rust + rustfmt + clippy
+    product/                    ← product spec
+    specs/                      ← data model, sync, engineering standards
+  frontend/                     ← Vite + React + TanStack Router + shadcn mail
+    src/
+      components/               ← three-pane mail chrome (sidebar, list, view)
+      stores/                   ← Zustand (mail data, UI state)
+      machines/                 ← XState (auth, account-setup flows)
+      rxjs/                     ← RxJS (sync event streams)
+      i18n/                     ← en + zh translations
+  backend/                      ← Rust + Axum
+    src/
+      main.rs                   ← health + version routes, entry point
+      config.rs                 ← env-based configuration
+      auth.rs                   ← authentication stub
+      storage.rs                ← repository stub (SQLite + PostgreSQL)
+      sync.rs                   ← sync engine stub (JMAP/IMAP/SMTP)
+    README.md                   ← how to run
+  scripts/
+    secretscan.sh               ← gitleaks scanner
 ```
 
 | Area | Path | Notes |
 |------|------|--------|
-| Web UI | `frontend/` | React, TanStack Router (planned), shadcn mail, en/zh i18n |
-| API + sync | `backend/` | Rust + Axum (planned); sync engine as a deep module |
+| Web UI | `frontend/` | React, TanStack Router, shadcn mail, en/zh i18n |
+| API + sync | `backend/` | Rust + Axum; health + version routes, module stubs |
 | DB | TBD | SQLite + PostgreSQL |
 
 ### Lint & format
