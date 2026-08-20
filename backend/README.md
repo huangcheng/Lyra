@@ -191,3 +191,83 @@ echo "=== Logout ==="
 curl -s -X POST $BASE/api/auth/logout \
   -H "Authorization: Bearer $TOKEN" -w '\nHTTP %{http_code}'
 ```
+
+## Accounts API demo
+
+Manage mail accounts with authenticated Bearer token:
+
+```bash
+BASE=http://localhost:3000
+
+# Login first (get token)
+RESP=$(curl -s -X POST $BASE/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"Str0ngP@ss"}')
+TOKEN=$(echo $RESP | jq -r '.token')
+
+# ─── Create first account (personal) ───────────────────────────────
+echo "=== Create Account 1 ==="
+curl -s -X POST $BASE/api/accounts \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "displayName": "Personal Mail",
+    "emailAddress": "user@example.com",
+    "password": "account-password-here",
+    "protocol": "imap",
+    "imapHost": "imap.example.com",
+    "imapPort": 993,
+    "imapSecurity": "tls",
+    "smtpHost": "smtp.example.com",
+    "smtpPort": 587,
+    "smtpSecurity": "starttls"
+  }' | jq .
+
+# ─── Create second account (work) ──────────────────────────────────
+echo "=== Create Account 2 ==="
+curl -s -X POST $BASE/api/accounts \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "displayName": "Work Mail",
+    "emailAddress": "user@work.example.com",
+    "password": "work-password-here",
+    "protocol": "imap",
+    "imapHost": "mail.work.example.com",
+    "imapPort": 993,
+    "imapSecurity": "tls",
+    "smtpHost": "smtp.work.example.com",
+    "smtpPort": 465,
+    "smtpSecurity": "tls"
+  }' | jq .
+
+# ─── List all accounts ─────────────────────────────────────────────
+echo "=== List Accounts ==="
+curl -s $BASE/api/accounts \
+  -H "Authorization: Bearer $TOKEN" | jq .
+
+# ─── Get single account ────────────────────────────────────────────
+ACCOUNT_ID="<paste-id-from-list>"
+echo "=== Get Account ==="
+curl -s $BASE/api/accounts/$ACCOUNT_ID \
+  -H "Authorization: Bearer $TOKEN" | jq .
+
+# ─── Update account ────────────────────────────────────────────────
+echo "=== Update Account ==="
+curl -s -X PUT $BASE/api/accounts/$ACCOUNT_ID \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"displayName": "My Personal Mail"}' | jq .
+
+# ─── Probe server config ───────────────────────────────────────────
+echo "=== Probe Server Config ==="
+curl -s -X POST $BASE/api/accounts/probe \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"emailAddress": "user@gmail.com"}' | jq .
+
+# ─── Delete account ────────────────────────────────────────────────
+echo "=== Delete Account ==="
+curl -s -X DELETE $BASE/api/accounts/$ACCOUNT_ID \
+  -H "Authorization: Bearer $TOKEN" -w '\nHTTP %{http_code}'
+```
