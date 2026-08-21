@@ -5,7 +5,7 @@
  * Sends via POST /api/messages/send using the selected account's SMTP.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { t } from '../i18n';
 import { useUIStore } from '../stores/ui';
 import { useMailStore } from '../stores/mail';
@@ -22,7 +22,9 @@ interface ComposeForm {
 export function ComposeDialog() {
   const locale = useUIStore((s) => s.locale);
   const composeOpen = useUIStore((s) => s.composeOpen);
+  const composeDraft = useUIStore((s) => s.composeDraft);
   const setComposeOpen = useUIStore((s) => s.setComposeOpen);
+  const clearComposeDraft = useUIStore((s) => s.clearComposeDraft);
   const selectedAccountId = useUIStore((s) => s.selectedAccountId);
   const accounts = useMailStore((s) => s.accounts);
   const token = useAuthStore((s) => s.token);
@@ -38,13 +40,32 @@ export function ComposeDialog() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
+  useEffect(() => {
+    if (!composeOpen) return;
+    setForm({
+      to: composeDraft?.to ?? '',
+      cc: '',
+      bcc: '',
+      subject: composeDraft?.subject ?? '',
+      body: composeDraft?.body ?? '',
+    });
+    setError(null);
+    setSuccess(false);
+  }, [composeOpen, composeDraft]);
+
   if (!composeOpen) return null;
 
-  // Use the selected account, or the first available account
   const accountId = selectedAccountId ?? accounts[0]?.id;
+  const titleKey =
+    composeDraft?.mode === 'reply'
+      ? 'mail.reply'
+      : composeDraft?.mode === 'forward'
+        ? 'mail.forward'
+        : 'mail.compose';
 
   const handleClose = () => {
     setComposeOpen(false);
+    clearComposeDraft();
     setForm({ to: '', cc: '', bcc: '', subject: '', body: '' });
     setError(null);
     setSuccess(false);
@@ -125,7 +146,7 @@ export function ComposeDialog() {
     <div className="compose-overlay" onClick={handleClose}>
       <div className="compose-dialog" onClick={(e) => e.stopPropagation()}>
         <div className="compose-header">
-          <h2>{t(locale, 'mail.compose')}</h2>
+          <h2>{t(locale, titleKey)}</h2>
           <button type="button" className="compose-close" onClick={handleClose} aria-label="Close">
             ✕
           </button>

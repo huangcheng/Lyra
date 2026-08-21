@@ -1,6 +1,11 @@
 services:
   lyra:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # DaoCloud mirror — Docker Hub auth times out on some networks.
+        REGISTRY: docker.m.daocloud.io/library/
     ports:
       - "3000:3000"
     environment:
@@ -8,11 +13,18 @@ services:
       DATABASE_URL: sqlite:/data/lyra.db
       DATA_DIR: /data
       RUST_LOG: info
-      # Set SESSION_SECRET in production (32+ bytes). Ephemeral if unset.
-      # SESSION_SECRET: replace-me-with-a-long-random-secret
+      # Dev default; override for anything beyond local OrbStack use.
+      SESSION_SECRET: lyra-local-dev-session-secret-change-me-32b
+      LYRA_MASTER_KEY: lyra-default-master-key-for-dev-only
     volumes:
       - lyra-data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
 
   # Optional PostgreSQL — switch lyra.DATABASE_URL to:
   # postgres://lyra:lyra@postgres:5432/lyra

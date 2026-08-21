@@ -1,7 +1,7 @@
 {
   "app": {
     "name": "Lyra",
-    "tagline": "自托管邮件客户端"
+    "tagline": "邮件，自己托管。"
   },
   "nav": {
     "inbox": "收件箱",

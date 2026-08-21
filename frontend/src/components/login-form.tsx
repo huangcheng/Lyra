@@ -1,12 +1,13 @@
 /**
- * Login screen for Lyra.
- *
- * Handles username/password authentication and TOTP challenge.
+ * Login / bootstrap / TOTP — form-first polish (no watermark / globe).
+ * Design: docs/superpowers/specs/2026-08-21-lyra-auth-editorial-design.md
  */
 
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
+import { motion, useReducedMotion, type Variants } from 'motion/react';
 import { t } from '../i18n';
 import { useUIStore } from '../stores/ui';
+import { StampMark } from './stamp-mark';
 
 interface LoginFormProps {
   onLogin: (username: string, password: string) => void;
@@ -15,6 +16,71 @@ interface LoginFormProps {
   error: string | null;
   hasUser: boolean | null;
   requiresTotp: boolean;
+}
+
+const easeOut = [0.22, 1, 0.36, 1] as const;
+
+const stackVariants: Variants = {
+  hidden: {},
+  show: {
+    transition: { staggerChildren: 0.055, delayChildren: 0.03 },
+  },
+};
+
+const itemVariants: Variants = {
+  hidden: { opacity: 0, y: 8 },
+  show: {
+    opacity: 1,
+    y: 0,
+    transition: { duration: 0.28, ease: easeOut },
+  },
+};
+
+function AuthShell({ children }: { children: ReactNode }) {
+  const locale = useUIStore((s) => s.locale);
+  const reduceMotion = useReducedMotion();
+
+  return (
+    <div className="auth-page">
+      <motion.div
+        className="auth-stack"
+        variants={stackVariants}
+        initial={reduceMotion ? false : 'hidden'}
+        animate="show"
+      >
+        {children}
+        <motion.p className="auth-tagline" variants={itemVariants}>
+          {t(locale, 'app.tagline')}
+        </motion.p>
+      </motion.div>
+    </div>
+  );
+}
+
+function BrandBlock() {
+  return (
+    <motion.header className="auth-brand-block" variants={itemVariants}>
+      <StampMark size={44} className="auth-stamp" />
+      <p className="auth-wordmark">Lyra</p>
+    </motion.header>
+  );
+}
+
+function AuthCopy({ title, description }: { title: string; description?: string }) {
+  return (
+    <motion.div className="auth-copy" variants={itemVariants}>
+      <h1 className="auth-title">{title}</h1>
+      {description ? <p className="auth-muted">{description}</p> : null}
+    </motion.div>
+  );
+}
+
+function AuthFormWrap({ children }: { children: ReactNode }) {
+  return (
+    <motion.div className="auth-form-wrap" variants={itemVariants}>
+      {children}
+    </motion.div>
+  );
 }
 
 export function LoginForm({
@@ -67,35 +133,29 @@ export function LoginForm({
     onTotpVerify(totpCode);
   };
 
-  // Loading state
   if (hasUser === null) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="text-center">
-          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-          <p className="mt-2 text-sm text-muted-foreground">{t(locale, 'common.loading')}</p>
-        </div>
-      </div>
+      <AuthShell>
+        <motion.div className="auth-loading" variants={itemVariants}>
+          <div className="auth-spinner" aria-hidden />
+          <p className="auth-muted">{t(locale, 'common.loading')}</p>
+        </motion.div>
+      </AuthShell>
     );
   }
 
-  // TOTP challenge
   if (requiresTotp) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="w-full max-w-md space-y-6 p-6">
-          <div className="text-center">
-            <h1 className="text-2xl font-bold">{t(locale, 'auth.totpTitle')}</h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              {t(locale, 'auth.totpDescription')}
-            </p>
-          </div>
-
-          <form onSubmit={handleTotpSubmit} className="space-y-4">
-            <div>
-              <label htmlFor="totp-code" className="block text-sm font-medium">
-                {t(locale, 'auth.totpCode')}
-              </label>
+      <AuthShell>
+        <BrandBlock />
+        <AuthCopy
+          title={t(locale, 'auth.totpTitle')}
+          description={t(locale, 'auth.totpDescription')}
+        />
+        <AuthFormWrap>
+          <form onSubmit={handleTotpSubmit} className="auth-form">
+            <label className="auth-field" htmlFor="totp-code">
+              <span className="auth-label">{t(locale, 'auth.totpCode')}</span>
               <input
                 id="totp-code"
                 type="text"
@@ -104,158 +164,127 @@ export function LoginForm({
                 maxLength={6}
                 value={totpCode}
                 onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ''))}
-                className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2 text-center text-lg tracking-widest"
+                className="auth-input auth-input--otp"
                 placeholder="000000"
                 autoFocus
               />
-            </div>
-
+            </label>
             {(error || validationError) && (
-              <p className="text-sm text-destructive">{error || validationError}</p>
+              <p className="auth-error">{error || validationError}</p>
             )}
-
-            <button
-              type="submit"
-              className="w-full rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
-            >
+            <button type="submit" className="auth-submit">
               {t(locale, 'auth.totpVerify')}
             </button>
           </form>
-        </div>
-      </div>
+        </AuthFormWrap>
+      </AuthShell>
     );
   }
 
-  // Bootstrap (first-run setup)
   if (!hasUser) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="w-full max-w-md space-y-6 p-6">
-          <div className="text-center">
-            <h1 className="text-2xl font-bold">{t(locale, 'auth.bootstrapTitle')}</h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              {t(locale, 'auth.bootstrapDescription')}
-            </p>
-          </div>
-
-          <form onSubmit={handleBootstrapSubmit} className="space-y-4">
-            <div>
-              <label htmlFor="username" className="block text-sm font-medium">
-                {t(locale, 'auth.username')}
-              </label>
+      <AuthShell>
+        <BrandBlock />
+        <AuthCopy
+          title={t(locale, 'auth.bootstrapTitle')}
+          description={t(locale, 'auth.bootstrapDescription')}
+        />
+        <AuthFormWrap>
+          <form onSubmit={handleBootstrapSubmit} className="auth-form">
+            <label className="auth-field" htmlFor="username">
+              <span className="auth-label">{t(locale, 'auth.username')}</span>
               <input
                 id="username"
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2"
+                className="auth-input"
                 autoFocus
+                autoComplete="username"
               />
-            </div>
-
-            <div>
-              <label htmlFor="display-name" className="block text-sm font-medium">
-                {t(locale, 'auth.displayName')}
-              </label>
+            </label>
+            <label className="auth-field" htmlFor="display-name">
+              <span className="auth-label">{t(locale, 'auth.displayName')}</span>
               <input
                 id="display-name"
                 type="text"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
-                className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2"
+                className="auth-input"
+                autoComplete="name"
               />
-            </div>
-
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium">
-                {t(locale, 'auth.password')}
-              </label>
+            </label>
+            <label className="auth-field" htmlFor="password">
+              <span className="auth-label">{t(locale, 'auth.password')}</span>
               <input
                 id="password"
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2"
+                className="auth-input"
+                autoComplete="new-password"
               />
-            </div>
-
-            <div>
-              <label htmlFor="confirm-password" className="block text-sm font-medium">
-                {t(locale, 'auth.confirmPassword')}
-              </label>
+            </label>
+            <label className="auth-field" htmlFor="confirm-password">
+              <span className="auth-label">{t(locale, 'auth.confirmPassword')}</span>
               <input
                 id="confirm-password"
                 type="password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2"
+                className="auth-input"
+                autoComplete="new-password"
               />
-            </div>
-
+            </label>
             {(error || validationError) && (
-              <p className="text-sm text-destructive">{error || validationError}</p>
+              <p className="auth-error">{error || validationError}</p>
             )}
-
-            <button
-              type="submit"
-              className="w-full rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
-            >
+            <button type="submit" className="auth-submit">
               {t(locale, 'auth.createAccount')}
             </button>
           </form>
-        </div>
-      </div>
+        </AuthFormWrap>
+      </AuthShell>
     );
   }
 
-  // Normal login
   return (
-    <div className="flex min-h-screen items-center justify-center">
-      <div className="w-full max-w-md space-y-6 p-6">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold">{t(locale, 'auth.loginTitle')}</h1>
-        </div>
-
-        <form onSubmit={handleLoginSubmit} className="space-y-4">
-          <div>
-            <label htmlFor="username" className="block text-sm font-medium">
-              {t(locale, 'auth.username')}
-            </label>
+    <AuthShell>
+      <BrandBlock />
+      <AuthCopy title={t(locale, 'auth.loginTitle')} />
+      <AuthFormWrap>
+        <form onSubmit={handleLoginSubmit} className="auth-form">
+          <label className="auth-field" htmlFor="username">
+            <span className="auth-label">{t(locale, 'auth.username')}</span>
             <input
               id="username"
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2"
+              className="auth-input"
               autoFocus
+              autoComplete="username"
             />
-          </div>
-
-          <div>
-            <label htmlFor="password" className="block text-sm font-medium">
-              {t(locale, 'auth.password')}
-            </label>
+          </label>
+          <label className="auth-field" htmlFor="password">
+            <span className="auth-label">{t(locale, 'auth.password')}</span>
             <input
               id="password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2"
+              className="auth-input"
+              autoComplete="current-password"
             />
-          </div>
-
+          </label>
           {(error || validationError) && (
-            <p className="text-sm text-destructive">{error || validationError}</p>
+            <p className="auth-error">{error || validationError}</p>
           )}
-
-          <button
-            type="submit"
-            className="w-full rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
-          >
+          <button type="submit" className="auth-submit">
             {t(locale, 'auth.login')}
           </button>
         </form>
-      </div>
-    </div>
+      </AuthFormWrap>
+    </AuthShell>
   );
 }

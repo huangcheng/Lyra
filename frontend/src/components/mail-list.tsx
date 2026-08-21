@@ -13,6 +13,27 @@ import { t } from '../i18n';
 import { formatMailDate, getInitials, cn } from '../lib/utils';
 import type { MailMessage } from '../types';
 
+function ReplyGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <polyline
+        points="9 17 4 12 9 7"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M20 18v-2a4 4 0 0 0-4-4H4"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function MessageItem({ message }: { message: MailMessage }) {
   const selectedMessageId = useUIStore((s) => s.selectedMessageId);
   const setSelectedMessage = useUIStore((s) => s.setSelectedMessage);
@@ -28,16 +49,21 @@ function MessageItem({ message }: { message: MailMessage }) {
       )}
       onClick={() => setSelectedMessage(message.id)}
     >
+      <span className="mail-list-status" aria-hidden>
+        {message.isReplied ? <ReplyGlyph /> : null}
+      </span>
       <div className="mail-list-avatar">{getInitials(message.from.name ?? message.from.email)}</div>
       <div className="mail-list-content">
         <div className="mail-list-top">
-          <span className="mail-list-sender">{message.from.name ?? message.from.email}</span>
+          <span className="mail-list-lead">
+            {!message.isRead && <span className="mail-list-unread-dot" />}
+            <span className="mail-list-sender">{message.from.name ?? message.from.email}</span>
+          </span>
           <span className="mail-list-date">{formatMailDate(message.date)}</span>
         </div>
         <div className="mail-list-subject">{message.subject}</div>
         <div className="mail-list-snippet">{message.snippet}</div>
       </div>
-      {message.isStarred && <span className="mail-list-star">⭐</span>}
     </button>
   );
 }
@@ -47,12 +73,22 @@ export function MailList() {
   const selectedFolderId = useUIStore((s) => s.selectedFolderId);
   const searchQuery = useUIStore((s) => s.searchQuery);
   const setSearchQuery = useUIStore((s) => s.setSearchQuery);
+  const searchOpen = useUIStore((s) => s.searchOpen);
+  const setSearchOpen = useUIStore((s) => s.setSearchOpen);
+  const folders = useMailStore((s) => s.folders);
   const messages = useMailStore((s) => s.getMessagesForFolder(selectedFolderId ?? ''));
   const token = useAuthStore((s) => s.token);
   const upsertMessage = useMailStore((s) => s.upsertMessage);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const folder = selectedFolderId ? folders[selectedFolderId] : undefined;
+  const folderTitle = folder
+    ? folder.role
+      ? t(locale, `nav.${folder.role}`)
+      : folder.name
+    : t(locale, 'nav.inbox');
 
   // Fetch messages when folder changes
   useEffect(() => {
@@ -129,7 +165,6 @@ export function MailList() {
     fetchMessages();
   }, [selectedFolderId, token, upsertMessage]);
 
-  // Filter by search query
   const filtered = searchQuery
     ? messages.filter(
         (m) =>
@@ -142,13 +177,39 @@ export function MailList() {
   return (
     <div className="mail-list">
       <div className="mail-list-header">
-        <input
-          type="text"
-          className="mail-list-search"
-          placeholder={t(locale, 'mail.searchPlaceholder')}
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-        />
+        <div className="mail-list-header-row">
+          <h2 className="mail-list-title">
+            {folderTitle}
+            <span className="mail-list-count"> · {filtered.length}</span>
+          </h2>
+          <button
+            type="button"
+            className="mail-list-search-toggle"
+            aria-label={t(locale, 'mail.searchPlaceholder')}
+            aria-pressed={searchOpen}
+            onClick={() => setSearchOpen(!searchOpen)}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="1.75" />
+              <path
+                d="M20 20l-3-3"
+                stroke="currentColor"
+                strokeWidth="1.75"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        </div>
+        {searchOpen && (
+          <input
+            type="text"
+            className="mail-list-search"
+            placeholder={t(locale, 'mail.searchPlaceholder')}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            autoFocus
+          />
+        )}
       </div>
       <div className="mail-list-body">
         {loading ? (

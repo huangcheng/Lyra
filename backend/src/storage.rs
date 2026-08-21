@@ -139,20 +139,34 @@ impl Storage {
 
     /// Get the path to the migrations directory for the current backend.
     fn migrations_dir(&self) -> anyhow::Result<PathBuf> {
-        // Find the backend directory (we're running from there)
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let subdir = match &self.pool {
             DbPool::Sqlite(_) => "sqlite",
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => "postgres",
         };
 
-        let dir = base.join("migrations").join(subdir);
-        if !dir.exists() {
-            anyhow::bail!("Migrations directory not found: {}", dir.display());
+        // Prefer runtime override (Docker / packaged installs), then compile-time
+        // source tree path used during `cargo run` from the repo.
+        let candidates = [
+            std::env::var_os("MIGRATIONS_DIR").map(PathBuf::from),
+            Some(PathBuf::from("/lyra/migrations")),
+            Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations")),
+        ];
+
+        for base in candidates.into_iter().flatten() {
+            let dir = if base.ends_with("sqlite") || base.ends_with("postgres") {
+                base
+            } else {
+                base.join(subdir)
+            };
+            if dir.exists() {
+                return Ok(dir);
+            }
         }
 
-        Ok(dir)
+        anyhow::bail!(
+            "Migrations directory not found (set MIGRATIONS_DIR or ship /lyra/migrations/{subdir})"
+        );
     }
 }
 

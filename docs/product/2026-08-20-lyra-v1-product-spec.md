@@ -23,7 +23,7 @@ v1 is complete when all of the following are done:
 11. **Data layer** — carefully designed schema supporting SQLite and PostgreSQL  
 12. **Security basics** — HTTPS, encrypted credentials at rest, strong password policy for Lyra login  
 
-**Not required to complete v1:** team collaboration, SaaS hosting, multi-user logins, spam ML beyond provider flags, native desktop/mobile apps, GitHub/SSO/passkeys, Google/Outlook calendar APIs.
+**Not required to complete v1:** team collaboration, SaaS hosting, multi-user logins, spam ML beyond provider flags, AI assist / BYOK, native desktop/mobile apps, GitHub/SSO/passkeys, Google/Outlook calendar APIs.
 
 ---
 
@@ -150,8 +150,9 @@ v1 succeeds when a self-hoster can:
 | SSO / GitHub / passkeys | After password + TOTP |
 | Google / Outlook calendar APIs | CardDAV/CalDAV only in v1 |
 | Native desktop / mobile apps | Responsive web first in v1; far-horizon order in `docs/product/2026-08-20-lyra-multi-client-roadmap.md` (API → desktop → mobile) |
+| AI assist (BYOK) | Post-v1; see `docs/product/2026-08-21-lyra-ai-assist-roadmap.md` (draft → categorize → spam → calendar-from-email) |
 | Collaboration | Shared drafts, shared mailboxes — not a Lyra v1 goal |
-| Advanced spam / ML | Rely on provider flags unless a later spec says otherwise |
+| Advanced spam / ML | Rely on provider flags in v1; optional BYOK spam assist later (same AI roadmap) |
 
 ---
 
@@ -160,4 +161,5 @@ v1 succeeds when a self-hoster can:
 - Agent guidance (living): `AGENTS.md`  
 - Engineering standards: `docs/specs/2026-08-20-lyra-engineering-standards.md`  
 - Multi-client roadmap (far horizon): `docs/product/2026-08-20-lyra-multi-client-roadmap.md`  
+- AI assist roadmap (post-v1 BYOK): `docs/product/2026-08-21-lyra-ai-assist-roadmap.md`  
 - Further technical specs: `docs/specs/`  

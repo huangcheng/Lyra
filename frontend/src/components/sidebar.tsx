@@ -51,7 +51,7 @@ export function Sidebar() {
   const accounts = useMailStore((s) => s.accounts);
   const setLocale = useUIStore((s) => s.setLocale);
   const setSelectedAccount = useUIStore((s) => s.setSelectedAccount);
-  const setComposeOpen = useUIStore((s) => s.setComposeOpen);
+  const openCompose = useUIStore((s) => s.openCompose);
   const clearSession = useAuthStore((s) => s.clearSession);
   const user = useAuthStore((s) => s.user);
   const token = useAuthStore((s) => s.token);
@@ -100,7 +100,7 @@ export function Sidebar() {
           <button
             type="button"
             className="sidebar-compose-btn"
-            onClick={() => setComposeOpen(true)}
+            onClick={() => openCompose()}
             title={t(locale, 'mail.compose')}
           >
             ✏️ {t(locale, 'mail.compose')}

@@ -57,6 +57,7 @@ Detail lives in specs; this file stays short and accurate.
 |------|------|
 | Scoping features, v1 boundaries, non-goals | `docs/product/2026-08-20-lyra-v1-product-spec.md` |
 | Far-horizon multi-client order (API → desktop → mobile) | `docs/product/2026-08-20-lyra-multi-client-roadmap.md` |
+| Post-v1 AI assist (BYOK; draft → categorize → spam → calendar) | `docs/product/2026-08-21-lyra-ai-assist-roadmap.md` |
 | Clean/robust code, deep modules, state roles, verification | `docs/specs/2026-08-20-lyra-engineering-standards.md` |
 | Data model, dual-DB schema, migrations | `docs/specs/2026-08-20-lyra-data-model-spec.md` |
 | Sync engine, protocols, auto-config | `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md` |
@@ -73,7 +74,7 @@ Lyra/
   AGENTS.md
   Makefile                      ← fmt / lint / check / secretscan
   docs/
-    product/                    ← product spec + far-horizon multi-client roadmap
+    product/                    ← product spec + far-horizon roadmaps (multi-client, AI assist)
     specs/                      ← data model, sync, engineering standards
   frontend/                     ← Vite + React + TanStack Router + shadcn mail
     src/

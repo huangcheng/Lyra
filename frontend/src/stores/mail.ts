@@ -31,6 +31,7 @@ interface MailState {
   upsertThread: (thread: MailThread) => void;
   markMessageRead: (id: string) => void;
   toggleStar: (id: string) => void;
+  removeMessage: (id: string) => void;
 }
 
 export const useMailStore = create<MailState>((set, get) => ({
@@ -95,5 +96,11 @@ export const useMailStore = create<MailState>((set, get) => ({
           [id]: { ...msg, isStarred: !msg.isStarred },
         },
       };
+    }),
+
+  removeMessage: (id) =>
+    set((state) => {
+      const { [id]: _removed, ...rest } = state.messages;
+      return { messages: rest };
     }),
 }));
