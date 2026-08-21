@@ -12,6 +12,7 @@ mod accounts;
 mod auth;
 mod config;
 mod crypto;
+mod dav;
 mod imap;
 mod jmap;
 mod pim;

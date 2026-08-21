@@ -71,6 +71,7 @@ function MessageItem({ message }: { message: MailMessage }) {
 export function MailList() {
   const locale = useUIStore((s) => s.locale);
   const selectedFolderId = useUIStore((s) => s.selectedFolderId);
+  const selectedAccountId = useUIStore((s) => s.selectedAccountId);
   const searchQuery = useUIStore((s) => s.searchQuery);
   const setSearchQuery = useUIStore((s) => s.setSearchQuery);
   const searchOpen = useUIStore((s) => s.searchOpen);
@@ -82,6 +83,8 @@ export function MailList() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchHits, setSearchHits] = useState<MailMessage[] | null>(null);
+  const [searching, setSearching] = useState(false);
 
   const folder = selectedFolderId ? folders[selectedFolderId] : undefined;
   const folderTitle = folder
@@ -89,6 +92,58 @@ export function MailList() {
       ? t(locale, `nav.${folder.role}`)
       : folder.name
     : t(locale, 'nav.inbox');
+
+  const mapApiMessage = (msg: Record<string, unknown>): MailMessage => {
+    const parseAddr = (json?: unknown) => {
+      if (typeof json !== 'string') return { email: 'unknown' };
+      try {
+        const parsed = JSON.parse(json) as { raw?: string };
+        if (parsed.raw) {
+          const match = parsed.raw.match(/^(.+?)\s*<(.+?)>$/);
+          if (match) return { name: match[1].trim(), email: match[2].trim() };
+          return { email: parsed.raw };
+        }
+      } catch {
+        /* fall through */
+      }
+      return { email: 'unknown' };
+    };
+
+    const parseAddrs = (json?: unknown) => {
+      if (typeof json !== 'string') return [];
+      try {
+        const parsed = JSON.parse(json) as unknown;
+        if (Array.isArray(parsed)) {
+          return parsed.map((item: string) => {
+            const match = item.match(/^(.+?)\s*<(.+?)>$/);
+            if (match) return { name: match[1].trim(), email: match[2].trim() };
+            return { email: item };
+          });
+        }
+      } catch {
+        /* fall through */
+      }
+      return [];
+    };
+
+    return {
+      id: String(msg.id),
+      accountId: String(msg.accountId),
+      folderId: String(msg.folderId),
+      subject: (msg.subject as string) ?? '(no subject)',
+      from: parseAddr(msg.fromAddress),
+      to: parseAddrs(msg.toAddresses),
+      cc: parseAddrs(msg.ccAddresses),
+      date: (msg.date as string) ?? new Date().toISOString(),
+      snippet: (msg.snippet as string) ?? '',
+      bodyText: msg.bodyText as string | undefined,
+      bodyHtml: msg.bodyHtml as string | undefined,
+      isRead: Boolean(msg.isRead),
+      isStarred: Boolean(msg.isStarred),
+      isDraft: false,
+      hasAttachments: Boolean(msg.hasAttachments),
+    };
+  };
 
   // Fetch messages when folder changes
   useEffect(() => {
@@ -102,58 +157,9 @@ export function MailList() {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) throw new Error('Failed to fetch messages');
-        const data = await res.json();
-
+        const data = (await res.json()) as Record<string, unknown>[];
         for (const msg of data) {
-          const parseAddr = (json?: string) => {
-            if (!json) return { email: 'unknown' };
-            try {
-              const parsed = JSON.parse(json);
-              if (parsed.raw) {
-                const match = parsed.raw.match(/^(.+?)\s*<(.+?)>$/);
-                if (match) return { name: match[1].trim(), email: match[2].trim() };
-                return { email: parsed.raw };
-              }
-              return { email: 'unknown' };
-            } catch {
-              return { email: 'unknown' };
-            }
-          };
-
-          const parseAddrs = (json?: string) => {
-            if (!json) return [];
-            try {
-              const parsed = JSON.parse(json);
-              if (Array.isArray(parsed)) {
-                return parsed.map((item: string) => {
-                  const match = item.match(/^(.+?)\s*<(.+?)>$/);
-                  if (match) return { name: match[1].trim(), email: match[2].trim() };
-                  return { email: item };
-                });
-              }
-              return [];
-            } catch {
-              return [];
-            }
-          };
-
-          upsertMessage({
-            id: msg.id,
-            accountId: msg.accountId,
-            folderId: msg.folderId,
-            subject: msg.subject ?? '(no subject)',
-            from: parseAddr(msg.fromAddress),
-            to: parseAddrs(msg.toAddresses),
-            cc: parseAddrs(msg.ccAddresses),
-            date: msg.date ?? new Date().toISOString(),
-            snippet: msg.snippet ?? '',
-            bodyText: msg.bodyText,
-            bodyHtml: msg.bodyHtml,
-            isRead: msg.isRead,
-            isStarred: msg.isStarred,
-            isDraft: false,
-            hasAttachments: msg.hasAttachments,
-          });
+          upsertMessage(mapApiMessage(msg));
         }
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to load messages');
@@ -162,24 +168,63 @@ export function MailList() {
       }
     };
 
-    fetchMessages();
+    void fetchMessages();
   }, [selectedFolderId, token, upsertMessage]);
 
-  const filtered = searchQuery
-    ? messages.filter(
-        (m) =>
-          m.subject.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          m.from.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          m.snippet.toLowerCase().includes(searchQuery.toLowerCase()),
-      )
-    : messages;
+  // Server search (local DB index) when query is 2+ chars
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!token || q.length < 2) {
+      setSearchHits(null);
+      setSearching(false);
+      return;
+    }
+
+    const handle = window.setTimeout(() => {
+      void (async () => {
+        setSearching(true);
+        try {
+          const params = new URLSearchParams({ q });
+          if (selectedAccountId) params.set('accountId', selectedAccountId);
+          const res = await fetch(`/api/messages/search?${params}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!res.ok) throw new Error('Search failed');
+          const data = (await res.json()) as Record<string, unknown>[];
+          const mapped = data.map(mapApiMessage);
+          for (const msg of mapped) upsertMessage(msg);
+          setSearchHits(mapped);
+        } catch {
+          setSearchHits([]);
+        } finally {
+          setSearching(false);
+        }
+      })();
+    }, 280);
+
+    return () => window.clearTimeout(handle);
+  }, [searchQuery, token, selectedAccountId, upsertMessage]);
+
+  const filtered =
+    searchHits ??
+    (searchQuery.trim().length > 0 && searchQuery.trim().length < 2
+      ? messages.filter(
+          (m) =>
+            m.subject.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            m.from.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            m.snippet.toLowerCase().includes(searchQuery.toLowerCase()),
+        )
+      : messages);
+
+  const listTitle =
+    searchHits !== null ? t(locale, 'mail.searchPlaceholder') : folderTitle;
 
   return (
     <div className="mail-list">
       <div className="mail-list-header">
         <div className="mail-list-header-row">
           <h2 className="mail-list-title">
-            {folderTitle}
+            {listTitle}
             <span className="mail-list-count"> · {filtered.length}</span>
           </h2>
           <button
@@ -212,7 +257,7 @@ export function MailList() {
         )}
       </div>
       <div className="mail-list-body">
-        {loading ? (
+        {loading || searching ? (
           <div className="mail-list-loading">
             <span className="loading-spinner" />
             <span>{t(locale, 'common.loading')}</span>

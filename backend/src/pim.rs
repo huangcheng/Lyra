@@ -516,7 +516,8 @@ async fn get_event(
     }))
 }
 
-/// Sync contacts for an account via `CardDAV`.
+/// Sync contacts for an account via CardDAV (when `carddav_url` is set).
+#[allow(clippy::too_many_lines)]
 async fn sync_contacts(
     State(state): State<AuthState>,
     Path(account_id): Path<String>,
@@ -525,26 +526,114 @@ async fn sync_contacts(
     let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
-    // Verify account belongs to user
-    let _account = sqlx::query("SELECT id FROM mail_account WHERE id = ? AND user_id = ?")
-        .bind(&account_id)
-        .bind(&user_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or(PimError::AccountNotFound)?;
+    let row = sqlx::query(
+        r"
+        SELECT id, email_address, credential, carddav_url
+        FROM mail_account
+        WHERE id = ? AND user_id = ?
+        ",
+    )
+    .bind(&account_id)
+    .bind(&user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(PimError::AccountNotFound)?;
 
-    // TODO: Implement actual CardDAV sync
-    // 1. Discover addressbook URLs via PROPFIND
-    // 2. Fetch addressbook-multiget for contacts
-    // 3. Parse vCard data and store in contact table
+    let carddav_url: Option<String> = row.get("carddav_url");
+    let Some(base_url) = carddav_url.filter(|s| !s.is_empty()) else {
+        return Ok(Json(serde_json::json!({
+            "status": "skipped",
+            "message": "Set carddavUrl on the account to enable CardDAV sync"
+        })));
+    };
+
+    let email: String = row.get("email_address");
+    let credential_json: String = row.get("credential");
+    let dek =
+        crate::auth::AuthState::get_user_dek().map_err(|e| PimError::SyncError(e.to_string()))?;
+    let password = crate::imap::decrypt_account_password(&credential_json, &dek)
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
+
+    let client = crate::dav::DavClient::new(email, password);
+    let hrefs = client
+        .propfind_hrefs(&base_url)
+        .await
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
+
+    let mut synced = 0u32;
+    for href in hrefs {
+        if !href.to_lowercase().contains(".vcf") {
+            continue;
+        }
+        let url = crate::dav::resolve_href(&base_url, &href);
+        let Ok(vcard) = client.get_text(&url).await else {
+            continue;
+        };
+        let (display_name, emails, phones, org) = crate::dav::parse_vcard_fields(&vcard);
+        let emails_json = serde_json::to_string(&emails).unwrap_or_else(|_| "[]".into());
+        let phones_json = serde_json::to_string(&phones).unwrap_or_else(|_| "[]".into());
+        let external_id = href.clone();
+
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM contact WHERE account_id = ? AND external_id = ?",
+        )
+        .bind(&account_id)
+        .bind(&external_id)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some(id) = existing {
+            sqlx::query(
+                r"
+                UPDATE contact SET
+                  vcard_blob = ?, display_name = ?, email_addresses = ?,
+                  phone_numbers = ?, organisation = ?, addressbook_url = ?,
+                  updated_at = datetime('now')
+                WHERE id = ?
+                ",
+            )
+            .bind(&vcard)
+            .bind(&display_name)
+            .bind(&emails_json)
+            .bind(&phones_json)
+            .bind(&org)
+            .bind(&base_url)
+            .bind(&id)
+            .execute(pool)
+            .await?;
+        } else {
+            let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+            sqlx::query(
+                r"
+                INSERT INTO contact (
+                  id, account_id, external_id, vcard_blob, display_name,
+                  email_addresses, phone_numbers, organisation, addressbook_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ",
+            )
+            .bind(&id)
+            .bind(&account_id)
+            .bind(&external_id)
+            .bind(&vcard)
+            .bind(&display_name)
+            .bind(&emails_json)
+            .bind(&phones_json)
+            .bind(&org)
+            .bind(&base_url)
+            .execute(pool)
+            .await?;
+        }
+        synced += 1;
+    }
 
     Ok(Json(serde_json::json!({
-        "status": "not_implemented",
-        "message": "CardDAV sync not yet implemented"
+        "status": "ok",
+        "synced": synced,
     })))
 }
 
-/// Sync calendars for an account via `CalDAV`.
+/// Sync calendars for an account via CalDAV (when `caldav_url` is set).
+#[allow(clippy::too_many_lines)]
 async fn sync_calendars(
     State(state): State<AuthState>,
     Path(account_id): Path<String>,
@@ -553,22 +642,154 @@ async fn sync_calendars(
     let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
-    // Verify account belongs to user
-    let _account = sqlx::query("SELECT id FROM mail_account WHERE id = ? AND user_id = ?")
-        .bind(&account_id)
-        .bind(&user_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or(PimError::AccountNotFound)?;
+    let row = sqlx::query(
+        r"
+        SELECT id, email_address, credential, caldav_url
+        FROM mail_account
+        WHERE id = ? AND user_id = ?
+        ",
+    )
+    .bind(&account_id)
+    .bind(&user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(PimError::AccountNotFound)?;
 
-    // TODO: Implement actual CalDAV sync
-    // 1. Discover calendar URLs via PROPFIND
-    // 2. Fetch calendar-multiget for events
-    // 3. Parse iCalendar data and store in calendar and calendar_event tables
+    let caldav_url: Option<String> = row.get("caldav_url");
+    let Some(base_url) = caldav_url.filter(|s| !s.is_empty()) else {
+        return Ok(Json(serde_json::json!({
+            "status": "skipped",
+            "message": "Set caldavUrl on the account to enable CalDAV sync"
+        })));
+    };
+
+    let email: String = row.get("email_address");
+    let credential_json: String = row.get("credential");
+    let dek =
+        crate::auth::AuthState::get_user_dek().map_err(|e| PimError::SyncError(e.to_string()))?;
+    let password = crate::imap::decrypt_account_password(&credential_json, &dek)
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
+
+    let client = crate::dav::DavClient::new(email, password);
+    let hrefs = client
+        .propfind_hrefs(&base_url)
+        .await
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
+
+    // Ensure a local calendar row exists for this URL.
+    let calendar_id: String = {
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM calendar WHERE account_id = ? AND calendar_url = ?",
+        )
+        .bind(&account_id)
+        .bind(&base_url)
+        .fetch_optional(pool)
+        .await?;
+        if let Some(id) = existing {
+            id
+        } else {
+            let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+            sqlx::query(
+                r"
+                INSERT INTO calendar (id, account_id, name, calendar_url, is_active)
+                VALUES (?, ?, ?, ?, 1)
+                ",
+            )
+            .bind(&id)
+            .bind(&account_id)
+            .bind("Calendar")
+            .bind(&base_url)
+            .execute(pool)
+            .await?;
+            id
+        }
+    };
+
+    let mut synced = 0u32;
+    for href in hrefs {
+        let lower = href.to_lowercase();
+        let is_ics = std::path::Path::new(&lower)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("ics"));
+        if !(is_ics || lower.contains("vevent") || lower.contains("event")) {
+            if href.ends_with('/') {
+                continue;
+            }
+            continue;
+        }
+        let url = crate::dav::resolve_href(&base_url, &href);
+        let Ok(ical) = client.get_text(&url).await else {
+            continue;
+        };
+        if !ical.to_uppercase().contains("BEGIN:VEVENT") {
+            continue;
+        }
+        let (summary, description, dtstart, dtend, location, is_all_day) =
+            crate::dav::parse_vevent_fields(&ical);
+        let external_id = href.clone();
+
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM calendar_event WHERE account_id = ? AND external_id = ?",
+        )
+        .bind(&account_id)
+        .bind(&external_id)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some(id) = existing {
+            sqlx::query(
+                r"
+                UPDATE calendar_event SET
+                  calendar_id = ?, icalendar_blob = ?, summary = ?, description = ?,
+                  dtstart = ?, dtend = ?, location = ?, is_all_day = ?,
+                  calendar_url = ?, updated_at = datetime('now')
+                WHERE id = ?
+                ",
+            )
+            .bind(&calendar_id)
+            .bind(&ical)
+            .bind(&summary)
+            .bind(&description)
+            .bind(&dtstart)
+            .bind(&dtend)
+            .bind(&location)
+            .bind(is_all_day)
+            .bind(&base_url)
+            .bind(&id)
+            .execute(pool)
+            .await?;
+        } else {
+            let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+            sqlx::query(
+                r"
+                INSERT INTO calendar_event (
+                  id, account_id, calendar_id, external_id, icalendar_blob,
+                  summary, description, dtstart, dtend, location, is_all_day, calendar_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ",
+            )
+            .bind(&id)
+            .bind(&account_id)
+            .bind(&calendar_id)
+            .bind(&external_id)
+            .bind(&ical)
+            .bind(&summary)
+            .bind(&description)
+            .bind(&dtstart)
+            .bind(&dtend)
+            .bind(&location)
+            .bind(is_all_day)
+            .bind(&base_url)
+            .execute(pool)
+            .await?;
+        }
+        synced += 1;
+    }
 
     Ok(Json(serde_json::json!({
-        "status": "not_implemented",
-        "message": "CalDAV sync not yet implemented"
+        "status": "ok",
+        "synced": synced,
+        "calendarId": calendar_id,
     })))
 }
 

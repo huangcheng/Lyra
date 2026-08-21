@@ -65,6 +65,16 @@ pub struct ImapFolder {
     pub attributes: Vec<String>,
 }
 
+/// Parsed attachment extracted from a MIME part.
+#[derive(Debug, Clone)]
+pub struct ExtractedAttachment {
+    pub filename: String,
+    pub content_type: String,
+    pub data: Vec<u8>,
+    pub content_id: Option<String>,
+    pub is_inline: bool,
+}
+
 /// Parsed envelope for a fetched message.
 #[derive(Debug, Clone)]
 pub struct ImapMessage {
@@ -99,6 +109,8 @@ pub struct ImapMessage {
     pub body_html: Option<String>,
     /// Whether message has attachments (heuristic from MIME structure).
     pub has_attachments: bool,
+    /// Extracted attachment parts (populated when bodies are fetched).
+    pub attachments: Vec<ExtractedAttachment>,
 }
 
 /// An authenticated IMAP session.
@@ -295,7 +307,6 @@ impl ImapClient {
     /// Fetch full message bodies for the given UIDs.
     ///
     /// Uses `BODY[]` to retrieve the complete RFC 822 message.
-    #[allow(dead_code)]
     pub async fn fetch_bodies(&mut self, uids: &[u32]) -> Result<Vec<ImapMessage>, ImapError> {
         if uids.is_empty() {
             return Ok(Vec::new());
@@ -318,6 +329,45 @@ impl ImapClient {
         }
 
         Ok(result)
+    }
+
+    /// Add IMAP flags on a UID (e.g. `\\Seen`, `\\Flagged`).
+    pub async fn add_flags(&mut self, uid: u32, flags: &[&str]) -> Result<(), ImapError> {
+        self.uid_store_flags(uid, "+", flags).await
+    }
+
+    /// Remove IMAP flags on a UID.
+    pub async fn remove_flags(&mut self, uid: u32, flags: &[&str]) -> Result<(), ImapError> {
+        self.uid_store_flags(uid, "-", flags).await
+    }
+
+    async fn uid_store_flags(
+        &mut self,
+        uid: u32,
+        op: &str,
+        flags: &[&str],
+    ) -> Result<(), ImapError> {
+        if flags.is_empty() {
+            return Ok(());
+        }
+        let flag_list = flags.join(" ");
+        let query = format!("{op}FLAGS ({flag_list})");
+        let stream = self
+            .session
+            .uid_store(uid.to_string(), query)
+            .await
+            .map_err(ImapError::Imap)?;
+        // Drain FETCH responses from STORE
+        let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+        Ok(())
+    }
+
+    /// Move a message UID into another mailbox (RFC 6851 UID MOVE).
+    pub async fn move_uid(&mut self, uid: u32, destination: &str) -> Result<(), ImapError> {
+        self.session
+            .uid_mv(uid.to_string(), destination)
+            .await
+            .map_err(ImapError::Imap)
     }
 
     /// Log out and close the connection.
@@ -365,15 +415,16 @@ fn parse_fetch_to_message(fetch: &async_imap::types::Fetch, include_body: bool) 
             (None, None, None, None, None, None, None, None)
         };
 
-    let (body_bytes, body_text, body_html, has_attachments) = if include_body {
+    let (body_bytes, body_text, body_html, has_attachments, attachments) = if include_body {
         if let Some(raw) = fetch.body() {
-            let (text, html, attachments) = extract_mime_parts(raw);
-            (Some(raw.to_vec()), text, html, attachments)
+            let (text, html, atts) = extract_mime_parts(raw);
+            let has = !atts.is_empty();
+            (Some(raw.to_vec()), text, html, has, atts)
         } else {
-            (None, None, None, false)
+            (None, None, None, false, Vec::new())
         }
     } else {
-        (None, None, None, false)
+        (None, None, None, false, Vec::new())
     };
 
     ImapMessage {
@@ -392,6 +443,7 @@ fn parse_fetch_to_message(fetch: &async_imap::types::Fetch, include_body: bool) 
         body_text,
         body_html,
         has_attachments,
+        attachments,
     }
 }
 
@@ -460,24 +512,19 @@ fn format_address_list(addrs: &[Address]) -> String {
     parts.join(", ")
 }
 
-/// Extract plain-text and HTML parts from a raw RFC 822 message body.
+#[allow(clippy::too_many_lines)]
+/// Extract plain-text, HTML, and attachment parts from a raw RFC 822 message.
 ///
-/// This is a simplified MIME parser that handles the most common cases:
-/// - `text/plain` and `text/html` parts
-/// - `multipart/*` containers
-/// - Base64 and quoted-printable transfer encodings
-///
-/// Returns `(body_text, body_html, has_attachments)`.
-fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, bool) {
+/// Returns `(body_text, body_html, attachments)`.
+fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, Vec<ExtractedAttachment>) {
     let Ok(body_str) = std::str::from_utf8(raw) else {
-        return (None, None, false);
+        return (None, None, Vec::new());
     };
 
     let mut body_text = None;
     let mut body_html = None;
-    let mut has_attachments = false;
+    let mut attachments = Vec::new();
 
-    // Find the boundary between headers and body
     let body_start = body_str
         .find("\r\n\r\n")
         .map(|i| i + 4)
@@ -487,15 +534,12 @@ fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, bool) {
     let headers_section = &body_str[..body_start];
     let body_section = &body_str[body_start..];
 
-    // Check for multipart
     let boundary =
         extract_header_value(headers_section, "content-type").and_then(|ct| extract_boundary(&ct));
 
     if let Some(boundary) = boundary {
-        // Split by boundary
         let parts: Vec<&str> = body_section.split(&format!("--{boundary}")).collect();
         for part in &parts[1..] {
-            // Skip the closing boundary (--boundary--)
             if part.starts_with("--") {
                 continue;
             }
@@ -516,15 +560,21 @@ fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, bool) {
             let content_type = extract_header_value(part_headers, "content-type")
                 .unwrap_or_else(|| "text/plain".to_string());
             let encoding = extract_header_value(part_headers, "content-transfer-encoding");
+            let disposition = extract_header_value(part_headers, "content-disposition");
+            let content_id = extract_header_value(part_headers, "content-id")
+                .map(|s| s.trim_matches(|c| c == '<' || c == '>').to_string());
 
             let content = part_body.trim_end_matches(['\r', '\n', '-']);
+            let is_attachment = disposition
+                .as_deref()
+                .is_some_and(|d| d.to_lowercase().starts_with("attachment"))
+                || content_type.contains("application/")
+                || (content_type.contains("image/")
+                    && disposition
+                        .as_deref()
+                        .is_some_and(|d| !d.to_lowercase().contains("inline")));
 
-            if content_type.contains("text/plain") && body_text.is_none() {
-                body_text = decode_content(content, encoding.as_deref());
-            } else if content_type.contains("text/html") && body_html.is_none() {
-                body_html = decode_content(content, encoding.as_deref());
-            } else if content_type.contains("multipart/") {
-                // Recurse into nested multipart
+            if content_type.contains("multipart/") {
                 let nested = extract_mime_parts(content.as_bytes());
                 if body_text.is_none() {
                     body_text = nested.0;
@@ -532,21 +582,56 @@ fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, bool) {
                 if body_html.is_none() {
                     body_html = nested.1;
                 }
-                has_attachments |= nested.2;
-            } else if content_type.contains("application/")
+                attachments.extend(nested.2);
+            } else if is_attachment
+                || content_type.contains("application/")
                 || content_type.contains("image/")
                 || content_type.contains("audio/")
                 || content_type.contains("video/")
             {
-                has_attachments = true;
+                let filename = disposition
+                    .as_deref()
+                    .and_then(extract_filename)
+                    .or_else(|| {
+                        content_type
+                            .split(';')
+                            .find_map(|p| {
+                                let p = p.trim();
+                                if p.to_lowercase().starts_with("name=") {
+                                    Some(p.split_once('=')?.1.trim_matches('"').to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                    })
+                    .unwrap_or_else(|| "attachment.bin".to_string());
+                let is_inline = disposition
+                    .as_deref()
+                    .is_some_and(|d| d.to_lowercase().contains("inline"));
+                if let Some(data) = decode_content_bytes(content, encoding.as_deref()) {
+                    attachments.push(ExtractedAttachment {
+                        filename,
+                        content_type: content_type
+                            .split(';')
+                            .next()
+                            .unwrap_or("application/octet-stream")
+                            .trim()
+                            .to_string(),
+                        data,
+                        content_id,
+                        is_inline,
+                    });
+                }
+            } else if content_type.contains("text/plain") && body_text.is_none() {
+                body_text = decode_content(content, encoding.as_deref());
+            } else if content_type.contains("text/html") && body_html.is_none() {
+                body_html = decode_content(content, encoding.as_deref());
             }
         }
     } else {
-        // Single-part message
         let content_type = extract_header_value(headers_section, "content-type")
             .unwrap_or_else(|| "text/plain".to_string());
         let encoding = extract_header_value(headers_section, "content-transfer-encoding");
-
         let content = body_section.trim_end_matches(['\r', '\n']);
 
         if content_type.contains("text/plain") {
@@ -556,7 +641,26 @@ fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, bool) {
         }
     }
 
-    (body_text, body_html, has_attachments)
+    (body_text, body_html, attachments)
+}
+
+fn extract_filename(disposition: &str) -> Option<String> {
+    for part in disposition.split(';') {
+        let part = part.trim();
+        let lower = part.to_lowercase();
+        if lower.starts_with("filename*=") {
+            // RFC 5987 — ignore charset for v1; take after ''
+            let value = part.split_once('=')?.1.trim_matches('"');
+            if let Some((_charset_lang, rest)) = value.split_once("''") {
+                return Some(rest.to_string());
+            }
+            return Some(value.to_string());
+        }
+        if lower.starts_with("filename=") {
+            return Some(part.split_once('=')?.1.trim_matches('"').to_string());
+        }
+    }
+    None
 }
 
 /// Extract a header value from raw headers (case-insensitive).
@@ -586,16 +690,17 @@ fn extract_boundary(content_type: &str) -> Option<String> {
 
 /// Decode content based on transfer encoding.
 fn decode_content(content: &str, encoding: Option<&str>) -> Option<String> {
+    decode_content_bytes(content, encoding).and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+fn decode_content_bytes(content: &str, encoding: Option<&str>) -> Option<Vec<u8>> {
     match encoding.map(str::to_lowercase).as_deref() {
         Some("base64") => {
-            // Remove whitespace before decoding
             let cleaned: String = content.chars().filter(|c| !c.is_whitespace()).collect();
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &cleaned)
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes).ok())
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &cleaned).ok()
         }
-        Some("quoted-printable") => Some(decode_quoted_printable(content)),
-        _ => Some(content.to_string()),
+        Some("quoted-printable") => Some(decode_quoted_printable(content).into_bytes()),
+        _ => Some(content.as_bytes().to_vec()),
     }
 }
 

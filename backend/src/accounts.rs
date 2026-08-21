@@ -48,6 +48,8 @@ pub struct Account {
     pub smtp_host: Option<String>,
     pub smtp_port: Option<i32>,
     pub smtp_security: Option<String>,
+    pub carddav_url: Option<String>,
+    pub caldav_url: Option<String>,
     pub is_active: bool,
     pub sync_enabled: bool,
     pub last_sync_at: Option<String>,
@@ -85,6 +87,8 @@ pub struct UpdateAccountRequest {
     pub smtp_host: Option<String>,
     pub smtp_port: Option<i32>,
     pub smtp_security: Option<String>,
+    pub carddav_url: Option<String>,
+    pub caldav_url: Option<String>,
     pub is_active: Option<bool>,
     pub sync_enabled: Option<bool>,
 }
@@ -207,6 +211,8 @@ async fn list_accounts(
             smtp_host: row.get("smtp_host"),
             smtp_port: row.get("smtp_port"),
             smtp_security: row.get("smtp_security"),
+            carddav_url: row.get("carddav_url"),
+            caldav_url: row.get("caldav_url"),
             is_active: row.get::<bool, _>("is_active"),
             sync_enabled: row.get::<bool, _>("sync_enabled"),
             last_sync_at: row.get("last_sync_at"),
@@ -257,6 +263,8 @@ async fn get_account(
         smtp_host: row.get("smtp_host"),
         smtp_port: row.get("smtp_port"),
         smtp_security: row.get("smtp_security"),
+            carddav_url: row.get("carddav_url"),
+            caldav_url: row.get("caldav_url"),
         is_active: row.get::<bool, _>("is_active"),
         sync_enabled: row.get::<bool, _>("sync_enabled"),
         last_sync_at: row.get("last_sync_at"),
@@ -330,6 +338,8 @@ async fn create_account(
             smtp_host: body.smtp_host,
             smtp_port: body.smtp_port,
             smtp_security: body.smtp_security,
+            carddav_url: None,
+            caldav_url: None,
             is_active: true,
             sync_enabled: true,
             last_sync_at: None,
@@ -409,6 +419,15 @@ async fn update_account(
         }
     }
 
+    if let Some(url) = &body.carddav_url {
+        updates.push("carddav_url = ?");
+        params.push(url.clone());
+    }
+    if let Some(url) = &body.caldav_url {
+        updates.push("caldav_url = ?");
+        params.push(url.clone());
+    }
+
     // Update SMTP settings
     if body.smtp_host.is_some() || body.smtp_port.is_some() || body.smtp_security.is_some() {
         if let Some(host) = &body.smtp_host {
@@ -475,6 +494,8 @@ async fn update_account(
         smtp_host: row.get("smtp_host"),
         smtp_port: row.get("smtp_port"),
         smtp_security: row.get("smtp_security"),
+            carddav_url: row.get("carddav_url"),
+            caldav_url: row.get("caldav_url"),
         is_active: row.get::<bool, _>("is_active"),
         sync_enabled: row.get::<bool, _>("sync_enabled"),
         last_sync_at: row.get("last_sync_at"),

@@ -448,14 +448,17 @@ pub struct AuthState {
     pub db: DbPool,
     pub sessions: SessionStore,
     pub min_password_length: usize,
+    pub data_dir: std::path::PathBuf,
 }
 
 impl AuthState {
     pub fn new(db: DbPool, config: &crate::config::Config) -> Result<Self, anyhow::Error> {
+        std::fs::create_dir_all(&config.data_dir)?;
         Ok(Self {
             db,
             sessions: SessionStore::new(),
             min_password_length: config.min_password_length,
+            data_dir: std::path::PathBuf::from(&config.data_dir),
         })
     }
 
