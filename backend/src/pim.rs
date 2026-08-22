@@ -641,12 +641,13 @@ async fn sync_calendars(
                 db,
                 r"
                 INSERT INTO calendar (id, account_id, name, calendar_url, is_active)
-                VALUES (?, ?, ?, ?, 1)
+                VALUES (?, ?, ?, ?, ?)
                 ",
                 &id,
                 &account_id,
                 "Calendar",
-                &base_url
+                &base_url,
+                true
             )?;
             id
         }

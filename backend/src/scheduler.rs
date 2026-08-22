@@ -151,12 +151,14 @@ async fn list_active_accounts(db: &DbPool) -> Result<Vec<ActiveAccount>, sqlx::E
         db,
         r"
         SELECT id, user_id FROM mail_account
-        WHERE is_active = 1 AND sync_enabled = 1
+        WHERE is_active = ? AND sync_enabled = ?
         ",
         |row| ActiveAccount {
             id: row.get("id"),
             user_id: row.get("user_id"),
-        }
+        },
+        true,
+        true
     )
 }
 

@@ -187,8 +187,10 @@ async fn sync_status(
     let count: i64 = db_scalar!(
         db,
         i64,
-        "SELECT COUNT(*) FROM mail_account WHERE user_id = ? AND is_active = 1 AND sync_enabled = 1",
-        &user_id
+        "SELECT COUNT(*) FROM mail_account WHERE user_id = ? AND is_active = ? AND sync_enabled = ?",
+        &user_id,
+        true,
+        true
     )?;
 
     // Pending or running sync_account jobs for this user (payload JSON has user_id).
@@ -644,13 +646,14 @@ async fn list_messages(
                to_addresses, cc_addresses, date, snippet,
                body_text, body_html, is_read, is_starred, has_attachments
         FROM message
-        WHERE folder_id = ? AND is_deleted = 0
+        WHERE folder_id = ? AND is_deleted = ?
           AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
         ORDER BY date DESC
         LIMIT 500
         ",
         |row| message_response_from_sql!(row),
-        &folder_id
+        &folder_id,
+        false
     )?;
 
     Ok(Json(messages))
@@ -698,7 +701,7 @@ async fn query_user_messages(
         JOIN folder f ON m.folder_id = f.id
         JOIN mail_account a ON m.account_id = a.id
         WHERE a.user_id = ?
-          AND m.is_deleted = 0
+          AND m.is_deleted = ?
           AND (m.snoozed_until IS NULL OR m.snoozed_until <= datetime('now'))
           AND (? IS NULL OR f.role = ?)
           AND (? IS NULL OR m.account_id = ?)
@@ -707,6 +710,7 @@ async fn query_user_messages(
         ",
         |row| message_response_from_sql!(row),
         user_id,
+        false,
         role,
         role,
         account_id,
@@ -755,7 +759,7 @@ async fn search_messages(
         FROM message m
         JOIN mail_account a ON m.account_id = a.id
         WHERE a.user_id = ?
-          AND m.is_deleted = 0
+          AND m.is_deleted = ?
           AND (? IS NULL OR m.account_id = ?)
           AND (? IS NULL OR m.folder_id = ?)
           AND (
@@ -769,6 +773,7 @@ async fn search_messages(
         ",
         |row| message_response_from_sql!(row),
         &user_id,
+        false,
         &query.account_id,
         &query.account_id,
         &query.folder_id,
@@ -928,7 +933,8 @@ async fn persist_attachments(
 
     db_execute!(
         db,
-        "UPDATE message SET has_attachments = 1, updated_at = datetime('now') WHERE id = ?",
+        "UPDATE message SET has_attachments = ?, updated_at = datetime('now') WHERE id = ?",
+        true,
         message_id
     )?;
 
@@ -1000,7 +1006,7 @@ async fn load_message_row(
         FROM message m
         JOIN folder f ON m.folder_id = f.id
         JOIN mail_account a ON m.account_id = a.id
-        WHERE m.id = ? AND a.user_id = ? AND m.is_deleted = 0
+        WHERE m.id = ? AND a.user_id = ? AND m.is_deleted = ?
         ",
         |row| MessageRow {
             id: row.get("id"),
@@ -1022,7 +1028,8 @@ async fn load_message_row(
             has_attachments: row.get("has_attachments"),
         },
         message_id,
-        user_id
+        user_id,
+        false
     )?
     .ok_or(SyncError::MessageNotFound)
 }
@@ -1037,7 +1044,7 @@ async fn connect_imap_for_account(
         r"
         SELECT email_address, credential, imap_host, imap_port, imap_security, protocol
         FROM mail_account
-        WHERE id = ? AND user_id = ? AND is_active = 1
+        WHERE id = ? AND user_id = ? AND is_active = ?
         ",
         |row| {
             let protocol: String = row.get("protocol");
@@ -1056,7 +1063,8 @@ async fn connect_imap_for_account(
             )
         },
         account_id,
-        user_id
+        user_id,
+        true
     )?
     .ok_or(SyncError::AccountNotFound)?;
 
@@ -1264,7 +1272,7 @@ async fn snooze_message(
         db,
         r"
         UPDATE message
-        SET snoozed_until = ?, updated_at = datetime('now')
+        SET snoozed_until = CAST(? AS TIMESTAMP), updated_at = datetime('now')
         WHERE id = ?
         ",
         &until_sql,
@@ -1319,7 +1327,8 @@ async fn move_message_to_role(
         // No destination folder: soft-delete locally.
         db_execute!(
             db,
-            "UPDATE message SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE message SET is_deleted = ?, updated_at = datetime('now') WHERE id = ?",
+            true,
             &row.id
         )?;
         update_folder_counts(db, &row.folder_id).await?;
@@ -2146,15 +2155,18 @@ async fn update_folder_counts(db: &DbPool, folder_id: &str) -> Result<(), SyncEr
     let total: i64 = db_scalar!(
         db,
         i64,
-        "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = 0",
-        folder_id
+        "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = ?",
+        folder_id,
+        false
     )?;
 
     let unread: i64 = db_scalar!(
         db,
         i64,
-        "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = 0 AND is_read = 0",
-        folder_id
+        "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = ? AND is_read = ?",
+        folder_id,
+        false,
+        false
     )?;
 
     db_execute!(

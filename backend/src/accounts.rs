@@ -259,7 +259,7 @@ async fn create_account(
             credential, imap_host, imap_port, imap_security,
             smtp_host, smtp_port, smtp_security, is_active, sync_enabled,
             receive_protocol, send_protocol
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
         &id,
         &user_id,
@@ -274,6 +274,8 @@ async fn create_account(
         &body.smtp_host,
         body.smtp_port,
         &smtp_security,
+        true,
+        true,
         &receive_protocol,
         &send_protocol
     )?;
@@ -338,102 +340,93 @@ async fn update_account(
         return Err(AccountError::NotFound);
     }
 
-    // Build dynamic update
-    let mut updates = Vec::new();
-    let mut params: Vec<String> = Vec::new();
-
-    if let Some(display_name) = &body.display_name {
-        updates.push("display_name = ?");
-        params.push(display_name.clone());
+    if let Some(email) = &body.email_address
+        && !email.contains('@')
+    {
+        return Err(AccountError::InvalidInput("invalid email address".into()));
     }
-    if let Some(email) = &body.email_address {
-        if !email.contains('@') {
-            return Err(AccountError::InvalidInput("invalid email address".into()));
-        }
-        updates.push("email_address = ?");
-        params.push(email.clone());
-    }
-    if let Some(is_active) = body.is_active {
-        updates.push("is_active = ?");
-        params.push(if is_active { "1" } else { "0" }.into());
-    }
-    if let Some(sync_enabled) = body.sync_enabled {
-        updates.push("sync_enabled = ?");
-        params.push(if sync_enabled { "1" } else { "0" }.into());
-    }
-
-    // Update password if provided
-    if let Some(password) = &body.password {
-        let dek = AuthState::get_user_dek(state.db(), &user_id).await?;
-        let encrypted = crypto::encrypt(&dek, password.as_bytes())?;
-        let credential_json = serde_json::to_string(&encrypted).map_err(|e| {
-            AccountError::InvalidInput(format!("credential serialization failed: {e}"))
-        })?;
-        updates.push("credential = ?");
-        params.push(credential_json);
-    }
-
-    // Update IMAP settings
-    if body.imap_host.is_some() || body.imap_port.is_some() || body.imap_security.is_some() {
-        if let Some(host) = &body.imap_host {
-            updates.push("imap_host = ?");
-            params.push(host.clone());
-        }
-        if let Some(port) = body.imap_port {
-            updates.push("imap_port = ?");
-            params.push(port.to_string());
-        }
-        if let Some(security) = &body.imap_security {
-            let normalized = crate::netsec::normalize_security_mode(security)
-                .map_err(AccountError::InvalidInput)?;
-            updates.push("imap_security = ?");
-            params.push(normalized.to_string());
-        }
-    }
-
+    let imap_security = body
+        .imap_security
+        .as_deref()
+        .map(|s| crate::netsec::normalize_security_mode(s).map(str::to_string))
+        .transpose()
+        .map_err(AccountError::InvalidInput)?;
+    let smtp_security = body
+        .smtp_security
+        .as_deref()
+        .map(|s| crate::netsec::normalize_security_mode(s).map(str::to_string))
+        .transpose()
+        .map_err(AccountError::InvalidInput)?;
     if let Some(url) = &body.carddav_url {
         crate::netsec::validate_server_url(url).map_err(AccountError::InvalidInput)?;
-        updates.push("carddav_url = ?");
-        params.push(url.clone());
     }
     if let Some(url) = &body.caldav_url {
         crate::netsec::validate_server_url(url).map_err(AccountError::InvalidInput)?;
-        updates.push("caldav_url = ?");
-        params.push(url.clone());
     }
 
-    // Update SMTP settings
-    if body.smtp_host.is_some() || body.smtp_port.is_some() || body.smtp_security.is_some() {
-        if let Some(host) = &body.smtp_host {
-            updates.push("smtp_host = ?");
-            params.push(host.clone());
-        }
-        if let Some(port) = body.smtp_port {
-            updates.push("smtp_port = ?");
-            params.push(port.to_string());
-        }
-        if let Some(security) = &body.smtp_security {
-            let normalized = crate::netsec::normalize_security_mode(security)
-                .map_err(AccountError::InvalidInput)?;
-            updates.push("smtp_security = ?");
-            params.push(normalized.to_string());
-        }
-    }
-
-    if updates.is_empty() {
+    let has_update = body.display_name.is_some()
+        || body.email_address.is_some()
+        || body.is_active.is_some()
+        || body.sync_enabled.is_some()
+        || body.password.is_some()
+        || body.imap_host.is_some()
+        || body.imap_port.is_some()
+        || body.imap_security.is_some()
+        || body.carddav_url.is_some()
+        || body.caldav_url.is_some()
+        || body.smtp_host.is_some()
+        || body.smtp_port.is_some()
+        || body.smtp_security.is_some();
+    if !has_update {
         return Err(AccountError::InvalidInput("no fields to update".into()));
     }
 
-    updates.push("updated_at = datetime('now')");
-    params.push(id.clone());
-    params.push(user_id.clone());
+    let credential_json = if let Some(password) = &body.password {
+        let dek = AuthState::get_user_dek(state.db(), &user_id).await?;
+        let encrypted = crypto::encrypt(&dek, password.as_bytes())?;
+        Some(serde_json::to_string(&encrypted).map_err(|e| {
+            AccountError::InvalidInput(format!("credential serialization failed: {e}"))
+        })?)
+    } else {
+        None
+    };
 
-    let sql = format!(
-        "UPDATE mail_account SET {} WHERE id = ? AND user_id = ?",
-        updates.join(", ")
-    );
-
-    db_execute_binds!(db, &sql, &params)?;
+    db_execute!(
+        db,
+        r"
+        UPDATE mail_account SET
+            display_name = IFNULL(?, display_name),
+            email_address = IFNULL(?, email_address),
+            is_active = IFNULL(?, is_active),
+            sync_enabled = IFNULL(?, sync_enabled),
+            credential = IFNULL(?, credential),
+            imap_host = IFNULL(?, imap_host),
+            imap_port = IFNULL(?, imap_port),
+            imap_security = IFNULL(?, imap_security),
+            carddav_url = IFNULL(?, carddav_url),
+            caldav_url = IFNULL(?, caldav_url),
+            smtp_host = IFNULL(?, smtp_host),
+            smtp_port = IFNULL(?, smtp_port),
+            smtp_security = IFNULL(?, smtp_security),
+            updated_at = datetime('now')
+        WHERE id = ? AND user_id = ?
+        ",
+        body.display_name.as_ref(),
+        body.email_address.as_ref(),
+        body.is_active,
+        body.sync_enabled,
+        credential_json.as_ref(),
+        body.imap_host.as_ref(),
+        body.imap_port,
+        imap_security.as_ref(),
+        body.carddav_url.as_ref(),
+        body.caldav_url.as_ref(),
+        body.smtp_host.as_ref(),
+        body.smtp_port,
+        smtp_security.as_ref(),
+        &id,
+        &user_id
+    )?;
 
     let select_sql = format!("{ACCOUNT_SELECT}        WHERE id = ? AND user_id = ?\n        ");
     let account = db_fetch_one!(

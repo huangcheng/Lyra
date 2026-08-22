@@ -4,7 +4,7 @@ UPDATE mail_account SET receive_protocol = protocol WHERE protocol IN ('imap', '
 UPDATE mail_account SET send_protocol = 'smtp';
 
 ALTER TABLE lyra_user ADD COLUMN IF NOT EXISTS sess_epoch INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE message ADD COLUMN IF NOT EXISTS snoozed_until TEXT;
+ALTER TABLE message ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY NOT NULL,
