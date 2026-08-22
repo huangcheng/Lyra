@@ -1322,6 +1322,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-imap",
+ "async-trait",
  "axum",
  "base32",
  "base64 0.22.1",
