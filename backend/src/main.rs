@@ -10,12 +10,12 @@
 
 #[macro_use]
 mod db_sql;
-mod db_row;
 mod accounts;
 mod auth;
 mod config;
 mod crypto;
 mod dav;
+mod db_row;
 mod imap;
 mod jmap;
 mod jobs;
@@ -219,5 +219,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn sync_events_requires_auth() {
+        let app = test_api_router().await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/sync/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 }

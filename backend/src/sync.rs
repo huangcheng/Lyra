@@ -12,7 +12,10 @@ use axum::{
     body::Body,
     extract::{Path, Query, State},
     http::{HeaderValue, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -26,7 +29,7 @@ use crate::db_row::{
 };
 use crate::imap::{ImapClient, ImapConfig, ImapError, ImapMessage, ImapSecurity};
 use crate::jmap::{JmapClient, JmapError};
-use crate::kernel::App;
+use crate::kernel::{App, AppEvent};
 use crate::protocol::{SendHandle, SyncCtx, SyncOutcome};
 use crate::sanitize::persist_body_html;
 use crate::smtp::{OutboundMessage, SmtpAdapter, SmtpConfig, SmtpError, SmtpSecurity};
@@ -160,6 +163,7 @@ pub struct SendMessageResponse {
 pub fn routes() -> Router<AuthState> {
     Router::new()
         .route("/api/v1/sync/status", get(sync_status))
+        .route("/api/v1/sync/events", get(sync_events))
         .route("/api/v1/accounts/{account_id}/sync", post(trigger_sync))
         .route("/api/v1/messages/send", post(send_message))
         .route("/api/v1/messages/search", get(search_messages))
@@ -212,6 +216,48 @@ async fn sync_status(
         active_accounts: count,
         syncing,
     }))
+}
+
+fn sync_event_json(ev: &AppEvent) -> serde_json::Value {
+    match ev {
+        AppEvent::SyncStarted { account_id } => serde_json::json!({
+            "type": "sync_started",
+            "accountId": account_id,
+        }),
+        AppEvent::SyncComplete { account_id } => serde_json::json!({
+            "type": "sync_complete",
+            "accountId": account_id,
+        }),
+        AppEvent::SyncError { account_id, error } => serde_json::json!({
+            "type": "sync_error",
+            "accountId": account_id,
+            "error": error,
+        }),
+    }
+}
+
+fn sse_from_app_event(ev: &AppEvent) -> Event {
+    let body = sync_event_json(ev);
+    let ty = body["type"].as_str().unwrap_or("message");
+    Event::default().event(ty).data(body.to_string())
+}
+
+/// GET /api/v1/sync/events — SSE stream of sync lifecycle events.
+async fn sync_events(
+    State(state): State<AuthState>,
+    AuthUser(_user_id): AuthUser,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let rx = state.app.events.subscribe();
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => return Some((Ok(sse_from_app_event(&ev)), rx)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// True when any `sync_account` job for `user_id` is pending or running.
@@ -1708,20 +1754,38 @@ pub(crate) async fn run_jmap_sync(
     for mb in &mailboxes {
         let folder_id = get_folder_id(db, account_id, &mb.name).await?;
 
-        // Load stored JMAP state (raw queryState token, sent back as sinceState)
+        // Load stored JMAP queryState for Email/queryChanges; fall back to a
+        // full Email/query when the token is expired or missing.
         let since_state = load_jmap_cursor(db, account_id, &folder_id).await?;
 
-        // Query emails
-        let query_result = client
-            .query_emails(&mb.id, since_state.as_deref(), Some(100))
-            .await?;
+        let (ids, query_state) = if let Some(ref state) = since_state {
+            match client.query_email_changes(&mb.id, state).await {
+                Ok(changes) => (changes.added_ids, changes.new_query_state),
+                Err(e) if e.is_stale_query_state() => {
+                    tracing::info!(
+                        account_id,
+                        folder = %mb.name,
+                        "JMAP queryState expired; clearing cursor and running a full query"
+                    );
+                    clear_jmap_cursor(db, account_id, &folder_id).await?;
+                    let full = client.query_emails(&mb.id, Some(100)).await?;
+                    (full.ids, full.query_state)
+                }
+                Err(e) => return Err(e.into()),
+            }
+        } else {
+            let full = client.query_emails(&mb.id, Some(100)).await?;
+            (full.ids, full.query_state)
+        };
 
-        if query_result.ids.is_empty() {
+        if ids.is_empty() {
+            if let Some(ref qs) = query_state {
+                save_jmap_cursor(db, account_id, &folder_id, qs).await?;
+            }
             continue;
         }
 
-        // Fetch email objects
-        let emails = client.get_emails(&query_result.ids).await?;
+        let emails = client.get_emails(&ids).await?;
 
         // Upsert each email
         for email_obj in &emails {
@@ -1733,8 +1797,8 @@ pub(crate) async fn run_jmap_sync(
             }
         }
 
-        // Save JMAP cursor: store the raw queryState token verbatim
-        if let Some(ref qs) = query_result.query_state {
+        // Save JMAP cursor: store the raw queryState / newQueryState token verbatim
+        if let Some(ref qs) = query_state {
             save_jmap_cursor(db, account_id, &folder_id, qs).await?;
         }
 
@@ -2025,7 +2089,7 @@ fn parse_cursor_value(value: &str) -> SyncCursorInfo {
 
 /// Load the stored JMAP `queryState` token for a folder.
 ///
-/// Returns the raw token to be sent verbatim as `sinceState` on the next sync.
+/// Returns the raw token to be sent verbatim as `sinceQueryState` on the next sync.
 async fn load_jmap_cursor(
     db: &DbPool,
     account_id: &str,
@@ -2048,7 +2112,7 @@ async fn load_jmap_cursor(
 /// Save the JMAP `queryState` token for a folder.
 ///
 /// The token is an opaque server string and is stored verbatim — never hashed —
-/// so it can be sent back as `sinceState` on the next sync.
+/// so it can be sent back as `sinceQueryState` on the next sync.
 async fn save_jmap_cursor(
     db: &DbPool,
     account_id: &str,
@@ -2071,6 +2135,23 @@ async fn save_jmap_cursor(
         query_state
     )?;
 
+    Ok(())
+}
+
+async fn clear_jmap_cursor(
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+) -> Result<(), SyncError> {
+    db_execute!(
+        db,
+        r"
+        DELETE FROM sync_cursor
+        WHERE account_id = ? AND folder_id = ? AND cursor_type = 'state_token'
+        ",
+        &id_param(db, account_id)?,
+        &id_param(db, folder_id)?
+    )?;
     Ok(())
 }
 
@@ -2646,7 +2727,7 @@ mod tests {
             .unwrap();
 
         // A JMAP queryState is an opaque server token — it must round-trip verbatim,
-        // because it is sent back to the server as `sinceState` on the next sync.
+        // because it is sent back to the server as `sinceQueryState` on the next sync.
         let query_state = "jmap-state-abc123";
 
         save_jmap_cursor(&as_db(&pool), &account_id, &folder_id, query_state)
@@ -2668,7 +2749,7 @@ mod tests {
             "stored cursor must be the raw queryState token"
         );
 
-        // What we send back as sinceState must equal the original token.
+        // What we send back as sinceQueryState must equal the original token.
         let since_state = load_jmap_cursor(&as_db(&pool), &account_id, &folder_id)
             .await
             .unwrap();
@@ -2691,6 +2772,29 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 1);
+
+        clear_jmap_cursor(&as_db(&pool), &account_id, &folder_id)
+            .await
+            .unwrap();
+        let since_state = load_jmap_cursor(&as_db(&pool), &account_id, &folder_id)
+            .await
+            .unwrap();
+        assert!(since_state.is_none());
+    }
+
+    #[test]
+    fn sync_event_json_matches_spec_type_names() {
+        let started = sync_event_json(&AppEvent::SyncStarted {
+            account_id: "acc".into(),
+        });
+        assert_eq!(started["type"], "sync_started");
+        assert_eq!(started["accountId"], "acc");
+        let err = sync_event_json(&AppEvent::SyncError {
+            account_id: "acc".into(),
+            error: "IMAP error".into(),
+        });
+        assert_eq!(err["type"], "sync_error");
+        assert_eq!(err["error"], "IMAP error");
     }
 
     #[tokio::test]

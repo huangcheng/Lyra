@@ -36,6 +36,20 @@ pub enum JmapError {
     CrossOrigin(String),
 }
 
+impl JmapError {
+    /// `Email/queryChanges` cannot resume from the stored token; caller should full-query.
+    #[must_use]
+    pub fn is_stale_query_state(&self) -> bool {
+        match self {
+            Self::Method { code, .. } => {
+                code.eq_ignore_ascii_case("cannotCalculateChanges")
+                    || code.eq_ignore_ascii_case("cannotCalculateChangesFrom")
+            }
+            _ => false,
+        }
+    }
+}
+
 // ── JMAP Session Resource ───────────────────────────────────────────
 
 /// JMAP session resource returned by `/.well-known/jmap`.
@@ -282,13 +296,7 @@ impl JmapClient {
         };
 
         let resp = self.send_request(&req).await?;
-
-        // Extract the first method response
-        let (_name, args, _cid) = resp
-            .method_responses
-            .into_iter()
-            .next()
-            .ok_or_else(|| JmapError::InvalidResponse("empty method responses".into()))?;
+        let args = take_ok_args(resp, "Mailbox/get")?;
 
         let list = args
             .get("list")
@@ -307,20 +315,20 @@ impl JmapClient {
 
     // ── Email operations ────────────────────────────────────────
 
-    /// Query emails in a mailbox, optionally since a state token.
+    /// Query emails in a mailbox (full query, not incremental).
     ///
-    /// Returns the list of email IDs and a new query state.
+    /// Returns the list of email IDs and a new query state. Incremental
+    /// updates use [`Self::query_email_changes`].
     pub async fn query_emails(
         &self,
         mailbox_id: &str,
-        since_state: Option<&str>,
         limit: Option<u32>,
     ) -> Result<EmailQueryResult, JmapError> {
         let filter = serde_json::json!({
             "inMailbox": mailbox_id
         });
 
-        let mut args = serde_json::json!({
+        let args = serde_json::json!({
             "accountId": self.account_id,
             "filter": filter,
             "sort": [{ "property": "receivedAt", "isAscending": false }],
@@ -328,22 +336,13 @@ impl JmapClient {
             "calculateTotal": true
         });
 
-        if let Some(state) = since_state {
-            args["sinceState"] = serde_json::Value::String(state.to_string());
-        }
-
         let req = JmapRequest {
             using: vec!["urn:ietf:params:jmap:mail".into()],
             method_calls: vec![("Email/query".into(), args, "eq0".into())],
         };
 
         let resp = self.send_request(&req).await?;
-
-        let (_name, args, _cid) = resp
-            .method_responses
-            .into_iter()
-            .next()
-            .ok_or_else(|| JmapError::InvalidResponse("empty Email/query response".into()))?;
+        let args = take_ok_args(resp, "Email/query")?;
 
         let ids: Vec<String> = args
             .get("ids")
@@ -366,6 +365,60 @@ impl JmapClient {
             ids,
             query_state,
             total,
+        })
+    }
+
+    /// Incremental mailbox changes since a stored `queryState` (RFC 8621 `Email/queryChanges`).
+    pub async fn query_email_changes(
+        &self,
+        mailbox_id: &str,
+        since_query_state: &str,
+    ) -> Result<EmailQueryChanges, JmapError> {
+        let args = serde_json::json!({
+            "accountId": self.account_id,
+            "filter": { "inMailbox": mailbox_id },
+            "sort": [{ "property": "receivedAt", "isAscending": false }],
+            "sinceQueryState": since_query_state,
+            "maxChanges": 100
+        });
+
+        let req = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:mail".into()],
+            method_calls: vec![("Email/queryChanges".into(), args, "eqc0".into())],
+        };
+
+        let resp = self.send_request(&req).await?;
+        let args = take_ok_args(resp, "Email/queryChanges")?;
+
+        let added_ids: Vec<String> = args
+            .get("added")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.get("id").and_then(|v| v.as_str()).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let removed_ids: Vec<String> = args
+            .get("removed")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let new_query_state = args
+            .get("newQueryState")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+
+        Ok(EmailQueryChanges {
+            added_ids,
+            removed_ids,
+            new_query_state,
         })
     }
 
@@ -418,12 +471,7 @@ impl JmapClient {
         };
 
         let resp = self.send_request(&req).await?;
-
-        let (_name, args, _cid) = resp
-            .method_responses
-            .into_iter()
-            .next()
-            .ok_or_else(|| JmapError::InvalidResponse("empty Email/get response".into()))?;
+        let args = take_ok_args(resp, "Email/get")?;
 
         let list = args
             .get("list")
@@ -480,6 +528,34 @@ impl JmapClient {
     }
 }
 
+/// Unwrap the first method response, mapping JMAP `"error"` methods to [`JmapError::Method`].
+fn take_ok_args(resp: JmapResponse, expected: &str) -> Result<serde_json::Value, JmapError> {
+    let (name, args, _cid) = resp
+        .method_responses
+        .into_iter()
+        .next()
+        .ok_or_else(|| JmapError::InvalidResponse("empty method responses".into()))?;
+    if name == "error" {
+        let code = args
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        let description = args
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        return Err(JmapError::Method { code, description });
+    }
+    if name != expected {
+        return Err(JmapError::InvalidResponse(format!(
+            "expected {expected}, got {name}"
+        )));
+    }
+    Ok(args)
+}
+
 // ── JMAP data types ─────────────────────────────────────────────────
 
 /// Verify every credential-bearing URL in the session document shares the
@@ -531,6 +607,15 @@ pub struct EmailQueryResult {
     pub query_state: Option<String>,
     #[allow(dead_code)]
     pub total: Option<u64>,
+}
+
+/// Incremental result from `Email/queryChanges`.
+#[derive(Debug, Clone)]
+pub struct EmailQueryChanges {
+    pub added_ids: Vec<String>,
+    #[allow(dead_code)]
+    pub removed_ids: Vec<String>,
+    pub new_query_state: Option<String>,
 }
 
 /// A JMAP Email object (partial, only the fields we need).
@@ -898,5 +983,47 @@ mod tests {
         let mb: JmapMailbox = serde_json::from_value(json).unwrap();
         assert_eq!(mb.role, None);
         assert_eq!(mb.total_emails, None);
+    }
+
+    #[test]
+    fn take_ok_args_maps_jmap_error_method() {
+        let resp = JmapResponse {
+            method_responses: vec![(
+                "error".into(),
+                serde_json::json!({
+                    "type": "cannotCalculateChanges",
+                    "description": "state too old"
+                }),
+                "eqc0".into(),
+            )],
+            session_state: None,
+        };
+        let err = take_ok_args(resp, "Email/queryChanges").unwrap_err();
+        assert!(err.is_stale_query_state(), "got: {err}");
+    }
+
+    #[test]
+    fn take_ok_args_returns_matching_method() {
+        let resp = JmapResponse {
+            method_responses: vec![(
+                "Email/query".into(),
+                serde_json::json!({ "ids": ["em1"], "queryState": "s1" }),
+                "eq0".into(),
+            )],
+            session_state: None,
+        };
+        let args = take_ok_args(resp, "Email/query").expect("ok");
+        assert_eq!(args["queryState"], "s1");
+    }
+
+    #[test]
+    fn stale_query_state_detects_rfc_code() {
+        let err = JmapError::Method {
+            code: "cannotCalculateChanges".into(),
+            description: String::new(),
+        };
+        assert!(err.is_stale_query_state());
+        let err = JmapError::InvalidResponse("nope".into());
+        assert!(!err.is_stale_query_state());
     }
 }

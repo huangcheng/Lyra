@@ -289,12 +289,24 @@ pub async fn process_job(
                 revert_pending(db, &job.id).await?;
                 return Ok(());
             }
+            app.events.emit(crate::kernel::AppEvent::SyncStarted {
+                account_id: account_id.clone(),
+            });
             let result = crate::sync::run_account_sync(db, app, &user_id, &account_id).await;
             inflight.finish(&account_id).await;
             match result {
-                Ok(_) => mark_completed(db, &job.id).await?,
+                Ok(_) => {
+                    app.events.emit(crate::kernel::AppEvent::SyncComplete {
+                        account_id: account_id.clone(),
+                    });
+                    mark_completed(db, &job.id).await?;
+                }
                 Err(err) => {
                     let safe = sanitize_error(&err);
+                    app.events.emit(crate::kernel::AppEvent::SyncError {
+                        account_id: account_id.clone(),
+                        error: safe.to_string(),
+                    });
                     tracing::warn!(job_id = %job.id, error = %safe, "sync job failed");
                     mark_failed(db, &job.id, safe).await?;
                 }
@@ -526,6 +538,7 @@ mod tests {
         let job_id = enqueue(&db, &payload, now).await.unwrap();
         let claimed = claim_due(&db, now).await.unwrap().expect("due job");
 
+        let mut events = app.events.subscribe();
         let inflight = InFlight::new();
         let sem = Arc::new(Semaphore::new(3));
         let permit = Arc::clone(&sem)
@@ -534,6 +547,24 @@ mod tests {
         process_job(&db, &app, &inflight, permit, claimed)
             .await
             .expect("plugin error must not panic");
+
+        match events.recv().await.expect("started") {
+            crate::kernel::AppEvent::SyncStarted { account_id: id } => {
+                assert_eq!(id, account_id);
+            }
+            other => panic!("expected SyncStarted, got {other:?}"),
+        }
+        match events.recv().await.expect("error") {
+            crate::kernel::AppEvent::SyncError {
+                account_id: id,
+                error,
+            } => {
+                assert_eq!(id, account_id);
+                assert!(!error.to_lowercase().contains("password"));
+                assert!(!error.contains("hunter2"));
+            }
+            other => panic!("expected SyncError, got {other:?}"),
+        }
 
         let row = sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT status, last_error FROM jobs WHERE id = ?",

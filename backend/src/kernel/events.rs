@@ -31,3 +31,21 @@ impl EventBus {
         self.tx.subscribe()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn emit_reaches_subscriber() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+        bus.emit(AppEvent::SyncStarted {
+            account_id: "acc-1".into(),
+        });
+        match rx.recv().await.expect("event") {
+            AppEvent::SyncStarted { account_id } => assert_eq!(account_id, "acc-1"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
