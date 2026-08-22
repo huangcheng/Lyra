@@ -268,6 +268,13 @@ pub fn opt_ts_param(db: &DbPool, raw: Option<&str>) -> Option<TsParam> {
     }
 }
 
+/// Message `date` at ingest: parse RFC2822/RFC3339/ISO, store UTC, NULL if garbage.
+/// SQLite gets `YYYY-MM-DD HH:MM:SS` (sortable against `datetime('now')`).
+#[must_use]
+pub fn message_date_param(db: &DbPool, raw: Option<&str>) -> Option<TsParam> {
+    parse_ts(raw?).map(|dt| TsParam::from_utc(db, dt))
+}
+
 const NAIVE_TS_FMTS: &[&str] = &[
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%dT%H:%M:%S",
@@ -275,12 +282,19 @@ const NAIVE_TS_FMTS: &[&str] = &[
     "%Y%m%dT%H%M%S",
 ];
 
-/// Parse RFC3339, `datetime()` text, or compact iCal instants.
+/// Parse RFC3339, RFC2822 (IMAP ENVELOPE), `datetime()` text, or compact iCal instants.
+/// Invalid input returns `None` — callers store NULL rather than the raw string.
 #[must_use]
 #[allow(dead_code)]
 pub fn parse_ts(raw: &str) -> Option<DateTime<Utc>> {
     let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
     if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc2822(raw) {
         return Some(dt.with_timezone(&Utc));
     }
     for fmt in NAIVE_TS_FMTS {
@@ -402,8 +416,9 @@ impl<'q> Encode<'q, sqlx::Postgres> for JsonParam {
     ) -> Result<IsNull, BoxDynError> {
         let value = match self {
             Self::Value(v) => v.clone(),
-            Self::Text(s) => serde_json::from_str(s)
-                .unwrap_or_else(|_| serde_json::Value::String(s.clone())),
+            Self::Text(s) => {
+                serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.clone()))
+            }
         };
         <serde_json::Value as Encode<'q, sqlx::Postgres>>::encode(value, buf)
     }
@@ -434,10 +449,44 @@ mod tests {
     #[test]
     fn parse_ts_accepts_rfc3339_and_sqlite_datetime() {
         let rfc = parse_ts("2026-08-23T01:12:00+00:00").expect("rfc");
-        assert_eq!(rfc.format("%Y-%m-%d %H:%M:%S").to_string(), "2026-08-23 01:12:00");
+        assert_eq!(
+            rfc.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-08-23 01:12:00"
+        );
         let sql = parse_ts("2026-08-23 01:12:00").expect("sqlite");
         assert_eq!(sql, rfc);
         assert!(parse_ts("not-a-date").is_none());
+    }
+
+    #[test]
+    fn parse_ts_normalizes_rfc2822_envelope_dates_to_utc() {
+        let z = parse_ts("Tue, 18 Aug 2026 16:25:21 +0000").expect("zulu");
+        assert_eq!(z.to_rfc3339(), "2026-08-18T16:25:21+00:00");
+        let offset = parse_ts("Tue, 18 Aug 2026 12:25:21 -0400").expect("offset");
+        assert_eq!(offset.to_rfc3339(), "2026-08-18T16:25:21+00:00");
+        assert_eq!(
+            parse_ts("2026-08-18T16:25:21Z")
+                .expect("already utc")
+                .timestamp(),
+            z.timestamp()
+        );
+        assert!(parse_ts("not a date at all").is_none());
+        assert!(parse_ts("").is_none());
+    }
+
+    #[tokio::test]
+    async fn message_date_param_stores_sqlite_utc_datetime_or_null() {
+        let storage = crate::storage::Storage::new("sqlite::memory:")
+            .await
+            .unwrap();
+        let db = storage.pool();
+        let p = message_date_param(db, Some("Tue, 18 Aug 2026 12:25:21 -0400")).expect("parsed");
+        match p {
+            TsParam::Text(s) => assert_eq!(s, "2026-08-18 16:25:21"),
+            TsParam::Utc(_) => panic!("sqlite bind should be text"),
+        }
+        assert!(message_date_param(db, Some("garbage")).is_none());
+        assert!(message_date_param(db, None).is_none());
     }
 
     #[tokio::test]

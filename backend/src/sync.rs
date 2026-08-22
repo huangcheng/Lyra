@@ -21,8 +21,8 @@ use uuid::Uuid;
 
 use crate::auth::{AuthState, AuthUser};
 use crate::db_row::{
-    InvalidIdError, TsParam, id_from_row, id_param, json_text_from_row, opt_id_param,
-    opt_json_param, opt_ts_from_row, opt_ts_param,
+    InvalidIdError, TsParam, id_from_row, id_param, json_text_from_row, message_date_param,
+    opt_id_param, opt_json_param, opt_ts_from_row,
 };
 use crate::imap::{ImapClient, ImapConfig, ImapError, ImapMessage, ImapSecurity};
 use crate::jmap::{JmapClient, JmapError};
@@ -1843,7 +1843,7 @@ async fn upsert_jmap_message(
             opt_json_param(db, from_json.as_deref()),
             opt_json_param(db, to_json.as_deref()),
             opt_json_param(db, cc_json.as_deref()),
-            opt_ts_param(db, email.received_at.as_deref()),
+            message_date_param(db, email.received_at.as_deref()),
             is_read,
             is_starred,
             opt_json_param(db, Some(flags_json.as_str())),
@@ -2152,7 +2152,7 @@ async fn upsert_message(
         opt_json_param(db, from_json.as_deref()),
         opt_json_param(db, to_json.as_deref()),
         opt_json_param(db, msg.cc.as_deref()),
-        opt_ts_param(db, msg.date.as_deref()),
+        message_date_param(db, msg.date.as_deref()),
         is_read,
         is_starred,
         opt_json_param(db, Some(flags_json.as_str())),
