@@ -114,27 +114,24 @@ struct ActiveAccount {
 /// One poll pass: enqueue `SyncAccount` for due active accounts not already queued.
 ///
 /// Returns how many jobs were enqueued.
-pub async fn poll_tick(
-    pool: &sqlx::SqlitePool,
-    backoff: &mut Backoff,
-) -> Result<usize, sqlx::Error> {
-    let accounts = list_active_accounts(pool).await?;
+pub async fn poll_tick(db: &DbPool, backoff: &mut Backoff) -> Result<usize, sqlx::Error> {
+    let accounts = list_active_accounts(db).await?;
     let now = Instant::now();
     let run_at = chrono::Utc::now().to_rfc3339();
     let mut enqueued = 0usize;
 
     for account in accounts {
-        if let Some((job_id, status)) = latest_terminal_sync(pool, &account.id).await? {
+        if let Some((job_id, status)) = latest_terminal_sync(db, &account.id).await? {
             backoff.observe_outcome(&account.id, &job_id, &status);
         }
         if !backoff.is_due(&account.id, now) {
             continue;
         }
-        if has_pending_or_running_sync(pool, &account.id).await? {
+        if has_pending_or_running_sync(db, &account.id).await? {
             continue;
         }
         enqueue(
-            pool,
+            db,
             &JobPayload::SyncAccount {
                 account_id: account.id.clone(),
                 user_id: account.user_id,
@@ -149,48 +146,48 @@ pub async fn poll_tick(
     Ok(enqueued)
 }
 
-async fn list_active_accounts(pool: &sqlx::SqlitePool) -> Result<Vec<ActiveAccount>, sqlx::Error> {
-    let rows = sqlx::query(
+async fn list_active_accounts(db: &DbPool) -> Result<Vec<ActiveAccount>, sqlx::Error> {
+    db_fetch_all!(
+        db,
         r"
         SELECT id, user_id FROM mail_account
         WHERE is_active = 1 AND sync_enabled = 1
         ",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| ActiveAccount {
+        |row| ActiveAccount {
             id: row.get("id"),
             user_id: row.get("user_id"),
-        })
-        .collect())
+        }
+    )
 }
 
 /// Id of a pending/running `sync_account` job for this account, if any.
 pub async fn pending_or_running_sync_job_id(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
 ) -> Result<Option<String>, sqlx::Error> {
-    let rows = sqlx::query(
+    let rows = db_fetch_all!(
+        db,
         r"
         SELECT id, payload FROM jobs
         WHERE kind = 'sync_account' AND status IN ('pending', 'running')
         ",
-    )
-    .fetch_all(pool)
-    .await?;
+        |row| {
+            let id: String = row.get("id");
+            let payload_json: String = row.get("payload");
+            (id, payload_json)
+        }
+    )?;
 
-    for row in rows {
-        let payload_json: String = row.get("payload");
+    for (id, payload_json) in rows {
         let Ok(payload) = serde_json::from_str::<JobPayload>(&payload_json) else {
             continue;
         };
-        if let JobPayload::SyncAccount { account_id: id, .. } = payload
-            && id == account_id
+        if let JobPayload::SyncAccount {
+            account_id: aid, ..
+        } = payload
+            && aid == account_id
         {
-            return Ok(Some(row.get("id")));
+            return Ok(Some(id));
         }
     }
     Ok(None)
@@ -198,39 +195,43 @@ pub async fn pending_or_running_sync_job_id(
 
 /// True when a sync job for this account is already pending or running.
 pub async fn has_pending_or_running_sync(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
 ) -> Result<bool, sqlx::Error> {
-    Ok(pending_or_running_sync_job_id(pool, account_id)
+    Ok(pending_or_running_sync_job_id(db, account_id)
         .await?
         .is_some())
 }
 
 /// Most recent completed/failed sync job for an account, if any.
 async fn latest_terminal_sync(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
 ) -> Result<Option<(String, String)>, sqlx::Error> {
-    let rows = sqlx::query(
+    let rows = db_fetch_all!(
+        db,
         r"
         SELECT id, payload, status FROM jobs
         WHERE kind = 'sync_account' AND status IN ('completed', 'failed')
         ORDER BY updated_at DESC, created_at DESC
         ",
-    )
-    .fetch_all(pool)
-    .await?;
+        |row| {
+            let id: String = row.get("id");
+            let payload_json: String = row.get("payload");
+            let status: String = row.get("status");
+            (id, payload_json, status)
+        }
+    )?;
 
-    for row in rows {
-        let payload_json: String = row.get("payload");
+    for (job_id, payload_json, status) in rows {
         let Ok(payload) = serde_json::from_str::<JobPayload>(&payload_json) else {
             continue;
         };
-        if let JobPayload::SyncAccount { account_id: id, .. } = payload
-            && id == account_id
+        if let JobPayload::SyncAccount {
+            account_id: aid, ..
+        } = payload
+            && aid == account_id
         {
-            let job_id: String = row.get("id");
-            let status: String = row.get("status");
             return Ok(Some((job_id, status)));
         }
     }
@@ -239,33 +240,25 @@ async fn latest_terminal_sync(
 
 /// Start the background poll loop. First tick runs immediately (no initial wait).
 pub fn start_scheduler(db: DbPool, poll_secs: u64) {
-    match db {
-        DbPool::Sqlite(pool) => {
-            let secs = poll_secs.max(1);
-            tokio::spawn(async move {
-                let backoff = Arc::new(Mutex::new(Backoff::with_base_secs(secs)));
-                let mut interval = tokio::time::interval(Duration::from_secs(secs));
-                // First tick completes immediately — do not wait poll_secs at startup.
-                loop {
-                    interval.tick().await;
-                    let mut guard = backoff.lock().await;
-                    match poll_tick(&pool, &mut guard).await {
-                        Ok(n) if n > 0 => {
-                            tracing::debug!(enqueued = n, "scheduler poll enqueued sync jobs");
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            tracing::error!(%error, "scheduler poll failed");
-                        }
-                    }
+    let secs = poll_secs.max(1);
+    tokio::spawn(async move {
+        let backoff = Arc::new(Mutex::new(Backoff::with_base_secs(secs)));
+        let mut interval = tokio::time::interval(Duration::from_secs(secs));
+        // First tick completes immediately — do not wait poll_secs at startup.
+        loop {
+            interval.tick().await;
+            let mut guard = backoff.lock().await;
+            match poll_tick(&db, &mut guard).await {
+                Ok(n) if n > 0 => {
+                    tracing::debug!(enqueued = n, "scheduler poll enqueued sync jobs");
                 }
-            });
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(%error, "scheduler poll failed");
+                }
+            }
         }
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => {
-            tracing::warn!("scheduler is sqlite-only in this cycle");
-        }
-    }
+    });
 }
 
 #[cfg(test)]
@@ -275,17 +268,22 @@ mod tests {
     use crate::storage::{DbPool, Storage};
     use std::time::Duration;
 
-    async fn test_pool() -> sqlx::SqlitePool {
+    async fn test_pool() -> DbPool {
         let storage = Storage::new("sqlite::memory:").await.unwrap();
         storage.run_migrations().await.unwrap();
-        match storage.pool().clone() {
+        storage.pool().clone()
+    }
+
+    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
+        match db {
             DbPool::Sqlite(pool) => pool,
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("expected sqlite"),
         }
     }
 
-    async fn seed_active_account(pool: &sqlx::SqlitePool) -> (String, String) {
+    async fn seed_active_account(db: &DbPool) -> (String, String) {
+        let pool = sqlite_pool(db);
         let user_id = uuid::Uuid::now_v7().to_string();
         let account_id = uuid::Uuid::now_v7().to_string();
 
@@ -350,7 +348,7 @@ mod tests {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM jobs WHERE kind = 'sync_account' AND status IN ('pending', 'running')",
         )
-        .fetch_one(&pool)
+        .fetch_one(sqlite_pool(&pool))
         .await
         .unwrap();
         assert_eq!(count, 1);
@@ -389,7 +387,7 @@ mod tests {
         let row = sqlx::query_as::<_, (String, String)>(
             "SELECT payload, status FROM jobs WHERE kind = 'sync_account'",
         )
-        .fetch_one(&pool)
+        .fetch_one(sqlite_pool(&pool))
         .await
         .unwrap();
         assert_eq!(row.1, "pending");

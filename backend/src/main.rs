@@ -8,6 +8,8 @@
 #![allow(clippy::unnecessary_wraps)]
 #![allow(clippy::match_same_arms)]
 
+#[macro_use]
+mod db_sql;
 mod accounts;
 mod auth;
 mod config;

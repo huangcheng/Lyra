@@ -21,7 +21,6 @@ use uuid::Uuid;
 
 use crate::auth::{AuthState, AuthUser};
 use crate::crypto;
-use crate::storage::DbPool;
 
 /// Routes for account management.
 pub fn routes() -> Router<AuthState> {
@@ -145,63 +144,52 @@ impl IntoResponse for AccountError {
     }
 }
 
-/// Get SQLite pool from DbPool enum.
-fn get_sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
-    match db {
-        DbPool::Sqlite(pool) => pool,
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => panic!("PostgreSQL not supported yet"),
-    }
+macro_rules! account_from_row {
+    ($row:expr) => {{
+        Account {
+            id: $row.get("id"),
+            display_name: $row
+                .get::<Option<String>, _>("display_name")
+                .unwrap_or_default(),
+            email_address: $row.get("email_address"),
+            protocol: $row.get("protocol"),
+            imap_host: $row.get("imap_host"),
+            imap_port: $row.get("imap_port"),
+            imap_security: $row.get("imap_security"),
+            smtp_host: $row.get("smtp_host"),
+            smtp_port: $row.get("smtp_port"),
+            smtp_security: $row.get("smtp_security"),
+            carddav_url: $row.get("carddav_url"),
+            caldav_url: $row.get("caldav_url"),
+            is_active: $row.get::<bool, _>("is_active"),
+            sync_enabled: $row.get::<bool, _>("sync_enabled"),
+            last_sync_at: $row.get("last_sync_at"),
+            created_at: $row.get("created_at"),
+            updated_at: $row.get("updated_at"),
+        }
+    }};
 }
+
+const ACCOUNT_SELECT: &str = r"
+        SELECT id, display_name, email_address, protocol,
+               imap_host, imap_port, imap_security,
+               smtp_host, smtp_port, smtp_security,
+               carddav_url, caldav_url,
+               is_active, sync_enabled, last_sync_at,
+               created_at, updated_at
+        FROM mail_account
+";
 
 /// List all mail accounts for the authenticated user.
 async fn list_accounts(
     State(state): State<AuthState>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<Account>>, AccountError> {
-    let pool = get_sqlite_pool(state.db());
-
-    let rows = sqlx::query(
-        r"
-        SELECT id, display_name, email_address, protocol,
-               imap_host, imap_port, imap_security,
-               smtp_host, smtp_port, smtp_security,
-               is_active, sync_enabled, last_sync_at,
-               created_at, updated_at
-        FROM mail_account
-        WHERE user_id = ?
-        ORDER BY created_at DESC
-        ",
-    )
-    .bind(&user_id)
-    .fetch_all(pool)
-    .await?;
-
-    let accounts: Vec<Account> = rows
-        .iter()
-        .map(|row| Account {
-            id: row.get("id"),
-            display_name: row
-                .get::<Option<String>, _>("display_name")
-                .unwrap_or_default(),
-            email_address: row.get("email_address"),
-            protocol: row.get("protocol"),
-            imap_host: row.get("imap_host"),
-            imap_port: row.get("imap_port"),
-            imap_security: row.get("imap_security"),
-            smtp_host: row.get("smtp_host"),
-            smtp_port: row.get("smtp_port"),
-            smtp_security: row.get("smtp_security"),
-            carddav_url: row.get("carddav_url"),
-            caldav_url: row.get("caldav_url"),
-            is_active: row.get::<bool, _>("is_active"),
-            sync_enabled: row.get::<bool, _>("sync_enabled"),
-            last_sync_at: row.get("last_sync_at"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        })
-        .collect();
-
+    let db = state.db();
+    let sql = format!(
+        "{ACCOUNT_SELECT}        WHERE user_id = ?\n        ORDER BY created_at DESC\n        "
+    );
+    let accounts = db_fetch_all!(db, &sql, |row| account_from_row!(row), &user_id)?;
     Ok(Json(accounts))
 }
 
@@ -211,46 +199,11 @@ async fn get_account(
     Path(id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Account>, AccountError> {
-    let pool = get_sqlite_pool(state.db());
-
-    let row = sqlx::query(
-        r"
-        SELECT id, display_name, email_address, protocol,
-               imap_host, imap_port, imap_security,
-               smtp_host, smtp_port, smtp_security,
-               is_active, sync_enabled, last_sync_at,
-               created_at, updated_at
-        FROM mail_account
-        WHERE id = ? AND user_id = ?
-        ",
-    )
-    .bind(&id)
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(AccountError::NotFound)?;
-
-    Ok(Json(Account {
-        id: row.get("id"),
-        display_name: row
-            .get::<Option<String>, _>("display_name")
-            .unwrap_or_default(),
-        email_address: row.get("email_address"),
-        protocol: row.get("protocol"),
-        imap_host: row.get("imap_host"),
-        imap_port: row.get("imap_port"),
-        imap_security: row.get("imap_security"),
-        smtp_host: row.get("smtp_host"),
-        smtp_port: row.get("smtp_port"),
-        smtp_security: row.get("smtp_security"),
-        carddav_url: row.get("carddav_url"),
-        caldav_url: row.get("caldav_url"),
-        is_active: row.get::<bool, _>("is_active"),
-        sync_enabled: row.get::<bool, _>("sync_enabled"),
-        last_sync_at: row.get("last_sync_at"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    }))
+    let db = state.db();
+    let sql = format!("{ACCOUNT_SELECT}        WHERE id = ? AND user_id = ?\n        ");
+    let account = db_fetch_optional!(db, &sql, |row| account_from_row!(&row), &id, &user_id)?
+        .ok_or(AccountError::NotFound)?;
+    Ok(Json(account))
 }
 
 /// Create a new mail account.
@@ -259,7 +212,7 @@ async fn create_account(
     AuthUser(user_id): AuthUser,
     Json(body): Json<CreateAccountRequest>,
 ) -> Result<(StatusCode, Json<Account>), AccountError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
     // Validate email format (basic check)
     if !body.email_address.contains('@') {
@@ -298,7 +251,8 @@ async fn create_account(
     let send_protocol = "smtp".to_string();
     let auth_type = body.auth_type.unwrap_or_else(|| "password".into());
 
-    sqlx::query(
+    db_execute!(
+        db,
         r"
         INSERT INTO mail_account (
             id, user_id, display_name, email_address, protocol, auth_type,
@@ -307,28 +261,26 @@ async fn create_account(
             receive_protocol, send_protocol
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
         ",
-    )
-    .bind(&id)
-    .bind(&user_id)
-    .bind(&body.display_name)
-    .bind(&body.email_address)
-    .bind(&protocol)
-    .bind(&auth_type)
-    .bind(&credential_json)
-    .bind(&body.imap_host)
-    .bind(body.imap_port)
-    .bind(&imap_security)
-    .bind(&body.smtp_host)
-    .bind(body.smtp_port)
-    .bind(&smtp_security)
-    .bind(&receive_protocol)
-    .bind(&send_protocol)
-    .execute(pool)
-    .await?;
+        &id,
+        &user_id,
+        &body.display_name,
+        &body.email_address,
+        &protocol,
+        &auth_type,
+        &credential_json,
+        &body.imap_host,
+        body.imap_port,
+        &imap_security,
+        &body.smtp_host,
+        body.smtp_port,
+        &smtp_security,
+        &receive_protocol,
+        &send_protocol
+    )?;
 
     let now = chrono::Utc::now().to_rfc3339();
     if let Err(error) = crate::jobs::enqueue(
-        pool,
+        db,
         &crate::jobs::JobPayload::SyncAccount {
             account_id: id.clone(),
             user_id: user_id.clone(),
@@ -372,15 +324,19 @@ async fn update_account(
     AuthUser(user_id): AuthUser,
     Json(body): Json<UpdateAccountRequest>,
 ) -> Result<Json<Account>, AccountError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
     // Verify account exists and belongs to user
-    let _existing = sqlx::query("SELECT id FROM mail_account WHERE id = ? AND user_id = ?")
-        .bind(&id)
-        .bind(&user_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or(AccountError::NotFound)?;
+    let existing: Option<String> = db_scalar_optional!(
+        db,
+        String,
+        "SELECT id FROM mail_account WHERE id = ? AND user_id = ?",
+        &id,
+        &user_id
+    )?;
+    if existing.is_none() {
+        return Err(AccountError::NotFound);
+    }
 
     // Build dynamic update
     let mut updates = Vec::new();
@@ -477,51 +433,17 @@ async fn update_account(
         updates.join(", ")
     );
 
-    // Execute with dynamic params
-    let mut query = sqlx::query(&sql);
-    for param in &params {
-        query = query.bind(param);
-    }
-    query.execute(pool).await?;
+    db_execute_binds!(db, &sql, &params)?;
 
-    // Return updated account
-    let row = sqlx::query(
-        r"
-        SELECT id, display_name, email_address, protocol,
-               imap_host, imap_port, imap_security,
-               smtp_host, smtp_port, smtp_security,
-               is_active, sync_enabled, last_sync_at,
-               created_at, updated_at
-        FROM mail_account
-        WHERE id = ? AND user_id = ?
-        ",
-    )
-    .bind(&id)
-    .bind(&user_id)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(Json(Account {
-        id: row.get("id"),
-        display_name: row
-            .get::<Option<String>, _>("display_name")
-            .unwrap_or_default(),
-        email_address: row.get("email_address"),
-        protocol: row.get("protocol"),
-        imap_host: row.get("imap_host"),
-        imap_port: row.get("imap_port"),
-        imap_security: row.get("imap_security"),
-        smtp_host: row.get("smtp_host"),
-        smtp_port: row.get("smtp_port"),
-        smtp_security: row.get("smtp_security"),
-        carddav_url: row.get("carddav_url"),
-        caldav_url: row.get("caldav_url"),
-        is_active: row.get::<bool, _>("is_active"),
-        sync_enabled: row.get::<bool, _>("sync_enabled"),
-        last_sync_at: row.get("last_sync_at"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    }))
+    let select_sql = format!("{ACCOUNT_SELECT}        WHERE id = ? AND user_id = ?\n        ");
+    let account = db_fetch_one!(
+        db,
+        &select_sql,
+        |row| account_from_row!(&row),
+        &id,
+        &user_id
+    )?;
+    Ok(Json(account))
 }
 
 /// Delete a mail account.
@@ -530,15 +452,16 @@ async fn delete_account(
     Path(id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<StatusCode, AccountError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
-    let result = sqlx::query("DELETE FROM mail_account WHERE id = ? AND user_id = ?")
-        .bind(&id)
-        .bind(&user_id)
-        .execute(pool)
-        .await?;
+    let affected = db_execute!(
+        db,
+        "DELETE FROM mail_account WHERE id = ? AND user_id = ?",
+        &id,
+        &user_id
+    )?;
 
-    if result.rows_affected() == 0 {
+    if affected == 0 {
         return Err(AccountError::NotFound);
     }
 

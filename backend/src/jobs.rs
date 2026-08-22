@@ -44,6 +44,19 @@ pub struct ClaimedJob {
     pub payload: JobPayload,
 }
 
+macro_rules! row_to_claimed {
+    ($row:expr) => {{
+        let payload_json: String = $row.try_get("payload")?;
+        let payload =
+            serde_json::from_str(&payload_json).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        Ok::<_, sqlx::Error>(ClaimedJob {
+            id: $row.try_get("id")?,
+            status: $row.try_get("status")?,
+            payload,
+        })
+    }};
+}
+
 /// Per-account in-flight set so a second sync is skipped while one is running.
 #[derive(Default)]
 pub struct InFlight {
@@ -79,35 +92,32 @@ fn payload_kind(payload: &JobPayload) -> &'static str {
 
 /// Persist a pending job. `run_at` is RFC3339 or `datetime('now')` text.
 pub async fn enqueue(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     payload: &JobPayload,
     run_at: &str,
 ) -> Result<String, sqlx::Error> {
     let id = uuid::Uuid::now_v7().to_string();
     let kind = payload_kind(payload);
     let json = serde_json::to_string(payload).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-    sqlx::query(
+    db_execute!(
+        db,
         r"
         INSERT INTO jobs (id, kind, run_at, payload, status)
         VALUES (?, ?, ?, ?, 'pending')
         ",
-    )
-    .bind(&id)
-    .bind(kind)
-    .bind(run_at)
-    .bind(&json)
-    .execute(pool)
-    .await?;
+        &id,
+        kind,
+        run_at,
+        &json
+    )?;
     Ok(id)
 }
 
 /// Atomically claim the oldest due pending job and mark it `running`.
 #[allow(dead_code)]
-pub async fn claim_due(
-    pool: &sqlx::SqlitePool,
-    now: &str,
-) -> Result<Option<ClaimedJob>, sqlx::Error> {
-    let row = sqlx::query(
+pub async fn claim_due(db: &DbPool, now: &str) -> Result<Option<ClaimedJob>, sqlx::Error> {
+    let claimed = db_fetch_optional!(
+        db,
         r"
         UPDATE jobs
         SET status = 'running', updated_at = datetime('now')
@@ -119,33 +129,34 @@ pub async fn claim_due(
         )
         RETURNING id, payload, status
         ",
-    )
-    .bind(now)
-    .fetch_optional(pool)
-    .await?;
-
-    row.as_ref().map(row_to_claimed).transpose()
+        |row| row_to_claimed!(&row),
+        now
+    )?;
+    claimed.transpose()
 }
 
 /// Claim the next due job whose account is not already in-flight.
 pub async fn claim_next(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     now: &str,
     inflight: &InFlight,
 ) -> Result<Option<ClaimedJob>, sqlx::Error> {
-    let rows = sqlx::query(
+    let rows = db_fetch_all!(
+        db,
         r"
         SELECT id, payload FROM jobs
         WHERE status = 'pending' AND run_at <= ?
         ORDER BY run_at ASC, created_at ASC
         ",
-    )
-    .bind(now)
-    .fetch_all(pool)
-    .await?;
+        |row| {
+            let id: String = row.get("id");
+            let payload_json: String = row.get("payload");
+            (id, payload_json)
+        },
+        now
+    )?;
 
-    for row in rows {
-        let payload_json: String = row.get("payload");
+    for (id, payload_json) in rows {
         let Ok(payload) = serde_json::from_str::<JobPayload>(&payload_json) else {
             continue;
         };
@@ -154,18 +165,16 @@ pub async fn claim_next(
         {
             continue;
         }
-        let id: String = row.get("id");
-        let updated = sqlx::query(
+        let updated = db_execute!(
+            db,
             r"
             UPDATE jobs
             SET status = 'running', updated_at = datetime('now')
             WHERE id = ? AND status = 'pending'
             ",
-        )
-        .bind(&id)
-        .execute(pool)
-        .await?;
-        if updated.rows_affected() == 1 {
+            &id
+        )?;
+        if updated == 1 {
             return Ok(Some(ClaimedJob {
                 id,
                 status: "running".into(),
@@ -177,23 +186,21 @@ pub async fn claim_next(
 }
 
 /// Reset leftover `running` rows so a restarted worker can claim them.
-pub async fn reclaim_stale_running(pool: &sqlx::SqlitePool) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
+pub async fn reclaim_stale_running(db: &DbPool) -> Result<u64, sqlx::Error> {
+    db_execute!(
+        db,
         r"
         UPDATE jobs
         SET status = 'pending', updated_at = datetime('now')
         WHERE status = 'running'
-        ",
+        "
     )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
 }
 
 /// Acquire a worker permit, then claim. The permit is held for the job's
 /// lifetime so `running` cannot exceed `SYNC_MAX_CONCURRENT`.
 pub async fn try_claim_with_permit(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     now: &str,
     inflight: &InFlight,
     sem: &Arc<Semaphore>,
@@ -201,22 +208,10 @@ pub async fn try_claim_with_permit(
     let Ok(permit) = Arc::clone(sem).try_acquire_owned() else {
         return Ok(None);
     };
-    match claim_next(pool, now, inflight).await? {
+    match claim_next(db, now, inflight).await? {
         Some(job) => Ok(Some((job, permit))),
         None => Ok(None),
     }
-}
-
-#[allow(dead_code)]
-fn row_to_claimed(row: &sqlx::sqlite::SqliteRow) -> Result<ClaimedJob, sqlx::Error> {
-    let payload_json: String = row.get("payload");
-    let payload =
-        serde_json::from_str(&payload_json).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
-    Ok(ClaimedJob {
-        id: row.get("id"),
-        status: row.get("status"),
-        payload,
-    })
 }
 
 /// Map a sync failure to a fixed, safe category string for `jobs.last_error`.
@@ -234,58 +229,51 @@ fn sanitize_error(err: &SyncError) -> &'static str {
     }
 }
 
-async fn mark_completed(pool: &sqlx::SqlitePool, id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(
+async fn mark_completed(db: &DbPool, id: &str) -> Result<(), sqlx::Error> {
+    db_execute!(
+        db,
         r"
         UPDATE jobs
         SET status = 'completed', last_error = NULL, updated_at = datetime('now')
         WHERE id = ?
         ",
-    )
-    .bind(id)
-    .execute(pool)
-    .await?;
+        id
+    )?;
     Ok(())
 }
 
-async fn mark_failed(
-    pool: &sqlx::SqlitePool,
-    id: &str,
-    last_error: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+async fn mark_failed(db: &DbPool, id: &str, last_error: &str) -> Result<(), sqlx::Error> {
+    db_execute!(
+        db,
         r"
         UPDATE jobs
         SET status = 'failed', last_error = ?, attempts = attempts + 1,
             updated_at = datetime('now')
         WHERE id = ?
         ",
-    )
-    .bind(last_error)
-    .bind(id)
-    .execute(pool)
-    .await?;
+        last_error,
+        id
+    )?;
     Ok(())
 }
 
-async fn revert_pending(pool: &sqlx::SqlitePool, id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(
+async fn revert_pending(db: &DbPool, id: &str) -> Result<(), sqlx::Error> {
+    db_execute!(
+        db,
         r"
         UPDATE jobs
         SET status = 'pending', updated_at = datetime('now')
         WHERE id = ?
         ",
-    )
-    .bind(id)
-    .execute(pool)
-    .await?;
+        id
+    )?;
     Ok(())
 }
 
 /// Dispatch a claimed job. Plugin errors mark the job `failed` (no panic).
 /// `permit` must already be held; it is released when this future ends.
 pub async fn process_job(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     app: &App,
     inflight: &InFlight,
     _permit: OwnedSemaphorePermit,
@@ -297,30 +285,30 @@ pub async fn process_job(
             user_id,
         } => {
             if !inflight.try_begin(&account_id).await {
-                revert_pending(pool, &job.id).await?;
+                revert_pending(db, &job.id).await?;
                 return Ok(());
             }
-            let db = DbPool::Sqlite(pool.clone());
-            let result = crate::sync::run_account_sync(&db, app, &user_id, &account_id).await;
+            let result = crate::sync::run_account_sync(db, app, &user_id, &account_id).await;
             inflight.finish(&account_id).await;
             match result {
-                Ok(_) => mark_completed(pool, &job.id).await?,
+                Ok(_) => mark_completed(db, &job.id).await?,
                 Err(err) => {
                     let safe = sanitize_error(&err);
                     tracing::warn!(job_id = %job.id, error = %safe, "sync job failed");
-                    mark_failed(pool, &job.id, safe).await?;
+                    mark_failed(db, &job.id, safe).await?;
                 }
             }
         }
         JobPayload::UnsnoozeMessage { message_id } => {
-            sqlx::query("UPDATE message SET snoozed_until = NULL WHERE id = ?")
-                .bind(&message_id)
-                .execute(pool)
-                .await?;
-            mark_completed(pool, &job.id).await?;
+            db_execute!(
+                db,
+                "UPDATE message SET snoozed_until = NULL WHERE id = ?",
+                &message_id
+            )?;
+            mark_completed(db, &job.id).await?;
         }
         JobPayload::SendMessage { .. } => {
-            revert_pending(pool, &job.id).await?;
+            revert_pending(db, &job.id).await?;
         }
     }
     Ok(())
@@ -328,31 +316,21 @@ pub async fn process_job(
 
 /// Spawn the job poller after `AuthState` exists. Worker needs the db pool + `Arc<App>`.
 pub fn spawn_workers(db: DbPool, app: Arc<App>, max_concurrent: usize) {
-    match db {
-        DbPool::Sqlite(pool) => spawn_sqlite_workers(pool, app, max_concurrent),
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => {
-            tracing::warn!("job workers are sqlite-only in this cycle");
-        }
-    }
-}
-
-fn spawn_sqlite_workers(pool: sqlx::SqlitePool, app: Arc<App>, max_concurrent: usize) {
     let inflight = Arc::new(InFlight::new());
     let sem = Arc::new(Semaphore::new(max_concurrent.max(1)));
     tokio::spawn(async move {
-        if let Err(error) = reclaim_stale_running(&pool).await {
+        if let Err(error) = reclaim_stale_running(&db).await {
             tracing::error!(%error, "failed to reclaim stale running jobs");
         }
         loop {
             let now = chrono::Utc::now().to_rfc3339();
-            match try_claim_with_permit(&pool, &now, &inflight, &sem).await {
+            match try_claim_with_permit(&db, &now, &inflight, &sem).await {
                 Ok(Some((job, permit))) => {
-                    let pool = pool.clone();
+                    let db = db.clone();
                     let app = Arc::clone(&app);
                     let inflight = Arc::clone(&inflight);
                     tokio::spawn(async move {
-                        if let Err(error) = process_job(&pool, &app, &inflight, permit, job).await {
+                        if let Err(error) = process_job(&db, &app, &inflight, permit, job).await {
                             tracing::error!(%error, "job process failed");
                         }
                     });
@@ -380,10 +358,14 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Semaphore;
 
-    async fn test_pool() -> sqlx::SqlitePool {
+    async fn test_pool() -> DbPool {
         let storage = Storage::new("sqlite::memory:").await.unwrap();
         storage.run_migrations().await.unwrap();
-        match storage.pool().clone() {
+        storage.pool().clone()
+    }
+
+    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
+        match db {
             DbPool::Sqlite(pool) => pool,
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("expected sqlite"),
@@ -403,7 +385,8 @@ mod tests {
         }
     }
 
-    async fn seed_account_with_cursor(pool: &sqlx::SqlitePool) -> (String, String, String) {
+    async fn seed_account_with_cursor(db: &DbPool) -> (String, String, String) {
+        let pool = sqlite_pool(db);
         let user_id = uuid::Uuid::now_v7().to_string();
         let account_id = uuid::Uuid::now_v7().to_string();
         let folder_id = uuid::Uuid::now_v7().to_string();
@@ -471,15 +454,15 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_then_claim_due_job() {
-        let pool = test_pool().await;
+        let db = test_pool().await;
         let now = "2026-08-22T00:00:00+00:00";
         let payload = JobPayload::SyncAccount {
             account_id: "acc-1".into(),
             user_id: "user-1".into(),
         };
 
-        let job_id = enqueue(&pool, &payload, now).await.unwrap();
-        let claimed = claim_due(&pool, now)
+        let job_id = enqueue(&db, &payload, now).await.unwrap();
+        let claimed = claim_due(&db, now)
             .await
             .unwrap()
             .expect("pending job should be claimed");
@@ -489,7 +472,7 @@ mod tests {
 
         let status: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = ?")
             .bind(&job_id)
-            .fetch_one(&pool)
+            .fetch_one(sqlite_pool(&db))
             .await
             .unwrap();
         assert_eq!(status, "running");
@@ -497,7 +480,7 @@ mod tests {
 
     #[tokio::test]
     async fn second_sync_same_account_skipped_while_running() {
-        let pool = test_pool().await;
+        let db = test_pool().await;
         let inflight = InFlight::new();
         let now = "2026-08-22T00:00:00+00:00";
         let payload = JobPayload::SyncAccount {
@@ -505,14 +488,14 @@ mod tests {
             user_id: "user-1".into(),
         };
 
-        let first_id = enqueue(&pool, &payload, now).await.unwrap();
-        let first = claim_due(&pool, now).await.unwrap().expect("first job");
+        let first_id = enqueue(&db, &payload, now).await.unwrap();
+        let first = claim_due(&db, now).await.unwrap().expect("first job");
         assert_eq!(first.id, first_id);
         assert_eq!(first.status, "running");
         assert!(inflight.try_begin("acc-1").await);
 
-        let second_id = enqueue(&pool, &payload, now).await.unwrap();
-        let next = claim_next(&pool, now, &inflight).await.unwrap();
+        let second_id = enqueue(&db, &payload, now).await.unwrap();
+        let next = claim_next(&db, now, &inflight).await.unwrap();
         assert!(
             next.is_none(),
             "second sync for the same account must be skipped while running"
@@ -520,7 +503,7 @@ mod tests {
 
         let status: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = ?")
             .bind(&second_id)
-            .fetch_one(&pool)
+            .fetch_one(sqlite_pool(&db))
             .await
             .unwrap();
         assert_eq!(status, "pending");
@@ -528,8 +511,8 @@ mod tests {
 
     #[tokio::test]
     async fn cursor_not_advanced_on_plugin_error() {
-        let pool = test_pool().await;
-        let (user_id, account_id, folder_id) = seed_account_with_cursor(&pool).await;
+        let db = test_pool().await;
+        let (user_id, account_id, folder_id) = seed_account_with_cursor(&db).await;
         let now = "2026-08-22T00:00:00+00:00";
 
         let mut app = App::new();
@@ -539,15 +522,15 @@ mod tests {
             account_id: account_id.clone(),
             user_id,
         };
-        let job_id = enqueue(&pool, &payload, now).await.unwrap();
-        let claimed = claim_due(&pool, now).await.unwrap().expect("due job");
+        let job_id = enqueue(&db, &payload, now).await.unwrap();
+        let claimed = claim_due(&db, now).await.unwrap().expect("due job");
 
         let inflight = InFlight::new();
         let sem = Arc::new(Semaphore::new(3));
         let permit = Arc::clone(&sem)
             .try_acquire_owned()
             .expect("test semaphore has a permit");
-        process_job(&pool, &app, &inflight, permit, claimed)
+        process_job(&db, &app, &inflight, permit, claimed)
             .await
             .expect("plugin error must not panic");
 
@@ -555,7 +538,7 @@ mod tests {
             "SELECT status, last_error FROM jobs WHERE id = ?",
         )
         .bind(&job_id)
-        .fetch_one(&pool)
+        .fetch_one(sqlite_pool(&db))
         .await
         .unwrap();
         assert_eq!(row.0, "failed");
@@ -572,7 +555,7 @@ mod tests {
         let cursor: String =
             sqlx::query_scalar("SELECT cursor_value FROM sync_cursor WHERE folder_id = ?")
                 .bind(&folder_id)
-                .fetch_one(&pool)
+                .fetch_one(sqlite_pool(&db))
                 .await
                 .unwrap();
         assert_eq!(cursor, "uid:100");
@@ -580,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_running_job_reclaimed_then_claimable() {
-        let pool = test_pool().await;
+        let db = test_pool().await;
         let now = "2026-08-22T00:00:00+00:00";
         let inflight = InFlight::new();
         let payload = JobPayload::SyncAccount {
@@ -588,22 +571,22 @@ mod tests {
             user_id: "user-1".into(),
         };
 
-        let job_id = enqueue(&pool, &payload, now).await.unwrap();
+        let job_id = enqueue(&db, &payload, now).await.unwrap();
         sqlx::query("UPDATE jobs SET status = 'running' WHERE id = ?")
             .bind(&job_id)
-            .execute(&pool)
+            .execute(sqlite_pool(&db))
             .await
             .unwrap();
 
         assert!(
-            claim_next(&pool, now, &inflight).await.unwrap().is_none(),
+            claim_next(&db, now, &inflight).await.unwrap().is_none(),
             "running leftovers must not be claimed before reclaim"
         );
 
-        let reclaimed = reclaim_stale_running(&pool).await.unwrap();
+        let reclaimed = reclaim_stale_running(&db).await.unwrap();
         assert_eq!(reclaimed, 1);
 
-        let claimed = claim_next(&pool, now, &inflight)
+        let claimed = claim_next(&db, now, &inflight)
             .await
             .unwrap()
             .expect("reclaimed job should be claimable via claim_next");
@@ -613,14 +596,14 @@ mod tests {
 
     #[tokio::test]
     async fn claim_does_not_exceed_semaphore_cap() {
-        let pool = test_pool().await;
+        let db = test_pool().await;
         let now = "2026-08-22T00:00:00+00:00";
         let inflight = InFlight::new();
         let sem = Arc::new(Semaphore::new(1));
 
         for i in 0..3 {
             enqueue(
-                &pool,
+                &db,
                 &JobPayload::SyncAccount {
                     account_id: format!("acc-{i}"),
                     user_id: "user-1".into(),
@@ -631,12 +614,12 @@ mod tests {
             .unwrap();
         }
 
-        let first = try_claim_with_permit(&pool, now, &inflight, &sem)
+        let first = try_claim_with_permit(&db, now, &inflight, &sem)
             .await
             .unwrap()
             .expect("should claim when a permit is available");
 
-        let second = try_claim_with_permit(&pool, now, &inflight, &sem)
+        let second = try_claim_with_permit(&db, now, &inflight, &sem)
             .await
             .unwrap();
         assert!(
@@ -645,7 +628,7 @@ mod tests {
         );
 
         let running: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status = 'running'")
-            .fetch_one(&pool)
+            .fetch_one(sqlite_pool(&db))
             .await
             .unwrap();
         assert_eq!(running, 1, "running count must stay within the worker cap");

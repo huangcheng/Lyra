@@ -682,21 +682,12 @@ pub async fn invalidate_user_sessions(
     user_id: &str,
 ) -> Result<(), StatusCode> {
     let old_epoch = fetch_sess_epoch(pool, user_id).await?;
-    match pool {
-        DbPool::Sqlite(db) => {
-            sqlx::query("UPDATE lyra_user SET sess_epoch = sess_epoch + 1 WHERE id = ?")
-                .bind(user_id)
-                .execute(db)
-                .await
-        }
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(db) => {
-            sqlx::query("UPDATE lyra_user SET sess_epoch = sess_epoch + 1 WHERE id = $1")
-                .bind(user_id)
-                .execute(db)
-                .await
-        }
-    }
+    // Split per dialect so we do not unify SqliteQueryResult with PgQueryResult.
+    db_execute!(
+        pool,
+        "UPDATE lyra_user SET sess_epoch = sess_epoch + 1 WHERE id = ?",
+        user_id
+    )
     .map_err(|e| {
         tracing::error!("bump sess_epoch failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -1552,9 +1543,12 @@ mod tests {
         let token = store.create_session("user-1").await.unwrap();
         assert_eq!(store.get_session(&token).await, Some("user-1".to_string()));
 
+        let epoch_before = fetch_sess_epoch(&db, "user-1").await.unwrap();
         invalidate_user_sessions(&db, kv.as_ref(), "user-1")
             .await
             .unwrap();
+        let epoch_after = fetch_sess_epoch(&db, "user-1").await.unwrap();
+        assert_eq!(epoch_after, epoch_before + 1);
 
         assert_eq!(store.get_session(&token).await, None);
         // New sessions at epoch 1 still work.

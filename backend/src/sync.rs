@@ -182,17 +182,17 @@ async fn sync_status(
     State(state): State<AuthState>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<SyncStatus>, SyncError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
-    let count: i64 = sqlx::query_scalar(
+    let count: i64 = db_scalar!(
+        db,
+        i64,
         "SELECT COUNT(*) FROM mail_account WHERE user_id = ? AND is_active = 1 AND sync_enabled = 1",
-    )
-    .bind(&user_id)
-    .fetch_one(pool)
-    .await?;
+        &user_id
+    )?;
 
     // Pending or running sync_account jobs for this user (payload JSON has user_id).
-    let syncing = user_has_active_sync_job(pool, &user_id).await?;
+    let syncing = user_has_active_sync_job(db, &user_id).await?;
 
     Ok(Json(SyncStatus {
         active_accounts: count,
@@ -201,21 +201,17 @@ async fn sync_status(
 }
 
 /// True when any `sync_account` job for `user_id` is pending or running.
-async fn user_has_active_sync_job(
-    pool: &sqlx::SqlitePool,
-    user_id: &str,
-) -> Result<bool, SyncError> {
-    let rows = sqlx::query(
+async fn user_has_active_sync_job(db: &DbPool, user_id: &str) -> Result<bool, SyncError> {
+    let rows = db_fetch_all!(
+        db,
         r"
         SELECT payload FROM jobs
         WHERE kind = 'sync_account' AND status IN ('pending', 'running')
         ",
-    )
-    .fetch_all(pool)
-    .await?;
+        |row| row.get::<String, _>("payload")
+    )?;
 
-    for row in rows {
-        let payload_json: String = row.get("payload");
+    for payload_json in rows {
         let Ok(payload) = serde_json::from_str::<crate::jobs::JobPayload>(&payload_json) else {
             continue;
         };
@@ -236,23 +232,22 @@ async fn trigger_sync(
     Path(account_id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<(StatusCode, Json<EnqueuedSync>), SyncError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM mail_account WHERE id = ? AND user_id = ?")
-            .bind(&account_id)
-            .bind(&user_id)
-            .fetch_optional(pool)
-            .await?;
+    let exists: Option<String> = db_scalar_optional!(
+        db,
+        String,
+        "SELECT id FROM mail_account WHERE id = ? AND user_id = ?",
+        &account_id,
+        &user_id
+    )?;
     if exists.is_none() {
         return Err(SyncError::AccountNotFound);
     }
 
     // Prefer 202 + existing job id over 409 so the Settings poller can keep
     // polling the same job instead of treating a duplicate trigger as an error.
-    if let Some(job_id) =
-        crate::scheduler::pending_or_running_sync_job_id(pool, &account_id).await?
-    {
+    if let Some(job_id) = crate::scheduler::pending_or_running_sync_job_id(db, &account_id).await? {
         return Ok((
             StatusCode::ACCEPTED,
             Json(EnqueuedSync {
@@ -264,7 +259,7 @@ async fn trigger_sync(
 
     let now = chrono::Utc::now().to_rfc3339();
     let job_id = crate::jobs::enqueue(
-        pool,
+        db,
         &crate::jobs::JobPayload::SyncAccount {
             account_id,
             user_id,
@@ -292,28 +287,30 @@ async fn send_message(
     AuthUser(user_id): AuthUser,
     Json(body): Json<SendMessageRequest>,
 ) -> Result<Json<SendMessageResponse>, SyncError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
-    let row = sqlx::query(
+    let row = db_fetch_optional!(
+        db,
         r"
         SELECT email_address, send_protocol, is_active
         FROM mail_account
         WHERE id = ? AND user_id = ?
         ",
-    )
-    .bind(&body.account_id)
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await?
+        |row| {
+            let is_active: bool = row.get("is_active");
+            let send_protocol: String = row.get("send_protocol");
+            let email_address: String = row.get("email_address");
+            (is_active, send_protocol, email_address)
+        },
+        &body.account_id,
+        &user_id
+    )?
     .ok_or(SyncError::AccountNotFound)?;
 
-    let is_active: bool = row.get("is_active");
+    let (is_active, send_protocol, email_address) = row;
     if !is_active {
         return Err(SyncError::AccountDisabled);
     }
-
-    let send_protocol: String = row.get("send_protocol");
-    let email_address: String = row.get("email_address");
 
     let plugin = resolve_send_plugin(state.app.as_ref(), &send_protocol)?;
 
@@ -390,31 +387,41 @@ pub(crate) async fn prepare_smtp_send(
     account_id: &str,
     raw: &str,
 ) -> Result<(SmtpConfig, OutboundMessage), SyncError> {
-    let pool = get_sqlite_pool(db);
-    let row = sqlx::query(
+    let row = db_fetch_optional!(
+        db,
         r"
         SELECT email_address, credential, user_id,
                smtp_host, smtp_port, smtp_security, is_active
         FROM mail_account
         WHERE id = ?
         ",
-    )
-    .bind(account_id)
-    .fetch_optional(pool)
-    .await?
+        |row| {
+            let is_active: bool = row.get("is_active");
+            let smtp_host: Option<String> = row.get("smtp_host");
+            let smtp_port: Option<i32> = row.get("smtp_port");
+            let smtp_security: Option<String> = row.get("smtp_security");
+            let credential_json: String = row.get("credential");
+            let email_address: String = row.get("email_address");
+            let user_id: String = row.get("user_id");
+            (
+                is_active,
+                smtp_host,
+                smtp_port,
+                smtp_security,
+                credential_json,
+                email_address,
+                user_id,
+            )
+        },
+        account_id
+    )?
     .ok_or(SyncError::AccountNotFound)?;
 
-    let is_active: bool = row.get("is_active");
+    let (is_active, smtp_host, smtp_port, smtp_security, credential_json, email_address, user_id) =
+        row;
     if !is_active {
         return Err(SyncError::AccountDisabled);
     }
-
-    let smtp_host: Option<String> = row.get("smtp_host");
-    let smtp_port: Option<i32> = row.get("smtp_port");
-    let smtp_security: Option<String> = row.get("smtp_security");
-    let credential_json: String = row.get("credential");
-    let email_address: String = row.get("email_address");
-    let user_id: String = row.get("user_id");
 
     let host =
         smtp_host.ok_or_else(|| SyncError::InvalidInput("SMTP host not configured".into()))?;
@@ -553,14 +560,36 @@ pub struct MessageResponse {
     pub has_attachments: bool,
 }
 
+macro_rules! message_response_from_sql {
+    ($row:expr) => {{
+        MessageResponse {
+            id: $row.get("id"),
+            account_id: $row.get("account_id"),
+            folder_id: $row.get("folder_id"),
+            subject: $row.get("subject"),
+            from_address: $row.get("from_address"),
+            to_addresses: $row.get("to_addresses"),
+            cc_addresses: $row.get("cc_addresses"),
+            date: $row.get("date"),
+            snippet: $row.get("snippet"),
+            body_text: $row.get("body_text"),
+            body_html: $row.get("body_html"),
+            is_read: $row.get::<bool, _>("is_read"),
+            is_starred: $row.get::<bool, _>("is_starred"),
+            has_attachments: $row.get::<bool, _>("has_attachments"),
+        }
+    }};
+}
+
 /// List all folders for the authenticated user.
 async fn list_folders(
     State(state): State<AuthState>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<FolderResponse>>, SyncError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
-    let rows = sqlx::query(
+    let folders = db_fetch_all!(
+        db,
         r"
         SELECT f.id, f.account_id, f.name, f.role, f.sort_order,
                f.total_messages, f.unread_messages
@@ -569,14 +598,7 @@ async fn list_folders(
         WHERE a.user_id = ?
         ORDER BY f.sort_order, f.name
         ",
-    )
-    .bind(&user_id)
-    .fetch_all(pool)
-    .await?;
-
-    let folders: Vec<FolderResponse> = rows
-        .iter()
-        .map(|row| FolderResponse {
+        |row| FolderResponse {
             id: row.get("id"),
             account_id: row.get("account_id"),
             name: row.get("name"),
@@ -584,8 +606,9 @@ async fn list_folders(
             sort_order: row.get("sort_order"),
             total_messages: row.get("total_messages"),
             unread_messages: row.get("unread_messages"),
-        })
-        .collect();
+        },
+        &user_id
+    )?;
 
     Ok(Json(folders))
 }
@@ -596,23 +619,26 @@ async fn list_messages(
     Path(folder_id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<MessageResponse>>, SyncError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
     // Verify folder belongs to the user
-    let _check: String = sqlx::query_scalar(
+    let check: Option<String> = db_scalar_optional!(
+        db,
+        String,
         r"
         SELECT f.id FROM folder f
         JOIN mail_account a ON f.account_id = a.id
         WHERE f.id = ? AND a.user_id = ?
         ",
-    )
-    .bind(&folder_id)
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(SyncError::AccountNotFound)?;
+        &folder_id,
+        &user_id
+    )?;
+    if check.is_none() {
+        return Err(SyncError::AccountNotFound);
+    }
 
-    let rows = sqlx::query(
+    let messages = db_fetch_all!(
+        db,
         r"
         SELECT id, account_id, folder_id, subject, from_address,
                to_addresses, cc_addresses, date, snippet,
@@ -623,30 +649,9 @@ async fn list_messages(
         ORDER BY date DESC
         LIMIT 500
         ",
-    )
-    .bind(&folder_id)
-    .fetch_all(pool)
-    .await?;
-
-    let messages: Vec<MessageResponse> = rows
-        .iter()
-        .map(|row| MessageResponse {
-            id: row.get("id"),
-            account_id: row.get("account_id"),
-            folder_id: row.get("folder_id"),
-            subject: row.get("subject"),
-            from_address: row.get("from_address"),
-            to_addresses: row.get("to_addresses"),
-            cc_addresses: row.get("cc_addresses"),
-            date: row.get("date"),
-            snippet: row.get("snippet"),
-            body_text: row.get("body_text"),
-            body_html: row.get("body_html"),
-            is_read: row.get::<bool, _>("is_read"),
-            is_starred: row.get::<bool, _>("is_starred"),
-            has_attachments: row.get::<bool, _>("has_attachments"),
-        })
-        .collect();
+        |row| message_response_from_sql!(row),
+        &folder_id
+    )?;
 
     Ok(Json(messages))
 }
@@ -665,9 +670,9 @@ async fn list_messages_query(
     AuthUser(user_id): AuthUser,
     Query(query): Query<ListMessagesQuery>,
 ) -> Result<Json<Vec<MessageResponse>>, SyncError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
     let messages = query_user_messages(
-        pool,
+        db,
         &user_id,
         query.role.as_deref(),
         query.account_id.as_deref(),
@@ -678,12 +683,13 @@ async fn list_messages_query(
 
 /// List messages for a user, optionally filtered by folder role and account.
 async fn query_user_messages(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     user_id: &str,
     role: Option<&str>,
     account_id: Option<&str>,
 ) -> Result<Vec<MessageResponse>, SyncError> {
-    let rows = sqlx::query(
+    db_fetch_all!(
+        db,
         r"
         SELECT m.id, m.account_id, m.folder_id, m.subject, m.from_address,
                m.to_addresses, m.cc_addresses, m.date, m.snippet,
@@ -699,34 +705,14 @@ async fn query_user_messages(
         ORDER BY m.date DESC
         LIMIT 500
         ",
+        |row| message_response_from_sql!(row),
+        user_id,
+        role,
+        role,
+        account_id,
+        account_id
     )
-    .bind(user_id)
-    .bind(role)
-    .bind(role)
-    .bind(account_id)
-    .bind(account_id)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .iter()
-        .map(|row| MessageResponse {
-            id: row.get("id"),
-            account_id: row.get("account_id"),
-            folder_id: row.get("folder_id"),
-            subject: row.get("subject"),
-            from_address: row.get("from_address"),
-            to_addresses: row.get("to_addresses"),
-            cc_addresses: row.get("cc_addresses"),
-            date: row.get("date"),
-            snippet: row.get("snippet"),
-            body_text: row.get("body_text"),
-            body_html: row.get("body_html"),
-            is_read: row.get::<bool, _>("is_read"),
-            is_starred: row.get::<bool, _>("is_starred"),
-            has_attachments: row.get::<bool, _>("has_attachments"),
-        })
-        .collect())
+    .map_err(SyncError::from)
 }
 
 /// Query for GET /api/v1/messages/search.
@@ -745,7 +731,7 @@ async fn search_messages(
     AuthUser(user_id): AuthUser,
     Query(query): Query<SearchMessagesQuery>,
 ) -> Result<Json<Vec<MessageResponse>>, SyncError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
     let q = query.q.trim();
     if q.is_empty() {
@@ -760,7 +746,8 @@ async fn search_messages(
     let pattern = format!("%{q}%");
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
 
-    let rows = sqlx::query(
+    let messages = db_fetch_all!(
+        db,
         r"
         SELECT m.id, m.account_id, m.folder_id, m.subject, m.from_address,
                m.to_addresses, m.cc_addresses, m.date, m.snippet,
@@ -780,39 +767,18 @@ async fn search_messages(
         ORDER BY m.date DESC
         LIMIT ?
         ",
-    )
-    .bind(&user_id)
-    .bind(&query.account_id)
-    .bind(&query.account_id)
-    .bind(&query.folder_id)
-    .bind(&query.folder_id)
-    .bind(&pattern)
-    .bind(&pattern)
-    .bind(&pattern)
-    .bind(&pattern)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-
-    let messages: Vec<MessageResponse> = rows
-        .iter()
-        .map(|row| MessageResponse {
-            id: row.get("id"),
-            account_id: row.get("account_id"),
-            folder_id: row.get("folder_id"),
-            subject: row.get("subject"),
-            from_address: row.get("from_address"),
-            to_addresses: row.get("to_addresses"),
-            cc_addresses: row.get("cc_addresses"),
-            date: row.get("date"),
-            snippet: row.get("snippet"),
-            body_text: row.get("body_text"),
-            body_html: row.get("body_html"),
-            is_read: row.get::<bool, _>("is_read"),
-            is_starred: row.get::<bool, _>("is_starred"),
-            has_attachments: row.get::<bool, _>("has_attachments"),
-        })
-        .collect();
+        |row| message_response_from_sql!(row),
+        &user_id,
+        &query.account_id,
+        &query.account_id,
+        &query.folder_id,
+        &query.folder_id,
+        &pattern,
+        &pattern,
+        &pattern,
+        &pattern,
+        limit
+    )?;
 
     Ok(Json(messages))
 }
@@ -834,33 +800,29 @@ async fn list_attachments(
     Path(message_id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<AttachmentResponse>>, SyncError> {
-    let pool = get_sqlite_pool(state.db());
-    let _ = load_message_row(pool, &user_id, &message_id).await?;
+    let db = state.db();
+    let _ = load_message_row(db, &user_id, &message_id).await?;
 
-    let rows = sqlx::query(
+    let rows = db_fetch_all!(
+        db,
         r"
         SELECT id, message_id, filename, content_type, size_bytes, is_inline
         FROM attachment
         WHERE message_id = ?
         ORDER BY created_at ASC
         ",
-    )
-    .bind(&message_id)
-    .fetch_all(pool)
-    .await?;
+        |row| AttachmentResponse {
+            id: row.get("id"),
+            message_id: row.get("message_id"),
+            filename: row.get("filename"),
+            content_type: row.get("content_type"),
+            size_bytes: row.get("size_bytes"),
+            is_inline: row.get("is_inline"),
+        },
+        &message_id
+    )?;
 
-    Ok(Json(
-        rows.iter()
-            .map(|row| AttachmentResponse {
-                id: row.get("id"),
-                message_id: row.get("message_id"),
-                filename: row.get("filename"),
-                content_type: row.get("content_type"),
-                size_bytes: row.get("size_bytes"),
-                is_inline: row.get("is_inline"),
-            })
-            .collect(),
-    ))
+    Ok(Json(rows))
 }
 
 async fn download_attachment(
@@ -868,9 +830,10 @@ async fn download_attachment(
     Path(attachment_id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Response, SyncError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
-    let row = sqlx::query(
+    let row = db_fetch_optional!(
+        db,
         r"
         SELECT a.id, a.filename, a.content_type, a.storage_path, a.message_id
         FROM attachment a
@@ -878,16 +841,18 @@ async fn download_attachment(
         JOIN mail_account acc ON m.account_id = acc.id
         WHERE a.id = ? AND acc.user_id = ?
         ",
-    )
-    .bind(&attachment_id)
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await?
+        |row| {
+            let storage_path: String = row.get("storage_path");
+            let filename: Option<String> = row.get("filename");
+            let content_type: Option<String> = row.get("content_type");
+            (storage_path, filename, content_type)
+        },
+        &attachment_id,
+        &user_id
+    )?
     .ok_or(SyncError::MessageNotFound)?;
 
-    let storage_path: String = row.get("storage_path");
-    let filename: Option<String> = row.get("filename");
-    let content_type: Option<String> = row.get("content_type");
+    let (storage_path, filename, content_type) = row;
 
     let bytes = tokio::fs::read(&storage_path).await.map_err(|e| {
         tracing::error!(error = %e, path = %storage_path, "attachment missing on disk");
@@ -913,7 +878,7 @@ async fn download_attachment(
 }
 
 async fn persist_attachments(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     data_dir: &std::path::Path,
     message_id: &str,
     attachments: &[crate::imap::ExtractedAttachment],
@@ -923,10 +888,11 @@ async fn persist_attachments(
     }
 
     // Replace prior attachment rows for this message (re-fetch).
-    sqlx::query("DELETE FROM attachment WHERE message_id = ?")
-        .bind(message_id)
-        .execute(pool)
-        .await?;
+    db_execute!(
+        db,
+        "DELETE FROM attachment WHERE message_id = ?",
+        message_id
+    )?;
 
     let dir = data_dir.join("attachments").join(message_id);
     tokio::fs::create_dir_all(&dir)
@@ -941,32 +907,30 @@ async fn persist_attachments(
             .map_err(|e| SyncError::InvalidInput(format!("cannot write attachment: {e}")))?;
 
         let size = i64::try_from(att.data.len()).unwrap_or(i64::MAX);
-        sqlx::query(
+        db_execute!(
+            db,
             r"
             INSERT INTO attachment (
                 id, message_id, filename, content_type, size_bytes,
                 storage_path, content_id, is_inline
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ",
-        )
-        .bind(&id)
-        .bind(message_id)
-        .bind(&att.filename)
-        .bind(&att.content_type)
-        .bind(size)
-        .bind(path.to_string_lossy().as_ref())
-        .bind(&att.content_id)
-        .bind(att.is_inline)
-        .execute(pool)
-        .await?;
+            &id,
+            message_id,
+            &att.filename,
+            &att.content_type,
+            size,
+            path.to_string_lossy().as_ref(),
+            &att.content_id,
+            att.is_inline
+        )?;
     }
 
-    sqlx::query(
+    db_execute!(
+        db,
         "UPDATE message SET has_attachments = 1, updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(message_id)
-    .execute(pool)
-    .await?;
+        message_id
+    )?;
 
     Ok(())
 }
@@ -1020,11 +984,12 @@ fn message_response_from_row(row: &MessageRow) -> MessageResponse {
 }
 
 async fn load_message_row(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     user_id: &str,
     message_id: &str,
 ) -> Result<MessageRow, SyncError> {
-    let row = sqlx::query(
+    db_fetch_optional!(
+        db,
         r"
         SELECT m.id, m.account_id, m.folder_id, m.external_id,
                m.subject, m.from_address, m.to_addresses, m.cc_addresses,
@@ -1037,65 +1002,70 @@ async fn load_message_row(
         JOIN mail_account a ON m.account_id = a.id
         WHERE m.id = ? AND a.user_id = ? AND m.is_deleted = 0
         ",
-    )
-    .bind(message_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(SyncError::MessageNotFound)?;
-
-    Ok(MessageRow {
-        id: row.get("id"),
-        account_id: row.get("account_id"),
-        folder_id: row.get("folder_id"),
-        folder_name: row.get("folder_name"),
-        external_id: row.get("external_id"),
-        protocol: row.get("protocol"),
-        body_text: row.get("body_text"),
-        body_html: row.get("body_html"),
-        is_read: row.get("is_read"),
-        is_starred: row.get("is_starred"),
-        subject: row.get("subject"),
-        from_address: row.get("from_address"),
-        to_addresses: row.get("to_addresses"),
-        cc_addresses: row.get("cc_addresses"),
-        date: row.get("date"),
-        snippet: row.get("snippet"),
-        has_attachments: row.get("has_attachments"),
-    })
+        |row| MessageRow {
+            id: row.get("id"),
+            account_id: row.get("account_id"),
+            folder_id: row.get("folder_id"),
+            folder_name: row.get("folder_name"),
+            external_id: row.get("external_id"),
+            protocol: row.get("protocol"),
+            body_text: row.get("body_text"),
+            body_html: row.get("body_html"),
+            is_read: row.get("is_read"),
+            is_starred: row.get("is_starred"),
+            subject: row.get("subject"),
+            from_address: row.get("from_address"),
+            to_addresses: row.get("to_addresses"),
+            cc_addresses: row.get("cc_addresses"),
+            date: row.get("date"),
+            snippet: row.get("snippet"),
+            has_attachments: row.get("has_attachments"),
+        },
+        message_id,
+        user_id
+    )?
+    .ok_or(SyncError::MessageNotFound)
 }
 
 async fn connect_imap_for_account(
     db: &DbPool,
-    pool: &sqlx::SqlitePool,
     user_id: &str,
     account_id: &str,
 ) -> Result<(ImapClient, String), SyncError> {
-    let row = sqlx::query(
+    let row = db_fetch_optional!(
+        db,
         r"
         SELECT email_address, credential, imap_host, imap_port, imap_security, protocol
         FROM mail_account
         WHERE id = ? AND user_id = ? AND is_active = 1
         ",
-    )
-    .bind(account_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?
+        |row| {
+            let protocol: String = row.get("protocol");
+            let imap_host: Option<String> = row.get("imap_host");
+            let imap_port: Option<i32> = row.get("imap_port");
+            let imap_security: Option<String> = row.get("imap_security");
+            let email_address: String = row.get("email_address");
+            let credential_json: String = row.get("credential");
+            (
+                protocol,
+                imap_host,
+                imap_port,
+                imap_security,
+                email_address,
+                credential_json,
+            )
+        },
+        account_id,
+        user_id
+    )?
     .ok_or(SyncError::AccountNotFound)?;
 
-    let protocol: String = row.get("protocol");
+    let (protocol, imap_host, imap_port, imap_security, email_address, credential_json) = row;
     if protocol != "imap" {
         return Err(SyncError::InvalidInput(
             "remote flag/move ops require an IMAP account in v1".into(),
         ));
     }
-
-    let imap_host: Option<String> = row.get("imap_host");
-    let imap_port: Option<i32> = row.get("imap_port");
-    let imap_security: Option<String> = row.get("imap_security");
-    let email_address: String = row.get("email_address");
-    let credential_json: String = row.get("credential");
 
     let host =
         imap_host.ok_or_else(|| SyncError::InvalidInput("IMAP host not configured".into()))?;
@@ -1140,20 +1110,20 @@ async fn get_message(
     Path(message_id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<MessageResponse>, SyncError> {
-    let pool = get_sqlite_pool(state.db());
-    let mut row = load_message_row(pool, &user_id, &message_id).await?;
+    let db = state.db();
+    let mut row = load_message_row(db, &user_id, &message_id).await?;
 
     let needs_body = row.body_text.is_none() && row.body_html.is_none();
     if needs_body
         && row.protocol == "imap"
         && let Ok(uid) = parse_imap_uid(row.external_id.as_deref())
     {
-        let (mut client, _) =
-            connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
+        let (mut client, _) = connect_imap_for_account(db, &user_id, &row.account_id).await?;
         client.select(&row.folder_name).await?;
         let bodies = client.fetch_bodies(&[uid]).await?;
         if let Some(fetched) = bodies.into_iter().next() {
-            sqlx::query(
+            db_execute!(
+                db,
                 r"
                     UPDATE message
                     SET body_text = ?, body_html = ?, has_attachments = ?,
@@ -1161,24 +1131,20 @@ async fn get_message(
                         updated_at = datetime('now')
                     WHERE id = ?
                     ",
-            )
-            .bind(&fetched.body_text)
-            .bind(&fetched.body_html)
-            .bind(fetched.has_attachments)
-            .bind(
+                &fetched.body_text,
+                &fetched.body_html,
+                fetched.has_attachments,
                 fetched
                     .body_text
                     .as_deref()
                     .map(|t| t.chars().take(120).collect::<String>()),
-            )
-            .bind(&row.id)
-            .execute(pool)
-            .await?;
+                &row.id
+            )?;
 
             row.body_text = fetched.body_text;
             row.body_html = fetched.body_html;
             row.has_attachments = fetched.has_attachments || !fetched.attachments.is_empty();
-            persist_attachments(pool, &state.data_dir, &row.id, &fetched.attachments).await?;
+            persist_attachments(db, &state.data_dir, &row.id, &fetched.attachments).await?;
         }
     }
 
@@ -1192,8 +1158,8 @@ async fn patch_message(
     AuthUser(user_id): AuthUser,
     Json(body): Json<PatchMessageRequest>,
 ) -> Result<Json<MessageResponse>, SyncError> {
-    let pool = get_sqlite_pool(state.db());
-    let mut row = load_message_row(pool, &user_id, &message_id).await?;
+    let db = state.db();
+    let mut row = load_message_row(db, &user_id, &message_id).await?;
 
     if body.is_read.is_none() && body.is_starred.is_none() {
         return Err(SyncError::InvalidInput(
@@ -1206,8 +1172,7 @@ async fn patch_message(
 
     if row.protocol == "imap" && (body.is_read.is_some() || body.is_starred.is_some()) {
         let uid = parse_imap_uid(row.external_id.as_deref())?;
-        let (mut client, _) =
-            connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
+        let (mut client, _) = connect_imap_for_account(db, &user_id, &row.account_id).await?;
         client.select(&row.folder_name).await?;
 
         if let Some(is_read) = body.is_read {
@@ -1226,24 +1191,23 @@ async fn patch_message(
         }
     }
 
-    sqlx::query(
+    db_execute!(
+        db,
         r"
         UPDATE message
         SET is_read = ?, is_starred = ?, updated_at = datetime('now')
         WHERE id = ?
         ",
-    )
-    .bind(next_read)
-    .bind(next_star)
-    .bind(&row.id)
-    .execute(pool)
-    .await?;
+        next_read,
+        next_star,
+        &row.id
+    )?;
 
     row.is_read = next_read;
     row.is_starred = next_star;
 
     // Keep folder unread counts roughly consistent.
-    update_folder_counts(pool, &row.folder_id).await?;
+    update_folder_counts(db, &row.folder_id).await?;
 
     Ok(Json(message_response_from_row(&row)))
 }
@@ -1287,8 +1251,8 @@ async fn snooze_message(
     AuthUser(user_id): AuthUser,
     Json(body): Json<SnoozeRequest>,
 ) -> Result<Json<serde_json::Value>, SyncError> {
-    let pool = get_sqlite_pool(state.db());
-    let row = load_message_row(pool, &user_id, &message_id).await?;
+    let db = state.db();
+    let row = load_message_row(db, &user_id, &message_id).await?;
 
     let until_utc = chrono::DateTime::parse_from_rfc3339(&body.until)
         .map_err(|_| SyncError::InvalidInput("until must be RFC3339".into()))?
@@ -1296,21 +1260,20 @@ async fn snooze_message(
     let until_api = until_utc.to_rfc3339();
     let until_sql = sqlite_utc_datetime(until_utc);
 
-    sqlx::query(
+    db_execute!(
+        db,
         r"
         UPDATE message
         SET snoozed_until = ?, updated_at = datetime('now')
         WHERE id = ?
         ",
-    )
-    .bind(&until_sql)
-    .bind(&row.id)
-    .execute(pool)
-    .await?;
+        &until_sql,
+        &row.id
+    )?;
 
     // Job claim compares `run_at` to RFC3339 `now` from chrono — keep that format.
     crate::jobs::enqueue(
-        pool,
+        db,
         &crate::jobs::JobPayload::UnsnoozeMessage {
             message_id: row.id.clone(),
         },
@@ -1330,29 +1293,36 @@ async fn move_message_to_role(
     user_id: String,
     role: &str,
 ) -> Result<Json<serde_json::Value>, SyncError> {
-    let pool = get_sqlite_pool(state.db());
-    let row = load_message_row(pool, &user_id, &message_id).await?;
+    let db = state.db();
+    let row = load_message_row(db, &user_id, &message_id).await?;
 
-    let dest = sqlx::query(
+    let dest = db_fetch_optional!(
+        db,
         r"
         SELECT id, external_id, name FROM folder
         WHERE account_id = ? AND role = ?
         ORDER BY sort_order ASC
         LIMIT 1
         ",
-    )
-    .bind(&row.account_id)
-    .bind(role)
-    .fetch_optional(pool)
-    .await?;
+        |dest| {
+            let dest_id: String = dest.get("id");
+            let dest_name: String = dest
+                .get::<Option<String>, _>("external_id")
+                .unwrap_or_else(|| dest.get("name"));
+            (dest_id, dest_name)
+        },
+        &row.account_id,
+        role
+    )?;
 
-    let Some(dest) = dest else {
+    let Some((dest_id, dest_name)) = dest else {
         // No destination folder: soft-delete locally.
-        sqlx::query("UPDATE message SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?")
-            .bind(&row.id)
-            .execute(pool)
-            .await?;
-        update_folder_counts(pool, &row.folder_id).await?;
+        db_execute!(
+            db,
+            "UPDATE message SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?",
+            &row.id
+        )?;
+        update_folder_counts(db, &row.folder_id).await?;
         return Ok(Json(serde_json::json!({
             "status": "ok",
             "action": "soft_delete",
@@ -1360,33 +1330,26 @@ async fn move_message_to_role(
         })));
     };
 
-    let dest_id: String = dest.get("id");
-    let dest_name: String = dest
-        .get::<Option<String>, _>("external_id")
-        .unwrap_or_else(|| dest.get("name"));
-
     if row.protocol == "imap" {
         let uid = parse_imap_uid(row.external_id.as_deref())?;
-        let (mut client, _) =
-            connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
+        let (mut client, _) = connect_imap_for_account(db, &user_id, &row.account_id).await?;
         client.select(&row.folder_name).await?;
         client.move_uid(uid, &dest_name).await?;
     }
 
-    sqlx::query(
+    db_execute!(
+        db,
         r"
         UPDATE message
         SET folder_id = ?, updated_at = datetime('now')
         WHERE id = ?
         ",
-    )
-    .bind(&dest_id)
-    .bind(&row.id)
-    .execute(pool)
-    .await?;
+        &dest_id,
+        &row.id
+    )?;
 
-    update_folder_counts(pool, &row.folder_id).await?;
-    update_folder_counts(pool, &dest_id).await?;
+    update_folder_counts(db, &row.folder_id).await?;
+    update_folder_counts(db, &dest_id).await?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -1408,30 +1371,31 @@ pub async fn run_account_sync(
     user_id: &str,
     account_id: &str,
 ) -> Result<SyncResponse, SyncError> {
-    let pool = get_sqlite_pool(db);
-
-    let row = sqlx::query(
+    let row = db_fetch_optional!(
+        db,
         r"
         SELECT receive_protocol, protocol, is_active, sync_enabled
         FROM mail_account
         WHERE id = ? AND user_id = ?
         ",
-    )
-    .bind(account_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?
+        |row| {
+            let is_active: bool = row.get("is_active");
+            let sync_enabled: bool = row.get("sync_enabled");
+            let receive_protocol: Option<String> = row.get("receive_protocol");
+            let protocol: String = row.get("protocol");
+            (is_active, sync_enabled, receive_protocol, protocol)
+        },
+        account_id,
+        user_id
+    )?
     .ok_or(SyncError::AccountNotFound)?;
 
-    let is_active: bool = row.get("is_active");
-    let sync_enabled: bool = row.get("sync_enabled");
+    let (is_active, sync_enabled, receive_protocol, protocol) = row;
 
     if !is_active || !sync_enabled {
         return Err(SyncError::AccountDisabled);
     }
 
-    let receive_protocol: Option<String> = row.get("receive_protocol");
-    let protocol: String = row.get("protocol");
     let receive_id = receive_protocol
         .filter(|s| !s.is_empty())
         .unwrap_or(protocol);
@@ -1447,10 +1411,11 @@ pub async fn run_account_sync(
         .await
         .map_err(SyncError::Protocol)?;
 
-    sqlx::query("UPDATE mail_account SET last_sync_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
-        .bind(account_id)
-        .execute(pool)
-        .await?;
+    db_execute!(
+        db,
+        "UPDATE mail_account SET last_sync_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+        account_id
+    )?;
 
     Ok(SyncResponse {
         account_id: account_id.to_string(),
@@ -1468,14 +1433,13 @@ pub(crate) async fn imap_sync_account(
     user_id: &str,
     account_id: &str,
 ) -> Result<SyncOutcome, SyncError> {
-    let pool = get_sqlite_pool(db);
-    let row = load_account_sync_row(pool, user_id, account_id).await?;
-    let credential_json: String = row.get("credential");
+    let row = load_account_sync_row(db, user_id, account_id).await?;
+    let credential_json = row.credential.clone();
     let dek = crate::auth::AuthState::get_user_dek(db, user_id)
         .await
         .map_err(|e| SyncError::Crypto(e.to_string()))?;
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
-    let result = run_imap_sync(pool, account_id, &row, &password).await?;
+    let result = run_imap_sync(db, account_id, &row, &password).await?;
     Ok(outcome_from_response(&result))
 }
 
@@ -1487,38 +1451,47 @@ pub(crate) async fn jmap_sync_account(
     user_id: &str,
     account_id: &str,
 ) -> Result<SyncOutcome, SyncError> {
-    let pool = get_sqlite_pool(db);
-    let row = load_account_sync_row(pool, user_id, account_id).await?;
-    let credential_json: String = row.get("credential");
-    let email_address: String = row.get("email_address");
-    let jmap_base_url: Option<String> = row.get("jmap_base_url");
+    let row = load_account_sync_row(db, user_id, account_id).await?;
+    let credential_json = row.credential.clone();
+    let email_address = row.email_address.clone();
+    let jmap_base_url = row.jmap_base_url.clone();
     let dek = crate::auth::AuthState::get_user_dek(db, user_id)
         .await
         .map_err(|e| SyncError::Crypto(e.to_string()))?;
 
     let result = if let Some(ref base_url) = jmap_base_url {
         let password = crate::jmap::decrypt_account_password(&credential_json, &dek)?;
-        match run_jmap_sync(pool, account_id, base_url, &email_address, &password).await {
+        match run_jmap_sync(db, account_id, base_url, &email_address, &password).await {
             Ok(result) => result,
             Err(e) => {
                 tracing::warn!("JMAP sync failed ({e}), falling back to IMAP");
                 let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
-                run_imap_sync(pool, account_id, &row, &password).await?
+                run_imap_sync(db, account_id, &row, &password).await?
             }
         }
     } else {
         let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
-        run_imap_sync(pool, account_id, &row, &password).await?
+        run_imap_sync(db, account_id, &row, &password).await?
     };
     Ok(outcome_from_response(&result))
 }
 
+pub(crate) struct AccountSyncRow {
+    email_address: String,
+    credential: String,
+    imap_host: Option<String>,
+    imap_port: Option<i32>,
+    imap_security: Option<String>,
+    jmap_base_url: Option<String>,
+}
+
 async fn load_account_sync_row(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     user_id: &str,
     account_id: &str,
-) -> Result<sqlx::sqlite::SqliteRow, SyncError> {
-    sqlx::query(
+) -> Result<AccountSyncRow, SyncError> {
+    db_fetch_optional!(
+        db,
         r"
         SELECT id, email_address, protocol, credential,
                imap_host, imap_port, imap_security,
@@ -1527,11 +1500,17 @@ async fn load_account_sync_row(
         FROM mail_account
         WHERE id = ? AND user_id = ?
         ",
-    )
-    .bind(account_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?
+        |row| AccountSyncRow {
+            email_address: row.get("email_address"),
+            credential: row.get("credential"),
+            imap_host: row.get("imap_host"),
+            imap_port: row.get("imap_port"),
+            imap_security: row.get("imap_security"),
+            jmap_base_url: row.get("jmap_base_url"),
+        },
+        account_id,
+        user_id
+    )?
     .ok_or(SyncError::AccountNotFound)
 }
 
@@ -1548,15 +1527,15 @@ fn outcome_from_response(result: &SyncResponse) -> SyncOutcome {
 /// using UIDVALIDITY + UID cursors.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn run_imap_sync(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
-    row: &sqlx::sqlite::SqliteRow,
+    row: &AccountSyncRow,
     password: &str,
 ) -> Result<SyncResponse, SyncError> {
-    let imap_host: Option<String> = row.get("imap_host");
-    let imap_port: Option<i32> = row.get("imap_port");
-    let imap_security: Option<String> = row.get("imap_security");
-    let email_address: String = row.get("email_address");
+    let imap_host = row.imap_host.clone();
+    let imap_port = row.imap_port;
+    let imap_security = row.imap_security.clone();
+    let email_address = row.email_address.clone();
 
     let host = imap_host.ok_or_else(|| SyncError::Crypto("IMAP host not configured".into()))?;
     let port = u16::try_from(imap_port.unwrap_or(993)).unwrap_or(993);
@@ -1586,7 +1565,7 @@ pub(crate) async fn run_imap_sync(
     let mut folders_synced = 0;
 
     for folder in &folders {
-        upsert_folder(pool, account_id, &folder.name, folder.delimiter.as_deref()).await?;
+        upsert_folder(db, account_id, &folder.name, folder.delimiter.as_deref()).await?;
         folders_synced += 1;
     }
 
@@ -1596,12 +1575,12 @@ pub(crate) async fn run_imap_sync(
     let total_deleted = 0;
 
     for folder in &folders {
-        let folder_id = get_folder_id(pool, account_id, &folder.name).await?;
+        let folder_id = get_folder_id(db, account_id, &folder.name).await?;
 
         let (uid_validity, _uid_next, _exists) = client.select(&folder.name).await?;
 
         // Load existing cursor
-        let cursor = load_cursor(pool, account_id, &folder_id).await?;
+        let cursor = load_cursor(db, account_id, &folder_id).await?;
 
         // Check if UIDVALIDITY changed — if so, we need a full resync
         let after_uid = if let Some(ref c) = cursor {
@@ -1609,7 +1588,7 @@ pub(crate) async fn run_imap_sync(
                 Some(c.last_uid)
             } else {
                 // UIDVALIDITY changed: clear old messages for this folder and resync
-                clear_folder_messages(pool, &folder_id).await?;
+                clear_folder_messages(db, &folder_id).await?;
                 None
             }
         } else {
@@ -1628,7 +1607,7 @@ pub(crate) async fn run_imap_sync(
 
         // Upsert each message
         for msg in &messages {
-            let was_new = upsert_message(pool, account_id, &folder_id, msg).await?;
+            let was_new = upsert_message(db, account_id, &folder_id, msg).await?;
             if was_new {
                 total_new += 1;
             } else {
@@ -1640,7 +1619,7 @@ pub(crate) async fn run_imap_sync(
         let max_uid = messages.iter().map(|m| m.uid).max().unwrap_or(0);
         let new_cursor_uid = std::cmp::max(max_uid, cursor.map_or(0, |c| c.last_uid));
         save_cursor(
-            pool,
+            db,
             account_id,
             &folder_id,
             "imap",
@@ -1650,7 +1629,7 @@ pub(crate) async fn run_imap_sync(
         .await?;
 
         // Update folder counts
-        update_folder_counts(pool, &folder_id).await?;
+        update_folder_counts(db, &folder_id).await?;
     }
 
     // Clean logout
@@ -1671,7 +1650,7 @@ pub(crate) async fn run_imap_sync(
 /// Discovers the JMAP session, lists mailboxes, queries emails,
 /// and upserts them into the database.
 pub(crate) async fn run_jmap_sync(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
     jmap_base_url: &str,
     email: &str,
@@ -1685,7 +1664,7 @@ pub(crate) async fn run_jmap_sync(
     let mut folders_synced = 0;
 
     for mb in &mailboxes {
-        upsert_folder(pool, account_id, &mb.name, mb.role.as_deref()).await?;
+        upsert_folder(db, account_id, &mb.name, mb.role.as_deref()).await?;
         folders_synced += 1;
     }
 
@@ -1694,10 +1673,10 @@ pub(crate) async fn run_jmap_sync(
     let mut total_updated = 0;
 
     for mb in &mailboxes {
-        let folder_id = get_folder_id(pool, account_id, &mb.name).await?;
+        let folder_id = get_folder_id(db, account_id, &mb.name).await?;
 
         // Load stored JMAP state (raw queryState token, sent back as sinceState)
-        let since_state = load_jmap_cursor(pool, account_id, &folder_id).await?;
+        let since_state = load_jmap_cursor(db, account_id, &folder_id).await?;
 
         // Query emails
         let query_result = client
@@ -1713,7 +1692,7 @@ pub(crate) async fn run_jmap_sync(
 
         // Upsert each email
         for email_obj in &emails {
-            let was_new = upsert_jmap_message(pool, account_id, &folder_id, email_obj).await?;
+            let was_new = upsert_jmap_message(db, account_id, &folder_id, email_obj).await?;
             if was_new {
                 total_new += 1;
             } else {
@@ -1723,10 +1702,10 @@ pub(crate) async fn run_jmap_sync(
 
         // Save JMAP cursor: store the raw queryState token verbatim
         if let Some(ref qs) = query_result.query_state {
-            save_jmap_cursor(pool, account_id, &folder_id, qs).await?;
+            save_jmap_cursor(db, account_id, &folder_id, qs).await?;
         }
 
-        update_folder_counts(pool, &folder_id).await?;
+        update_folder_counts(db, &folder_id).await?;
     }
 
     Ok(SyncResponse {
@@ -1743,19 +1722,20 @@ pub(crate) async fn run_jmap_sync(
 ///
 /// Returns `true` if the message was newly inserted, `false` if updated.
 async fn upsert_jmap_message(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
     folder_id: &str,
     email: &crate::jmap::JmapEmail,
 ) -> Result<bool, SyncError> {
     let external_id = &email.id;
 
-    let existing: Option<String> =
-        sqlx::query_scalar("SELECT id FROM message WHERE account_id = ? AND external_id = ?")
-            .bind(account_id)
-            .bind(external_id)
-            .fetch_optional(pool)
-            .await?;
+    let existing: Option<String> = db_scalar_optional!(
+        db,
+        String,
+        "SELECT id FROM message WHERE account_id = ? AND external_id = ?",
+        account_id,
+        external_id
+    )?;
 
     let is_read = email.is_seen();
     let is_starred = email.is_flagged();
@@ -1790,7 +1770,8 @@ async fn upsert_jmap_message(
     let flags_json = serde_json::to_string(&email.keywords).unwrap_or_else(|_| "{}".into());
 
     if let Some(id) = existing {
-        sqlx::query(
+        db_execute!(
+            db,
             r"
             UPDATE message SET
                 is_read = ?,
@@ -1799,19 +1780,18 @@ async fn upsert_jmap_message(
                 updated_at = datetime('now')
             WHERE id = ?
             ",
-        )
-        .bind(is_read)
-        .bind(is_starred)
-        .bind(&flags_json)
-        .bind(&id)
-        .execute(pool)
-        .await?;
+            is_read,
+            is_starred,
+            &flags_json,
+            &id
+        )?;
 
         Ok(false)
     } else {
         let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
 
-        sqlx::query(
+        db_execute!(
+            db,
             r"
             INSERT INTO message (
                 id, account_id, folder_id, external_id,
@@ -1821,35 +1801,31 @@ async fn upsert_jmap_message(
                 snippet, has_attachments, body_text, body_html
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
-        )
-        .bind(&id)
-        .bind(account_id)
-        .bind(folder_id)
-        .bind(external_id)
-        .bind(email.message_id_header())
-        .bind(&email.subject)
-        .bind(&from_json)
-        .bind(&to_json)
-        .bind(&cc_json)
-        .bind(&email.received_at)
-        .bind(is_read)
-        .bind(is_starred)
-        .bind(&flags_json)
-        .bind(email.size.map(|s| i32::try_from(s).unwrap_or(i32::MAX)))
-        .bind(
+            &id,
+            account_id,
+            folder_id,
+            external_id,
+            email.message_id_header(),
+            &email.subject,
+            &from_json,
+            &to_json,
+            &cc_json,
+            &email.received_at,
+            is_read,
+            is_starred,
+            &flags_json,
+            email.size.map(|s| i32::try_from(s).unwrap_or(i32::MAX)),
             email
                 .in_reply_to
                 .as_ref()
                 .and_then(|ids| ids.first())
                 .cloned(),
-        )
-        .bind(email.references.as_ref().map(|refs| refs.join(" ")))
-        .bind(&snippet)
-        .bind(email.has_attachment.unwrap_or(false))
-        .bind(email.body_text())
-        .bind(email.body_html())
-        .execute(pool)
-        .await?;
+            email.references.as_ref().map(|refs| refs.join(" ")),
+            &snippet,
+            email.has_attachment.unwrap_or(false),
+            email.body_text(),
+            email.body_html()
+        )?;
 
         Ok(true)
     }
@@ -1857,20 +1833,12 @@ async fn upsert_jmap_message(
 
 // ── Database helpers ────────────────────────────────────────────────
 
-fn get_sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
-    match db {
-        DbPool::Sqlite(pool) => pool,
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => panic!("PostgreSQL not supported yet"),
-    }
-}
-
 /// Upsert a folder by `(account_id, name)`.
 ///
 /// Returns `Ok(())` on success. Uses the `external_id` field to store
 /// the IMAP folder name for uniqueness.
 async fn upsert_folder(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
     name: &str,
     _delimiter: Option<&str>,
@@ -1879,56 +1847,50 @@ async fn upsert_folder(
     let external_id = name;
 
     // Try to find existing folder
-    let existing: Option<String> =
-        sqlx::query_scalar("SELECT id FROM folder WHERE account_id = ? AND external_id = ?")
-            .bind(account_id)
-            .bind(external_id)
-            .fetch_optional(pool)
-            .await?;
+    let existing: Option<String> = db_scalar_optional!(
+        db,
+        String,
+        "SELECT id FROM folder WHERE account_id = ? AND external_id = ?",
+        account_id,
+        external_id
+    )?;
 
     if let Some(id) = existing {
-        // Update
-        sqlx::query("UPDATE folder SET name = ?, updated_at = datetime('now') WHERE id = ?")
-            .bind(name)
-            .bind(&id)
-            .execute(pool)
-            .await?;
+        db_execute!(
+            db,
+            "UPDATE folder SET name = ?, updated_at = datetime('now') WHERE id = ?",
+            name,
+            &id
+        )?;
     } else {
-        // Insert
         let id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-        sqlx::query(
+        db_execute!(
+            db,
             r"
             INSERT INTO folder (id, account_id, external_id, name, role, sort_order)
             VALUES (?, ?, ?, ?, ?, 0)
             ",
-        )
-        .bind(&id)
-        .bind(account_id)
-        .bind(external_id)
-        .bind(name)
-        .bind(role)
-        .execute(pool)
-        .await?;
+            &id,
+            account_id,
+            external_id,
+            name,
+            role
+        )?;
     }
 
     Ok(())
 }
 
 /// Get the local folder ID by `external_id`.
-async fn get_folder_id(
-    pool: &sqlx::SqlitePool,
-    account_id: &str,
-    name: &str,
-) -> Result<String, SyncError> {
-    let id: String =
-        sqlx::query_scalar("SELECT id FROM folder WHERE account_id = ? AND external_id = ?")
-            .bind(account_id)
-            .bind(name)
-            .fetch_optional(pool)
-            .await?
-            .ok_or_else(|| SyncError::Database(sqlx::Error::RowNotFound))?;
-
-    Ok(id)
+async fn get_folder_id(db: &DbPool, account_id: &str, name: &str) -> Result<String, SyncError> {
+    db_scalar_optional!(
+        db,
+        String,
+        "SELECT id FROM folder WHERE account_id = ? AND external_id = ?",
+        account_id,
+        name
+    )?
+    .ok_or_else(|| SyncError::Database(sqlx::Error::RowNotFound))
 }
 
 /// Infer folder role from name.
@@ -1961,33 +1923,29 @@ struct SyncCursorInfo {
 
 /// Load the sync cursor for a folder.
 async fn load_cursor(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
     folder_id: &str,
 ) -> Result<Option<SyncCursorInfo>, SyncError> {
-    let row = sqlx::query(
+    let value: Option<String> = db_scalar_optional!(
+        db,
+        String,
         r"
         SELECT cursor_value
         FROM sync_cursor
         WHERE account_id = ? AND folder_id = ? AND cursor_type = 'uidvalidity_uid'
         ",
-    )
-    .bind(account_id)
-    .bind(folder_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row.map(|r| {
-        let value: String = r.get("cursor_value");
-        parse_cursor_value(&value)
-    }))
+        account_id,
+        folder_id
+    )?;
+    Ok(value.as_deref().map(parse_cursor_value))
 }
 
 /// Save the sync cursor for a folder.
 ///
 /// Cursor format: `{uid_validity}:{last_uid}` for the `uidvalidity_uid` type.
 async fn save_cursor(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
     folder_id: &str,
     protocol: &str,
@@ -1997,21 +1955,20 @@ async fn save_cursor(
     let cursor_value = format!("{uid_validity}:{last_uid}");
     let cursor_id = format!("{account_id}:{folder_id}:uidvalidity_uid");
 
-    sqlx::query(
+    db_execute!(
+        db,
         r"
         INSERT INTO sync_cursor (id, account_id, folder_id, protocol, cursor_type, cursor_value, updated_at)
         VALUES (?, ?, ?, ?, 'uidvalidity_uid', ?, datetime('now'))
         ON CONFLICT(account_id, folder_id, cursor_type)
         DO UPDATE SET cursor_value = excluded.cursor_value, updated_at = excluded.updated_at
         ",
-    )
-    .bind(&cursor_id)
-    .bind(account_id)
-    .bind(folder_id)
-    .bind(protocol)
-    .bind(&cursor_value)
-    .execute(pool)
-    .await?;
+        &cursor_id,
+        account_id,
+        folder_id,
+        protocol,
+        &cursor_value
+    )?;
 
     Ok(())
 }
@@ -2036,23 +1993,22 @@ fn parse_cursor_value(value: &str) -> SyncCursorInfo {
 ///
 /// Returns the raw token to be sent verbatim as `sinceState` on the next sync.
 async fn load_jmap_cursor(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
     folder_id: &str,
 ) -> Result<Option<String>, SyncError> {
-    let value = sqlx::query_scalar(
+    db_scalar_optional!(
+        db,
+        String,
         r"
         SELECT cursor_value
         FROM sync_cursor
         WHERE account_id = ? AND folder_id = ? AND cursor_type = 'state_token'
         ",
+        account_id,
+        folder_id
     )
-    .bind(account_id)
-    .bind(folder_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(value)
+    .map_err(SyncError::from)
 }
 
 /// Save the JMAP `queryState` token for a folder.
@@ -2060,27 +2016,26 @@ async fn load_jmap_cursor(
 /// The token is an opaque server string and is stored verbatim — never hashed —
 /// so it can be sent back as `sinceState` on the next sync.
 async fn save_jmap_cursor(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
     folder_id: &str,
     query_state: &str,
 ) -> Result<(), SyncError> {
     let cursor_id = format!("{account_id}:{folder_id}:state_token");
 
-    sqlx::query(
+    db_execute!(
+        db,
         r"
         INSERT INTO sync_cursor (id, account_id, folder_id, protocol, cursor_type, cursor_value, updated_at)
         VALUES (?, ?, ?, 'jmap', 'state_token', ?, datetime('now'))
         ON CONFLICT(account_id, folder_id, cursor_type)
         DO UPDATE SET cursor_value = excluded.cursor_value, updated_at = excluded.updated_at
         ",
-    )
-    .bind(&cursor_id)
-    .bind(account_id)
-    .bind(folder_id)
-    .bind(query_state)
-    .execute(pool)
-    .await?;
+        &cursor_id,
+        account_id,
+        folder_id,
+        query_state
+    )?;
 
     Ok(())
 }
@@ -2091,7 +2046,7 @@ async fn save_jmap_cursor(
 ///
 /// Returns `true` if the message was newly inserted, `false` if updated.
 async fn upsert_message(
-    pool: &sqlx::SqlitePool,
+    db: &DbPool,
     account_id: &str,
     folder_id: &str,
     msg: &ImapMessage,
@@ -2099,12 +2054,13 @@ async fn upsert_message(
     let external_id = msg.uid.to_string();
 
     // Check if message already exists
-    let existing: Option<String> =
-        sqlx::query_scalar("SELECT id FROM message WHERE account_id = ? AND external_id = ?")
-            .bind(account_id)
-            .bind(&external_id)
-            .fetch_optional(pool)
-            .await?;
+    let existing: Option<String> = db_scalar_optional!(
+        db,
+        String,
+        "SELECT id FROM message WHERE account_id = ? AND external_id = ?",
+        account_id,
+        &external_id
+    )?;
 
     let flags_json = serde_json::to_string(&msg.flags).unwrap_or_else(|_| "{}".into());
     let is_read = msg
@@ -2137,7 +2093,8 @@ async fn upsert_message(
         existing.unwrap_or_else(|| Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string());
 
     // INSERT snoozed_until as NULL; ON CONFLICT must not overwrite an existing snooze.
-    sqlx::query(
+    db_execute!(
+        db,
         r"
         INSERT INTO message (
             id, account_id, folder_id, external_id,
@@ -2152,72 +2109,61 @@ async fn upsert_message(
             flags = excluded.flags,
             updated_at = datetime('now')
         ",
-    )
-    .bind(&id)
-    .bind(account_id)
-    .bind(folder_id)
-    .bind(&external_id)
-    .bind(&msg.message_id)
-    .bind(&msg.subject)
-    .bind(&from_json)
-    .bind(&to_json)
-    .bind(&msg.cc)
-    .bind(&msg.date)
-    .bind(is_read)
-    .bind(is_starred)
-    .bind(&flags_json)
-    .bind(msg.size.map(i32::try_from).transpose().unwrap_or(None))
-    .bind(&msg.in_reply_to)
-    .bind(&msg.references)
-    .bind(&snippet)
-    .bind(msg.has_attachments)
-    .bind(&msg.body_text)
-    .bind(&msg.body_html)
-    .execute(pool)
-    .await?;
+        &id,
+        account_id,
+        folder_id,
+        &external_id,
+        &msg.message_id,
+        &msg.subject,
+        &from_json,
+        &to_json,
+        &msg.cc,
+        &msg.date,
+        is_read,
+        is_starred,
+        &flags_json,
+        msg.size.map(i32::try_from).transpose().unwrap_or(None),
+        &msg.in_reply_to,
+        &msg.references,
+        &snippet,
+        msg.has_attachments,
+        &msg.body_text,
+        &msg.body_html
+    )?;
 
     Ok(was_new)
 }
 
 /// Delete all messages in a folder (used when UIDVALIDITY changes).
-async fn clear_folder_messages(pool: &sqlx::SqlitePool, folder_id: &str) -> Result<(), SyncError> {
-    sqlx::query("DELETE FROM message WHERE folder_id = ?")
-        .bind(folder_id)
-        .execute(pool)
-        .await?;
-
-    // Also clear the cursor
-    sqlx::query("DELETE FROM sync_cursor WHERE folder_id = ?")
-        .bind(folder_id)
-        .execute(pool)
-        .await?;
-
+async fn clear_folder_messages(db: &DbPool, folder_id: &str) -> Result<(), SyncError> {
+    db_execute!(db, "DELETE FROM message WHERE folder_id = ?", folder_id)?;
+    db_execute!(db, "DELETE FROM sync_cursor WHERE folder_id = ?", folder_id)?;
     Ok(())
 }
 
 /// Update folder message counts from the message table.
-async fn update_folder_counts(pool: &sqlx::SqlitePool, folder_id: &str) -> Result<(), SyncError> {
-    let total: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = 0")
-            .bind(folder_id)
-            .fetch_one(pool)
-            .await?;
+async fn update_folder_counts(db: &DbPool, folder_id: &str) -> Result<(), SyncError> {
+    let total: i64 = db_scalar!(
+        db,
+        i64,
+        "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = 0",
+        folder_id
+    )?;
 
-    let unread: i64 = sqlx::query_scalar(
+    let unread: i64 = db_scalar!(
+        db,
+        i64,
         "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = 0 AND is_read = 0",
-    )
-    .bind(folder_id)
-    .fetch_one(pool)
-    .await?;
+        folder_id
+    )?;
 
-    sqlx::query(
+    db_execute!(
+        db,
         "UPDATE folder SET total_messages = ?, unread_messages = ?, updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(i32::try_from(total).unwrap_or(i32::MAX))
-    .bind(i32::try_from(unread).unwrap_or(i32::MAX))
-    .bind(folder_id)
-    .execute(pool)
-    .await?;
+        i32::try_from(total).unwrap_or(i32::MAX),
+        i32::try_from(unread).unwrap_or(i32::MAX),
+        folder_id
+    )?;
 
     Ok(())
 }
@@ -2228,6 +2174,10 @@ async fn update_folder_counts(pool: &sqlx::SqlitePool, folder_id: &str) -> Resul
 mod tests {
     use super::*;
     use crate::storage::Storage;
+
+    fn as_db(pool: &sqlx::SqlitePool) -> DbPool {
+        DbPool::Sqlite(pool.clone())
+    }
 
     /// Create an in-memory SQLite pool with migrations applied.
     async fn test_pool() -> sqlx::SqlitePool {
@@ -2374,10 +2324,14 @@ mod tests {
         let (user_id, account_id) = seed_user_and_account(&pool).await;
         let other_user = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
 
-        assert!(!user_has_active_sync_job(&pool, &user_id).await.unwrap());
+        assert!(
+            !user_has_active_sync_job(&as_db(&pool), &user_id)
+                .await
+                .unwrap()
+        );
 
         crate::jobs::enqueue(
-            &pool,
+            &as_db(&pool),
             &crate::jobs::JobPayload::SyncAccount {
                 account_id: account_id.clone(),
                 user_id: user_id.clone(),
@@ -2387,8 +2341,16 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(user_has_active_sync_job(&pool, &user_id).await.unwrap());
-        assert!(!user_has_active_sync_job(&pool, &other_user).await.unwrap());
+        assert!(
+            user_has_active_sync_job(&as_db(&pool), &user_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !user_has_active_sync_job(&as_db(&pool), &other_user)
+                .await
+                .unwrap()
+        );
     }
 
     fn test_auth_state(pool: sqlx::SqlitePool) -> AuthState {
@@ -2483,18 +2445,22 @@ mod tests {
         let (_, account_id) = seed_user_and_account(&pool).await;
 
         // First insert
-        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
             .await
             .unwrap();
 
-        let id1 = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        let id1 = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
 
         // Second upsert (update) — should not create a new row
-        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
             .await
             .unwrap();
 
-        let id2 = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        let id2 = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
 
         assert_eq!(id1, id2, "upsert should be idempotent");
 
@@ -2514,10 +2480,12 @@ mod tests {
         let (_, account_id) = seed_user_and_account(&pool).await;
 
         // Create a folder first
-        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
             .await
             .unwrap();
-        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
 
         let msg = ImapMessage {
             uid: 42,
@@ -2539,7 +2507,7 @@ mod tests {
         };
 
         // First insert
-        let was_new = upsert_message(&pool, &account_id, &folder_id, &msg)
+        let was_new = upsert_message(&as_db(&pool), &account_id, &folder_id, &msg)
             .await
             .unwrap();
         assert!(was_new, "first insert should return true");
@@ -2547,7 +2515,7 @@ mod tests {
         // Second upsert (update flags)
         let mut msg2 = msg.clone();
         msg2.flags = vec!["\\Seen".into(), "\\Flagged".into()];
-        let was_new2 = upsert_message(&pool, &account_id, &folder_id, &msg2)
+        let was_new2 = upsert_message(&as_db(&pool), &account_id, &folder_id, &msg2)
             .await
             .unwrap();
         assert!(!was_new2, "second upsert should return false (update)");
@@ -2578,18 +2546,20 @@ mod tests {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
 
-        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
             .await
             .unwrap();
-        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
 
         // Save cursor
-        save_cursor(&pool, &account_id, &folder_id, "imap", 12345, 100)
+        save_cursor(&as_db(&pool), &account_id, &folder_id, "imap", 12345, 100)
             .await
             .unwrap();
 
         // Load cursor
-        let cursor = load_cursor(&pool, &account_id, &folder_id)
+        let cursor = load_cursor(&as_db(&pool), &account_id, &folder_id)
             .await
             .unwrap()
             .expect("cursor should exist");
@@ -2598,11 +2568,11 @@ mod tests {
         assert_eq!(cursor.last_uid, 100);
 
         // Update cursor (idempotent upsert)
-        save_cursor(&pool, &account_id, &folder_id, "imap", 12345, 200)
+        save_cursor(&as_db(&pool), &account_id, &folder_id, "imap", 12345, 200)
             .await
             .unwrap();
 
-        let cursor2 = load_cursor(&pool, &account_id, &folder_id)
+        let cursor2 = load_cursor(&as_db(&pool), &account_id, &folder_id)
             .await
             .unwrap()
             .expect("cursor should exist");
@@ -2624,16 +2594,18 @@ mod tests {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
 
-        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
             .await
             .unwrap();
-        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
 
         // A JMAP queryState is an opaque server token — it must round-trip verbatim,
         // because it is sent back to the server as `sinceState` on the next sync.
         let query_state = "jmap-state-abc123";
 
-        save_jmap_cursor(&pool, &account_id, &folder_id, query_state)
+        save_jmap_cursor(&as_db(&pool), &account_id, &folder_id, query_state)
             .await
             .unwrap();
 
@@ -2653,16 +2625,16 @@ mod tests {
         );
 
         // What we send back as sinceState must equal the original token.
-        let since_state = load_jmap_cursor(&pool, &account_id, &folder_id)
+        let since_state = load_jmap_cursor(&as_db(&pool), &account_id, &folder_id)
             .await
             .unwrap();
         assert_eq!(since_state.as_deref(), Some(query_state));
 
         // Idempotent upsert: saving a newer state replaces the old one.
-        save_jmap_cursor(&pool, &account_id, &folder_id, "jmap-state-def456")
+        save_jmap_cursor(&as_db(&pool), &account_id, &folder_id, "jmap-state-def456")
             .await
             .unwrap();
-        let since_state = load_jmap_cursor(&pool, &account_id, &folder_id)
+        let since_state = load_jmap_cursor(&as_db(&pool), &account_id, &folder_id)
             .await
             .unwrap();
         assert_eq!(since_state.as_deref(), Some("jmap-state-def456"));
@@ -2682,10 +2654,12 @@ mod tests {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
 
-        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
             .await
             .unwrap();
-        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
 
         // Insert a message
         let msg = ImapMessage {
@@ -2706,17 +2680,19 @@ mod tests {
             has_attachments: false,
             attachments: vec![],
         };
-        upsert_message(&pool, &account_id, &folder_id, &msg)
+        upsert_message(&as_db(&pool), &account_id, &folder_id, &msg)
             .await
             .unwrap();
 
         // Save cursor
-        save_cursor(&pool, &account_id, &folder_id, "imap", 100, 1)
+        save_cursor(&as_db(&pool), &account_id, &folder_id, "imap", 100, 1)
             .await
             .unwrap();
 
         // Clear
-        clear_folder_messages(&pool, &folder_id).await.unwrap();
+        clear_folder_messages(&as_db(&pool), &folder_id)
+            .await
+            .unwrap();
 
         let msg_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message WHERE folder_id = ?")
             .bind(&folder_id)
@@ -2739,10 +2715,12 @@ mod tests {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
 
-        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
             .await
             .unwrap();
-        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
 
         // Insert 3 messages: 2 read, 1 unread
         for i in 1..=3u32 {
@@ -2768,12 +2746,14 @@ mod tests {
                 has_attachments: false,
                 attachments: vec![],
             };
-            upsert_message(&pool, &account_id, &folder_id, &msg)
+            upsert_message(&as_db(&pool), &account_id, &folder_id, &msg)
                 .await
                 .unwrap();
         }
 
-        update_folder_counts(&pool, &folder_id).await.unwrap();
+        update_folder_counts(&as_db(&pool), &folder_id)
+            .await
+            .unwrap();
 
         let total: i32 = sqlx::query_scalar("SELECT total_messages FROM folder WHERE id = ?")
             .bind(&folder_id)
@@ -2824,13 +2804,20 @@ mod tests {
     async fn inbox_hides_snoozed_message() {
         let pool = test_pool().await;
         let (user_id, account_id) = seed_user_and_account(&pool).await;
-        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
             .await
             .unwrap();
-        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
-        upsert_message(&pool, &account_id, &folder_id, &sample_imap_message(7))
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
             .await
             .unwrap();
+        upsert_message(
+            &as_db(&pool),
+            &account_id,
+            &folder_id,
+            &sample_imap_message(7),
+        )
+        .await
+        .unwrap();
         let message_id = message_id_for_uid(&pool, &account_id, 7).await;
         let future = sqlite_utc_datetime(chrono::Utc::now() + chrono::Duration::hours(1));
         sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
@@ -2840,7 +2827,7 @@ mod tests {
             .await
             .unwrap();
 
-        let inbox = query_user_messages(&pool, &user_id, Some("inbox"), None)
+        let inbox = query_user_messages(&as_db(&pool), &user_id, Some("inbox"), None)
             .await
             .unwrap();
         assert!(
@@ -2853,13 +2840,20 @@ mod tests {
     async fn inbox_shows_overdue_same_day_snooze() {
         let pool = test_pool().await;
         let (user_id, account_id) = seed_user_and_account(&pool).await;
-        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
             .await
             .unwrap();
-        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
-        upsert_message(&pool, &account_id, &folder_id, &sample_imap_message(10))
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
             .await
             .unwrap();
+        upsert_message(
+            &as_db(&pool),
+            &account_id,
+            &folder_id,
+            &sample_imap_message(10),
+        )
+        .await
+        .unwrap();
         let message_id = message_id_for_uid(&pool, &account_id, 10).await;
 
         // Client sends RFC3339 with `T`; store the SQLite-safe form the handler writes.
@@ -2885,7 +2879,7 @@ mod tests {
             .await
             .unwrap();
 
-        let inbox = query_user_messages(&pool, &user_id, Some("inbox"), None)
+        let inbox = query_user_messages(&as_db(&pool), &user_id, Some("inbox"), None)
             .await
             .unwrap();
         assert_eq!(
@@ -2900,13 +2894,20 @@ mod tests {
     async fn unsnooze_job_clears_column() {
         let pool = test_pool().await;
         let (user_id, account_id) = seed_user_and_account(&pool).await;
-        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
             .await
             .unwrap();
-        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
-        upsert_message(&pool, &account_id, &folder_id, &sample_imap_message(8))
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
             .await
             .unwrap();
+        upsert_message(
+            &as_db(&pool),
+            &account_id,
+            &folder_id,
+            &sample_imap_message(8),
+        )
+        .await
+        .unwrap();
         let message_id = message_id_for_uid(&pool, &account_id, 8).await;
         sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
             .bind(sqlite_utc_datetime(
@@ -2921,8 +2922,10 @@ mod tests {
         let payload = crate::jobs::JobPayload::UnsnoozeMessage {
             message_id: message_id.clone(),
         };
-        crate::jobs::enqueue(&pool, &payload, &now).await.unwrap();
-        let claimed = crate::jobs::claim_due(&pool, &now)
+        crate::jobs::enqueue(&as_db(&pool), &payload, &now)
+            .await
+            .unwrap();
+        let claimed = crate::jobs::claim_due(&as_db(&pool), &now)
             .await
             .unwrap()
             .expect("due unsnooze job");
@@ -2933,7 +2936,7 @@ mod tests {
         let permit = std::sync::Arc::clone(&sem)
             .try_acquire_owned()
             .expect("test semaphore has a permit");
-        crate::jobs::process_job(&pool, &app, &inflight, permit, claimed)
+        crate::jobs::process_job(&as_db(&pool), &app, &inflight, permit, claimed)
             .await
             .expect("unsnooze dispatch must not panic");
         drop(app);
@@ -2946,7 +2949,7 @@ mod tests {
                 .unwrap();
         assert!(snoozed.is_none(), "dispatch must SET snoozed_until = NULL");
 
-        let inbox = query_user_messages(&pool, &user_id, Some("inbox"), None)
+        let inbox = query_user_messages(&as_db(&pool), &user_id, Some("inbox"), None)
             .await
             .unwrap();
         assert_eq!(inbox.len(), 1, "unsnoozed message must reappear in inbox");
@@ -2957,12 +2960,14 @@ mod tests {
     async fn sync_does_not_clear_snooze() {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
-        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
             .await
             .unwrap();
-        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
         let msg = sample_imap_message(9);
-        upsert_message(&pool, &account_id, &folder_id, &msg)
+        upsert_message(&as_db(&pool), &account_id, &folder_id, &msg)
             .await
             .unwrap();
         let message_id = message_id_for_uid(&pool, &account_id, 9).await;
@@ -2976,7 +2981,7 @@ mod tests {
 
         let mut again = msg.clone();
         again.flags = vec!["\\Seen".into()];
-        let was_new = upsert_message(&pool, &account_id, &folder_id, &again)
+        let was_new = upsert_message(&as_db(&pool), &account_id, &folder_id, &again)
             .await
             .unwrap();
         assert!(!was_new);

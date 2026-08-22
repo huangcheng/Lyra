@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::auth::{AuthState, AuthUser};
-use crate::storage::DbPool;
 
 /// Routes for PIM endpoints.
 pub fn routes() -> Router<AuthState> {
@@ -148,13 +147,57 @@ impl IntoResponse for PimError {
     }
 }
 
-/// Get SQLite pool from `DbPool` enum.
-fn get_sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
-    match db {
-        DbPool::Sqlite(pool) => pool,
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => panic!("PostgreSQL not supported yet"),
-    }
+macro_rules! contact_from_row {
+    ($row:expr) => {{
+        let emails: Option<String> = $row.get("email_addresses");
+        let phones: Option<String> = $row.get("phone_numbers");
+        Contact {
+            id: $row.get("id"),
+            account_id: $row.get("account_id"),
+            display_name: $row.get("display_name"),
+            email_addresses: parse_json_array(emails.as_deref()),
+            phone_numbers: parse_json_array(phones.as_deref()),
+            organisation: $row.get("organisation"),
+            photo_path: $row.get("photo_path"),
+            created_at: $row.get("created_at"),
+            updated_at: $row.get("updated_at"),
+        }
+    }};
+}
+
+macro_rules! calendar_from_row {
+    ($row:expr) => {{
+        Calendar {
+            id: $row.get("id"),
+            account_id: $row.get("account_id"),
+            name: $row.get("name"),
+            color: $row.get("color"),
+            description: $row.get("description"),
+            timezone: $row.get("timezone"),
+            is_active: $row.get::<bool, _>("is_active"),
+            created_at: $row.get("created_at"),
+            updated_at: $row.get("updated_at"),
+        }
+    }};
+}
+
+macro_rules! event_from_row {
+    ($row:expr) => {{
+        CalendarEvent {
+            id: $row.get("id"),
+            calendar_id: $row.get("calendar_id"),
+            summary: $row.get("summary"),
+            description: $row.get("description"),
+            dtstart: $row.get("dtstart"),
+            dtend: $row.get("dtend"),
+            location: $row.get("location"),
+            is_all_day: $row.get::<bool, _>("is_all_day"),
+            status: $row.get("status"),
+            recurrence_rule: $row.get("recurrence_rule"),
+            created_at: $row.get("created_at"),
+            updated_at: $row.get("updated_at"),
+        }
+    }};
 }
 
 /// List contacts, optionally filtered by account.
@@ -163,12 +206,13 @@ async fn list_contacts(
     AuthUser(user_id): AuthUser,
     Query(query): Query<ListContactsQuery>,
 ) -> Result<Json<Vec<Contact>>, PimError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
 
-    let rows = if let Some(account_id) = &query.account_id {
-        sqlx::query(
+    let contacts = if let Some(account_id) = &query.account_id {
+        db_fetch_all!(
+            db,
             r"
             SELECT c.id, c.account_id, c.display_name, c.email_addresses,
                    c.phone_numbers, c.organisation, c.photo_path,
@@ -179,16 +223,16 @@ async fn list_contacts(
             ORDER BY c.display_name
             LIMIT ? OFFSET ?
             ",
-        )
-        .bind(&user_id)
-        .bind(account_id)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?
+            |row| contact_from_row!(row),
+            &user_id,
+            account_id,
+            limit,
+            offset
+        )?
     } else if let Some(search) = &query.q {
         let pattern = format!("%{search}%");
-        sqlx::query(
+        db_fetch_all!(
+            db,
             r"
             SELECT c.id, c.account_id, c.display_name, c.email_addresses,
                    c.phone_numbers, c.organisation, c.photo_path,
@@ -199,16 +243,16 @@ async fn list_contacts(
             ORDER BY c.display_name
             LIMIT ? OFFSET ?
             ",
-        )
-        .bind(&user_id)
-        .bind(&pattern)
-        .bind(&pattern)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?
+            |row| contact_from_row!(row),
+            &user_id,
+            &pattern,
+            &pattern,
+            limit,
+            offset
+        )?
     } else {
-        sqlx::query(
+        db_fetch_all!(
+            db,
             r"
             SELECT c.id, c.account_id, c.display_name, c.email_addresses,
                    c.phone_numbers, c.organisation, c.photo_path,
@@ -219,28 +263,12 @@ async fn list_contacts(
             ORDER BY c.display_name
             LIMIT ? OFFSET ?
             ",
-        )
-        .bind(&user_id)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?
+            |row| contact_from_row!(row),
+            &user_id,
+            limit,
+            offset
+        )?
     };
-
-    let contacts: Vec<Contact> = rows
-        .iter()
-        .map(|row| Contact {
-            id: row.get("id"),
-            account_id: row.get("account_id"),
-            display_name: row.get("display_name"),
-            email_addresses: parse_json_array(row.get("email_addresses")),
-            phone_numbers: parse_json_array(row.get("phone_numbers")),
-            organisation: row.get("organisation"),
-            photo_path: row.get("photo_path"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        })
-        .collect();
 
     Ok(Json(contacts))
 }
@@ -251,9 +279,9 @@ async fn get_contact(
     Path(id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Contact>, PimError> {
-    let pool = get_sqlite_pool(state.db());
-
-    let row = sqlx::query(
+    let db = state.db();
+    let contact = db_fetch_optional!(
+        db,
         r"
         SELECT c.id, c.account_id, c.display_name, c.email_addresses,
                c.phone_numbers, c.organisation, c.photo_path,
@@ -262,24 +290,12 @@ async fn get_contact(
         JOIN mail_account a ON c.account_id = a.id
         WHERE c.id = ? AND a.user_id = ?
         ",
-    )
-    .bind(&id)
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await?
+        |row| contact_from_row!(&row),
+        &id,
+        &user_id
+    )?
     .ok_or(PimError::NotFound)?;
-
-    Ok(Json(Contact {
-        id: row.get("id"),
-        account_id: row.get("account_id"),
-        display_name: row.get("display_name"),
-        email_addresses: parse_json_array(row.get("email_addresses")),
-        phone_numbers: parse_json_array(row.get("phone_numbers")),
-        organisation: row.get("organisation"),
-        photo_path: row.get("photo_path"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    }))
+    Ok(Json(contact))
 }
 
 /// List calendars, optionally filtered by account.
@@ -288,10 +304,11 @@ async fn list_calendars(
     AuthUser(user_id): AuthUser,
     Query(query): Query<ListCalendarsQuery>,
 ) -> Result<Json<Vec<Calendar>>, PimError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
-    let rows = if let Some(account_id) = &query.account_id {
-        sqlx::query(
+    let calendars = if let Some(account_id) = &query.account_id {
+        db_fetch_all!(
+            db,
             r"
             SELECT cal.id, cal.account_id, cal.name, cal.description,
                    cal.color, cal.timezone, cal.is_active,
@@ -301,13 +318,13 @@ async fn list_calendars(
             WHERE a.user_id = ? AND cal.account_id = ?
             ORDER BY cal.name
             ",
-        )
-        .bind(&user_id)
-        .bind(account_id)
-        .fetch_all(pool)
-        .await?
+            |row| calendar_from_row!(row),
+            &user_id,
+            account_id
+        )?
     } else {
-        sqlx::query(
+        db_fetch_all!(
+            db,
             r"
             SELECT cal.id, cal.account_id, cal.name, cal.description,
                    cal.color, cal.timezone, cal.is_active,
@@ -317,26 +334,10 @@ async fn list_calendars(
             WHERE a.user_id = ?
             ORDER BY cal.name
             ",
-        )
-        .bind(&user_id)
-        .fetch_all(pool)
-        .await?
+            |row| calendar_from_row!(row),
+            &user_id
+        )?
     };
-
-    let calendars: Vec<Calendar> = rows
-        .iter()
-        .map(|row| Calendar {
-            id: row.get("id"),
-            account_id: row.get("account_id"),
-            name: row.get("name"),
-            color: row.get("color"),
-            description: row.get("description"),
-            timezone: row.get("timezone"),
-            is_active: row.get::<bool, _>("is_active"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        })
-        .collect();
 
     Ok(Json(calendars))
 }
@@ -347,9 +348,9 @@ async fn get_calendar(
     Path(id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Calendar>, PimError> {
-    let pool = get_sqlite_pool(state.db());
-
-    let row = sqlx::query(
+    let db = state.db();
+    let calendar = db_fetch_optional!(
+        db,
         r"
         SELECT cal.id, cal.account_id, cal.name, cal.description,
                cal.color, cal.timezone, cal.is_active,
@@ -358,24 +359,12 @@ async fn get_calendar(
         JOIN mail_account a ON cal.account_id = a.id
         WHERE cal.id = ? AND a.user_id = ?
         ",
-    )
-    .bind(&id)
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await?
+        |row| calendar_from_row!(&row),
+        &id,
+        &user_id
+    )?
     .ok_or(PimError::NotFound)?;
-
-    Ok(Json(Calendar {
-        id: row.get("id"),
-        account_id: row.get("account_id"),
-        name: row.get("name"),
-        color: row.get("color"),
-        description: row.get("description"),
-        timezone: row.get("timezone"),
-        is_active: row.get::<bool, _>("is_active"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    }))
+    Ok(Json(calendar))
 }
 
 /// List events for a specific calendar.
@@ -385,26 +374,28 @@ async fn list_events(
     AuthUser(user_id): AuthUser,
     Query(query): Query<ListEventsQuery>,
 ) -> Result<Json<Vec<CalendarEvent>>, PimError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
     // Verify calendar belongs to user
-    let _calendar = sqlx::query(
+    let calendar: Option<String> = db_scalar_optional!(
+        db,
+        String,
         r"
         SELECT cal.id
         FROM calendar cal
         JOIN mail_account a ON cal.account_id = a.id
         WHERE cal.id = ? AND a.user_id = ?
         ",
-    )
-    .bind(&calendar_id)
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(PimError::NotFound)?;
+        &calendar_id,
+        &user_id
+    )?;
+    if calendar.is_none() {
+        return Err(PimError::NotFound);
+    }
 
-    let rows = if query.start.is_some() || query.end.is_some() {
-        // Filter by date range
-        sqlx::query(
+    let events = if query.start.is_some() || query.end.is_some() {
+        db_fetch_all!(
+            db,
             r"
             SELECT id, calendar_id, summary, description, dtstart, dtend,
                    location, is_all_day, status, recurrence_rule,
@@ -415,16 +406,16 @@ async fn list_events(
               AND (dtend <= ? OR ? IS NULL)
             ORDER BY dtstart
             ",
-        )
-        .bind(&calendar_id)
-        .bind(&query.start)
-        .bind(&query.start)
-        .bind(&query.end)
-        .bind(&query.end)
-        .fetch_all(pool)
-        .await?
+            |row| event_from_row!(row),
+            &calendar_id,
+            &query.start,
+            &query.start,
+            &query.end,
+            &query.end
+        )?
     } else {
-        sqlx::query(
+        db_fetch_all!(
+            db,
             r"
             SELECT id, calendar_id, summary, description, dtstart, dtend,
                    location, is_all_day, status, recurrence_rule,
@@ -433,29 +424,10 @@ async fn list_events(
             WHERE calendar_id = ?
             ORDER BY dtstart
             ",
-        )
-        .bind(&calendar_id)
-        .fetch_all(pool)
-        .await?
+            |row| event_from_row!(row),
+            &calendar_id
+        )?
     };
-
-    let events: Vec<CalendarEvent> = rows
-        .iter()
-        .map(|row| CalendarEvent {
-            id: row.get("id"),
-            calendar_id: row.get("calendar_id"),
-            summary: row.get("summary"),
-            description: row.get("description"),
-            dtstart: row.get("dtstart"),
-            dtend: row.get("dtend"),
-            location: row.get("location"),
-            is_all_day: row.get::<bool, _>("is_all_day"),
-            status: row.get("status"),
-            recurrence_rule: row.get("recurrence_rule"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        })
-        .collect();
 
     Ok(Json(events))
 }
@@ -466,9 +438,9 @@ async fn get_event(
     Path(id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<CalendarEvent>, PimError> {
-    let pool = get_sqlite_pool(state.db());
-
-    let row = sqlx::query(
+    let db = state.db();
+    let event = db_fetch_optional!(
+        db,
         r"
         SELECT e.id, e.calendar_id, e.summary, e.description, e.dtstart, e.dtend,
                e.location, e.is_all_day, e.status, e.recurrence_rule,
@@ -478,27 +450,12 @@ async fn get_event(
         JOIN mail_account a ON cal.account_id = a.id
         WHERE e.id = ? AND a.user_id = ?
         ",
-    )
-    .bind(&id)
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await?
+        |row| event_from_row!(&row),
+        &id,
+        &user_id
+    )?
     .ok_or(PimError::NotFound)?;
-
-    Ok(Json(CalendarEvent {
-        id: row.get("id"),
-        calendar_id: row.get("calendar_id"),
-        summary: row.get("summary"),
-        description: row.get("description"),
-        dtstart: row.get("dtstart"),
-        dtend: row.get("dtend"),
-        location: row.get("location"),
-        is_all_day: row.get::<bool, _>("is_all_day"),
-        status: row.get("status"),
-        recurrence_rule: row.get("recurrence_rule"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    }))
+    Ok(Json(event))
 }
 
 /// Sync contacts for an account via CardDAV (when `carddav_url` is set).
@@ -508,22 +465,27 @@ async fn sync_contacts(
     Path(account_id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, PimError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
-    let row = sqlx::query(
+    let row = db_fetch_optional!(
+        db,
         r"
         SELECT id, email_address, credential, carddav_url
         FROM mail_account
         WHERE id = ? AND user_id = ?
         ",
-    )
-    .bind(&account_id)
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await?
+        |row| {
+            let carddav_url: Option<String> = row.get("carddav_url");
+            let email: String = row.get("email_address");
+            let credential_json: String = row.get("credential");
+            (carddav_url, email, credential_json)
+        },
+        &account_id,
+        &user_id
+    )?
     .ok_or(PimError::AccountNotFound)?;
 
-    let carddav_url: Option<String> = row.get("carddav_url");
+    let (carddav_url, email, credential_json) = row;
     let Some(base_url) = carddav_url.filter(|s| !s.is_empty()) else {
         return Ok(Json(serde_json::json!({
             "status": "skipped",
@@ -531,8 +493,6 @@ async fn sync_contacts(
         })));
     };
 
-    let email: String = row.get("email_address");
-    let credential_json: String = row.get("credential");
     let dek = crate::auth::AuthState::get_user_dek(state.db(), &user_id)
         .await
         .map_err(|e| PimError::SyncError(e.to_string()))?;
@@ -560,15 +520,17 @@ async fn sync_contacts(
         let phones_json = serde_json::to_string(&phones).unwrap_or_else(|_| "[]".into());
         let external_id = href.clone();
 
-        let existing: Option<String> =
-            sqlx::query_scalar("SELECT id FROM contact WHERE account_id = ? AND external_id = ?")
-                .bind(&account_id)
-                .bind(&external_id)
-                .fetch_optional(pool)
-                .await?;
+        let existing: Option<String> = db_scalar_optional!(
+            db,
+            String,
+            "SELECT id FROM contact WHERE account_id = ? AND external_id = ?",
+            &account_id,
+            &external_id
+        )?;
 
         if let Some(id) = existing {
-            sqlx::query(
+            db_execute!(
+                db,
                 r"
                 UPDATE contact SET
                   vcard_blob = ?, display_name = ?, email_addresses = ?,
@@ -576,37 +538,34 @@ async fn sync_contacts(
                   updated_at = datetime('now')
                 WHERE id = ?
                 ",
-            )
-            .bind(&vcard)
-            .bind(&display_name)
-            .bind(&emails_json)
-            .bind(&phones_json)
-            .bind(&org)
-            .bind(&base_url)
-            .bind(&id)
-            .execute(pool)
-            .await?;
+                &vcard,
+                &display_name,
+                &emails_json,
+                &phones_json,
+                &org,
+                &base_url,
+                &id
+            )?;
         } else {
             let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-            sqlx::query(
+            db_execute!(
+                db,
                 r"
                 INSERT INTO contact (
                   id, account_id, external_id, vcard_blob, display_name,
                   email_addresses, phone_numbers, organisation, addressbook_url
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ",
-            )
-            .bind(&id)
-            .bind(&account_id)
-            .bind(&external_id)
-            .bind(&vcard)
-            .bind(&display_name)
-            .bind(&emails_json)
-            .bind(&phones_json)
-            .bind(&org)
-            .bind(&base_url)
-            .execute(pool)
-            .await?;
+                &id,
+                &account_id,
+                &external_id,
+                &vcard,
+                &display_name,
+                &emails_json,
+                &phones_json,
+                &org,
+                &base_url
+            )?;
         }
         synced += 1;
     }
@@ -624,22 +583,27 @@ async fn sync_calendars(
     Path(account_id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, PimError> {
-    let pool = get_sqlite_pool(state.db());
+    let db = state.db();
 
-    let row = sqlx::query(
+    let row = db_fetch_optional!(
+        db,
         r"
         SELECT id, email_address, credential, caldav_url
         FROM mail_account
         WHERE id = ? AND user_id = ?
         ",
-    )
-    .bind(&account_id)
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await?
+        |row| {
+            let caldav_url: Option<String> = row.get("caldav_url");
+            let email: String = row.get("email_address");
+            let credential_json: String = row.get("credential");
+            (caldav_url, email, credential_json)
+        },
+        &account_id,
+        &user_id
+    )?
     .ok_or(PimError::AccountNotFound)?;
 
-    let caldav_url: Option<String> = row.get("caldav_url");
+    let (caldav_url, email, credential_json) = row;
     let Some(base_url) = caldav_url.filter(|s| !s.is_empty()) else {
         return Ok(Json(serde_json::json!({
             "status": "skipped",
@@ -647,8 +611,6 @@ async fn sync_calendars(
         })));
     };
 
-    let email: String = row.get("email_address");
-    let credential_json: String = row.get("credential");
     let dek = crate::auth::AuthState::get_user_dek(state.db(), &user_id)
         .await
         .map_err(|e| PimError::SyncError(e.to_string()))?;
@@ -664,28 +626,28 @@ async fn sync_calendars(
 
     // Ensure a local calendar row exists for this URL.
     let calendar_id: String = {
-        let existing: Option<String> =
-            sqlx::query_scalar("SELECT id FROM calendar WHERE account_id = ? AND calendar_url = ?")
-                .bind(&account_id)
-                .bind(&base_url)
-                .fetch_optional(pool)
-                .await?;
+        let existing: Option<String> = db_scalar_optional!(
+            db,
+            String,
+            "SELECT id FROM calendar WHERE account_id = ? AND calendar_url = ?",
+            &account_id,
+            &base_url
+        )?;
         if let Some(id) = existing {
             id
         } else {
             let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-            sqlx::query(
+            db_execute!(
+                db,
                 r"
                 INSERT INTO calendar (id, account_id, name, calendar_url, is_active)
                 VALUES (?, ?, ?, ?, 1)
                 ",
-            )
-            .bind(&id)
-            .bind(&account_id)
-            .bind("Calendar")
-            .bind(&base_url)
-            .execute(pool)
-            .await?;
+                &id,
+                &account_id,
+                "Calendar",
+                &base_url
+            )?;
             id
         }
     };
@@ -713,16 +675,17 @@ async fn sync_calendars(
             crate::dav::parse_vevent_fields(&ical);
         let external_id = href.clone();
 
-        let existing: Option<String> = sqlx::query_scalar(
+        let existing: Option<String> = db_scalar_optional!(
+            db,
+            String,
             "SELECT id FROM calendar_event WHERE account_id = ? AND external_id = ?",
-        )
-        .bind(&account_id)
-        .bind(&external_id)
-        .fetch_optional(pool)
-        .await?;
+            &account_id,
+            &external_id
+        )?;
 
         if let Some(id) = existing {
-            sqlx::query(
+            db_execute!(
+                db,
                 r"
                 UPDATE calendar_event SET
                   calendar_id = ?, icalendar_blob = ?, summary = ?, description = ?,
@@ -730,43 +693,40 @@ async fn sync_calendars(
                   calendar_url = ?, updated_at = datetime('now')
                 WHERE id = ?
                 ",
-            )
-            .bind(&calendar_id)
-            .bind(&ical)
-            .bind(&summary)
-            .bind(&description)
-            .bind(&dtstart)
-            .bind(&dtend)
-            .bind(&location)
-            .bind(is_all_day)
-            .bind(&base_url)
-            .bind(&id)
-            .execute(pool)
-            .await?;
+                &calendar_id,
+                &ical,
+                &summary,
+                &description,
+                &dtstart,
+                &dtend,
+                &location,
+                is_all_day,
+                &base_url,
+                &id
+            )?;
         } else {
             let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-            sqlx::query(
+            db_execute!(
+                db,
                 r"
                 INSERT INTO calendar_event (
                   id, account_id, calendar_id, external_id, icalendar_blob,
                   summary, description, dtstart, dtend, location, is_all_day, calendar_url
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ",
-            )
-            .bind(&id)
-            .bind(&account_id)
-            .bind(&calendar_id)
-            .bind(&external_id)
-            .bind(&ical)
-            .bind(&summary)
-            .bind(&description)
-            .bind(&dtstart)
-            .bind(&dtend)
-            .bind(&location)
-            .bind(is_all_day)
-            .bind(&base_url)
-            .execute(pool)
-            .await?;
+                &id,
+                &account_id,
+                &calendar_id,
+                &external_id,
+                &ical,
+                &summary,
+                &description,
+                &dtstart,
+                &dtend,
+                &location,
+                is_all_day,
+                &base_url
+            )?;
         }
         synced += 1;
     }
