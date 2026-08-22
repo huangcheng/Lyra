@@ -1245,6 +1245,15 @@ struct SnoozeRequest {
     until: String,
 }
 
+/// UTC instant as SQLite `datetime()` text (`YYYY-MM-DD HH:MM:SS`).
+///
+/// Inbox/folder filters compare `snoozed_until <= datetime('now')`. RFC3339 with a `T`
+/// separator sorts after the same wall time with a space, so same-day overdue rows would
+/// stay hidden if we stored client RFC3339 literally.
+fn sqlite_utc_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 async fn snooze_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
@@ -1255,9 +1264,11 @@ async fn snooze_message(
     let pool = get_sqlite_pool(state.db());
     let row = load_message_row(pool, &user_id, &message_id).await?;
 
-    let parsed = chrono::DateTime::parse_from_rfc3339(&body.until)
-        .map_err(|_| SyncError::InvalidInput("until must be RFC3339".into()))?;
-    let until = parsed.to_utc().to_rfc3339();
+    let until_utc = chrono::DateTime::parse_from_rfc3339(&body.until)
+        .map_err(|_| SyncError::InvalidInput("until must be RFC3339".into()))?
+        .to_utc();
+    let until_api = until_utc.to_rfc3339();
+    let until_sql = sqlite_utc_datetime(until_utc);
 
     sqlx::query(
         r"
@@ -1266,23 +1277,24 @@ async fn snooze_message(
         WHERE id = ?
         ",
     )
-    .bind(&until)
+    .bind(&until_sql)
     .bind(&row.id)
     .execute(pool)
     .await?;
 
+    // Job claim compares `run_at` to RFC3339 `now` from chrono — keep that format.
     crate::jobs::enqueue(
         pool,
         &crate::jobs::JobPayload::UnsnoozeMessage {
             message_id: row.id.clone(),
         },
-        &until,
+        &until_api,
     )
     .await?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
-        "until": until,
+        "until": until_api,
     })))
 }
 
@@ -2574,8 +2586,9 @@ mod tests {
             .await
             .unwrap();
         let message_id = message_id_for_uid(&pool, &account_id, 7).await;
+        let future = sqlite_utc_datetime(chrono::Utc::now() + chrono::Duration::hours(1));
         sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
-            .bind("2099-01-01T00:00:00+00:00")
+            .bind(&future)
             .bind(&message_id)
             .execute(&pool)
             .await
@@ -2591,6 +2604,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inbox_shows_overdue_same_day_snooze() {
+        let pool = test_pool().await;
+        let (user_id, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        upsert_message(&pool, &account_id, &folder_id, &sample_imap_message(10))
+            .await
+            .unwrap();
+        let message_id = message_id_for_uid(&pool, &account_id, 10).await;
+
+        // Client sends RFC3339 with `T`; store the SQLite-safe form the handler writes.
+        let past_rfc = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+        assert!(
+            past_rfc.contains('T'),
+            "regression requires RFC3339 T separator"
+        );
+        let past_sql = sqlite_utc_datetime(
+            chrono::DateTime::parse_from_rfc3339(&past_rfc)
+                .unwrap()
+                .to_utc(),
+        );
+        assert!(
+            !past_sql.contains('T'),
+            "stored snoozed_until must use space, not T"
+        );
+
+        sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
+            .bind(&past_sql)
+            .bind(&message_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let inbox = query_user_messages(&pool, &user_id, Some("inbox"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            inbox.len(),
+            1,
+            "same-day overdue snooze must be visible in inbox"
+        );
+        assert_eq!(inbox[0].id, message_id);
+    }
+
+    #[tokio::test]
     async fn unsnooze_job_clears_column() {
         let pool = test_pool().await;
         let (user_id, account_id) = seed_user_and_account(&pool).await;
@@ -2603,18 +2663,20 @@ mod tests {
             .unwrap();
         let message_id = message_id_for_uid(&pool, &account_id, 8).await;
         sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
-            .bind("2099-01-01T00:00:00+00:00")
+            .bind(sqlite_utc_datetime(
+                chrono::Utc::now() + chrono::Duration::hours(1),
+            ))
             .bind(&message_id)
             .execute(&pool)
             .await
             .unwrap();
 
-        let now = "2026-08-22T00:00:00+00:00";
+        let now = chrono::Utc::now().to_rfc3339();
         let payload = crate::jobs::JobPayload::UnsnoozeMessage {
             message_id: message_id.clone(),
         };
-        crate::jobs::enqueue(&pool, &payload, now).await.unwrap();
-        let claimed = crate::jobs::claim_due(&pool, now)
+        crate::jobs::enqueue(&pool, &payload, &now).await.unwrap();
+        let claimed = crate::jobs::claim_due(&pool, &now)
             .await
             .unwrap()
             .expect("due unsnooze job");
@@ -2658,9 +2720,9 @@ mod tests {
             .await
             .unwrap();
         let message_id = message_id_for_uid(&pool, &account_id, 9).await;
-        let until = "2099-06-01T18:00:00+00:00";
+        let until = sqlite_utc_datetime(chrono::Utc::now() + chrono::Duration::days(30));
         sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
-            .bind(until)
+            .bind(&until)
             .bind(&message_id)
             .execute(&pool)
             .await
@@ -2681,7 +2743,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             snoozed.as_deref(),
-            Some(until),
+            Some(until.as_str()),
             "upsert_message must not overwrite snoozed_until"
         );
     }
