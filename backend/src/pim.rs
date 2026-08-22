@@ -10,14 +10,14 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::StatusCode,
     response::IntoResponse,
     routing::get,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
-use crate::auth::AuthState;
+use crate::auth::{AuthState, AuthUser};
 use crate::storage::DbPool;
 
 /// Routes for PIM endpoints.
@@ -129,32 +129,23 @@ pub enum PimError {
 
 impl IntoResponse for PimError {
     fn into_response(self) -> axum::response::Response {
-        let status = match self {
-            PimError::NotFound | PimError::AccountNotFound => StatusCode::NOT_FOUND,
-            PimError::Database(_) | PimError::SyncError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            PimError::Unauthorized => StatusCode::UNAUTHORIZED,
+        // Internal variants may carry SQL detail or upstream error text: log
+        // the full error server-side, answer "internal error" to the client.
+        let (status, message) = match &self {
+            PimError::NotFound | PimError::AccountNotFound => {
+                (StatusCode::NOT_FOUND, self.to_string())
+            }
+            PimError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
+            PimError::Database(_) | PimError::SyncError(_) => {
+                tracing::error!(error = %self, "pim request failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error".to_string(),
+                )
+            }
         };
-        (
-            status,
-            Json(serde_json::json!({ "error": self.to_string() })),
-        )
-            .into_response()
+        (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
-}
-
-/// Extract user ID from auth header and session store.
-async fn get_user_id(state: &AuthState, headers: &HeaderMap) -> Result<String, PimError> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or(PimError::Unauthorized)?;
-
-    state
-        .sessions
-        .get_session(token)
-        .await
-        .ok_or(PimError::Unauthorized)
 }
 
 /// Get SQLite pool from `DbPool` enum.
@@ -169,10 +160,9 @@ fn get_sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
 /// List contacts, optionally filtered by account.
 async fn list_contacts(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Query(query): Query<ListContactsQuery>,
 ) -> Result<Json<Vec<Contact>>, PimError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
@@ -259,9 +249,8 @@ async fn list_contacts(
 async fn get_contact(
     State(state): State<AuthState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<Contact>, PimError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let row = sqlx::query(
@@ -296,10 +285,9 @@ async fn get_contact(
 /// List calendars, optionally filtered by account.
 async fn list_calendars(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Query(query): Query<ListCalendarsQuery>,
 ) -> Result<Json<Vec<Calendar>>, PimError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let rows = if let Some(account_id) = &query.account_id {
@@ -357,9 +345,8 @@ async fn list_calendars(
 async fn get_calendar(
     State(state): State<AuthState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<Calendar>, PimError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let row = sqlx::query(
@@ -395,10 +382,9 @@ async fn get_calendar(
 async fn list_events(
     State(state): State<AuthState>,
     Path(calendar_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Query(query): Query<ListEventsQuery>,
 ) -> Result<Json<Vec<CalendarEvent>>, PimError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     // Verify calendar belongs to user
@@ -478,9 +464,8 @@ async fn list_events(
 async fn get_event(
     State(state): State<AuthState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<CalendarEvent>, PimError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let row = sqlx::query(
@@ -521,9 +506,8 @@ async fn get_event(
 async fn sync_contacts(
     State(state): State<AuthState>,
     Path(account_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, PimError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let row = sqlx::query(
@@ -638,9 +622,8 @@ async fn sync_contacts(
 async fn sync_calendars(
     State(state): State<AuthState>,
     Path(account_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, PimError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let row = sqlx::query(
@@ -799,4 +782,35 @@ async fn sync_calendars(
 fn parse_json_array(json: Option<&str>) -> Vec<String> {
     json.and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn internal_pim_errors_are_masked() {
+        let err = PimError::Database(sqlx::Error::Protocol(
+            "connection to db.internal:5432 refused".into(),
+        ));
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert_eq!(body, r#"{"error":"internal error"}"#);
+
+        let err = PimError::SyncError("token=t0psecret user=admin".into());
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(!body.contains("t0psecret"));
+
+        // 404s stay descriptive (deliberate API surface).
+        let res = PimError::NotFound.into_response();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("not found"));
+    }
 }

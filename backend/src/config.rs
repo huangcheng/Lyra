@@ -53,6 +53,7 @@ pub enum ConfigError {
 /// Load and validate the master key from `LYRA_MASTER_KEY`.
 fn master_key_from_env() -> Result<Vec<u8>, ConfigError> {
     let raw = env::var("LYRA_MASTER_KEY").map_err(|_| ConfigError::MasterKeyMissing)?;
+    // Used as raw bytes (no hex/base64 decoding) — encoding-agnostic by design.
     let bytes = raw.into_bytes();
     if bytes.len() < 32 {
         return Err(ConfigError::MasterKeyTooShort(bytes.len()));

@@ -11,7 +11,7 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header},
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::auth::AuthState;
+use crate::auth::{AuthState, AuthUser};
 use crate::crypto;
 use crate::storage::DbPool;
 
@@ -127,8 +127,6 @@ pub enum AccountError {
     Crypto(#[from] crypto::CryptoError),
     #[error("invalid input: {0}")]
     InvalidInput(String),
-    #[error("authentication required")]
-    Unauthorized,
 }
 
 impl IntoResponse for AccountError {
@@ -142,25 +140,9 @@ impl IntoResponse for AccountError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "encryption error".into())
             }
             AccountError::InvalidInput(msg) => (StatusCode::BAD_REQUEST, msg),
-            AccountError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
         };
         (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
-}
-
-/// Extract user ID from auth header and session store.
-async fn get_user_id(state: &AuthState, headers: &HeaderMap) -> Result<String, AccountError> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or(AccountError::Unauthorized)?;
-
-    state
-        .sessions
-        .get_session(token)
-        .await
-        .ok_or(AccountError::Unauthorized)
 }
 
 /// Get SQLite pool from DbPool enum.
@@ -175,9 +157,8 @@ fn get_sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
 /// List all mail accounts for the authenticated user.
 async fn list_accounts(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<Account>>, AccountError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let rows = sqlx::query(
@@ -228,9 +209,8 @@ async fn list_accounts(
 async fn get_account(
     State(state): State<AuthState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<Account>, AccountError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let row = sqlx::query(
@@ -276,10 +256,9 @@ async fn get_account(
 /// Create a new mail account.
 async fn create_account(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Json(body): Json<CreateAccountRequest>,
 ) -> Result<(StatusCode, Json<Account>), AccountError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     // Validate email format (basic check)
@@ -390,10 +369,9 @@ async fn create_account(
 async fn update_account(
     State(state): State<AuthState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Json(body): Json<UpdateAccountRequest>,
 ) -> Result<Json<Account>, AccountError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     // Verify account exists and belongs to user
@@ -550,9 +528,8 @@ async fn update_account(
 async fn delete_account(
     State(state): State<AuthState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<StatusCode, AccountError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let result = sqlx::query("DELETE FROM mail_account WHERE id = ? AND user_id = ?")
@@ -580,12 +557,9 @@ async fn delete_account(
 /// oracle. The domain is validated and resolved addresses are filtered
 /// against private/loopback ranges before connecting.
 async fn probe_server_config(
-    State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(_user_id): AuthUser,
     Json(body): Json<ProbeRequest>,
 ) -> Result<Json<ProbeResult>, AccountError> {
-    let _user_id = get_user_id(&state, &headers).await?;
-
     let domain = body
         .domain
         .clone()

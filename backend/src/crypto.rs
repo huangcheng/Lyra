@@ -80,7 +80,6 @@ pub fn encrypt(key: &[u8], plaintext: &[u8]) -> Result<EncryptedCredential, Cryp
 ///
 /// # Returns
 /// Decrypted plaintext bytes.
-#[allow(dead_code)]
 pub fn decrypt(key: &[u8], encrypted: &EncryptedCredential) -> Result<Vec<u8>, CryptoError> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::InvalidKeyLength)?;
 
@@ -97,8 +96,7 @@ pub fn decrypt(key: &[u8], encrypted: &EncryptedCredential) -> Result<Vec<u8>, C
         .map_err(|e| CryptoError::Decrypt(e.to_string()))
 }
 
-/// Generate a random 256-bit key for testing or initial setup.
-#[allow(dead_code)]
+/// Generate a random 256-bit key for initial setup (e.g. per-user DEKs).
 pub fn generate_key() -> [u8; 32] {
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);

@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::auth::AuthState;
+use crate::auth::{AuthState, AuthUser};
 use crate::imap::{ImapClient, ImapConfig, ImapError, ImapMessage, ImapSecurity};
 use crate::jmap::{JmapClient, JmapError};
 use crate::kernel::App;
@@ -80,8 +80,6 @@ pub enum SyncError {
     Jmap(#[from] JmapError),
     #[error("smtp error: {0}")]
     Smtp(#[from] SmtpError),
-    #[error("authentication required")]
-    Unauthorized,
     #[error("crypto error: {0}")]
     Crypto(String),
     #[error("invalid input: {0}")]
@@ -92,21 +90,33 @@ pub enum SyncError {
 
 impl IntoResponse for SyncError {
     fn into_response(self) -> axum::response::Response {
-        let status = match self {
-            SyncError::AccountNotFound | SyncError::MessageNotFound => StatusCode::NOT_FOUND,
-            SyncError::AccountDisabled | SyncError::InvalidInput(_) => StatusCode::BAD_REQUEST,
-            SyncError::Database(_) | SyncError::Crypto(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            SyncError::Imap(_)
+        // 5xx/upstream variants carry hostnames, SQL detail, and protocol
+        // chatter: log the full error server-side, answer "internal error".
+        // 4xx variants are deliberate API surface and stay descriptive.
+        let (status, message) = match &self {
+            SyncError::AccountNotFound | SyncError::MessageNotFound => {
+                (StatusCode::NOT_FOUND, self.to_string())
+            }
+            SyncError::AccountDisabled | SyncError::InvalidInput(_) => {
+                (StatusCode::BAD_REQUEST, self.to_string())
+            }
+            // Crypto messages carry deliberate operator guidance, no secrets.
+            SyncError::Crypto(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            masked @ (SyncError::Database(_)
+            | SyncError::Imap(_)
             | SyncError::Jmap(_)
             | SyncError::Smtp(_)
-            | SyncError::Protocol(_) => StatusCode::BAD_GATEWAY,
-            SyncError::Unauthorized => StatusCode::UNAUTHORIZED,
+            | SyncError::Protocol(_)) => {
+                tracing::error!(error = %masked, "sync request failed");
+                let status = if matches!(masked, SyncError::Database(_)) {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::BAD_GATEWAY
+                };
+                (status, "internal error".to_string())
+            }
         };
-        (
-            status,
-            Json(serde_json::json!({ "error": self.to_string() })),
-        )
-            .into_response()
+        (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
 }
 
@@ -164,9 +174,8 @@ pub fn routes() -> Router<AuthState> {
 /// Get sync status.
 async fn sync_status(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<SyncStatus>, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let count: i64 = sqlx::query_scalar(
@@ -219,9 +228,8 @@ async fn user_has_active_sync_job(
 async fn trigger_sync(
     State(state): State<AuthState>,
     Path(account_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<(StatusCode, Json<EnqueuedSync>), SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let exists: Option<String> =
@@ -261,10 +269,9 @@ async fn trigger_sync(
 #[allow(clippy::too_many_lines)]
 async fn send_message(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Json(body): Json<SendMessageRequest>,
 ) -> Result<Json<SendMessageResponse>, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let row = sqlx::query(
@@ -529,9 +536,8 @@ pub struct MessageResponse {
 /// List all folders for the authenticated user.
 async fn list_folders(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<FolderResponse>>, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let rows = sqlx::query(
@@ -568,9 +574,8 @@ async fn list_folders(
 async fn list_messages(
     State(state): State<AuthState>,
     Path(folder_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<MessageResponse>>, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     // Verify folder belongs to the user
@@ -637,10 +642,9 @@ struct ListMessagesQuery {
 /// List messages across folders, optionally filtered by standard role and account.
 async fn list_messages_query(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Query(query): Query<ListMessagesQuery>,
 ) -> Result<Json<Vec<MessageResponse>>, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
     let messages = query_user_messages(
         pool,
@@ -718,10 +722,9 @@ struct SearchMessagesQuery {
 /// Search messages by subject / snippet / body / from (local index).
 async fn search_messages(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Query(query): Query<SearchMessagesQuery>,
 ) -> Result<Json<Vec<MessageResponse>>, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let q = query.q.trim();
@@ -809,9 +812,8 @@ struct AttachmentResponse {
 async fn list_attachments(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<AttachmentResponse>>, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
     let _ = load_message_row(pool, &user_id, &message_id).await?;
 
@@ -844,9 +846,8 @@ async fn list_attachments(
 async fn download_attachment(
     State(state): State<AuthState>,
     Path(attachment_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Response, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
     let row = sqlx::query(
@@ -868,9 +869,10 @@ async fn download_attachment(
     let filename: Option<String> = row.get("filename");
     let content_type: Option<String> = row.get("content_type");
 
-    let bytes = tokio::fs::read(&storage_path)
-        .await
-        .map_err(|e| SyncError::InvalidInput(format!("attachment missing on disk: {e}")))?;
+    let bytes = tokio::fs::read(&storage_path).await.map_err(|e| {
+        tracing::error!(error = %e, path = %storage_path, "attachment missing on disk");
+        SyncError::InvalidInput("attachment not available".to_string())
+    })?;
 
     let mut response = Response::new(Body::from(bytes));
     let ct = content_type.unwrap_or_else(|| "application/octet-stream".into());
@@ -1116,9 +1118,8 @@ fn parse_imap_uid(external_id: Option<&str>) -> Result<u32, SyncError> {
 async fn get_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<MessageResponse>, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
     let mut row = load_message_row(pool, &user_id, &message_id).await?;
 
@@ -1167,10 +1168,9 @@ async fn get_message(
 async fn patch_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Json(body): Json<PatchMessageRequest>,
 ) -> Result<Json<MessageResponse>, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
     let mut row = load_message_row(pool, &user_id, &message_id).await?;
 
@@ -1230,18 +1230,18 @@ async fn patch_message(
 async fn trash_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, SyncError> {
-    move_message_to_role(state, message_id, headers, "trash").await
+    move_message_to_role(state, message_id, user_id, "trash").await
 }
 
 /// POST /api/messages/{id}/archive — move to Archive when available.
 async fn archive_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, SyncError> {
-    move_message_to_role(state, message_id, headers, "archive").await
+    move_message_to_role(state, message_id, user_id, "archive").await
 }
 
 /// POST /api/messages/{id}/snooze — hide locally until `until`, then unsnooze via job.
@@ -1262,10 +1262,9 @@ fn sqlite_utc_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
 async fn snooze_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Json(body): Json<SnoozeRequest>,
 ) -> Result<Json<serde_json::Value>, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
     let row = load_message_row(pool, &user_id, &message_id).await?;
 
@@ -1306,10 +1305,9 @@ async fn snooze_message(
 async fn move_message_to_role(
     state: AuthState,
     message_id: String,
-    headers: HeaderMap,
+    user_id: String,
     role: &str,
 ) -> Result<Json<serde_json::Value>, SyncError> {
-    let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
     let row = load_message_row(pool, &user_id, &message_id).await?;
 
@@ -1842,20 +1840,6 @@ fn get_sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => panic!("PostgreSQL not supported yet"),
     }
-}
-
-async fn get_user_id(state: &AuthState, headers: &HeaderMap) -> Result<String, SyncError> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or(SyncError::Unauthorized)?;
-
-    state
-        .sessions
-        .get_session(token)
-        .await
-        .ok_or(SyncError::Unauthorized)
 }
 
 /// Upsert a folder by `(account_id, name)`.
@@ -2932,5 +2916,38 @@ mod tests {
             Some(until.as_str()),
             "upsert_message must not overwrite snoozed_until"
         );
+    }
+
+    #[tokio::test]
+    async fn internal_sync_errors_are_masked() {
+        // SQL detail must not reach the client.
+        let err = SyncError::Database(sqlx::Error::Protocol("no such column: secret_token".into()));
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert_eq!(body, r#"{"error":"internal error"}"#);
+
+        // Upstream protocol chatter (hostnames, usernames) masked as 502.
+        let err = SyncError::Protocol("NO auth failed for bob@imap.example.com".into());
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert_eq!(body, r#"{"error":"internal error"}"#);
+    }
+
+    #[tokio::test]
+    async fn client_sync_errors_stay_descriptive() {
+        // 4xx variants are deliberate API surface.
+        let err = SyncError::InvalidInput("until must be RFC3339".into());
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("until must be RFC3339"));
+
+        let res = SyncError::MessageNotFound.into_response();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }

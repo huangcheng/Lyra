@@ -28,10 +28,40 @@ mod smtp;
 mod storage;
 mod sync;
 
-use axum::{Json, Router, http::StatusCode};
+use axum::{
+    Json, Router,
+    extract::Request,
+    http::{HeaderValue, StatusCode, header},
+    middleware,
+    response::Response,
+};
 use std::path::PathBuf;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::EnvFilter;
+
+/// Matches the CSP meta tag in `frontend/index.html`; sent as a real header
+/// because `frame-ancestors` is ignored in `<meta>` form.
+const SPA_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+/// Baseline security headers for API and static/SPA responses.
+async fn security_headers(req: Request, next: middleware::Next) -> Response {
+    let mut res = next.run(req).await;
+    let headers = res.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(SPA_CSP),
+    );
+    res
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -81,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("FRONTEND_DIR {frontend_dir} missing; API-only mode");
         api
     };
+    let app = app.layer(middleware::from_fn(security_headers));
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!("listening on {}", config.listen_addr);
@@ -97,4 +128,34 @@ async fn version() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn security_headers_are_applied() {
+        let app = Router::new()
+            .route("/health", axum::routing::get(health))
+            .layer(middleware::from_fn(security_headers));
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let h = res.headers();
+        assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(h[header::X_FRAME_OPTIONS], "DENY");
+        assert_eq!(h[header::REFERRER_POLICY], "no-referrer");
+        let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("default-src 'self'"));
+    }
 }

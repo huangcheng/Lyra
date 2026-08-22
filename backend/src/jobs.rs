@@ -16,6 +16,7 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::kernel::App;
 use crate::storage::DbPool;
+use crate::sync::SyncError;
 
 /// Job payload stored as JSON in `jobs.payload`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,8 +208,6 @@ pub async fn try_claim_with_permit(
     }
 }
 
-const ERROR_MAX_CHARS: usize = 512;
-
 #[allow(dead_code)]
 fn row_to_claimed(row: &sqlx::sqlite::SqliteRow) -> Result<ClaimedJob, sqlx::Error> {
     let payload_json: String = row.get("payload");
@@ -221,19 +220,18 @@ fn row_to_claimed(row: &sqlx::sqlite::SqliteRow) -> Result<ClaimedJob, sqlx::Err
     })
 }
 
-fn sanitize_error(msg: &str) -> String {
-    let lower = msg.to_lowercase();
-    if lower.contains("password") || lower.contains("passwd") || lower.contains("secret") {
-        return "sync failed".into();
-    }
-    if msg.len() <= ERROR_MAX_CHARS {
-        msg.to_string()
-    } else {
-        let mut end = ERROR_MAX_CHARS;
-        while !msg.is_char_boundary(end) {
-            end -= 1;
-        }
-        msg[..end].to_string()
+/// Map a sync failure to a fixed, safe category string for `jobs.last_error`.
+///
+/// Whitelist, not blacklist: raw error text is never persisted, because it can
+/// echo credentials, tokens, usernames, or server chatter.
+fn sanitize_error(err: &SyncError) -> &'static str {
+    match err {
+        SyncError::Imap(_) => "IMAP error",
+        SyncError::Jmap(_) => "JMAP error",
+        SyncError::Smtp(_) => "SMTP error",
+        SyncError::Database(_) => "database error",
+        SyncError::Protocol(_) => "protocol error",
+        _ => "sync failed",
     }
 }
 
@@ -309,9 +307,9 @@ pub async fn process_job(
             match result {
                 Ok(_) => mark_completed(pool, &job.id).await?,
                 Err(err) => {
-                    let safe = sanitize_error(&err.to_string());
+                    let safe = sanitize_error(&err);
                     tracing::warn!(job_id = %job.id, error = %safe, "sync job failed");
-                    mark_failed(pool, &job.id, &safe).await?;
+                    mark_failed(pool, &job.id, safe).await?;
                 }
             }
         }
@@ -378,6 +376,7 @@ mod tests {
     use crate::kernel::App;
     use crate::protocol::{ReceivePlugin, SyncCtx, SyncOutcome};
     use crate::storage::{DbPool, Storage};
+    use crate::sync::SyncError;
     use async_trait::async_trait;
     use std::sync::Arc;
     use tokio::sync::Semaphore;
@@ -652,5 +651,51 @@ mod tests {
             .unwrap();
         assert_eq!(running, 1, "running count must stay within the worker cap");
         drop(first);
+    }
+
+    #[test]
+    fn sanitize_error_whitelists_categories() {
+        // Raw text — tokens, usernames, server echoes — never passes through.
+        let msg = "535 auth failed for user admin token=t0psecret";
+        assert_eq!(
+            sanitize_error(&SyncError::Imap(crate::imap::ImapError::Login(msg.into()))),
+            "IMAP error"
+        );
+        assert_eq!(
+            sanitize_error(&SyncError::Jmap(crate::jmap::JmapError::SessionDiscovery(
+                msg.into()
+            ))),
+            "JMAP error"
+        );
+        assert_eq!(
+            sanitize_error(&SyncError::Smtp(crate::smtp::SmtpError::Credential(
+                msg.into()
+            ))),
+            "SMTP error"
+        );
+        assert_eq!(
+            sanitize_error(&SyncError::Database(sqlx::Error::Protocol(msg.into()))),
+            "database error"
+        );
+        assert_eq!(
+            sanitize_error(&SyncError::Protocol(msg.into())),
+            "protocol error"
+        );
+        // Other categories collapse to the generic fallback.
+        assert_eq!(
+            sanitize_error(&SyncError::InvalidInput(msg.into())),
+            "sync failed"
+        );
+        for safe in [
+            "IMAP error",
+            "JMAP error",
+            "SMTP error",
+            "database error",
+            "protocol error",
+            "sync failed",
+        ] {
+            assert!(!safe.contains("t0psecret"));
+            assert!(!safe.contains("admin"));
+        }
     }
 }
