@@ -20,6 +20,7 @@ use totp_rs::{Algorithm, TOTP};
 use uuid::Uuid;
 
 use crate::kernel::App;
+use crate::kv::{KvStore, MemoryKv};
 use crate::storage::DbPool;
 
 // ── Public types ────────────────────────────────────────────────────
@@ -381,64 +382,175 @@ async fn update_user_totp(
     Ok(())
 }
 
-// ── Session store (in-memory for v1) ────────────────────────────────
+// ── Session store (KvStore + sess_epoch) ─────────────────────────────
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+
+fn sess_key(epoch: i64, token: &str) -> String {
+    format!("sess:{epoch}:{token}")
+}
+
+fn tok_key(token: &str) -> String {
+    format!("tok:{token}")
+}
+
+fn pending_key(token: &str) -> String {
+    format!("pending:{token}")
+}
+
+async fn fetch_sess_epoch(db: &DbPool, user_id: &str) -> Result<i64, StatusCode> {
+    let epoch: i64 = match db {
+        DbPool::Sqlite(pool) => sqlx::query_scalar("SELECT sess_epoch FROM lyra_user WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("fetch sess_epoch failed: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .ok_or(StatusCode::NOT_FOUND)?,
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(pool) => {
+            sqlx::query_scalar("SELECT sess_epoch FROM lyra_user WHERE id = $1")
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| {
+                    tracing::error!("fetch sess_epoch failed: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                .ok_or(StatusCode::NOT_FOUND)?
+        }
+    };
+    Ok(epoch)
+}
+
+/// Bump `sess_epoch` and delete session keys for the previous epoch.
+#[allow(dead_code)] // wired to password-change in a later task
+pub async fn invalidate_user_sessions(
+    pool: &DbPool,
+    kv: &dyn KvStore,
+    user_id: &str,
+) -> Result<(), StatusCode> {
+    let old_epoch = fetch_sess_epoch(pool, user_id).await?;
+    match pool {
+        DbPool::Sqlite(db) => {
+            sqlx::query("UPDATE lyra_user SET sess_epoch = sess_epoch + 1 WHERE id = ?")
+                .bind(user_id)
+                .execute(db)
+                .await
+        }
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(db) => {
+            sqlx::query("UPDATE lyra_user SET sess_epoch = sess_epoch + 1 WHERE id = $1")
+                .bind(user_id)
+                .execute(db)
+                .await
+        }
+    }
+    .map_err(|e| {
+        tracing::error!("bump sess_epoch failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    kv.del_prefix(&format!("sess:{old_epoch}:"))
+        .await
+        .map_err(|e| {
+            tracing::error!("del_prefix sessions failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct SessionStore {
-    sessions: Arc<RwLock<HashMap<String, String>>>,
-    pending_sessions: Arc<RwLock<HashMap<String, String>>>,
+    kv: Arc<dyn KvStore>,
+    db: DbPool,
 }
 
 impl SessionStore {
-    pub fn new() -> Self {
-        Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            pending_sessions: Arc::new(RwLock::new(HashMap::new())),
-        }
+    pub fn new(db: DbPool, kv: Arc<dyn KvStore>) -> Self {
+        Self { kv, db }
     }
 
-    pub async fn create_session(&self, user_id: &str) -> String {
-        let token = generate_token();
-        self.sessions
-            .write()
-            .await
-            .insert(token.clone(), user_id.to_string());
-        token
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn kv(&self) -> &Arc<dyn KvStore> {
+        &self.kv
     }
 
-    pub async fn create_pending_session(&self, user_id: &str) -> String {
+    pub async fn create_session(&self, user_id: &str) -> Result<String, StatusCode> {
+        let epoch = fetch_sess_epoch(&self.db, user_id).await?;
         let token = generate_token();
-        self.pending_sessions
-            .write()
+        self.kv
+            .set(&sess_key(epoch, &token), user_id, None)
             .await
-            .insert(token.clone(), user_id.to_string());
-        token
+            .map_err(|e| {
+                tracing::error!("session set failed: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        // Reverse index so get_session can resolve token → user, then check current epoch.
+        self.kv
+            .set(&tok_key(&token), user_id, None)
+            .await
+            .map_err(|e| {
+                tracing::error!("session tok index set failed: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        Ok(token)
+    }
+
+    pub async fn create_pending_session(&self, user_id: &str) -> Result<String, StatusCode> {
+        let token = generate_token();
+        self.kv
+            .set(&pending_key(&token), user_id, None)
+            .await
+            .map_err(|e| {
+                tracing::error!("pending session set failed: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        Ok(token)
     }
 
     pub async fn get_session(&self, token: &str) -> Option<String> {
-        self.sessions.read().await.get(token).cloned()
-    }
-
-    pub async fn get_pending_session(&self, token: &str) -> Option<String> {
-        self.pending_sessions.read().await.get(token).cloned()
-    }
-
-    pub async fn promote_pending_session(&self, pending_token: &str) -> Option<String> {
-        let mut pending = self.pending_sessions.write().await;
-        if let Some(user_id) = pending.remove(pending_token) {
-            drop(pending);
-            Some(self.create_session(&user_id).await)
+        let user_id = self.kv.get(&tok_key(token)).await.ok().flatten()?;
+        let epoch = fetch_sess_epoch(&self.db, &user_id).await.ok()?;
+        let stored = self.kv.get(&sess_key(epoch, token)).await.ok().flatten()?;
+        if stored == user_id {
+            Some(user_id)
         } else {
             None
         }
     }
 
+    pub async fn get_pending_session(&self, token: &str) -> Option<String> {
+        self.kv.get(&pending_key(token)).await.ok().flatten()
+    }
+
+    pub async fn promote_pending_session(
+        &self,
+        pending_token: &str,
+    ) -> Result<Option<String>, StatusCode> {
+        let Some(user_id) = self.get_pending_session(pending_token).await else {
+            return Ok(None);
+        };
+        self.kv
+            .del(&pending_key(pending_token))
+            .await
+            .map_err(|e| {
+                tracing::error!("pending session del failed: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        Ok(Some(self.create_session(&user_id).await?))
+    }
+
     pub async fn remove_session(&self, token: &str) {
-        self.sessions.write().await.remove(token);
+        if let Some(user_id) = self.kv.get(&tok_key(token)).await.ok().flatten()
+            && let Ok(epoch) = fetch_sess_epoch(&self.db, &user_id).await
+        {
+            let _ = self.kv.del(&sess_key(epoch, token)).await;
+        }
+        let _ = self.kv.del(&tok_key(token)).await;
     }
 }
 
@@ -460,9 +572,10 @@ impl AuthState {
         app: Arc<App>,
     ) -> Result<Self, anyhow::Error> {
         std::fs::create_dir_all(&config.data_dir)?;
+        let kv: Arc<dyn KvStore> = Arc::new(MemoryKv::new());
         Ok(Self {
-            db,
-            sessions: SessionStore::new(),
+            db: db.clone(),
+            sessions: SessionStore::new(db, kv),
             min_password_length: config.min_password_length,
             data_dir: std::path::PathBuf::from(&config.data_dir),
             app,
@@ -611,7 +724,14 @@ async fn auth_bootstrap(
         )
     })?;
 
-    let token = state.sessions.create_session(&user_id).await;
+    let token = state.sessions.create_session(&user_id).await.map_err(|e| {
+        (
+            e,
+            Json(ErrorResponse {
+                error: "Failed to create session".to_string(),
+            }),
+        )
+    })?;
 
     Ok((
         StatusCode::CREATED,
@@ -682,7 +802,18 @@ async fn auth_login(
     }
 
     if user.totp_enabled {
-        let pending_token = state.sessions.create_pending_session(&user.id).await;
+        let pending_token = state
+            .sessions
+            .create_pending_session(&user.id)
+            .await
+            .map_err(|e| {
+                (
+                    e,
+                    Json(ErrorResponse {
+                        error: "Failed to create pending session".to_string(),
+                    }),
+                )
+            })?;
         return Ok(Json(LoginResponse {
             token: pending_token,
             user: UserInfo {
@@ -696,7 +827,14 @@ async fn auth_login(
         }));
     }
 
-    let token = state.sessions.create_session(&user.id).await;
+    let token = state.sessions.create_session(&user.id).await.map_err(|e| {
+        (
+            e,
+            Json(ErrorResponse {
+                error: "Failed to create session".to_string(),
+            }),
+        )
+    })?;
 
     Ok(Json(LoginResponse {
         token,
@@ -780,11 +918,19 @@ async fn totp_verify(
         .sessions
         .promote_pending_session(&req.pending_token)
         .await
-        .ok_or_else(|| {
+        .map_err(|e| {
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                e,
                 Json(ErrorResponse {
                     error: "Failed to promote session".to_string(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Invalid or expired pending session".to_string(),
                 }),
             )
         })?;
@@ -1103,8 +1249,10 @@ mod tests {
 
     #[tokio::test]
     async fn session_store_operations() {
-        let store = SessionStore::new();
-        let token = store.create_session("user-1").await;
+        let db = test_pool().await;
+        seed_user(&db, "user-1").await;
+        let store = SessionStore::new(db, Arc::new(MemoryKv::new()));
+        let token = store.create_session("user-1").await.unwrap();
         assert_eq!(store.get_session(&token).await, Some("user-1".to_string()));
         store.remove_session(&token).await;
         assert_eq!(store.get_session(&token).await, None);
@@ -1112,15 +1260,63 @@ mod tests {
 
     #[tokio::test]
     async fn pending_session_promotion() {
-        let store = SessionStore::new();
-        let pending_token = store.create_pending_session("user-1").await;
+        let db = test_pool().await;
+        seed_user(&db, "user-1").await;
+        let store = SessionStore::new(db, Arc::new(MemoryKv::new()));
+        let pending_token = store.create_pending_session("user-1").await.unwrap();
         assert!(store.get_pending_session(&pending_token).await.is_some());
-        let session_token = store.promote_pending_session(&pending_token).await;
-        assert!(session_token.is_some());
+        let session_token = store
+            .promote_pending_session(&pending_token)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            store.get_session(&session_token.unwrap()).await,
+            store.get_session(&session_token).await,
             Some("user-1".to_string())
         );
         assert!(store.get_pending_session(&pending_token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn bump_epoch_invalidates_old_tokens() {
+        let db = test_pool().await;
+        seed_user(&db, "user-1").await;
+        let kv = Arc::new(MemoryKv::new());
+        let store = SessionStore::new(db.clone(), Arc::clone(&kv) as Arc<dyn KvStore>);
+        let token = store.create_session("user-1").await.unwrap();
+        assert_eq!(store.get_session(&token).await, Some("user-1".to_string()));
+
+        invalidate_user_sessions(&db, kv.as_ref(), "user-1")
+            .await
+            .unwrap();
+
+        assert_eq!(store.get_session(&token).await, None);
+        // New sessions at epoch 1 still work.
+        let token2 = store.create_session("user-1").await.unwrap();
+        assert_eq!(store.get_session(&token2).await, Some("user-1".to_string()));
+    }
+
+    async fn test_pool() -> DbPool {
+        let storage = crate::storage::Storage::new("sqlite::memory:")
+            .await
+            .unwrap();
+        storage.run_migrations().await.unwrap();
+        storage.pool().clone()
+    }
+
+    async fn seed_user(db: &DbPool, id: &str) {
+        match db {
+            DbPool::Sqlite(pool) => {
+                sqlx::query("INSERT INTO lyra_user (id, username, password_hash) VALUES (?, ?, ?)")
+                    .bind(id)
+                    .bind(format!("user-{id}"))
+                    .bind("hash")
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            #[cfg(feature = "postgres")]
+            DbPool::Postgres(_) => panic!("expected sqlite in tests"),
+        }
     }
 }

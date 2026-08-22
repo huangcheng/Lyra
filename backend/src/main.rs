@@ -17,6 +17,7 @@ mod imap;
 mod jmap;
 mod jobs;
 mod kernel;
+mod kv;
 mod pim;
 mod plugins;
 mod protocol;
