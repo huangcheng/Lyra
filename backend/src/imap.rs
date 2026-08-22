@@ -16,6 +16,7 @@ use tokio::net::TcpStream;
 use tokio_native_tls::TlsStream;
 
 use crate::crypto::{self, EncryptedCredential};
+use crate::sanitize::sanitize_email_html;
 
 /// Errors specific to the IMAP adapter.
 #[derive(Debug, Error)]
@@ -623,7 +624,8 @@ fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, Vec<Extrac
             } else if content_type.contains("text/plain") && body_text.is_none() {
                 body_text = decode_content(content, encoding.as_deref());
             } else if content_type.contains("text/html") && body_html.is_none() {
-                body_html = decode_content(content, encoding.as_deref());
+                body_html =
+                    decode_content(content, encoding.as_deref()).map(|h| sanitize_email_html(&h));
             }
         }
     } else {
@@ -635,7 +637,7 @@ fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, Vec<Extrac
         if content_type.contains("text/plain") {
             body_text = decode_content(content, encoding.as_deref());
         } else if content_type.contains("text/html") {
-            body_html = decode_content(content, encoding.as_deref());
+            body_html = decode_content(content, encoding.as_deref()).map(|h| sanitize_email_html(&h));
         }
     }
 
@@ -786,6 +788,19 @@ mod tests {
     #[test]
     fn format_uid_set_unsorted_with_dupes() {
         assert_eq!(format_uid_set(&[5, 3, 1, 3, 5]), "1,3,5");
+    }
+
+    #[test]
+    fn extract_mime_parts_sanitizes_html_part() {
+        let raw = b"Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nplain\r\n--b\r\nContent-Type: text/html\r\n\r\n<p><b>hi</b></p><script>alert(1)</script><img src=\"https://x/y.png\" onerror=\"alert(2)\">\r\n--b--\r\n";
+        let (text, html, _) = extract_mime_parts(raw);
+        assert_eq!(text.as_deref(), Some("plain"));
+        let html = html.expect("html part");
+        assert!(html.contains("<b>hi</b>"), "got: {html}");
+        assert!(!html.contains("<script"), "got: {html}");
+        assert!(!html.to_lowercase().contains("onerror"), "got: {html}");
+        assert!(!html.contains("alert("), "got: {html}");
+        assert!(html.contains("src=\"https://x/y.png\""), "got: {html}");
     }
 
     #[test]

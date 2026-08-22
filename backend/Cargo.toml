@@ -48,6 +48,7 @@ futures-util = "0.3"
 lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls", "smtp-transport", "builder"], default-features = false }
 async-trait = "0.1"
 redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
+ammonia = "4.1.4"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

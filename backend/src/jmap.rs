@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::crypto::{self, EncryptedCredential};
+use crate::sanitize::sanitize_email_html;
 
 /// Errors specific to the JMAP adapter.
 #[derive(Debug, Error)]
@@ -534,9 +535,9 @@ impl JmapEmail {
         extract_body_part(self, "text/plain")
     }
 
-    /// Extract the HTML body from bodyValues.
+    /// Extract the HTML body from bodyValues, sanitized for safe rendering.
     pub fn body_html(&self) -> Option<String> {
-        extract_body_part(self, "text/html")
+        extract_body_part(self, "text/html").map(|h| sanitize_email_html(&h))
     }
 
     /// Get the `from` address as a formatted string.

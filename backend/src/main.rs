@@ -21,6 +21,7 @@ mod kv;
 mod pim;
 mod plugins;
 mod protocol;
+mod sanitize;
 mod scheduler;
 mod smtp;
 mod storage;

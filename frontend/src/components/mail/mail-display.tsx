@@ -3,6 +3,7 @@
  */
 
 import { addDays, addHours, format, nextSaturday } from 'date-fns';
+import DOMPurify from 'dompurify';
 import {
   Archive,
   ArchiveX,
@@ -36,6 +37,18 @@ import { getInitials } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
+
+/**
+ * Sanitize attacker-controlled email HTML before rendering.
+ * Defense in depth: the backend sanitizes at ingest; this guards the render
+ * path against anything stored before that, or from other sources.
+ * Strict config: no iframes/forms/embeds, no unknown protocols.
+ */
+function sanitizeEmailHtml(html: string): string {
+  return DOMPurify.sanitize(html, {
+    FORBID_TAGS: ['iframe', 'object', 'embed', 'form', 'meta', 'link', 'base', 'style'],
+  });
+}
 
 function quoteBody(message: {
   from: { email: string };
@@ -422,7 +435,7 @@ export function MailDisplay() {
             {loadError ? (
               <p className="text-muted-foreground">{loadError}</p>
             ) : mail.bodyHtml ? (
-              <div dangerouslySetInnerHTML={{ __html: mail.bodyHtml }} />
+              <div dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(mail.bodyHtml) }} />
             ) : (
               (mail.bodyText ?? mail.snippet)
             )}
