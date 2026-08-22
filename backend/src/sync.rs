@@ -148,25 +148,31 @@ pub struct SendMessageResponse {
 /// Routes for sync-related endpoints.
 pub fn routes() -> Router<AuthState> {
     Router::new()
-        .route("/api/sync/status", get(sync_status))
-        .route("/api/accounts/{account_id}/sync", post(trigger_sync))
-        .route("/api/messages/send", post(send_message))
-        .route("/api/messages/search", get(search_messages))
-        .route("/api/messages", get(list_messages_query))
-        .route("/api/folders", get(list_folders))
-        .route("/api/folders/{folder_id}/messages", get(list_messages))
+        .route("/api/v1/sync/status", get(sync_status))
+        .route("/api/v1/accounts/{account_id}/sync", post(trigger_sync))
+        .route("/api/v1/messages/send", post(send_message))
+        .route("/api/v1/messages/search", get(search_messages))
+        .route("/api/v1/messages", get(list_messages_query))
+        .route("/api/v1/folders", get(list_folders))
+        .route("/api/v1/folders/{folder_id}/messages", get(list_messages))
         .route(
-            "/api/messages/{message_id}",
+            "/api/v1/messages/{message_id}",
             get(get_message).patch(patch_message),
         )
         .route(
-            "/api/messages/{message_id}/attachments",
+            "/api/v1/messages/{message_id}/attachments",
             get(list_attachments),
         )
-        .route("/api/attachments/{attachment_id}", get(download_attachment))
-        .route("/api/messages/{message_id}/trash", post(trash_message))
-        .route("/api/messages/{message_id}/archive", post(archive_message))
-        .route("/api/messages/{message_id}/snooze", post(snooze_message))
+        .route(
+            "/api/v1/attachments/{attachment_id}",
+            get(download_attachment),
+        )
+        .route("/api/v1/messages/{message_id}/trash", post(trash_message))
+        .route(
+            "/api/v1/messages/{message_id}/archive",
+            post(archive_message),
+        )
+        .route("/api/v1/messages/{message_id}/snooze", post(snooze_message))
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -631,7 +637,7 @@ async fn list_messages(
     Ok(Json(messages))
 }
 
-/// Query for GET /api/messages (unified inbox / role filter).
+/// Query for GET /api/v1/messages (unified inbox / role filter).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ListMessagesQuery {
@@ -709,7 +715,7 @@ async fn query_user_messages(
         .collect())
 }
 
-/// Query for GET /api/messages/search.
+/// Query for GET /api/v1/messages/search.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchMessagesQuery {
@@ -951,7 +957,7 @@ async fn persist_attachments(
     Ok(())
 }
 
-/// Request body for PATCH /api/messages/{id}.
+/// Request body for PATCH /api/v1/messages/{id}.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PatchMessageRequest {
@@ -1114,7 +1120,7 @@ fn parse_imap_uid(external_id: Option<&str>) -> Result<u32, SyncError> {
         .ok_or_else(|| SyncError::InvalidInput("message has no IMAP UID".into()))
 }
 
-/// GET /api/messages/{id} — return one message; lazily fetch IMAP body if missing.
+/// GET /api/v1/messages/{id} — return one message; lazily fetch IMAP body if missing.
 async fn get_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
@@ -1128,7 +1134,8 @@ async fn get_message(
         && row.protocol == "imap"
         && let Ok(uid) = parse_imap_uid(row.external_id.as_deref())
     {
-        let (mut client, _) = connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
+        let (mut client, _) =
+            connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
         client.select(&row.folder_name).await?;
         let bodies = client.fetch_bodies(&[uid]).await?;
         if let Some(fetched) = bodies.into_iter().next() {
@@ -1164,7 +1171,7 @@ async fn get_message(
     Ok(Json(message_response_from_row(&row)))
 }
 
-/// PATCH /api/messages/{id} — update read/starred flags (IMAP STORE when possible).
+/// PATCH /api/v1/messages/{id} — update read/starred flags (IMAP STORE when possible).
 async fn patch_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
@@ -1185,7 +1192,8 @@ async fn patch_message(
 
     if row.protocol == "imap" && (body.is_read.is_some() || body.is_starred.is_some()) {
         let uid = parse_imap_uid(row.external_id.as_deref())?;
-        let (mut client, _) = connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
+        let (mut client, _) =
+            connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
         client.select(&row.folder_name).await?;
 
         if let Some(is_read) = body.is_read {
@@ -1226,7 +1234,7 @@ async fn patch_message(
     Ok(Json(message_response_from_row(&row)))
 }
 
-/// POST /api/messages/{id}/trash — move to Trash (IMAP) or soft-delete locally.
+/// POST /api/v1/messages/{id}/trash — move to Trash (IMAP) or soft-delete locally.
 async fn trash_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
@@ -1235,7 +1243,7 @@ async fn trash_message(
     move_message_to_role(state, message_id, user_id, "trash").await
 }
 
-/// POST /api/messages/{id}/archive — move to Archive when available.
+/// POST /api/v1/messages/{id}/archive — move to Archive when available.
 async fn archive_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
@@ -1244,7 +1252,7 @@ async fn archive_message(
     move_message_to_role(state, message_id, user_id, "archive").await
 }
 
-/// POST /api/messages/{id}/snooze — hide locally until `until`, then unsnooze via job.
+/// POST /api/v1/messages/{id}/snooze — hide locally until `until`, then unsnooze via job.
 #[derive(Deserialize)]
 struct SnoozeRequest {
     until: String,
@@ -1345,7 +1353,8 @@ async fn move_message_to_role(
 
     if row.protocol == "imap" {
         let uid = parse_imap_uid(row.external_id.as_deref())?;
-        let (mut client, _) = connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
+        let (mut client, _) =
+            connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
         client.select(&row.folder_name).await?;
         client.move_uid(uid, &dest_name).await?;
     }

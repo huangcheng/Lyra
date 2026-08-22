@@ -61,7 +61,7 @@ export function CalendarPage() {
   async function fetchCalendars() {
     try {
       setLoading(true);
-      const res = await fetch('/api/calendars', {
+      const res = await fetch('/api/v1/calendars', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch calendars');
@@ -79,7 +79,7 @@ export function CalendarPage() {
 
   async function fetchEvents(calendarId: string) {
     try {
-      const res = await fetch(`/api/calendars/${calendarId}/events`, {
+      const res = await fetch(`/api/v1/calendars/${calendarId}/events`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch events');

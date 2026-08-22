@@ -24,19 +24,19 @@ use crate::storage::DbPool;
 pub fn routes() -> Router<AuthState> {
     Router::new()
         // Contacts
-        .route("/api/contacts", get(list_contacts))
-        .route("/api/contacts/{id}", get(get_contact))
+        .route("/api/v1/contacts", get(list_contacts))
+        .route("/api/v1/contacts/{id}", get(get_contact))
         .route(
-            "/api/accounts/{account_id}/contacts/sync",
+            "/api/v1/accounts/{account_id}/contacts/sync",
             get(sync_contacts),
         )
         // Calendars
-        .route("/api/calendars", get(list_calendars))
-        .route("/api/calendars/{id}", get(get_calendar))
-        .route("/api/calendars/{id}/events", get(list_events))
-        .route("/api/events/{id}", get(get_event))
+        .route("/api/v1/calendars", get(list_calendars))
+        .route("/api/v1/calendars/{id}", get(get_calendar))
+        .route("/api/v1/calendars/{id}/events", get(list_events))
+        .route("/api/v1/events/{id}", get(get_event))
         .route(
-            "/api/accounts/{account_id}/calendars/sync",
+            "/api/v1/accounts/{account_id}/calendars/sync",
             get(sync_calendars),
         )
 }

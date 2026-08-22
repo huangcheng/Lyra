@@ -1,7 +1,7 @@
 /**
  * RxJS stream for sync events.
  *
- * Subscribes to the backend SSE endpoint (/api/sync/events) and provides
+ * Subscribes to the backend SSE endpoint (/api/v1/sync/events) and provides
  * an observable stream of SyncEvents.
  *
  * Role: ASYNC / RECOVERY only. Long-lived subscriptions, retry logic,
@@ -27,7 +27,7 @@ export const syncEventSubject = new Subject<SyncEvent>();
  * In production, this would wrap an EventSource:
  *
  *   const sse$ = new Observable<SyncEvent>(subscriber => {
- *     const es = new EventSource('/api/sync/events');
+ *     const es = new EventSource('/api/v1/sync/events');
  *     es.onmessage = (e) => subscriber.next(JSON.parse(e.data));
  *     es.onerror = (e) => subscriber.error(e);
  *     return () => es.close();

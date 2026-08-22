@@ -387,7 +387,7 @@ use crate::auth::AuthState;
 /// Routes for storage-related endpoints.
 #[allow(dead_code)]
 pub fn routes() -> Router<AuthState> {
-    Router::new().route("/api/storage/status", get(storage_status))
+    Router::new().route("/api/v1/storage/status", get(storage_status))
 }
 
 #[derive(Serialize)]

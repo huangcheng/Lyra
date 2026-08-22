@@ -28,7 +28,7 @@ export function useMailData() {
   const fetchAccounts = useCallback(async () => {
     if (!token) return;
     try {
-      const res = await fetch('/api/accounts', {
+      const res = await fetch('/api/v1/accounts', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) return;
@@ -51,7 +51,7 @@ export function useMailData() {
   const fetchFolders = useCallback(async () => {
     if (!token) return;
     try {
-      const res = await fetch('/api/folders', {
+      const res = await fetch('/api/v1/folders', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) return;
@@ -66,7 +66,7 @@ export function useMailData() {
     async (folderId: string) => {
       if (!token || !folderId) return;
       try {
-        const res = await fetch(`/api/folders/${folderId}/messages`, {
+        const res = await fetch(`/api/v1/folders/${folderId}/messages`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) return;

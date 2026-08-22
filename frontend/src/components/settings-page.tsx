@@ -85,7 +85,7 @@ export function SettingsPage() {
 
   useEffect(() => {
     fetchAccounts();
-    fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+    fetch('/api/v1/auth/me', { headers: { Authorization: `Bearer ${token}` } })
       .then((res) => (res.ok ? res.json() : null))
       .then((me) => {
         if (me) setTotpEnabled(Boolean(me.totp_enabled));
@@ -96,7 +96,7 @@ export function SettingsPage() {
   async function fetchAccounts() {
     try {
       setLoading(true);
-      const res = await fetch('/api/accounts', {
+      const res = await fetch('/api/v1/accounts', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch accounts');
@@ -112,7 +112,7 @@ export function SettingsPage() {
   async function pollUntilSyncIdle() {
     for (;;) {
       await new Promise((r) => setTimeout(r, 2000));
-      const res = await fetch('/api/sync/status', {
+      const res = await fetch('/api/v1/sync/status', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(t(locale, 'sync.syncError'));
@@ -126,7 +126,7 @@ export function SettingsPage() {
       setError(null);
       setSyncing(true);
       setSyncMessage(null);
-      const res = await fetch(`/api/accounts/${id}/sync`, {
+      const res = await fetch(`/api/v1/accounts/${id}/sync`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -159,7 +159,7 @@ export function SettingsPage() {
     try {
       setProbing(true);
       setProbeResult(null);
-      const res = await fetch('/api/accounts/probe', {
+      const res = await fetch('/api/v1/accounts/probe', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -192,7 +192,7 @@ export function SettingsPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     try {
-      const url = editingAccount ? `/api/accounts/${editingAccount.id}` : '/api/accounts';
+      const url = editingAccount ? `/api/v1/accounts/${editingAccount.id}` : '/api/v1/accounts';
       const method = editingAccount ? 'PUT' : 'POST';
       const body: any = {
         displayName: formData.displayName,
@@ -229,7 +229,7 @@ export function SettingsPage() {
   async function handleDelete(id: string) {
     if (!confirm(t(locale, 'settings.accounts.confirmDelete'))) return;
     try {
-      const res = await fetch(`/api/accounts/${id}`, {
+      const res = await fetch(`/api/v1/accounts/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -246,7 +246,7 @@ export function SettingsPage() {
       setChangingPassword(true);
       setSecurityError(null);
       setSecurityMessage(null);
-      const res = await fetch('/api/auth/change-password', {
+      const res = await fetch('/api/v1/auth/change-password', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -278,7 +278,7 @@ export function SettingsPage() {
       setDisablingTotp(true);
       setSecurityError(null);
       setSecurityMessage(null);
-      const res = await fetch('/api/auth/totp/disable', {
+      const res = await fetch('/api/v1/auth/totp/disable', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -367,7 +367,7 @@ export function SettingsPage() {
               className="ml-auto"
               onClick={() => {
                 if (token) {
-                  fetch('/api/auth/logout', {
+                  fetch('/api/v1/auth/logout', {
                     method: 'POST',
                     headers: { Authorization: `Bearer ${token}` },
                   }).catch(() => {});

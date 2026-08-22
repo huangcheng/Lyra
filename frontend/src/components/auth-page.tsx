@@ -37,7 +37,7 @@ export function AuthPage() {
       const token = state.context.token;
       authStore.setToken(token);
 
-      fetch('/api/auth/me', {
+      fetch('/api/v1/auth/me', {
         headers: { Authorization: `Bearer ${token}` },
       })
         .then((res) => {

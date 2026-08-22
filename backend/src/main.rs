@@ -94,14 +94,7 @@ async fn main() -> anyhow::Result<()> {
     );
     scheduler::start_scheduler(auth_state.db.clone(), config.sync_poll_secs);
 
-    let api = Router::new()
-        .route("/health", axum::routing::get(health))
-        .route("/version", axum::routing::get(version))
-        .merge(accounts::routes())
-        .merge(pim::routes())
-        .merge(sync::routes())
-        .merge(auth::routes())
-        .with_state(auth_state);
+    let api = api_router(auth_state);
 
     let frontend_dir = std::env::var("FRONTEND_DIR").unwrap_or_else(|_| "frontend/dist".into());
     let app = if PathBuf::from(&frontend_dir).is_dir() {
@@ -118,6 +111,18 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Public HTTP surface: unversioned `/health` and `/version`, everything else under `/api/v1`.
+fn api_router(auth_state: auth::AuthState) -> Router {
+    Router::new()
+        .route("/health", axum::routing::get(health))
+        .route("/version", axum::routing::get(version))
+        .merge(accounts::routes())
+        .merge(pim::routes())
+        .merge(sync::routes())
+        .merge(auth::routes())
+        .with_state(auth_state)
 }
 
 async fn health() -> StatusCode {
@@ -157,5 +162,60 @@ mod tests {
         let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("default-src 'self'"));
+    }
+
+    async fn test_api_router() -> Router {
+        let storage = storage::Storage::new("sqlite::memory:").await.unwrap();
+        storage.run_migrations().await.unwrap();
+        let config = config::Config {
+            listen_addr: "127.0.0.1:0".into(),
+            database_url: "sqlite::memory:".into(),
+            data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            session_secret: b"test-session-secret-0123456789abcdef".to_vec(),
+            min_password_length: 8,
+            sync_max_concurrent: 3,
+            sync_poll_secs: 300,
+            redis_url: None,
+            master_key: vec![0x11; 32],
+        };
+        let state = auth::AuthState::new(
+            storage.pool().clone(),
+            &config,
+            std::sync::Arc::new(kernel::App::new()),
+            std::sync::Arc::new(kv::MemoryKv::new()),
+        )
+        .unwrap();
+        api_router(state)
+    }
+
+    #[tokio::test]
+    async fn api_v1_auth_status_is_mounted() {
+        let app = test_api_router().await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unversioned_api_auth_status_is_not_mounted() {
+        // API-only mode (no SPA fallback): old `/api/...` paths are a clean 404.
+        let app = test_api_router().await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }

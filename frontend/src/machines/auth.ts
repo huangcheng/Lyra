@@ -38,7 +38,7 @@ interface StatusResponse {
   totp_enabled: boolean;
 }
 
-const API_BASE = '/api/auth';
+const API_BASE = '/api/v1/auth';
 
 function persistToken(token: string) {
   localStorage.setItem('lyra_token', token);

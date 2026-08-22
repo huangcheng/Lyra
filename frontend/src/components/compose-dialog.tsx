@@ -107,7 +107,7 @@ export function ComposeDialog() {
           .filter(Boolean)
           .map((email) => ({ email }));
 
-      const res = await fetch('/api/messages/send', {
+      const res = await fetch('/api/v1/messages/send', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

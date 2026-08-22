@@ -26,12 +26,12 @@ use crate::storage::DbPool;
 /// Routes for account management.
 pub fn routes() -> Router<AuthState> {
     Router::new()
-        .route("/api/accounts", get(list_accounts).post(create_account))
+        .route("/api/v1/accounts", get(list_accounts).post(create_account))
         .route(
-            "/api/accounts/{id}",
+            "/api/v1/accounts/{id}",
             get(get_account).put(update_account).delete(delete_account),
         )
-        .route("/api/accounts/probe", post(probe_server_config))
+        .route("/api/v1/accounts/probe", post(probe_server_config))
 }
 
 /// A mail account as returned by the API.

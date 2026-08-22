@@ -914,16 +914,16 @@ impl AuthState {
 /// Public auth routes (no middleware).
 pub fn routes() -> Router<AuthState> {
     Router::new()
-        .route("/api/auth/status", get(auth_status))
-        .route("/api/auth/bootstrap", post(auth_bootstrap))
-        .route("/api/auth/login", post(auth_login))
-        .route("/api/auth/logout", post(auth_logout))
-        .route("/api/auth/me", get(auth_me))
-        .route("/api/auth/change-password", post(change_password))
-        .route("/api/auth/totp/enroll", post(totp_enroll))
-        .route("/api/auth/totp/confirm", post(totp_enroll_confirm))
-        .route("/api/auth/totp/verify", post(totp_verify))
-        .route("/api/auth/totp/disable", post(totp_disable))
+        .route("/api/v1/auth/status", get(auth_status))
+        .route("/api/v1/auth/bootstrap", post(auth_bootstrap))
+        .route("/api/v1/auth/login", post(auth_login))
+        .route("/api/v1/auth/logout", post(auth_logout))
+        .route("/api/v1/auth/me", get(auth_me))
+        .route("/api/v1/auth/change-password", post(change_password))
+        .route("/api/v1/auth/totp/enroll", post(totp_enroll))
+        .route("/api/v1/auth/totp/confirm", post(totp_enroll_confirm))
+        .route("/api/v1/auth/totp/verify", post(totp_verify))
+        .route("/api/v1/auth/totp/disable", post(totp_disable))
 }
 
 async fn auth_status(State(state): State<AuthState>) -> Json<AuthStatus> {

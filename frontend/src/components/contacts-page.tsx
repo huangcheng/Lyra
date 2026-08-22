@@ -40,7 +40,7 @@ export function ContactsPage() {
       setLoading(true);
       const params = new URLSearchParams();
       if (query) params.set('q', query);
-      const res = await fetch(`/api/contacts?${params}`, {
+      const res = await fetch(`/api/v1/contacts?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch contacts');

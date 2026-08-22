@@ -157,14 +157,14 @@ BASE=http://localhost:3000
 
 # 1. Bootstrap first user (only works when no user exists)
 echo "=== Bootstrap ==="
-curl -s -X POST $BASE/api/auth/bootstrap \
+curl -s -X POST $BASE/api/v1/auth/bootstrap \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"Str0ngP@ss"}' | jq .
 # Returns: {"token":"...","user":{...},"requires_totp":false}
 
 # 2. Login with credentials
 echo "=== Login ==="
-RESP=$(curl -s -X POST $BASE/api/auth/login \
+RESP=$(curl -s -X POST $BASE/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"Str0ngP@ss"}')
 echo $RESP | jq .
@@ -172,28 +172,28 @@ TOKEN=$(echo $RESP | jq -r '.token')
 
 # 3. Call protected route with token
 echo "=== Protected route (with token) ==="
-curl -s $BASE/api/storage/status \
+curl -s $BASE/api/v1/storage/status \
   -H "Authorization: Bearer $TOKEN" | jq .
 # Returns: {"engine":"sqlite","ready":true}
 
 # 4. Call protected route without token → 401
 echo "=== Protected route (no token) ==="
-curl -s -w '\nHTTP %{http_code}' $BASE/api/storage/status
+curl -s -w '\nHTTP %{http_code}' $BASE/api/v1/storage/status
 # Returns 401 Unauthorized
 
 # 5. Check auth status
 echo "\n=== Auth status ==="
-curl -s $BASE/api/auth/status | jq .
+curl -s $BASE/api/v1/auth/status | jq .
 # Returns: {"has_user":true,"totp_enabled":false}
 
 # 6. Get current user
 echo "=== Current user ==="
-curl -s $BASE/api/auth/me \
+curl -s $BASE/api/v1/auth/me \
   -H "Authorization: Bearer $TOKEN" | jq .
 
 # 7. Logout
 echo "=== Logout ==="
-curl -s -X POST $BASE/api/auth/logout \
+curl -s -X POST $BASE/api/v1/auth/logout \
   -H "Authorization: Bearer $TOKEN" -w '\nHTTP %{http_code}'
 ```
 
@@ -205,14 +205,14 @@ Manage mail accounts with authenticated Bearer token:
 BASE=http://localhost:3000
 
 # Login first (get token)
-RESP=$(curl -s -X POST $BASE/api/auth/login \
+RESP=$(curl -s -X POST $BASE/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"Str0ngP@ss"}')
 TOKEN=$(echo $RESP | jq -r '.token')
 
 # ─── Create first account (personal) ───────────────────────────────
 echo "=== Create Account 1 ==="
-curl -s -X POST $BASE/api/accounts \
+curl -s -X POST $BASE/api/v1/accounts \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
@@ -230,7 +230,7 @@ curl -s -X POST $BASE/api/accounts \
 
 # ─── Create second account (work) ──────────────────────────────────
 echo "=== Create Account 2 ==="
-curl -s -X POST $BASE/api/accounts \
+curl -s -X POST $BASE/api/v1/accounts \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
@@ -248,31 +248,31 @@ curl -s -X POST $BASE/api/accounts \
 
 # ─── List all accounts ─────────────────────────────────────────────
 echo "=== List Accounts ==="
-curl -s $BASE/api/accounts \
+curl -s $BASE/api/v1/accounts \
   -H "Authorization: Bearer $TOKEN" | jq .
 
 # ─── Get single account ────────────────────────────────────────────
 ACCOUNT_ID="<paste-id-from-list>"
 echo "=== Get Account ==="
-curl -s $BASE/api/accounts/$ACCOUNT_ID \
+curl -s $BASE/api/v1/accounts/$ACCOUNT_ID \
   -H "Authorization: Bearer $TOKEN" | jq .
 
 # ─── Update account ────────────────────────────────────────────────
 echo "=== Update Account ==="
-curl -s -X PUT $BASE/api/accounts/$ACCOUNT_ID \
+curl -s -X PUT $BASE/api/v1/accounts/$ACCOUNT_ID \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"displayName": "My Personal Mail"}' | jq .
 
 # ─── Probe server config ───────────────────────────────────────────
 echo "=== Probe Server Config ==="
-curl -s -X POST $BASE/api/accounts/probe \
+curl -s -X POST $BASE/api/v1/accounts/probe \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"emailAddress": "user@gmail.com"}' | jq .
 
 # ─── Delete account ────────────────────────────────────────────────
 echo "=== Delete Account ==="
-curl -s -X DELETE $BASE/api/accounts/$ACCOUNT_ID \
+curl -s -X DELETE $BASE/api/v1/accounts/$ACCOUNT_ID \
   -H "Authorization: Bearer $TOKEN" -w '\nHTTP %{http_code}'
 ```

@@ -84,7 +84,7 @@ export function MailList() {
             const params = new URLSearchParams({ q });
             if (selectedAccountId !== ALL_ACCOUNTS) params.set('accountId', selectedAccountId);
             if (selectedFolderId) params.set('folderId', selectedFolderId);
-            const res = await fetch(`/api/messages/search?${params}`, {
+            const res = await fetch(`/api/v1/messages/search?${params}`, {
               headers: { Authorization: `Bearer ${token}` },
             });
             if (!res.ok) throw new Error('Search failed');
@@ -107,11 +107,11 @@ export function MailList() {
       try {
         let url: string | null = null;
         if (selectedFolderId) {
-          url = `/api/folders/${selectedFolderId}/messages`;
+          url = `/api/v1/folders/${selectedFolderId}/messages`;
         } else if (selectedFolderRole) {
           const params = new URLSearchParams({ role: selectedFolderRole });
           if (selectedAccountId !== ALL_ACCOUNTS) params.set('accountId', selectedAccountId);
-          url = `/api/messages?${params}`;
+          url = `/api/v1/messages?${params}`;
         }
         if (!url) return;
         const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });

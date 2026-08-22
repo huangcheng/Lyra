@@ -28,7 +28,7 @@ export function TotpEnroll({ onComplete, onCancel }: TotpEnrollProps) {
 
     try {
       const token = localStorage.getItem('lyra_token');
-      const res = await fetch('/api/auth/totp/enroll', {
+      const res = await fetch('/api/v1/auth/totp/enroll', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -58,7 +58,7 @@ export function TotpEnroll({ onComplete, onCancel }: TotpEnrollProps) {
 
     try {
       const token = localStorage.getItem('lyra_token');
-      const res = await fetch('/api/auth/totp/confirm', {
+      const res = await fetch('/api/v1/auth/totp/confirm', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

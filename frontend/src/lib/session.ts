@@ -9,7 +9,7 @@ export async function restoreSession(): Promise<void> {
   if (!token) return;
 
   try {
-    const res = await fetch('/api/auth/me', {
+    const res = await fetch('/api/v1/auth/me', {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) throw new Error('Session expired');

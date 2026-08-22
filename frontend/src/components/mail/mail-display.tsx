@@ -96,7 +96,7 @@ export function MailDisplay() {
     const load = async () => {
       setLoadError(null);
       try {
-        const res = await fetch(`/api/messages/${selectedMessageId}`, {
+        const res = await fetch(`/api/v1/messages/${selectedMessageId}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) throw new Error('Failed to load message');
@@ -104,7 +104,7 @@ export function MailDisplay() {
         if (cancelled) return;
         upsertMessage(mapApiMessage(msg));
         if (!msg.isRead) {
-          const patch = await fetch(`/api/messages/${selectedMessageId}`, {
+          const patch = await fetch(`/api/v1/messages/${selectedMessageId}`, {
             method: 'PATCH',
             headers: {
               Authorization: `Bearer ${token}`,
@@ -156,7 +156,7 @@ export function MailDisplay() {
     if (!token || !mail || busy) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/messages/${mail.id}/${action}`, {
+      const res = await fetch(`/api/v1/messages/${mail.id}/${action}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -174,7 +174,7 @@ export function MailDisplay() {
     if (!token || !mail || busy) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/messages/${mail.id}/snooze`, {
+      const res = await fetch(`/api/v1/messages/${mail.id}/snooze`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -194,7 +194,7 @@ export function MailDisplay() {
 
   const handlePatch = async (body: { isRead?: boolean; isStarred?: boolean }) => {
     if (!token || !mail) return;
-    const res = await fetch(`/api/messages/${mail.id}`, {
+    const res = await fetch(`/api/v1/messages/${mail.id}`, {
       method: 'PATCH',
       headers: {
         Authorization: `Bearer ${token}`,

@@ -28,6 +28,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      // Prefix match: covers `/api/v1/...` as well as any future `/api/...`.
       '/api': 'http://127.0.0.1:3000',
       '/health': 'http://127.0.0.1:3000',
       '/version': 'http://127.0.0.1:3000',
