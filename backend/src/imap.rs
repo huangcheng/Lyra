@@ -16,7 +16,6 @@ use tokio::net::TcpStream;
 use tokio_native_tls::TlsStream;
 
 use crate::crypto::{self, EncryptedCredential};
-use crate::sanitize::sanitize_email_html;
 use zeroize::Zeroizing;
 
 /// Errors specific to the IMAP adapter.
@@ -487,239 +486,47 @@ fn format_address_list(addrs: &[Address]) -> String {
     parts.join(", ")
 }
 
-#[allow(clippy::too_many_lines)]
 /// Extract plain-text, HTML, and attachment parts from a raw RFC 822 message.
 ///
-/// Returns `(body_text, body_html, attachments)`.
+/// Returns `(body_text, body_html, attachments)`. HTML is **not** sanitized
+/// here — persist via [`crate::sanitize::persist_body_html`].
 fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, Vec<ExtractedAttachment>) {
-    let Ok(body_str) = std::str::from_utf8(raw) else {
+    let Some(message) = mail_parser::MessageParser::default().parse(raw) else {
         return (None, None, Vec::new());
     };
 
-    let mut body_text = None;
-    let mut body_html = None;
-    let mut attachments = Vec::new();
+    let body_text = message.body_text(0).map(std::borrow::Cow::into_owned);
+    let body_html = message.body_html(0).map(std::borrow::Cow::into_owned);
 
-    let body_start = body_str
-        .find("\r\n\r\n")
-        .map(|i| i + 4)
-        .or_else(|| body_str.find("\n\n").map(|i| i + 2))
-        .unwrap_or(0);
-
-    let headers_section = &body_str[..body_start];
-    let body_section = &body_str[body_start..];
-
-    let boundary =
-        extract_header_value(headers_section, "content-type").and_then(|ct| extract_boundary(&ct));
-
-    if let Some(boundary) = boundary {
-        let parts: Vec<&str> = body_section.split(&format!("--{boundary}")).collect();
-        for part in &parts[1..] {
-            if part.starts_with("--") {
-                continue;
+    let attachments = message
+        .attachments()
+        .filter(|part| !part.is_multipart() && part.message().is_none())
+        .map(|part| {
+            use mail_parser::MimeHeaders;
+            let filename = part
+                .attachment_name()
+                .unwrap_or("attachment.bin")
+                .to_owned();
+            let content_type = part.content_type().map_or_else(
+                || "application/octet-stream".into(),
+                |ct| match ct.subtype() {
+                    Some(sub) => format!("{}/{sub}", ct.ctype()),
+                    None => ct.ctype().to_owned(),
+                },
+            );
+            ExtractedAttachment {
+                filename,
+                content_type,
+                data: part.contents().to_vec(),
+                content_id: part.content_id().map(str::to_owned),
+                is_inline: part
+                    .content_disposition()
+                    .is_some_and(mail_parser::ContentType::is_inline),
             }
-
-            let part_body_start = part
-                .find("\r\n\r\n")
-                .map(|i| i + 4)
-                .or_else(|| part.find("\n\n").map(|i| i + 2))
-                .unwrap_or(0);
-
-            if part_body_start >= part.len() {
-                continue;
-            }
-
-            let part_headers = &part[..part_body_start.min(part.len())];
-            let part_body = &part[part_body_start..];
-
-            let content_type = extract_header_value(part_headers, "content-type")
-                .unwrap_or_else(|| "text/plain".to_string());
-            let encoding = extract_header_value(part_headers, "content-transfer-encoding");
-            let disposition = extract_header_value(part_headers, "content-disposition");
-            let content_id = extract_header_value(part_headers, "content-id")
-                .map(|s| s.trim_matches(|c| c == '<' || c == '>').to_string());
-
-            let content = part_body.trim_end_matches(['\r', '\n', '-']);
-            let is_attachment = disposition
-                .as_deref()
-                .is_some_and(|d| d.to_lowercase().starts_with("attachment"))
-                || content_type.contains("application/")
-                || (content_type.contains("image/")
-                    && disposition
-                        .as_deref()
-                        .is_some_and(|d| !d.to_lowercase().contains("inline")));
-
-            if content_type.contains("multipart/") {
-                let nested = extract_mime_parts(content.as_bytes());
-                if body_text.is_none() {
-                    body_text = nested.0;
-                }
-                if body_html.is_none() {
-                    body_html = nested.1;
-                }
-                attachments.extend(nested.2);
-            } else if is_attachment
-                || content_type.contains("application/")
-                || content_type.contains("image/")
-                || content_type.contains("audio/")
-                || content_type.contains("video/")
-            {
-                let filename = disposition
-                    .as_deref()
-                    .and_then(extract_filename)
-                    .or_else(|| {
-                        content_type.split(';').find_map(|p| {
-                            let p = p.trim();
-                            if p.to_lowercase().starts_with("name=") {
-                                Some(p.split_once('=')?.1.trim_matches('"').to_string())
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                    .unwrap_or_else(|| "attachment.bin".to_string());
-                let is_inline = disposition
-                    .as_deref()
-                    .is_some_and(|d| d.to_lowercase().contains("inline"));
-                if let Some(data) = decode_content_bytes(content, encoding.as_deref()) {
-                    attachments.push(ExtractedAttachment {
-                        filename,
-                        content_type: content_type
-                            .split(';')
-                            .next()
-                            .unwrap_or("application/octet-stream")
-                            .trim()
-                            .to_string(),
-                        data,
-                        content_id,
-                        is_inline,
-                    });
-                }
-            } else if content_type.contains("text/plain") && body_text.is_none() {
-                body_text = decode_content(content, encoding.as_deref());
-            } else if content_type.contains("text/html") && body_html.is_none() {
-                body_html =
-                    decode_content(content, encoding.as_deref()).map(|h| sanitize_email_html(&h));
-            }
-        }
-    } else {
-        let content_type = extract_header_value(headers_section, "content-type")
-            .unwrap_or_else(|| "text/plain".to_string());
-        let encoding = extract_header_value(headers_section, "content-transfer-encoding");
-        let content = body_section.trim_end_matches(['\r', '\n']);
-
-        if content_type.contains("text/plain") {
-            body_text = decode_content(content, encoding.as_deref());
-        } else if content_type.contains("text/html") {
-            body_html =
-                decode_content(content, encoding.as_deref()).map(|h| sanitize_email_html(&h));
-        }
-    }
+        })
+        .collect();
 
     (body_text, body_html, attachments)
-}
-
-fn extract_filename(disposition: &str) -> Option<String> {
-    for part in disposition.split(';') {
-        let part = part.trim();
-        let lower = part.to_lowercase();
-        if lower.starts_with("filename*=") {
-            // RFC 5987 — ignore charset for v1; take after ''
-            let value = part.split_once('=')?.1.trim_matches('"');
-            if let Some((_charset_lang, rest)) = value.split_once("''") {
-                return Some(rest.to_string());
-            }
-            return Some(value.to_string());
-        }
-        if lower.starts_with("filename=") {
-            return Some(part.split_once('=')?.1.trim_matches('"').to_string());
-        }
-    }
-    None
-}
-
-/// Extract a header value from raw headers (case-insensitive).
-fn extract_header_value(headers: &str, name: &str) -> Option<String> {
-    let name_lower = name.to_lowercase();
-    for line in headers.lines() {
-        if let Some((key, value)) = line.split_once(':')
-            && key.trim().to_lowercase() == name_lower
-        {
-            return Some(value.trim().to_string());
-        }
-    }
-    None
-}
-
-/// Extract the `boundary` parameter from a `Content-Type` header value.
-fn extract_boundary(content_type: &str) -> Option<String> {
-    for part in content_type.split(';') {
-        let part = part.trim();
-        if part.to_lowercase().starts_with("boundary=") {
-            let value = part.split_once('=')?.1;
-            return Some(value.trim_matches('"').to_string());
-        }
-    }
-    None
-}
-
-/// Decode content based on transfer encoding.
-fn decode_content(content: &str, encoding: Option<&str>) -> Option<String> {
-    decode_content_bytes(content, encoding).and_then(|bytes| String::from_utf8(bytes).ok())
-}
-
-fn decode_content_bytes(content: &str, encoding: Option<&str>) -> Option<Vec<u8>> {
-    match encoding.map(str::to_lowercase).as_deref() {
-        Some("base64") => {
-            let cleaned: String = content.chars().filter(|c| !c.is_whitespace()).collect();
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &cleaned).ok()
-        }
-        Some("quoted-printable") => Some(decode_quoted_printable(content).into_bytes()),
-        _ => Some(content.as_bytes().to_vec()),
-    }
-}
-
-/// Simple quoted-printable decoder.
-fn decode_quoted_printable(input: &str) -> String {
-    let mut output = Vec::new();
-    let bytes = input.as_bytes();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if bytes[i] == b'='
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
-        {
-            output.push(hi * 16 + lo);
-            i += 3;
-            continue;
-        }
-        if bytes[i] == b'='
-            && i + 1 < bytes.len()
-            && (bytes[i + 1] == b'\r' || bytes[i + 1] == b'\n')
-        {
-            // Soft line break
-            i += 2;
-            if i < bytes.len() && bytes[i] == b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        output.push(bytes[i]);
-        i += 1;
-    }
-
-    String::from_utf8_lossy(&output).into_owned()
-}
-
-/// Convert a hex ASCII digit to its numeric value.
-fn hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// Decrypt the stored credential for an account.
@@ -766,11 +573,11 @@ mod tests {
     }
 
     #[test]
-    fn extract_mime_parts_sanitizes_html_part() {
+    fn extract_mime_parts_html_is_sanitized_at_persist() {
         let raw = b"Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nplain\r\n--b\r\nContent-Type: text/html\r\n\r\n<p><b>hi</b></p><script>alert(1)</script><img src=\"https://x/y.png\" onerror=\"alert(2)\">\r\n--b--\r\n";
         let (text, html, _) = extract_mime_parts(raw);
-        assert_eq!(text.as_deref(), Some("plain"));
-        let html = html.expect("html part");
+        assert_eq!(text.as_deref().map(str::trim), Some("plain"));
+        let html = crate::sanitize::persist_body_html(html.as_deref()).expect("html part");
         assert!(html.contains("<b>hi</b>"), "got: {html}");
         assert!(!html.contains("<script"), "got: {html}");
         assert!(!html.to_lowercase().contains("onerror"), "got: {html}");
@@ -779,47 +586,32 @@ mod tests {
     }
 
     #[test]
-    fn extract_boundary_simple() {
-        let ct = "multipart/mixed; boundary=\"abc123\"";
-        assert_eq!(extract_boundary(ct), Some("abc123".into()));
+    fn extract_mime_parts_nested_alternative_inside_mixed() {
+        let raw = b"Content-Type: multipart/mixed; boundary=\"mixed\"\r\n\r\n\
+--mixed\r\nContent-Type: multipart/alternative; boundary=\"alt\"\r\n\r\n\
+--alt\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nplain body\r\n\
+--alt\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>html body</p>\r\n\
+--alt--\r\n\
+--mixed\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"note.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nQUJD\r\n\
+--mixed--\r\n";
+        let (text, html, atts) = extract_mime_parts(raw);
+        assert_eq!(text.as_deref().map(str::trim), Some("plain body"));
+        assert_eq!(html.as_deref().map(str::trim), Some("<p>html body</p>"));
+        assert_eq!(atts.len(), 1, "atts={atts:?}");
+        assert_eq!(atts[0].filename, "note.pdf");
+        assert_eq!(atts[0].content_type.to_ascii_lowercase(), "application/pdf");
+        assert_eq!(atts[0].data, b"ABC");
     }
 
     #[test]
-    fn extract_boundary_no_quotes() {
-        let ct = "multipart/mixed; boundary=abc123";
-        assert_eq!(extract_boundary(ct), Some("abc123".into()));
-    }
-
-    #[test]
-    fn extract_boundary_none() {
-        let ct = "text/plain";
-        assert_eq!(extract_boundary(ct), None);
-    }
-
-    #[test]
-    fn extract_header_value_basic() {
-        let headers = "Content-Type: text/plain\r\nSubject: Hello\r\n";
-        assert_eq!(
-            extract_header_value(headers, "Content-Type"),
-            Some("text/plain".into())
-        );
-        assert_eq!(
-            extract_header_value(headers, "subject"),
-            Some("Hello".into())
-        );
-        assert_eq!(extract_header_value(headers, "Missing"), None);
-    }
-
-    #[test]
-    fn decode_quoted_printable_basic() {
-        let input = "Hello=20World=21";
-        assert_eq!(decode_quoted_printable(input), "Hello World!");
-    }
-
-    #[test]
-    fn decode_quoted_printable_soft_break() {
-        let input = "long line=\r\ncontinued";
-        assert_eq!(decode_quoted_printable(input), "long linecontinued");
+    fn extract_mime_parts_decodes_legacy_charset() {
+        let mut raw = b"Content-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: 8bit\r\n\r\nCaf"
+            .to_vec();
+        raw.push(0xE9);
+        let (text, html, atts) = extract_mime_parts(&raw);
+        assert_eq!(text.as_deref(), Some("Café"));
+        assert!(atts.is_empty());
+        let _ = html;
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! Sanitization of attacker-controlled email HTML before storage/rendering.
 //!
 //! Email HTML comes from remote senders and is rendered in the app origin, so
-//! it must never carry active content. All `body_html` produced by the IMAP
-//! and JMAP ingest paths passes through [`sanitize_email_html`].
+//! it must never carry active content. All `body_html` written to storage
+//! passes through [`persist_body_html`] (IMAP, JMAP, and lazy body fetch).
 //!
 //! Note: `cid:` URLs are allowed here so inline-image references survive, but
 //! actually rendering them additionally needs `img-src cid:` in the CSP (or
@@ -47,9 +47,29 @@ pub fn sanitize_email_html(html: &str) -> String {
     SANITIZER.clean(html).to_string()
 }
 
+/// HTML about to be stored on `message.body_html`. `None` stays `None`.
+#[must_use]
+pub fn persist_body_html(html: Option<&str>) -> Option<String> {
+    html.map(sanitize_email_html)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persist_body_html_maps_none_and_sanitizes() {
+        assert!(persist_body_html(None).is_none());
+        let out = persist_body_html(Some(
+            "<p>hi</p><script>alert(1)</script><img src=\"https://x/y.png\" onerror=\"alert(2)\">",
+        ))
+        .expect("html");
+        assert!(out.contains("<p>hi</p>"), "got: {out}");
+        assert!(!out.contains("<script"), "got: {out}");
+        assert!(!out.to_lowercase().contains("onerror"), "got: {out}");
+        assert!(!out.contains("alert("), "got: {out}");
+        assert!(out.contains("src=\"https://x/y.png\""), "got: {out}");
+    }
 
     #[test]
     fn removes_script_tags() {

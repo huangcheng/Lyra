@@ -28,6 +28,7 @@ use crate::imap::{ImapClient, ImapConfig, ImapError, ImapMessage, ImapSecurity};
 use crate::jmap::{JmapClient, JmapError};
 use crate::kernel::App;
 use crate::protocol::{SendHandle, SyncCtx, SyncOutcome};
+use crate::sanitize::persist_body_html;
 use crate::smtp::{OutboundMessage, SmtpAdapter, SmtpConfig, SmtpError, SmtpSecurity};
 use crate::storage::DbPool;
 
@@ -1162,7 +1163,7 @@ async fn get_message(
                     WHERE id = ?
                     ",
                 &fetched.body_text,
-                &fetched.body_html,
+                persist_body_html(fetched.body_html.as_deref()),
                 fetched.has_attachments,
                 fetched
                     .body_text
@@ -1172,7 +1173,7 @@ async fn get_message(
             )?;
 
             row.body_text = fetched.body_text;
-            row.body_html = fetched.body_html;
+            row.body_html = persist_body_html(fetched.body_html.as_deref());
             row.has_attachments = fetched.has_attachments || !fetched.attachments.is_empty();
             persist_attachments(db, &state.data_dir, &row.id, &fetched.attachments).await?;
         }
@@ -1857,7 +1858,7 @@ async fn upsert_jmap_message(
             &snippet,
             email.has_attachment.unwrap_or(false),
             email.body_text(),
-            email.body_html()
+            persist_body_html(email.body_html().as_deref())
         )?;
 
         Ok(true)
@@ -2162,7 +2163,7 @@ async fn upsert_message(
         &snippet,
         msg.has_attachments,
         &msg.body_text,
-        &msg.body_html
+        persist_body_html(msg.body_html.as_deref())
     )?;
 
     Ok(was_new)
