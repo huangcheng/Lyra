@@ -239,7 +239,7 @@ async fn insert_user(
     display_name: Option<&str>,
     locale: &str,
     encrypted_dek: &str,
-) -> Result<(), StatusCode> {
+) -> Result<(), sqlx::Error> {
     match db {
         DbPool::Sqlite(pool) => {
             sqlx::query(
@@ -252,11 +252,7 @@ async fn insert_user(
             .bind(locale)
             .bind(encrypted_dek)
             .execute(pool)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to insert user: {e}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+            .await?;
         }
         #[cfg(feature = "postgres")]
         DbPool::Postgres(pool) => {
@@ -270,14 +266,19 @@ async fn insert_user(
             .bind(locale)
             .bind(encrypted_dek)
             .execute(pool)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to insert user: {e}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+            .await?;
         }
     }
     Ok(())
+}
+
+/// True when `e` is a unique-constraint violation (e.g. the `singleton`
+/// guard rejecting a second row, or a duplicate username).
+fn is_unique_violation(e: &sqlx::Error) -> bool {
+    match e {
+        sqlx::Error::Database(db_err) => db_err.is_unique_violation(),
+        _ => false,
+    }
 }
 
 async fn find_user_by_username(
@@ -947,6 +948,9 @@ async fn auth_bootstrap(
     State(state): State<AuthState>,
     Json(req): Json<BootstrapRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    // Fast-path UX check; the real guard is the `singleton` unique index on
+    // lyra_user (migration 0005), which rejects a second row even when two
+    // concurrent bootstraps both pass this check.
     if has_any_user(&state.db).await.unwrap_or(false) {
         return Err((
             StatusCode::CONFLICT,
@@ -998,12 +1002,25 @@ async fn auth_bootstrap(
     )
     .await
     .map_err(|e| {
-        (
-            e,
-            Json(ErrorResponse {
-                error: "Failed to create user".to_string(),
-            }),
-        )
+        if is_unique_violation(&e) {
+            // Lost the bootstrap race (singleton guard) or username taken.
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error:
+                        "A user already exists. Bootstrap is only available for first-time setup."
+                            .to_string(),
+                }),
+            )
+        } else {
+            tracing::error!("Failed to insert user: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to create user".to_string(),
+                }),
+            )
+        }
     })?;
 
     let token = state.sessions.create_session(&user_id).await.map_err(|e| {
@@ -1919,22 +1936,82 @@ mod tests {
 
     #[tokio::test]
     async fn two_users_get_different_deks() {
-        let db = test_pool().await;
-        let dek_a = seed_user_with_dek(&db, "user-a").await;
-        let dek_b = seed_user_with_dek(&db, "user-b").await;
+        // The single-user guard (migration 0005) forbids two rows in one
+        // database, so each user lives in its own in-memory DB here.
+        let db_a = test_pool().await;
+        let db_b = test_pool().await;
+        let dek_a = seed_user_with_dek(&db_a, "user-a").await;
+        let dek_b = seed_user_with_dek(&db_b, "user-b").await;
 
-        assert_eq!(AuthState::get_user_dek(&db, "user-a").await.unwrap(), dek_a);
-        assert_eq!(AuthState::get_user_dek(&db, "user-b").await.unwrap(), dek_b);
+        assert_eq!(
+            AuthState::get_user_dek(&db_a, "user-a").await.unwrap(),
+            dek_a
+        );
+        assert_eq!(
+            AuthState::get_user_dek(&db_b, "user-b").await.unwrap(),
+            dek_b
+        );
         assert_ne!(dek_a, dek_b);
 
         // A user's wrapped DEK cannot be unwrapped with another user's KEK.
         let stored_a: String =
             sqlx::query_scalar("SELECT encrypted_dek FROM lyra_user WHERE id = 'user-a'")
-                .fetch_one(sqlite_pool(&db))
+                .fetch_one(sqlite_pool(&db_a))
                 .await
                 .unwrap();
         let kek_b = crypto::derive_user_kek(TEST_MASTER_KEY, "user-b");
         assert!(crypto::unwrap_dek(&kek_b, &stored_a).is_err());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_rejects_second_user_with_conflict() {
+        let db = test_pool().await;
+        let state = test_state(db.clone());
+        bootstrap_alice(&state).await;
+
+        let err = auth_bootstrap(
+            State(state),
+            Json(BootstrapRequest {
+                username: "bob".into(),
+                password: "Str0ngPass1".into(),
+                display_name: None,
+                locale: None,
+            }),
+        )
+        .await
+        .err()
+        .expect("second bootstrap must fail");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lyra_user")
+            .fetch_one(sqlite_pool(&db))
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "exactly one user may exist");
+    }
+
+    #[tokio::test]
+    async fn second_user_insert_violates_singleton_guard() {
+        let db = test_pool().await;
+        insert_user(&db, "id-1", "alice", "hash", None, "en", "dek")
+            .await
+            .unwrap();
+
+        // A second row with a *different* username must be rejected by the
+        // singleton unique index, not merely by UNIQUE(username).
+        let err = insert_user(&db, "id-2", "bob", "hash", None, "en", "dek")
+            .await
+            .unwrap_err();
+        assert!(
+            is_unique_violation(&err),
+            "expected a unique violation, got {err}"
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lyra_user")
+            .fetch_one(sqlite_pool(&db))
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]
