@@ -1,4 +1,7 @@
 //! SMTP send plugin — wraps `deliver_smtp`.
+//!
+//! `raw` is either JSON-serialized [`OutboundMessage`](crate::smtp::OutboundMessage)
+//! (compose / HTTP path) or a minimal RFC822-ish source (To/Subject headers + body).
 
 use std::sync::Arc;
 

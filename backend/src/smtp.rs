@@ -12,7 +12,7 @@ use lettre::message::header::ContentType;
 use lettre::message::{Mailbox, Message, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::crypto::{self, EncryptedCredential};
@@ -55,7 +55,7 @@ pub struct SmtpConfig {
 }
 
 /// An outbound email message to be sent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutboundMessage {
     /// From address (email).
     pub from_email: String,

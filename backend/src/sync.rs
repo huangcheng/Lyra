@@ -23,9 +23,15 @@ use crate::auth::AuthState;
 use crate::imap::{ImapClient, ImapConfig, ImapError, ImapMessage, ImapSecurity};
 use crate::jmap::{JmapClient, JmapError};
 use crate::kernel::App;
-use crate::protocol::{SyncCtx, SyncOutcome};
+use crate::protocol::{SendHandle, SyncCtx, SyncOutcome};
 use crate::smtp::{OutboundMessage, SmtpAdapter, SmtpConfig, SmtpError, SmtpSecurity};
 use crate::storage::DbPool;
+
+/// Look up a send plugin by `send_protocol`. Unknown ids map to HTTP 400.
+fn resolve_send_plugin(app: &App, send_protocol: &str) -> Result<SendHandle, SyncError> {
+    app.send(send_protocol)
+        .map_err(|e| SyncError::InvalidInput(e.to_string()))
+}
 
 // ── API types ───────────────────────────────────────────────────────
 
@@ -248,9 +254,10 @@ async fn trigger_sync(
     ))
 }
 
-/// Send a message via SMTP.
+/// Send a message through the account's `SendPlugin` (SMTP today).
 ///
-/// Loads the account, decrypts credentials, and sends via SMTP.
+/// Mailbox sync is queued for workers; single-message SMTP stays request-scoped
+/// so compose can await success without a 202/`jobId` handshake.
 #[allow(clippy::too_many_lines)]
 async fn send_message(
     State(state): State<AuthState>,
@@ -260,11 +267,9 @@ async fn send_message(
     let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
 
-    // Load account
     let row = sqlx::query(
         r"
-        SELECT id, email_address, credential,
-               smtp_host, smtp_port, smtp_security, is_active
+        SELECT email_address, send_protocol, is_active
         FROM mail_account
         WHERE id = ? AND user_id = ?
         ",
@@ -280,81 +285,14 @@ async fn send_message(
         return Err(SyncError::AccountDisabled);
     }
 
-    let smtp_host: Option<String> = row.get("smtp_host");
-    let smtp_port: Option<i32> = row.get("smtp_port");
-    let smtp_security: Option<String> = row.get("smtp_security");
-    let credential_json: String = row.get("credential");
+    let send_protocol: String = row.get("send_protocol");
     let email_address: String = row.get("email_address");
 
-    let host =
-        smtp_host.ok_or_else(|| SyncError::InvalidInput("SMTP host not configured".into()))?;
-    let port = u16::try_from(smtp_port.unwrap_or(587)).unwrap_or(587);
-    let security = match smtp_security.as_deref() {
-        Some("tls") => SmtpSecurity::Tls,
-        Some("none") => SmtpSecurity::None,
-        _ => SmtpSecurity::Starttls,
-    };
+    let plugin = resolve_send_plugin(state.app.as_ref(), &send_protocol)?;
 
-    // Decrypt password
-    let dek =
-        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
-    let password = crate::smtp::decrypt_account_password(&credential_json, &dek)?;
-
-    let config = SmtpConfig {
-        host,
-        port,
-        security,
-        username: email_address.clone(),
-        password,
-    };
-
-    // Parse recipients
-    let to: Vec<(Option<String>, String)> = body
-        .to
-        .iter()
-        .filter_map(|v| {
-            if let Some(s) = v.as_str() {
-                Some((None, s.to_string()))
-            } else {
-                v.get("email").and_then(|e| e.as_str()).map(|email| {
-                    let name = v.get("name").and_then(|n| n.as_str()).map(String::from);
-                    (name, email.to_string())
-                })
-            }
-        })
-        .collect();
-
-    let cc: Vec<(Option<String>, String)> = body
-        .cc
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|v| {
-            if let Some(s) = v.as_str() {
-                Some((None, s.to_string()))
-            } else {
-                v.get("email").and_then(|e| e.as_str()).map(|email| {
-                    let name = v.get("name").and_then(|n| n.as_str()).map(String::from);
-                    (name, email.to_string())
-                })
-            }
-        })
-        .collect();
-
-    let bcc: Vec<(Option<String>, String)> = body
-        .bcc
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|v| {
-            if let Some(s) = v.as_str() {
-                Some((None, s.to_string()))
-            } else {
-                v.get("email").and_then(|e| e.as_str()).map(|email| {
-                    let name = v.get("name").and_then(|n| n.as_str()).map(String::from);
-                    (name, email.to_string())
-                })
-            }
-        })
-        .collect();
+    let to = parse_address_list(&body.to);
+    let cc = parse_address_list(&body.cc.unwrap_or_default());
+    let bcc = parse_address_list(&body.bcc.unwrap_or_default());
 
     if to.is_empty() {
         return Err(SyncError::InvalidInput("No recipients specified".into()));
@@ -373,12 +311,39 @@ async fn send_message(
         references: body.references,
     };
 
-    let message_id = deliver_smtp(config, outbound).await?;
+    let raw = serde_json::to_string(&outbound)
+        .map_err(|e| SyncError::InvalidInput(format!("cannot encode outbound: {e}")))?;
+
+    plugin
+        .send(&body.account_id, &raw)
+        .await
+        .map_err(SyncError::Protocol)?;
+
+    let message_id = format!(
+        "sent-{}",
+        Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext))
+    );
 
     Ok(Json(SendMessageResponse {
         status: "sent".into(),
         message_id,
     }))
+}
+
+fn parse_address_list(values: &[serde_json::Value]) -> Vec<(Option<String>, String)> {
+    values
+        .iter()
+        .filter_map(|v| {
+            if let Some(s) = v.as_str() {
+                Some((None, s.to_string()))
+            } else {
+                v.get("email").and_then(|e| e.as_str()).map(|email| {
+                    let name = v.get("name").and_then(|n| n.as_str()).map(String::from);
+                    (name, email.to_string())
+                })
+            }
+        })
+        .collect()
 }
 
 /// Deliver an outbound message through the SMTP adapter.
@@ -391,6 +356,8 @@ pub(crate) async fn deliver_smtp(
 }
 
 /// Load SMTP settings for `account_id` and build an outbound message from raw source.
+///
+/// `raw` may be JSON [`OutboundMessage`] (HTTP compose) or minimal RFC822-ish text.
 pub(crate) async fn prepare_smtp_send(
     db: &DbPool,
     account_id: &str,
@@ -434,11 +401,6 @@ pub(crate) async fn prepare_smtp_send(
         crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
     let password = crate::smtp::decrypt_account_password(&credential_json, &dek)?;
 
-    let to = recipients_from_raw(raw);
-    if to.is_empty() {
-        return Err(SyncError::InvalidInput("No recipients specified".into()));
-    }
-
     let config = SmtpConfig {
         host,
         port,
@@ -446,19 +408,50 @@ pub(crate) async fn prepare_smtp_send(
         username: email_address.clone(),
         password,
     };
-    let outbound = OutboundMessage {
-        from_email: email_address,
+
+    let outbound = outbound_from_raw(email_address, raw)?;
+    Ok((config, outbound))
+}
+
+fn outbound_from_raw(from_email: String, raw: &str) -> Result<OutboundMessage, SyncError> {
+    let trimmed = raw.trim_start();
+    if trimmed.starts_with('{') {
+        let mut outbound: OutboundMessage = serde_json::from_str(trimmed)
+            .map_err(|e| SyncError::InvalidInput(format!("invalid outbound JSON: {e}")))?;
+        outbound.from_email = from_email;
+        if outbound.to.is_empty() {
+            return Err(SyncError::InvalidInput("No recipients specified".into()));
+        }
+        return Ok(outbound);
+    }
+
+    let to = recipients_from_raw(raw);
+    if to.is_empty() {
+        return Err(SyncError::InvalidInput("No recipients specified".into()));
+    }
+
+    Ok(OutboundMessage {
+        from_email,
         from_name: None,
         to,
         cc: vec![],
         bcc: vec![],
         subject: subject_from_raw(raw).unwrap_or_default(),
-        body_text: Some(raw.to_string()),
+        body_text: Some(body_from_raw(raw)),
         body_html: None,
         in_reply_to: None,
         references: None,
-    };
-    Ok((config, outbound))
+    })
+}
+
+fn body_from_raw(raw: &str) -> String {
+    if let Some(idx) = raw.find("\n\n") {
+        raw[idx + 2..].to_string()
+    } else if let Some(idx) = raw.find("\r\n\r\n") {
+        raw[idx + 4..].to_string()
+    } else {
+        raw.to_string()
+    }
 }
 
 fn recipients_from_raw(raw: &str) -> Vec<(Option<String>, String)> {
@@ -2231,6 +2224,82 @@ mod tests {
         .unwrap();
 
         (user_id, account_id)
+    }
+
+    #[test]
+    fn send_rejects_unknown_protocol() {
+        // Handler mapping: load send_protocol and call registry → 400 for unknown ids.
+        // (Full HTTP spin-up is heavy; App::send("graph") fail-closed is Task 2.)
+        let mut app = App::new();
+        app.provide("storage");
+        for plugin in crate::plugins::builtin_plugins() {
+            app.register_plugin(plugin.as_ref()).unwrap();
+        }
+
+        let err = resolve_send_plugin(&app, "graph")
+            .err()
+            .expect("graph must be unknown");
+        assert!(
+            matches!(&err, SyncError::InvalidInput(msg) if msg.contains("graph")),
+            "expected InvalidInput mentioning graph, got {err}"
+        );
+
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn send_rejects_unknown_protocol_from_account_column() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+
+        sqlx::query("UPDATE mail_account SET send_protocol = ? WHERE id = ?")
+            .bind("graph")
+            .bind(&account_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let send_protocol: String =
+            sqlx::query_scalar("SELECT send_protocol FROM mail_account WHERE id = ?")
+                .bind(&account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let mut app = App::new();
+        app.provide("storage");
+        for plugin in crate::plugins::builtin_plugins() {
+            app.register_plugin(plugin.as_ref()).unwrap();
+        }
+
+        let err = resolve_send_plugin(&app, &send_protocol)
+            .err()
+            .expect("graph must be unknown");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn outbound_from_raw_json_preserves_recipients() {
+        let raw = r#"{
+            "from_email":"ignored@example.com",
+            "from_name":null,
+            "to":[[null,"alice@example.com"]],
+            "cc":[],
+            "bcc":[],
+            "subject":"Hi",
+            "body_text":"Hello",
+            "body_html":null,
+            "in_reply_to":null,
+            "references":null
+        }"#;
+        let outbound = outbound_from_raw("acct@example.com".into(), raw).unwrap();
+        assert_eq!(outbound.from_email, "acct@example.com");
+        assert_eq!(outbound.to.len(), 1);
+        assert_eq!(outbound.to[0].1, "alice@example.com");
+        assert_eq!(outbound.subject, "Hi");
+        assert_eq!(outbound.body_text.as_deref(), Some("Hello"));
     }
 
     #[tokio::test]
