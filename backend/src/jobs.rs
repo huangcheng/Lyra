@@ -320,8 +320,34 @@ pub async fn process_job(
             )?;
             mark_completed(db, &job.id).await?;
         }
-        JobPayload::SendMessage { .. } => {
-            revert_pending(db, &job.id).await?;
+        JobPayload::SendMessage {
+            account_id,
+            outbound,
+        } => {
+            let Ok(raw) = serde_json::to_string(&outbound) else {
+                mark_failed(db, &job.id, "invalid outbound payload").await?;
+                return Ok(());
+            };
+            let protocol: Option<String> = db_scalar_optional!(
+                db,
+                String,
+                "SELECT send_protocol FROM mail_account WHERE id = ?",
+                &id_param(db, &account_id)?
+            )?;
+            let Some(protocol) = protocol.filter(|p| !p.is_empty()) else {
+                mark_failed(db, &job.id, "send protocol not configured").await?;
+                return Ok(());
+            };
+            let Ok(plugin) = app.send(&protocol) else {
+                mark_failed(db, &job.id, "unknown send protocol").await?;
+                return Ok(());
+            };
+            if plugin.send(&account_id, &raw).await.is_ok() {
+                mark_completed(db, &job.id).await?;
+            } else {
+                tracing::warn!(job_id = %job.id, "send job failed");
+                mark_failed(db, &job.id, "SMTP error").await?;
+            }
         }
     }
     Ok(())
@@ -711,5 +737,97 @@ mod tests {
             assert!(!safe.contains("t0psecret"));
             assert!(!safe.contains("admin"));
         }
+    }
+
+    struct OkSend;
+
+    #[async_trait]
+    impl crate::protocol::SendPlugin for OkSend {
+        fn id(&self) -> &'static str {
+            "smtp"
+        }
+
+        async fn send(&self, _account_id: &str, _raw: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct BoomSend;
+
+    #[async_trait]
+    impl crate::protocol::SendPlugin for BoomSend {
+        fn id(&self) -> &'static str {
+            "smtp"
+        }
+
+        async fn send(&self, _account_id: &str, _raw: &str) -> Result<(), String> {
+            Err("password=hunter2 smtp auth failed".into())
+        }
+    }
+
+    async fn process_one(db: &DbPool, app: &App, job: ClaimedJob) {
+        let inflight = InFlight::new();
+        let sem = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&sem)
+            .try_acquire_owned()
+            .expect("test semaphore has a permit");
+        process_job(db, app, &inflight, permit, job)
+            .await
+            .expect("process_job");
+    }
+
+    #[tokio::test]
+    async fn send_message_job_marks_completed_not_pending() {
+        let db = test_pool().await;
+        let (_, account_id, _) = seed_account_with_cursor(&db).await;
+        let now = "2026-08-22T00:00:00+00:00";
+
+        let mut app = App::new();
+        app.register_send(Arc::new(OkSend));
+
+        let payload = JobPayload::SendMessage {
+            account_id,
+            outbound: serde_json::json!({"to":["a@example.com"],"subject":"hi","body_text":"x"}),
+        };
+        let job_id = enqueue(&db, &payload, now).await.unwrap();
+        let claimed = claim_due(&db, now).await.unwrap().expect("due job");
+        process_one(&db, &app, claimed).await;
+
+        let status: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = ?")
+            .bind(&job_id)
+            .fetch_one(sqlite_pool(&db))
+            .await
+            .unwrap();
+        assert_eq!(status, "completed");
+    }
+
+    #[tokio::test]
+    async fn send_message_job_failure_is_terminal_and_sanitized() {
+        let db = test_pool().await;
+        let (_, account_id, _) = seed_account_with_cursor(&db).await;
+        let now = "2026-08-22T00:00:00+00:00";
+
+        let mut app = App::new();
+        app.register_send(Arc::new(BoomSend));
+
+        let payload = JobPayload::SendMessage {
+            account_id,
+            outbound: serde_json::json!({"to":["a@example.com"]}),
+        };
+        let job_id = enqueue(&db, &payload, now).await.unwrap();
+        let claimed = claim_due(&db, now).await.unwrap().expect("due job");
+        process_one(&db, &app, claimed).await;
+
+        let row = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT status, last_error FROM jobs WHERE id = ?",
+        )
+        .bind(&job_id)
+        .fetch_one(sqlite_pool(&db))
+        .await
+        .unwrap();
+        assert_eq!(row.0, "failed");
+        let err = row.1.expect("last_error");
+        assert!(!err.contains("hunter2"), "{err}");
+        assert!(!err.to_lowercase().contains("password"), "{err}");
     }
 }
