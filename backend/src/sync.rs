@@ -22,6 +22,8 @@ use uuid::Uuid;
 use crate::auth::AuthState;
 use crate::imap::{ImapClient, ImapConfig, ImapError, ImapMessage, ImapSecurity};
 use crate::jmap::{JmapClient, JmapError};
+use crate::kernel::App;
+use crate::protocol::{SyncCtx, SyncOutcome};
 use crate::smtp::{OutboundMessage, SmtpAdapter, SmtpConfig, SmtpError, SmtpSecurity};
 use crate::storage::DbPool;
 
@@ -70,6 +72,8 @@ pub enum SyncError {
     Crypto(String),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("protocol error: {0}")]
+    Protocol(String),
 }
 
 impl IntoResponse for SyncError {
@@ -78,7 +82,10 @@ impl IntoResponse for SyncError {
             SyncError::AccountNotFound | SyncError::MessageNotFound => StatusCode::NOT_FOUND,
             SyncError::AccountDisabled | SyncError::InvalidInput(_) => StatusCode::BAD_REQUEST,
             SyncError::Database(_) | SyncError::Crypto(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            SyncError::Imap(_) | SyncError::Jmap(_) | SyncError::Smtp(_) => StatusCode::BAD_GATEWAY,
+            SyncError::Imap(_)
+            | SyncError::Jmap(_)
+            | SyncError::Smtp(_)
+            | SyncError::Protocol(_) => StatusCode::BAD_GATEWAY,
             SyncError::Unauthorized => StatusCode::UNAUTHORIZED,
         };
         (
@@ -168,7 +175,7 @@ async fn trigger_sync(
 ) -> Result<Json<SyncResponse>, SyncError> {
     let user_id = get_user_id(&state, &headers).await?;
 
-    let result = run_account_sync(&state.db, &user_id, &account_id).await?;
+    let result = run_account_sync(&state.db, &state.app, &user_id, &account_id).await?;
 
     Ok(Json(result))
 }
@@ -298,14 +305,125 @@ async fn send_message(
         references: body.references,
     };
 
-    // Connect and send
-    let adapter = SmtpAdapter::connect(&config)?;
-    let message_id = adapter.send(&outbound).await?;
+    let message_id = deliver_smtp(config, outbound).await?;
 
     Ok(Json(SendMessageResponse {
         status: "sent".into(),
         message_id,
     }))
+}
+
+/// Deliver an outbound message through the SMTP adapter.
+pub(crate) async fn deliver_smtp(
+    config: SmtpConfig,
+    outbound: OutboundMessage,
+) -> Result<String, SyncError> {
+    let adapter = SmtpAdapter::connect(&config)?;
+    Ok(adapter.send(&outbound).await?)
+}
+
+/// Load SMTP settings for `account_id` and build an outbound message from raw source.
+pub(crate) async fn prepare_smtp_send(
+    db: &DbPool,
+    account_id: &str,
+    raw: &str,
+) -> Result<(SmtpConfig, OutboundMessage), SyncError> {
+    let pool = get_sqlite_pool(db);
+    let row = sqlx::query(
+        r"
+        SELECT email_address, credential,
+               smtp_host, smtp_port, smtp_security, is_active
+        FROM mail_account
+        WHERE id = ?
+        ",
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(SyncError::AccountNotFound)?;
+
+    let is_active: bool = row.get("is_active");
+    if !is_active {
+        return Err(SyncError::AccountDisabled);
+    }
+
+    let smtp_host: Option<String> = row.get("smtp_host");
+    let smtp_port: Option<i32> = row.get("smtp_port");
+    let smtp_security: Option<String> = row.get("smtp_security");
+    let credential_json: String = row.get("credential");
+    let email_address: String = row.get("email_address");
+
+    let host =
+        smtp_host.ok_or_else(|| SyncError::InvalidInput("SMTP host not configured".into()))?;
+    let port = u16::try_from(smtp_port.unwrap_or(587)).unwrap_or(587);
+    let security = match smtp_security.as_deref() {
+        Some("tls") => SmtpSecurity::Tls,
+        Some("none") => SmtpSecurity::None,
+        _ => SmtpSecurity::Starttls,
+    };
+
+    let dek =
+        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let password = crate::smtp::decrypt_account_password(&credential_json, &dek)?;
+
+    let to = recipients_from_raw(raw);
+    if to.is_empty() {
+        return Err(SyncError::InvalidInput("No recipients specified".into()));
+    }
+
+    let config = SmtpConfig {
+        host,
+        port,
+        security,
+        username: email_address.clone(),
+        password,
+    };
+    let outbound = OutboundMessage {
+        from_email: email_address,
+        from_name: None,
+        to,
+        cc: vec![],
+        bcc: vec![],
+        subject: subject_from_raw(raw).unwrap_or_default(),
+        body_text: Some(raw.to_string()),
+        body_html: None,
+        in_reply_to: None,
+        references: None,
+    };
+    Ok((config, outbound))
+}
+
+fn recipients_from_raw(raw: &str) -> Vec<(Option<String>, String)> {
+    for line in raw.lines() {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("to")
+        {
+            return value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| (None, s.to_string()))
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+fn subject_from_raw(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("subject")
+        {
+            return Some(value.trim().to_string());
+        }
+    }
+    None
 }
 
 /// Folder response for the API.
@@ -1113,34 +1231,19 @@ async fn move_message_to_role(
 
 /// Run a full sync for a mail account.
 ///
-/// **Prefers JMAP** when the account has a `jmap_base_url` configured.
-/// Falls back to IMAP otherwise.
-///
-/// JMAP flow:
-/// 1. Discover JMAP session via `/.well-known/jmap`
-/// 2. List mailboxes via `Mailbox/get`
-/// 3. For each mailbox: `Email/query` + `Email/get` to sync messages
-///
-/// IMAP flow:
-/// 1. Connect via IMAP
-/// 2. LIST folders
-/// 3. SELECT + UID SEARCH + FETCH for each folder
-///
-/// Both flows update `last_sync_at` on completion.
+/// Loads the account, resolves the receive plugin from `receive_protocol`
+/// (legacy `protocol` if empty), and dispatches to `plugin.sync_account`.
 pub async fn run_account_sync(
     db: &DbPool,
+    app: &App,
     user_id: &str,
     account_id: &str,
 ) -> Result<SyncResponse, SyncError> {
     let pool = get_sqlite_pool(db);
 
-    // 1. Load account — include jmap_base_url for JMAP detection
     let row = sqlx::query(
         r"
-        SELECT id, email_address, protocol, credential,
-               imap_host, imap_port, imap_security,
-               jmap_base_url,
-               is_active, sync_enabled
+        SELECT receive_protocol, protocol, is_active, sync_enabled
         FROM mail_account
         WHERE id = ? AND user_id = ?
         ",
@@ -1158,42 +1261,114 @@ pub async fn run_account_sync(
         return Err(SyncError::AccountDisabled);
     }
 
-    let credential_json: String = row.get("credential");
-    let email_address: String = row.get("email_address");
-    let jmap_base_url: Option<String> = row.get("jmap_base_url");
-    let imap_host: Option<String> = row.get("imap_host");
+    let receive_protocol: Option<String> = row.get("receive_protocol");
+    let protocol: String = row.get("protocol");
+    let receive_id = receive_protocol
+        .filter(|s| !s.is_empty())
+        .unwrap_or(protocol);
 
-    // 2. Decrypt password
-    let dek =
-        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let plugin = app
+        .receive(&receive_id)
+        .map_err(|e| SyncError::InvalidInput(e.to_string()))?;
+    let outcome = plugin
+        .sync_account(&SyncCtx {
+            account_id: account_id.to_string(),
+            user_id: user_id.to_string(),
+        })
+        .await
+        .map_err(SyncError::Protocol)?;
 
-    // 3. Prefer JMAP when jmap_base_url is set; fall back to IMAP
-    let result = if let Some(ref base_url) = jmap_base_url {
-        let password = crate::jmap::decrypt_account_password(&credential_json, &dek)?;
-        match run_jmap_sync(pool, account_id, base_url, &email_address, &password).await {
-            Ok(result) => Ok(result),
-            Err(e) => {
-                tracing::warn!("JMAP sync failed ({e}), falling back to IMAP");
-                let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
-                run_imap_sync(pool, account_id, &row, &password).await
-            }
-        }
-    } else if imap_host.is_some() {
-        let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
-        run_imap_sync(pool, account_id, &row, &password).await
-    } else {
-        return Err(SyncError::InvalidInput(
-            "No JMAP base URL or IMAP host configured".into(),
-        ));
-    }?;
-
-    // Update last_sync_at
     sqlx::query("UPDATE mail_account SET last_sync_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
         .bind(account_id)
         .execute(pool)
         .await?;
 
-    Ok(result)
+    Ok(SyncResponse {
+        account_id: account_id.to_string(),
+        status: "completed".into(),
+        folders_synced: usize::try_from(outcome.folders_synced).unwrap_or(usize::MAX),
+        messages_synced: usize::try_from(outcome.messages_synced).unwrap_or(usize::MAX),
+        messages_updated: 0,
+        messages_deleted: 0,
+    })
+}
+
+/// Load an IMAP account and run the existing IMAP fetch loop.
+pub(crate) async fn imap_sync_account(
+    db: &DbPool,
+    user_id: &str,
+    account_id: &str,
+) -> Result<SyncOutcome, SyncError> {
+    let pool = get_sqlite_pool(db);
+    let row = load_account_sync_row(pool, user_id, account_id).await?;
+    let credential_json: String = row.get("credential");
+    let dek =
+        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
+    let result = run_imap_sync(pool, account_id, &row, &password).await?;
+    Ok(outcome_from_response(&result))
+}
+
+/// Load a JMAP account and run the existing JMAP fetch loop.
+///
+/// JMAP-then-IMAP fallback stays inside this plugin path, not core dispatch.
+pub(crate) async fn jmap_sync_account(
+    db: &DbPool,
+    user_id: &str,
+    account_id: &str,
+) -> Result<SyncOutcome, SyncError> {
+    let pool = get_sqlite_pool(db);
+    let row = load_account_sync_row(pool, user_id, account_id).await?;
+    let credential_json: String = row.get("credential");
+    let email_address: String = row.get("email_address");
+    let jmap_base_url: Option<String> = row.get("jmap_base_url");
+    let dek =
+        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
+
+    let result = if let Some(ref base_url) = jmap_base_url {
+        let password = crate::jmap::decrypt_account_password(&credential_json, &dek)?;
+        match run_jmap_sync(pool, account_id, base_url, &email_address, &password).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!("JMAP sync failed ({e}), falling back to IMAP");
+                let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
+                run_imap_sync(pool, account_id, &row, &password).await?
+            }
+        }
+    } else {
+        let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
+        run_imap_sync(pool, account_id, &row, &password).await?
+    };
+    Ok(outcome_from_response(&result))
+}
+
+async fn load_account_sync_row(
+    pool: &sqlx::SqlitePool,
+    user_id: &str,
+    account_id: &str,
+) -> Result<sqlx::sqlite::SqliteRow, SyncError> {
+    sqlx::query(
+        r"
+        SELECT id, email_address, protocol, credential,
+               imap_host, imap_port, imap_security,
+               jmap_base_url,
+               is_active, sync_enabled
+        FROM mail_account
+        WHERE id = ? AND user_id = ?
+        ",
+    )
+    .bind(account_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(SyncError::AccountNotFound)
+}
+
+fn outcome_from_response(result: &SyncResponse) -> SyncOutcome {
+    SyncOutcome {
+        folders_synced: u32::try_from(result.folders_synced).unwrap_or(u32::MAX),
+        messages_synced: u32::try_from(result.messages_synced).unwrap_or(u32::MAX),
+    }
 }
 
 /// Run an IMAP-based sync for an account.
@@ -1201,7 +1376,7 @@ pub async fn run_account_sync(
 /// Connects to the IMAP server, lists folders, and syncs messages
 /// using UIDVALIDITY + UID cursors.
 #[allow(clippy::too_many_lines)]
-async fn run_imap_sync(
+pub(crate) async fn run_imap_sync(
     pool: &sqlx::SqlitePool,
     account_id: &str,
     row: &sqlx::sqlite::SqliteRow,
@@ -1320,7 +1495,7 @@ async fn run_imap_sync(
 ///
 /// Discovers the JMAP session, lists mailboxes, queries emails,
 /// and upserts them into the database.
-async fn run_jmap_sync(
+pub(crate) async fn run_jmap_sync(
     pool: &sqlx::SqlitePool,
     account_id: &str,
     jmap_base_url: &str,

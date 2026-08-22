@@ -17,6 +17,7 @@ mod imap;
 mod jmap;
 mod kernel;
 mod pim;
+mod plugins;
 mod protocol;
 mod smtp;
 mod storage;
@@ -37,7 +38,14 @@ async fn main() -> anyhow::Result<()> {
     let storage = storage::Storage::new(&config.database_url).await?;
     storage.run_migrations().await?;
     let db = storage.pool().clone();
-    let auth_state = auth::AuthState::new(db, &config)?;
+    plugins::bind_storage(db.clone());
+    let mut app = kernel::App::new();
+    app.provide("storage");
+    for plugin in plugins::builtin_plugins() {
+        app.register_plugin(plugin.as_ref())?;
+    }
+    let app = std::sync::Arc::new(app);
+    let auth_state = auth::AuthState::new(db, &config, app)?;
 
     let api = Router::new()
         .route("/health", axum::routing::get(health))
