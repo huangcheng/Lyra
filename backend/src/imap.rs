@@ -637,7 +637,8 @@ fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, Vec<Extrac
         if content_type.contains("text/plain") {
             body_text = decode_content(content, encoding.as_deref());
         } else if content_type.contains("text/html") {
-            body_html = decode_content(content, encoding.as_deref()).map(|h| sanitize_email_html(&h));
+            body_html =
+                decode_content(content, encoding.as_deref()).map(|h| sanitize_email_html(&h));
         }
     }
 

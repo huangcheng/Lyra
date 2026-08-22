@@ -3,6 +3,11 @@
 //! Email HTML comes from remote senders and is rendered in the app origin, so
 //! it must never carry active content. All `body_html` produced by the IMAP
 //! and JMAP ingest paths passes through [`sanitize_email_html`].
+//!
+//! Note: `cid:` URLs are allowed here so inline-image references survive, but
+//! actually rendering them additionally needs `img-src cid:` in the CSP (or
+//! rewriting to served attachment URLs) if inline-image rendering is ever
+//! enabled.
 
 use std::sync::LazyLock;
 
@@ -132,8 +137,32 @@ mod tests {
 
     #[test]
     fn strips_style_attribute() {
-        let out =
-            sanitize_email_html("<p style=\"background:url(javascript:alert(1))\">x</p>");
+        let out = sanitize_email_html("<p style=\"background:url(javascript:alert(1))\">x</p>");
         assert!(!out.contains("style="), "got: {out}");
+    }
+
+    #[test]
+    fn preserves_cid_and_mailto_urls() {
+        // Regression lock for the custom scheme whitelist.
+        let html = "<img src=\"cid:part1@example\">\
+                    <a href=\"mailto:someone@example.com\">mail</a>";
+        let out = sanitize_email_html(html);
+        assert!(out.contains("src=\"cid:part1@example\""), "got: {out}");
+        assert!(
+            out.contains("href=\"mailto:someone@example.com\""),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn strips_uppercase_script_and_entity_obfuscated_urls() {
+        let out = sanitize_email_html("<SCRIPT>alert(1)</SCRIPT><p>ok</p>");
+        assert!(!out.to_lowercase().contains("<script"), "got: {out}");
+        assert!(!out.contains("alert(1)"), "got: {out}");
+        assert!(out.contains("<p>ok</p>"), "got: {out}");
+
+        let out = sanitize_email_html("<a href=\"jav&#x61;script:alert(1)\">x</a>");
+        assert!(!out.to_lowercase().contains("javascript:"), "got: {out}");
+        assert!(!out.contains("alert(1)"), "got: {out}");
     }
 }

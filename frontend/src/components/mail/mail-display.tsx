@@ -45,6 +45,9 @@ import { useUIStore } from '@/stores/ui';
  * Strict config: no iframes/forms/embeds, no unknown protocols.
  */
 function sanitizeEmailHtml(html: string): string {
+  // Deliberately looser than the backend ingest policy (e.g. data: images
+  // survive here): this layer also guards legacy rows stored before backend
+  // sanitization existed, without re-deciding ingest-time trade-offs.
   return DOMPurify.sanitize(html, {
     FORBID_TAGS: ['iframe', 'object', 'embed', 'form', 'meta', 'link', 'base', 'style'],
   });
