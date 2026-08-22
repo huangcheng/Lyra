@@ -1657,17 +1657,8 @@ pub(crate) async fn run_jmap_sync(
     for mb in &mailboxes {
         let folder_id = get_folder_id(pool, account_id, &mb.name).await?;
 
-        // Load stored JMAP state
-        let cursor = load_cursor(pool, account_id, &folder_id).await?;
-        let since_state = cursor.as_ref().and_then(|c| {
-            // JMAP uses state tokens, not UIDs
-            if c.uid_validity == 0 {
-                // This is a JMAP cursor (stored with uid_validity=0)
-                Some(c.last_uid.to_string()) // We store the query state hash as last_uid
-            } else {
-                None // IMAP cursor, start fresh
-            }
-        });
+        // Load stored JMAP state (raw queryState token, sent back as sinceState)
+        let since_state = load_jmap_cursor(pool, account_id, &folder_id).await?;
 
         // Query emails
         let query_result = client
@@ -1691,19 +1682,9 @@ pub(crate) async fn run_jmap_sync(
             }
         }
 
-        // Save JMAP cursor (use a hash of the query state for idempotency)
+        // Save JMAP cursor: store the raw queryState token verbatim
         if let Some(ref qs) = query_result.query_state {
-            let state_hash = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut h = DefaultHasher::new();
-                qs.hash(&mut h);
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    h.finish() as u32
-                }
-            };
-            save_cursor(pool, account_id, &folder_id, "jmap", 0, state_hash).await?;
+            save_jmap_cursor(pool, account_id, &folder_id, qs).await?;
         }
 
         update_folder_counts(pool, &folder_id).await?;
@@ -2024,6 +2005,59 @@ fn parse_cursor_value(value: &str) -> SyncCursorInfo {
             last_uid: 0,
         }
     }
+}
+
+/// Load the stored JMAP `queryState` token for a folder.
+///
+/// Returns the raw token to be sent verbatim as `sinceState` on the next sync.
+async fn load_jmap_cursor(
+    pool: &sqlx::SqlitePool,
+    account_id: &str,
+    folder_id: &str,
+) -> Result<Option<String>, SyncError> {
+    let value = sqlx::query_scalar(
+        r"
+        SELECT cursor_value
+        FROM sync_cursor
+        WHERE account_id = ? AND folder_id = ? AND cursor_type = 'state_token'
+        ",
+    )
+    .bind(account_id)
+    .bind(folder_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(value)
+}
+
+/// Save the JMAP `queryState` token for a folder.
+///
+/// The token is an opaque server string and is stored verbatim — never hashed —
+/// so it can be sent back as `sinceState` on the next sync.
+async fn save_jmap_cursor(
+    pool: &sqlx::SqlitePool,
+    account_id: &str,
+    folder_id: &str,
+    query_state: &str,
+) -> Result<(), SyncError> {
+    let cursor_id = format!("{account_id}:{folder_id}:state_token");
+
+    sqlx::query(
+        r"
+        INSERT INTO sync_cursor (id, account_id, folder_id, protocol, cursor_type, cursor_value, updated_at)
+        VALUES (?, ?, ?, 'jmap', 'state_token', ?, datetime('now'))
+        ON CONFLICT(account_id, folder_id, cursor_type)
+        DO UPDATE SET cursor_value = excluded.cursor_value, updated_at = excluded.updated_at
+        ",
+    )
+    .bind(&cursor_id)
+    .bind(account_id)
+    .bind(folder_id)
+    .bind(query_state)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 // ── Message upsert ──────────────────────────────────────────────────
@@ -2491,6 +2525,64 @@ mod tests {
         assert_eq!(cursor2.last_uid, 200, "cursor should be updated");
 
         // Verify only one cursor row
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sync_cursor WHERE account_id = ?")
+                .bind(&account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn jmap_state_cursor_roundtrip() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+
+        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+
+        // A JMAP queryState is an opaque server token — it must round-trip verbatim,
+        // because it is sent back to the server as `sinceState` on the next sync.
+        let query_state = "jmap-state-abc123";
+
+        save_jmap_cursor(&pool, &account_id, &folder_id, query_state)
+            .await
+            .unwrap();
+
+        // The raw token must be stored as-is, not a hash of it.
+        let raw: String = sqlx::query_scalar(
+            "SELECT cursor_value FROM sync_cursor \
+             WHERE account_id = ? AND folder_id = ? AND cursor_type = 'state_token'",
+        )
+        .bind(&account_id)
+        .bind(&folder_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            raw, query_state,
+            "stored cursor must be the raw queryState token"
+        );
+
+        // What we send back as sinceState must equal the original token.
+        let since_state = load_jmap_cursor(&pool, &account_id, &folder_id)
+            .await
+            .unwrap();
+        assert_eq!(since_state.as_deref(), Some(query_state));
+
+        // Idempotent upsert: saving a newer state replaces the old one.
+        save_jmap_cursor(&pool, &account_id, &folder_id, "jmap-state-def456")
+            .await
+            .unwrap();
+        let since_state = load_jmap_cursor(&pool, &account_id, &folder_id)
+            .await
+            .unwrap();
+        assert_eq!(since_state.as_deref(), Some("jmap-state-def456"));
+
+        // Only one cursor row per folder.
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM sync_cursor WHERE account_id = ?")
                 .bind(&account_id)
