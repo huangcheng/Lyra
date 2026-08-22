@@ -366,7 +366,7 @@ pub(crate) async fn prepare_smtp_send(
     let pool = get_sqlite_pool(db);
     let row = sqlx::query(
         r"
-        SELECT email_address, credential,
+        SELECT email_address, credential, user_id,
                smtp_host, smtp_port, smtp_security, is_active
         FROM mail_account
         WHERE id = ?
@@ -387,6 +387,7 @@ pub(crate) async fn prepare_smtp_send(
     let smtp_security: Option<String> = row.get("smtp_security");
     let credential_json: String = row.get("credential");
     let email_address: String = row.get("email_address");
+    let user_id: String = row.get("user_id");
 
     let host =
         smtp_host.ok_or_else(|| SyncError::InvalidInput("SMTP host not configured".into()))?;
@@ -397,8 +398,9 @@ pub(crate) async fn prepare_smtp_send(
         _ => SmtpSecurity::Starttls,
     };
 
-    let dek =
-        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let dek = crate::auth::AuthState::get_user_dek(db, &user_id)
+        .await
+        .map_err(|e| SyncError::Crypto(e.to_string()))?;
     let password = crate::smtp::decrypt_account_password(&credential_json, &dek)?;
 
     let config = SmtpConfig {
@@ -1038,6 +1040,7 @@ async fn load_message_row(
 }
 
 async fn connect_imap_for_account(
+    db: &DbPool,
     pool: &sqlx::SqlitePool,
     user_id: &str,
     account_id: &str,
@@ -1077,8 +1080,9 @@ async fn connect_imap_for_account(
         _ => ImapSecurity::Tls,
     };
 
-    let dek =
-        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let dek = crate::auth::AuthState::get_user_dek(db, user_id)
+        .await
+        .map_err(|e| SyncError::Crypto(e.to_string()))?;
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| SyncError::Crypto(e.to_string()))?;
 
@@ -1115,7 +1119,7 @@ async fn get_message(
         && row.protocol == "imap"
         && let Ok(uid) = parse_imap_uid(row.external_id.as_deref())
     {
-        let (mut client, _) = connect_imap_for_account(pool, &user_id, &row.account_id).await?;
+        let (mut client, _) = connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
         client.select(&row.folder_name).await?;
         let bodies = client.fetch_bodies(&[uid]).await?;
         if let Some(fetched) = bodies.into_iter().next() {
@@ -1173,7 +1177,7 @@ async fn patch_message(
 
     if row.protocol == "imap" && (body.is_read.is_some() || body.is_starred.is_some()) {
         let uid = parse_imap_uid(row.external_id.as_deref())?;
-        let (mut client, _) = connect_imap_for_account(pool, &user_id, &row.account_id).await?;
+        let (mut client, _) = connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
         client.select(&row.folder_name).await?;
 
         if let Some(is_read) = body.is_read {
@@ -1335,7 +1339,7 @@ async fn move_message_to_role(
 
     if row.protocol == "imap" {
         let uid = parse_imap_uid(row.external_id.as_deref())?;
-        let (mut client, _) = connect_imap_for_account(pool, &user_id, &row.account_id).await?;
+        let (mut client, _) = connect_imap_for_account(state.db(), pool, &user_id, &row.account_id).await?;
         client.select(&row.folder_name).await?;
         client.move_uid(uid, &dest_name).await?;
     }
@@ -1438,8 +1442,9 @@ pub(crate) async fn imap_sync_account(
     let pool = get_sqlite_pool(db);
     let row = load_account_sync_row(pool, user_id, account_id).await?;
     let credential_json: String = row.get("credential");
-    let dek =
-        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let dek = crate::auth::AuthState::get_user_dek(db, user_id)
+        .await
+        .map_err(|e| SyncError::Crypto(e.to_string()))?;
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
     let result = run_imap_sync(pool, account_id, &row, &password).await?;
     Ok(outcome_from_response(&result))
@@ -1458,8 +1463,9 @@ pub(crate) async fn jmap_sync_account(
     let credential_json: String = row.get("credential");
     let email_address: String = row.get("email_address");
     let jmap_base_url: Option<String> = row.get("jmap_base_url");
-    let dek =
-        crate::auth::AuthState::get_user_dek().map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let dek = crate::auth::AuthState::get_user_dek(db, user_id)
+        .await
+        .map_err(|e| SyncError::Crypto(e.to_string()))?;
 
     let result = if let Some(ref base_url) = jmap_base_url {
         let password = crate::jmap::decrypt_account_password(&credential_json, &dek)?;
@@ -2215,22 +2221,29 @@ mod tests {
         }
     }
 
-    /// Seed a user and account in the test DB, return `(user_id, account_id)`.
+    /// Seed a user (with a wrapped DEK) and account in the test DB,
+    /// return `(user_id, account_id)`.
     async fn seed_user_and_account(pool: &sqlx::SqlitePool) -> (String, String) {
         let user_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
         let account_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
 
-        // Insert user
-        sqlx::query("INSERT INTO lyra_user (id, username, password_hash) VALUES (?, ?, ?)")
-            .bind(&user_id)
-            .bind("testuser")
-            .bind("hash")
-            .execute(pool)
-            .await
-            .unwrap();
+        // Insert user with a wrapped DEK under the shared test master key
+        crate::auth::install_test_master_key();
+        let dek = crate::crypto::generate_key();
+        let kek = crate::crypto::derive_user_kek(crate::auth::TEST_MASTER_KEY, &user_id);
+        let wrapped_dek = crate::crypto::wrap_dek(&kek, &dek).unwrap();
+        sqlx::query(
+            "INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&user_id)
+        .bind(format!("testuser-{user_id}"))
+        .bind("hash")
+        .bind(&wrapped_dek)
+        .execute(pool)
+        .await
+        .unwrap();
 
         // Insert account
-        let dek = crate::auth::AuthState::get_user_dek().unwrap();
         let encrypted = crate::crypto::encrypt(&dek, b"password123").unwrap();
         let credential_json = serde_json::to_string(&encrypted).unwrap();
 

@@ -19,6 +19,7 @@ use sqlx::Row;
 use totp_rs::{Algorithm, TOTP};
 use uuid::Uuid;
 
+use crate::crypto::{self, CryptoError};
 use crate::kernel::App;
 use crate::kv::KvStore;
 #[cfg(test)]
@@ -55,7 +56,7 @@ pub struct TotpEnrollResponse {
     pub otpauth_uri: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
 }
@@ -206,17 +207,19 @@ async fn insert_user(
     password_hash: &str,
     display_name: Option<&str>,
     locale: &str,
+    encrypted_dek: &str,
 ) -> Result<(), StatusCode> {
     match db {
         DbPool::Sqlite(pool) => {
             sqlx::query(
-                "INSERT INTO lyra_user (id, username, password_hash, display_name, locale) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO lyra_user (id, username, password_hash, display_name, locale, encrypted_dek) VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(id)
             .bind(username)
             .bind(password_hash)
             .bind(display_name)
             .bind(locale)
+            .bind(encrypted_dek)
             .execute(pool)
             .await
             .map_err(|e| {
@@ -227,13 +230,14 @@ async fn insert_user(
         #[cfg(feature = "postgres")]
         DbPool::Postgres(pool) => {
             sqlx::query(
-                "INSERT INTO lyra_user (id, username, password_hash, display_name, locale) VALUES ($1, $2, $3, $4, $5)",
+                "INSERT INTO lyra_user (id, username, password_hash, display_name, locale, encrypted_dek) VALUES ($1, $2, $3, $4, $5, $6)",
             )
             .bind(id)
             .bind(username)
             .bind(password_hash)
             .bind(display_name)
             .bind(locale)
+            .bind(encrypted_dek)
             .execute(pool)
             .await
             .map_err(|e| {
@@ -556,6 +560,75 @@ impl SessionStore {
     }
 }
 
+// ── Master key & DEK hierarchy ──────────────────────────────────────
+//
+// Master key (from `LYRA_MASTER_KEY`, validated at boot in config.rs)
+//   → per-user KEK (HKDF-SHA256, info string bound to the user id)
+//   → wraps a random 256-bit DEK stored in `lyra_user.encrypted_dek`
+//   → DEK encrypts account credentials and the TOTP secret.
+//
+// See `docs/specs/2026-08-20-lyra-data-model-spec.md` §3.
+
+/// Process-wide master key, installed once at boot by [`AuthState::new`].
+static MASTER_KEY: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+/// Install the master key. The first install wins; later calls are no-ops
+/// (tests share one process-wide key).
+pub(crate) fn install_master_key(key: &[u8]) {
+    let _ = MASTER_KEY.set(key.to_vec());
+}
+
+fn master_key() -> Result<&'static [u8], CryptoError> {
+    MASTER_KEY
+        .get()
+        .map(Vec::as_slice)
+        .ok_or(CryptoError::MasterKeyNotInitialized)
+}
+
+/// Fixed master key shared by all tests in this crate (32+ bytes).
+#[cfg(test)]
+pub(crate) const TEST_MASTER_KEY: &[u8] = b"lyra-test-master-key-0123456789abcdef";
+
+/// Install [`TEST_MASTER_KEY`] as the process-wide master key (idempotent).
+#[cfg(test)]
+pub(crate) fn install_test_master_key() {
+    install_master_key(TEST_MASTER_KEY);
+}
+
+/// Fetch the wrapped DEK blob from `lyra_user.encrypted_dek`.
+async fn fetch_encrypted_dek(db: &DbPool, user_id: &str) -> Result<String, CryptoError> {
+    let wrapped: Option<String> = match db {
+        DbPool::Sqlite(pool) => {
+            sqlx::query_scalar("SELECT encrypted_dek FROM lyra_user WHERE id = ?")
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await
+        }
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(pool) => {
+            sqlx::query_scalar("SELECT encrypted_dek FROM lyra_user WHERE id = $1")
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await
+        }
+    }
+    .map_err(|e| CryptoError::Storage(e.to_string()))?
+    .flatten();
+    wrapped.ok_or(CryptoError::MissingDek)
+}
+
+/// Map a crypto failure to a 500 response. The error text carries operator
+/// guidance (never key material or plaintext).
+fn crypto_err(e: &CryptoError) -> (StatusCode, Json<ErrorResponse>) {
+    tracing::error!("crypto failure: {e}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: e.to_string(),
+        }),
+    )
+}
+
 // ── Application state ───────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -575,6 +648,7 @@ impl AuthState {
         kv: Arc<dyn KvStore>,
     ) -> Result<Self, anyhow::Error> {
         std::fs::create_dir_all(&config.data_dir)?;
+        install_master_key(&config.master_key);
         Ok(Self {
             db: db.clone(),
             sessions: SessionStore::new(db, kv),
@@ -600,19 +674,20 @@ impl AuthState {
     }
 
     /// Get the user's data encryption key (DEK) for credential encryption.
-    /// The DEK is encrypted with the master key and stored in the user record.
-    pub fn get_user_dek() -> Result<Vec<u8>, crate::crypto::CryptoError> {
-        // For v1, use a default key derived from a constant.
-        // In production, this should use the user's encrypted_dek from the database.
-        // TODO: Implement proper DEK derivation from user's encrypted_dek
-        let master_key = std::env::var("LYRA_MASTER_KEY")
-            .unwrap_or_else(|_| "lyra-default-master-key-for-dev-only".to_string());
-        let key_bytes = master_key.as_bytes();
-        let mut key = [0u8; 32];
-        for (i, &b) in key_bytes.iter().enumerate().take(32) {
-            key[i] = b;
-        }
-        Ok(key.to_vec())
+    ///
+    /// The DEK is a random 256-bit key generated at bootstrap, wrapped with
+    /// the per-user KEK (HKDF-SHA256 from the master key, bound to the user
+    /// id) and stored in `lyra_user.encrypted_dek`. This unwraps it on demand.
+    ///
+    /// # Errors
+    /// Fails with a typed [`CryptoError`] if the master key was never
+    /// installed, the user has no stored DEK, or unwrapping fails (e.g. the
+    /// DEK was wrapped under a different master key — re-add accounts or
+    /// reset the database).
+    pub async fn get_user_dek(db: &DbPool, user_id: &str) -> Result<Vec<u8>, CryptoError> {
+        let kek = crypto::derive_user_kek(master_key()?, user_id);
+        let wrapped = fetch_encrypted_dek(db, user_id).await?;
+        crypto::unwrap_dek(&kek, &wrapped)
     }
 }
 
@@ -708,6 +783,11 @@ async fn auth_bootstrap(
     let user_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
     let locale = req.locale.unwrap_or_else(|| "en".to_string());
 
+    // Generate the user's DEK and store it wrapped with the per-user KEK.
+    let dek = crypto::generate_key();
+    let kek = crypto::derive_user_kek(master_key().map_err(|e| crypto_err(&e))?, &user_id);
+    let wrapped_dek = crypto::wrap_dek(&kek, &dek).map_err(|e| crypto_err(&e))?;
+
     insert_user(
         &state.db,
         &user_id,
@@ -715,6 +795,7 @@ async fn auth_bootstrap(
         &password_hash,
         req.display_name.as_deref(),
         &locale,
+        &wrapped_dek,
     )
     .await
     .map_err(|e| {
@@ -887,18 +968,19 @@ async fn totp_verify(
             )
         })?;
 
-    let totp = build_totp(
-        user.totp_secret.as_deref().ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "TOTP not configured".to_string(),
-                }),
-            )
-        })?,
-        &user.username,
-    )
-    .map_err(|_| {
+    let stored_secret = user.totp_secret.as_deref().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "TOTP not configured".to_string(),
+            }),
+        )
+    })?;
+    let dek = AuthState::get_user_dek(&state.db, &user_id)
+        .await
+        .map_err(|e| crypto_err(&e))?;
+    let secret = decrypt_totp_secret(&dek, stored_secret).map_err(|e| crypto_err(&e))?;
+    let totp = build_totp(&secret, &user.username).map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -986,7 +1068,12 @@ async fn totp_enroll(
     })?;
 
     let secret_base32 = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &secret_bytes);
-    update_user_totp(&state.db, &user_id, Some(&secret_base32), false)
+    // Store the secret encrypted with the user's DEK; enabled only after confirm.
+    let dek = AuthState::get_user_dek(&state.db, &user_id)
+        .await
+        .map_err(|e| crypto_err(&e))?;
+    let stored_secret = encrypt_totp_secret(&dek, &secret_base32).map_err(|e| crypto_err(&e))?;
+    update_user_totp(&state.db, &user_id, Some(&stored_secret), false)
         .await
         .map_err(|e| {
             (
@@ -1038,7 +1125,7 @@ async fn totp_enroll_confirm(
             )
         })?;
 
-    let secret = user.totp_secret.ok_or_else(|| {
+    let stored = user.totp_secret.ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -1046,6 +1133,11 @@ async fn totp_enroll_confirm(
             }),
         )
     })?;
+
+    let dek = AuthState::get_user_dek(&state.db, &user_id)
+        .await
+        .map_err(|e| crypto_err(&e))?;
+    let secret = decrypt_totp_secret(&dek, &stored).map_err(|e| crypto_err(&e))?;
 
     let totp = build_totp(&secret, &user.username).map_err(|_| {
         (
@@ -1065,7 +1157,8 @@ async fn totp_enroll_confirm(
         ));
     }
 
-    update_user_totp(&state.db, &user_id, Some(&secret), true)
+    // Code verified: keep the same encrypted secret, flip the enabled flag.
+    update_user_totp(&state.db, &user_id, Some(&stored), true)
         .await
         .map_err(|e| {
             (
@@ -1180,6 +1273,25 @@ async fn extract_session(
             }),
         )
     })
+}
+
+/// Encrypt a base32 TOTP secret with the user's DEK; returns the JSON blob
+/// stored in `lyra_user.totp_secret`.
+fn encrypt_totp_secret(dek: &[u8], secret_base32: &str) -> Result<String, CryptoError> {
+    let encrypted = crypto::encrypt(dek, secret_base32.as_bytes())?;
+    serde_json::to_string(&encrypted).map_err(|e| CryptoError::Encrypt(e.to_string()))
+}
+
+/// Decrypt a stored TOTP secret blob back to its base32 form.
+fn decrypt_totp_secret(dek: &[u8], stored: &str) -> Result<String, CryptoError> {
+    let encrypted: crypto::EncryptedCredential = serde_json::from_str(stored).map_err(|e| {
+        CryptoError::Decrypt(format!(
+            "stored TOTP secret is not an encrypted blob ({e}); disable 2FA and re-enroll, or reset the database"
+        ))
+    })?;
+    let bytes = crypto::decrypt(dek, &encrypted)?;
+    String::from_utf8(bytes)
+        .map_err(|e| CryptoError::Decrypt(format!("TOTP secret is not valid UTF-8: {e}")))
 }
 
 fn build_totp(secret_base32: &str, username: &str) -> Result<TOTP, StatusCode> {
@@ -1320,5 +1432,220 @@ mod tests {
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("expected sqlite in tests"),
         }
+    }
+
+    // ── DEK hierarchy & TOTP-at-rest tests ──────────────────────────
+
+    fn test_config() -> crate::config::Config {
+        crate::config::Config {
+            listen_addr: "127.0.0.1:0".into(),
+            database_url: "sqlite::memory:".into(),
+            data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            session_secret: b"test-session-secret-0123456789abcdef".to_vec(),
+            min_password_length: 8,
+            sync_max_concurrent: 3,
+            sync_poll_secs: 300,
+            redis_url: None,
+            master_key: TEST_MASTER_KEY.to_vec(),
+        }
+    }
+
+    fn test_state(db: DbPool) -> AuthState {
+        AuthState::new(
+            db,
+            &test_config(),
+            Arc::new(crate::kernel::App::new()),
+            Arc::new(MemoryKv::new()),
+        )
+        .unwrap()
+    }
+
+    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
+        match db {
+            DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "postgres")]
+            DbPool::Postgres(_) => panic!("expected sqlite in tests"),
+        }
+    }
+
+    /// Seed a user with a freshly generated DEK, stored wrapped.
+    /// Returns the plaintext DEK for assertions.
+    async fn seed_user_with_dek(db: &DbPool, id: &str) -> Vec<u8> {
+        install_test_master_key();
+        seed_user(db, id).await;
+        let dek = crypto::generate_key();
+        let kek = crypto::derive_user_kek(TEST_MASTER_KEY, id);
+        let wrapped = crypto::wrap_dek(&kek, &dek).unwrap();
+        sqlx::query("UPDATE lyra_user SET encrypted_dek = ? WHERE id = ?")
+            .bind(&wrapped)
+            .bind(id)
+            .execute(sqlite_pool(db))
+            .await
+            .unwrap();
+        dek.to_vec()
+    }
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn bootstrap_creates_and_persists_encrypted_dek() {
+        let db = test_pool().await;
+        let state = test_state(db.clone());
+
+        auth_bootstrap(
+            State(state),
+            Json(BootstrapRequest {
+                username: "alice".into(),
+                password: "Str0ngPass1".into(),
+                display_name: None,
+                locale: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let pool = sqlite_pool(&db);
+        let (user_id, stored): (String, String) =
+            sqlx::query_as("SELECT id, encrypted_dek FROM lyra_user")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+
+        // At rest it is a wrapped-key blob (JSON ciphertext + nonce), not raw key material.
+        let blob: crypto::EncryptedCredential = serde_json::from_str(&stored).unwrap();
+        assert!(!blob.ciphertext.is_empty());
+        assert!(!blob.nonce.is_empty());
+
+        // Unwrap round-trip via the public lookup matches a manual unwrap.
+        let dek = AuthState::get_user_dek(&db, &user_id).await.unwrap();
+        assert_eq!(dek.len(), 32);
+        let kek = crypto::derive_user_kek(TEST_MASTER_KEY, &user_id);
+        assert_eq!(crypto::unwrap_dek(&kek, &stored).unwrap(), dek);
+    }
+
+    #[tokio::test]
+    async fn two_users_get_different_deks() {
+        let db = test_pool().await;
+        let dek_a = seed_user_with_dek(&db, "user-a").await;
+        let dek_b = seed_user_with_dek(&db, "user-b").await;
+
+        assert_eq!(AuthState::get_user_dek(&db, "user-a").await.unwrap(), dek_a);
+        assert_eq!(AuthState::get_user_dek(&db, "user-b").await.unwrap(), dek_b);
+        assert_ne!(dek_a, dek_b);
+
+        // A user's wrapped DEK cannot be unwrapped with another user's KEK.
+        let stored_a: String =
+            sqlx::query_scalar("SELECT encrypted_dek FROM lyra_user WHERE id = 'user-a'")
+                .fetch_one(sqlite_pool(&db))
+                .await
+                .unwrap();
+        let kek_b = crypto::derive_user_kek(TEST_MASTER_KEY, "user-b");
+        assert!(crypto::unwrap_dek(&kek_b, &stored_a).is_err());
+    }
+
+    #[tokio::test]
+    async fn missing_dek_is_a_typed_error() {
+        let db = test_pool().await;
+        install_test_master_key();
+        seed_user(&db, "user-legacy").await;
+
+        let err = AuthState::get_user_dek(&db, "user-legacy").await.unwrap_err();
+        assert!(matches!(err, CryptoError::MissingDek));
+        assert!(err.to_string().contains("reset the database"));
+    }
+
+    #[tokio::test]
+    async fn totp_secret_is_encrypted_at_rest() {
+        let db = test_pool().await;
+        let state = test_state(db.clone());
+
+        auth_bootstrap(
+            State(state.clone()),
+            Json(BootstrapRequest {
+                username: "alice".into(),
+                password: "Str0ngPass1".into(),
+                display_name: None,
+                locale: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let user_id: String = sqlx::query_scalar("SELECT id FROM lyra_user")
+            .fetch_one(sqlite_pool(&db))
+            .await
+            .unwrap();
+        let token = state.sessions.create_session(&user_id).await.unwrap();
+
+        // Enroll: returns the plaintext secret once, stores only ciphertext.
+        let enroll = totp_enroll(State(state.clone()), bearer_headers(&token))
+            .await
+            .unwrap();
+        let plaintext_secret = enroll.secret.clone();
+
+        let stored: String =
+            sqlx::query_scalar("SELECT totp_secret FROM lyra_user WHERE id = ?")
+                .bind(&user_id)
+                .fetch_one(sqlite_pool(&db))
+                .await
+                .unwrap();
+        assert_ne!(stored, plaintext_secret);
+        assert!(!stored.contains(&plaintext_secret));
+        serde_json::from_str::<crypto::EncryptedCredential>(&stored).unwrap();
+        let enabled: bool =
+            sqlx::query_scalar("SELECT totp_enabled FROM lyra_user WHERE id = ?")
+                .bind(&user_id)
+                .fetch_one(sqlite_pool(&db))
+                .await
+                .unwrap();
+        assert!(!enabled, "enroll alone must not enable 2FA");
+
+        // Confirm with a valid code flips totp_enabled on.
+        let totp = build_totp(&plaintext_secret, "alice").unwrap();
+        let code = totp.generate_current().unwrap();
+        let status = totp_enroll_confirm(
+            State(state.clone()),
+            bearer_headers(&token),
+            Json(TotpEnrollConfirmRequest { code }),
+        )
+        .await
+        .unwrap();
+        assert!(status.totp_enabled);
+
+        // The stored value still decrypts to the original secret.
+        let dek = AuthState::get_user_dek(&db, &user_id).await.unwrap();
+        let stored_after: String =
+            sqlx::query_scalar("SELECT totp_secret FROM lyra_user WHERE id = ?")
+                .bind(&user_id)
+                .fetch_one(sqlite_pool(&db))
+                .await
+                .unwrap();
+        assert_eq!(
+            decrypt_totp_secret(&dek, &stored_after).unwrap(),
+            plaintext_secret
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_plaintext_totp_secret_fails_loudly() {
+        let db = test_pool().await;
+        seed_user_with_dek(&db, "user-1").await;
+        // Simulate a pre-fix row: plaintext base32 secret in the column.
+        sqlx::query("UPDATE lyra_user SET totp_secret = 'JBSWY3DPEHPK3PXP' WHERE id = 'user-1'")
+            .execute(sqlite_pool(&db))
+            .await
+            .unwrap();
+
+        let dek = AuthState::get_user_dek(&db, "user-1").await.unwrap();
+        let err = decrypt_totp_secret(&dek, "JBSWY3DPEHPK3PXP").unwrap_err();
+        assert!(matches!(err, CryptoError::Decrypt(_)));
+        assert!(err.to_string().contains("re-enroll"));
     }
 }

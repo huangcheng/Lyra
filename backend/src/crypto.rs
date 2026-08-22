@@ -8,8 +8,10 @@
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use hkdf::Hkdf;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
 /// Encrypted credential blob stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,7 +28,9 @@ pub struct EncryptedCredential {
 pub enum CryptoError {
     #[error("encryption failed: {0}")]
     Encrypt(String),
-    #[error("decryption failed: {0}")]
+    #[error(
+        "decryption failed ({0}); data was likely encrypted under a different key — re-add the account or reset the database"
+    )]
     Decrypt(String),
     #[error("invalid key length")]
     InvalidKeyLength,
@@ -34,6 +38,12 @@ pub enum CryptoError {
     InvalidNonceLength,
     #[error("base64 decode error: {0}")]
     Base64(#[from] base64::DecodeError),
+    #[error("master key not initialized; set LYRA_MASTER_KEY at startup")]
+    MasterKeyNotInitialized,
+    #[error("no encrypted DEK stored for this user; re-run bootstrap or reset the database")]
+    MissingDek,
+    #[error("database error while loading the user DEK: {0}")]
+    Storage(String),
 }
 
 /// Encrypt plaintext using AES-256-GCM with a random nonce.
@@ -95,6 +105,38 @@ pub fn generate_key() -> [u8; 32] {
     key
 }
 
+/// HKDF-SHA256 info-string prefix binding a KEK to one user.
+const KEK_INFO_PREFIX: &str = "lyra-user-kek:v1:";
+
+/// Derive the per-user key-encryption-key (KEK) from the master key.
+///
+/// HKDF-SHA256 with no salt and an info string that binds the derived key to
+/// the user id, so each user gets an independent KEK from the same master key.
+pub fn derive_user_kek(master_key: &[u8], user_id: &str) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(None, master_key);
+    let mut kek = [0u8; 32];
+    hk.expand(format!("{KEK_INFO_PREFIX}{user_id}").as_bytes(), &mut kek)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    kek
+}
+
+/// Wrap (encrypt) a data-encryption key with a KEK; returns the JSON blob to
+/// store in `lyra_user.encrypted_dek`.
+pub fn wrap_dek(kek: &[u8; 32], dek: &[u8; 32]) -> Result<String, CryptoError> {
+    let encrypted = encrypt(kek, dek)?;
+    serde_json::to_string(&encrypted).map_err(|e| CryptoError::Encrypt(e.to_string()))
+}
+
+/// Unwrap a DEK previously stored by [`wrap_dek`].
+pub fn unwrap_dek(kek: &[u8; 32], wrapped_json: &str) -> Result<Vec<u8>, CryptoError> {
+    let encrypted: EncryptedCredential = serde_json::from_str(wrapped_json).map_err(|e| {
+        CryptoError::Decrypt(format!(
+            "stored DEK is not a wrapped key blob ({e}); reset the database and re-add accounts"
+        ))
+    })?;
+    decrypt(kek, &encrypted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +172,29 @@ mod tests {
 
         let encrypted = encrypt(&key1, plaintext).unwrap();
         assert!(decrypt(&key2, &encrypted).is_err());
+    }
+
+    #[test]
+    fn kek_differs_per_user() {
+        let master = generate_key();
+        let kek_a = derive_user_kek(&master, "user-a");
+        let kek_b = derive_user_kek(&master, "user-b");
+        assert_ne!(kek_a, kek_b);
+        // Deterministic for the same user and master key.
+        assert_eq!(kek_a, derive_user_kek(&master, "user-a"));
+    }
+
+    #[test]
+    fn dek_wrap_unwrap_roundtrip() {
+        let master = generate_key();
+        let kek = derive_user_kek(&master, "user-a");
+        let dek = generate_key();
+
+        let wrapped = wrap_dek(&kek, &dek).unwrap();
+        assert_eq!(unwrap_dek(&kek, &wrapped).unwrap(), dek);
+
+        // Another user's KEK cannot unwrap it.
+        let other_kek = derive_user_kek(&master, "user-b");
+        assert!(unwrap_dek(&other_kek, &wrapped).is_err());
     }
 }

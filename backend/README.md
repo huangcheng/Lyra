@@ -7,6 +7,9 @@ Rust + Axum backend for the Lyra mail client.
 ```bash
 cd backend
 
+# Required secret (no default; boot fails without it)
+export LYRA_MASTER_KEY=$(openssl rand -base64 32)
+
 # Build and run (defaults to 0.0.0.0:3000 with SQLite)
 cargo run
 
@@ -25,6 +28,8 @@ All config via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `LYRA_MASTER_KEY` | *(required)* | Master key (32+ bytes) for the per-user DEK hierarchy that encrypts stored account credentials and TOTP secrets. Boot fails without it. Generate: `openssl rand -base64 32` |
+| `SESSION_SECRET` | ephemeral random | Session cookie signing secret (32+ bytes); sessions do not survive restarts if unset |
 | `LISTEN_ADDR` | `0.0.0.0:3000` | Address and port to listen on |
 | `DATABASE_URL` | `sqlite:./data/lyra.db` | Database connection string |
 | `DATA_DIR` | `./data` | Directory for message blobs and attachments |

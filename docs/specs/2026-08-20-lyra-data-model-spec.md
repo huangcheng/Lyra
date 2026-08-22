@@ -47,8 +47,9 @@ Single-user v1. Schema shaped so a `user_id` FK can be added to other tables lat
 | `id` | PK | Single row for v1 |
 | `username` | `TEXT NOT NULL UNIQUE` | Login identifier |
 | `password_hash` | `TEXT NOT NULL` | Argon2id hash |
-| `totp_secret` | `TEXT` | Encrypted TOTP secret; NULL if 2FA disabled |
+| `totp_secret` | `TEXT` | Encrypted TOTP secret (AES-256-GCM under the user DEK); NULL if 2FA disabled |
 | `totp_enabled` | `BOOLEAN NOT NULL DEFAULT FALSE` | |
+| `encrypted_dek` | `TEXT` | Per-user DEK, wrapped with the KEK derived from `LYRA_MASTER_KEY` (see §3) |
 | `display_name` | `TEXT` | |
 | `locale` | `TEXT NOT NULL DEFAULT 'en'` | Preferred UI language |
 
@@ -225,16 +226,18 @@ The cursor value is opaque to the application — it is whatever the protocol gi
 
 ## 3. Encrypted credentials
 
-Mail-account credentials (`credential`, `smtp_credential`) are stored as **encrypted JSON blobs** using AES-256-GCM.
+Mail-account credentials (`credential`, `smtp_credential`) are stored as **encrypted JSON blobs** using AES-256-GCM. The user's TOTP secret (`lyra_user.totp_secret`) is encrypted the same way.
 
 ### 3.1 Key hierarchy
 
-1. A **master key** is derived from the Lyra user's password via Argon2id (with a per-instance random salt stored in the config file).
-2. The master key encrypts a **data-encryption key** (DEK) which is stored in the `lyra_user` row (encrypted column).
-3. Credentials are encrypted with the DEK.
-4. On login, the user's password derives the master key, which decrypts the DEK, which is held in memory for the session.
+1. A **master key** comes from the `LYRA_MASTER_KEY` environment variable (required, 32+ bytes; boot fails closed without it).
+2. A per-user **key-encryption key** (KEK) is derived from the master key via HKDF-SHA256, with an info string bound to the user id (`lyra-user-kek:v1:<user_id>`).
+3. A random 256-bit **data-encryption key** (DEK) is generated per user at bootstrap, wrapped with the KEK, and stored in `lyra_user.encrypted_dek`.
+4. Credentials and the TOTP secret are encrypted with the DEK; the DEK is unwrapped on demand via the KEK.
 
-This means changing the Lyra login password re-encrypts only the DEK, not every stored credential.
+This means account credentials are never encrypted directly under the master key, and each user's data is cryptographically separated.
+
+**Breaking change (pre-release):** databases written before this hierarchy existed hold ciphertext under the old padded-master-key scheme (or plaintext TOTP secrets). There is no rotation/migration path; decryption failures surface as typed errors instructing the operator to re-add accounts or reset the database.
 
 ### 3.2 Non-goals
 

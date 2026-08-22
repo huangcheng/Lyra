@@ -2,6 +2,23 @@
 
 ## Recommended: Docker Compose
 
+Lyra refuses to start without two secrets. Create `.env` at the repo root
+(see `.env.example`; the file is gitignored):
+
+```bash
+cp .env.example .env
+# Fill in both values:
+printf 'LYRA_MASTER_KEY=%s\n' "$(openssl rand -base64 32)" >> .env
+printf 'SESSION_SECRET=%s\n'  "$(openssl rand -base64 48)" >> .env
+```
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `LYRA_MASTER_KEY` | **yes** (32+ bytes) | Master key for the per-user DEK hierarchy; all stored mail-account passwords and TOTP secrets are encrypted under it. Loss = unrecoverable credentials (re-add accounts). |
+| `SESSION_SECRET` | **yes** in Compose (32+ bytes) | Session cookie signing; sessions survive restarts only if stable. |
+
+Then:
+
 ```bash
 docker compose up --build -d
 curl -s http://127.0.0.1:3000/health

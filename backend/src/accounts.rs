@@ -288,7 +288,7 @@ async fn create_account(
     }
 
     // Get user's DEK for encryption
-    let dek = AuthState::get_user_dek()?;
+    let dek = AuthState::get_user_dek(state.db(), &user_id).await?;
 
     // Encrypt the password
     let encrypted = crypto::encrypt(&dek, body.password.as_bytes())?;
@@ -416,7 +416,7 @@ async fn update_account(
 
     // Update password if provided
     if let Some(password) = &body.password {
-        let dek = AuthState::get_user_dek()?;
+        let dek = AuthState::get_user_dek(state.db(), &user_id).await?;
         let encrypted = crypto::encrypt(&dek, password.as_bytes())?;
         let credential_json = serde_json::to_string(&encrypted).map_err(|e| {
             AccountError::InvalidInput(format!("credential serialization failed: {e}"))

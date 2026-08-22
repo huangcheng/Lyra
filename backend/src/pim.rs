@@ -549,8 +549,9 @@ async fn sync_contacts(
 
     let email: String = row.get("email_address");
     let credential_json: String = row.get("credential");
-    let dek =
-        crate::auth::AuthState::get_user_dek().map_err(|e| PimError::SyncError(e.to_string()))?;
+    let dek = crate::auth::AuthState::get_user_dek(state.db(), &user_id)
+        .await
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 
@@ -664,8 +665,9 @@ async fn sync_calendars(
 
     let email: String = row.get("email_address");
     let credential_json: String = row.get("credential");
-    let dek =
-        crate::auth::AuthState::get_user_dek().map_err(|e| PimError::SyncError(e.to_string()))?;
+    let dek = crate::auth::AuthState::get_user_dek(state.db(), &user_id)
+        .await
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 

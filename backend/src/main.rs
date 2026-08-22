@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let config = config::Config::from_env();
+    let config = config::Config::from_env()?;
     let storage = storage::Storage::new(&config.database_url).await?;
     storage.run_migrations().await?;
     let db = storage.pool().clone();

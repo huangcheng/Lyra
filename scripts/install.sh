@@ -33,6 +33,8 @@ LISTEN_ADDR=0.0.0.0:3000
 DATABASE_URL=sqlite:${DATA_DIR}/lyra.db
 DATA_DIR=${DATA_DIR}
 RUST_LOG=info
+# Required: master key for credential encryption (generated once at install).
+LYRA_MASTER_KEY=$(openssl rand -base64 32)
 # SESSION_SECRET=$(openssl rand -hex 32)
 EOF
   chmod 600 "$ENV_FILE"

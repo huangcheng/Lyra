@@ -18,9 +18,10 @@ services:
       DATA_DIR: /data
       RUST_LOG: info
       REDIS_URL: redis://redis:6379
-      # Dev default; override for anything beyond local OrbStack use.
-      SESSION_SECRET: lyra-local-dev-session-secret-change-me-32b
-      LYRA_MASTER_KEY: lyra-default-master-key-for-dev-only
+      # Required secrets — set them in .env (see .env.example). Compose
+      # refuses to start while either is unset.
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env (openssl rand -base64 48)}
+      LYRA_MASTER_KEY: ${LYRA_MASTER_KEY:?set LYRA_MASTER_KEY in .env (openssl rand -base64 32)}
     volumes:
       - lyra-data:/data
     depends_on:
