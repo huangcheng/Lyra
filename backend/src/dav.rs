@@ -35,14 +35,16 @@ impl DavClient {
     pub fn new(username: String, password: String, base_url: &str) -> Result<Self, DavError> {
         crate::netsec::validate_server_url(base_url).map_err(DavError::Protocol)?;
         let origin = crate::netsec::origin_of(base_url).map_err(DavError::Protocol)?;
+        let http = reqwest::Client::builder()
+            // Never follow redirects: a redirect could carry the request
+            // to a different host, and we must never replay credentials
+            // cross-origin. Redirect responses surface as errors instead.
+            .redirect(reqwest::redirect::Policy::none())
+            // No fallback: a silent default client would follow redirects.
+            .build()
+            .map_err(DavError::Http)?;
         Ok(Self {
-            http: reqwest::Client::builder()
-                // Never follow redirects: a redirect could carry the request
-                // to a different host, and we must never replay credentials
-                // cross-origin. Redirect responses surface as errors instead.
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            http,
             username,
             password,
             origin,

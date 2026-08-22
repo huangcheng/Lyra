@@ -591,7 +591,7 @@ async fn probe_server_config(
         .clone()
         .unwrap_or_else(|| extract_domain(&body.email_address));
 
-    crate::netsec::validate_domain(&domain).map_err(AccountError::InvalidInput)?;
+    let domain = crate::netsec::validate_domain(&domain).map_err(AccountError::InvalidInput)?;
 
     // Try Mozilla ISPDB first
     if let Some(config) = probe_mozilla_ispdb(&domain).await {

@@ -485,6 +485,9 @@ impl JmapClient {
 
 /// Verify every credential-bearing URL in the session document shares the
 /// configured origin (`apiUrl`, and `uploadUrl` when present).
+///
+/// Add new session URLs here when they start being consumed
+/// (e.g. `eventSourceUrl`, `downloadUrl`).
 fn check_session_urls(origin: &str, session: &JmapSession) -> Result<(), JmapError> {
     let mut urls = vec![session.api_url.as_str()];
     if let Some(upload) = &session.upload_url {

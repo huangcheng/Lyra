@@ -18,11 +18,14 @@ use std::net::IpAddr;
 
 /// Validate a DNS domain name: ASCII labels only, no IP literals.
 ///
+/// Returns the normalized domain (trimmed, trailing dot stripped, lowercased)
+/// on success — callers must use the returned value, not the raw input.
+///
 /// Wildcard-DNS names (e.g. `10.0.0.5.nip.io`) are syntactically valid and
 /// accepted here; the address filter in [`filter_public_addrs`] is what stops
 /// them from reaching internal hosts.
-pub fn validate_domain(domain: &str) -> Result<(), String> {
-    let d = domain.trim().trim_end_matches('.');
+pub fn validate_domain(domain: &str) -> Result<String, String> {
+    let d = domain.trim().trim_end_matches('.').to_ascii_lowercase();
     if d.is_empty() {
         return Err("domain is empty".into());
     }
@@ -54,12 +57,13 @@ pub fn validate_domain(domain: &str) -> Result<(), String> {
             return Err(format!("domain '{domain}' contains non-DNS characters"));
         }
     }
-    Ok(())
+    Ok(d)
 }
 
 /// Whether an IP address must not be used as an outbound destination:
 /// loopback, private (RFC 1918), link-local, unspecified, CGNAT,
-/// documentation, benchmarking, reserved, multicast, or broadcast.
+/// documentation, benchmarking, reserved, multicast, broadcast, or an
+/// IPv4-embedding translation prefix (6to4 / Teredo / local-use NAT64).
 pub fn is_blocked_addr(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -82,12 +86,29 @@ pub fn is_blocked_addr(ip: &IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
                 return is_blocked_addr(&IpAddr::V4(v4));
             }
-            let seg0 = v6.segments()[0];
-            v6.is_loopback()                  // ::1
-            || v6.is_unspecified()            // ::
-            || v6.is_multicast()              // ff00::/8
-            || (seg0 & 0xfe00) == 0xfc00      // fc00::/7 unique local
-            || (seg0 & 0xffc0) == 0xfe80 // fe80::/10 link-local
+            let seg = v6.segments();
+            // 6to4 (2002::/16) embeds a plain IPv4 address in bits 16..48.
+            if seg[0] == 0x2002 {
+                let [a, b] = seg[1].to_be_bytes();
+                let [c, d] = seg[2].to_be_bytes();
+                return is_blocked_addr(&IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d)));
+            }
+            // Teredo (2001::/32) embeds the client IPv4 address, bit-inverted,
+            // in the last 32 bits.
+            if seg[0] == 0x2001 && seg[1] == 0 {
+                let bits = !((u32::from(seg[6]) << 16) | u32::from(seg[7]));
+                return is_blocked_addr(&IpAddr::V4(std::net::Ipv4Addr::from_bits(bits)));
+            }
+            v6.is_loopback()               // ::1
+            || v6.is_unspecified()         // ::
+            || v6.is_multicast()           // ff00::/8
+            || v6.is_unique_local()        // fc00::/7
+            || v6.is_unicast_link_local()  // fe80::/10
+            // 2001:db8::/32 (documentation)
+            || (seg[0] == 0x2001 && seg[1] == 0x0db8)
+            // 64:ff9b:1::/48 (local-use NAT64; the embedded-IPv4 position is
+            // not fixed at this prefix length, so the whole prefix is blocked)
+            || (seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2] == 0x0001)
         }
     }
 }
@@ -233,6 +254,17 @@ mod tests {
         assert!(validate_domain("  example.com  ").is_ok());
     }
 
+    #[test]
+    fn domain_returns_normalized_value() {
+        // Callers must use the returned value, not the raw input.
+        assert_eq!(validate_domain("  example.com  ").unwrap(), "example.com");
+        assert_eq!(validate_domain("Example.COM.").unwrap(), "example.com");
+        assert_eq!(
+            validate_domain("Mail.Example.Org").unwrap(),
+            "mail.example.org"
+        );
+    }
+
     // ── is_blocked_addr / filter_public_addrs ───────────────────────
 
     #[test]
@@ -280,6 +312,52 @@ mod tests {
             IpAddr::V6("::ffff:8.8.8.8".parse().unwrap()), // mapped public
         ];
         for addr in public {
+            assert!(!is_blocked_addr(&addr), "expected {addr} to be allowed");
+        }
+    }
+
+    #[test]
+    fn blocked_addr_v6_special_ranges() {
+        let blocked = [
+            // 2001:db8::/32 documentation
+            IpAddr::V6("2001:db8::1".parse().unwrap()),
+            IpAddr::V6("2001:db8:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()),
+            // 64:ff9b:1::/48 local-use NAT64 (can embed private IPv4;
+            // extraction position is not fixed at this prefix length,
+            // so the whole prefix is blocked)
+            IpAddr::V6("64:ff9b:1::1".parse().unwrap()),
+            IpAddr::V6("64:ff9b:1:ffff:ffff:ffff:ffff:ffff".parse().unwrap()),
+            // 2002::/16 6to4 — embedded IPv4 (bits 16..48) inherits v4 rules
+            IpAddr::V6("2002:0a00:0001::".parse().unwrap()), // 10.0.0.1
+            IpAddr::V6("2002:7f00:0001::".parse().unwrap()), // 127.0.0.1
+            IpAddr::V6("2002:a9fe:0001::".parse().unwrap()), // 169.254.0.1
+            IpAddr::V6("2002:c0a8:0101::".parse().unwrap()), // 192.168.1.1
+            // 2001::/32 Teredo — client IPv4 is the bit-inverted last 32 bits
+            // f5ff:fffa = !10.0.0.5
+            IpAddr::V6("2001:0:4136:e378:8000:63bf:f5ff:fffa".parse().unwrap()),
+            // ffff:fffe = !0.0.0.1
+            IpAddr::V6("2001::ffff:fffe".parse().unwrap()),
+        ];
+        for addr in blocked {
+            assert!(is_blocked_addr(&addr), "expected {addr} to be blocked");
+        }
+    }
+
+    #[test]
+    fn blocked_addr_v6_special_range_boundaries() {
+        let allowed = [
+            // Just outside the documentation range
+            IpAddr::V6("2001:db7::1".parse().unwrap()),
+            IpAddr::V6("2001:db9::1".parse().unwrap()),
+            // Well-known NAT64 64:ff9b::/96 is out of scope (see report);
+            // just outside the local-use /48:
+            IpAddr::V6("64:ff9b:2::1".parse().unwrap()),
+            // 6to4 embedding a public IPv4
+            IpAddr::V6("2002:0808:0808::".parse().unwrap()), // 8.8.8.8
+            // Teredo with a public client IPv4 (f7f7:f7f7 = !8.8.8.8)
+            IpAddr::V6("2001:0:4136:e378:8000:63bf:f7f7:f7f7".parse().unwrap()),
+        ];
+        for addr in allowed {
             assert!(!is_blocked_addr(&addr), "expected {addr} to be allowed");
         }
     }

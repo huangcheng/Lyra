@@ -309,10 +309,18 @@ export function SettingsPage() {
       protocol: account.protocol,
       imapHost: account.imapHost || '',
       imapPort: account.imapPort || 993,
-      imapSecurity: account.imapSecurity || 'tls',
+      // Legacy 'none' values (removed insecure mode) coerce to 'tls' so the
+      // select never shows a blank value and saving doesn't 400.
+      imapSecurity:
+        !account.imapSecurity || account.imapSecurity === 'none'
+          ? 'tls'
+          : account.imapSecurity,
       smtpHost: account.smtpHost || '',
       smtpPort: account.smtpPort || 587,
-      smtpSecurity: account.smtpSecurity || 'starttls',
+      smtpSecurity:
+        !account.smtpSecurity || account.smtpSecurity === 'none'
+          ? 'starttls'
+          : account.smtpSecurity,
     });
     setShowAddForm(true);
   }
