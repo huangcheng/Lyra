@@ -48,7 +48,13 @@ async fn main() -> anyhow::Result<()> {
         app.register_plugin(plugin.as_ref())?;
     }
     let app = std::sync::Arc::new(app);
-    let auth_state = auth::AuthState::new(db, &config, app)?;
+    let kv: std::sync::Arc<dyn kv::KvStore> = if let Some(url) = config.redis_url.as_deref() {
+        std::sync::Arc::new(kv::RedisKv::connect(url).await?)
+    } else {
+        tracing::warn!("REDIS_URL unset; using in-memory kv (sessions die on restart)");
+        std::sync::Arc::new(kv::MemoryKv::new())
+    };
+    let auth_state = auth::AuthState::new(db, &config, app, kv)?;
     jobs::spawn_workers(
         auth_state.db.clone(),
         std::sync::Arc::clone(&auth_state.app),

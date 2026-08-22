@@ -20,7 +20,9 @@ use totp_rs::{Algorithm, TOTP};
 use uuid::Uuid;
 
 use crate::kernel::App;
-use crate::kv::{KvStore, MemoryKv};
+use crate::kv::KvStore;
+#[cfg(test)]
+use crate::kv::MemoryKv;
 use crate::storage::DbPool;
 
 // ── Public types ────────────────────────────────────────────────────
@@ -570,9 +572,9 @@ impl AuthState {
         db: DbPool,
         config: &crate::config::Config,
         app: Arc<App>,
+        kv: Arc<dyn KvStore>,
     ) -> Result<Self, anyhow::Error> {
         std::fs::create_dir_all(&config.data_dir)?;
-        let kv: Arc<dyn KvStore> = Arc::new(MemoryKv::new());
         Ok(Self {
             db: db.clone(),
             sessions: SessionStore::new(db, kv),

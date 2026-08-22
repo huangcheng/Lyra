@@ -26,6 +26,8 @@ pub struct Config {
     pub sync_max_concurrent: usize,
     /// Seconds between active-account poll ticks (`SYNC_POLL_SECS`, default 300).
     pub sync_poll_secs: u64,
+    /// Redis URL for session/kv store (`REDIS_URL`). When unset, boot uses in-memory kv.
+    pub redis_url: Option<String>,
 }
 
 impl Config {
@@ -40,6 +42,7 @@ impl Config {
     ///   - `DATA_DIR`    — default `./data`
     ///   - `SYNC_MAX_CONCURRENT` — default `3`
     ///   - `SYNC_POLL_SECS` — default `300`
+    ///   - `REDIS_URL` — if set, Redis kv (fail boot on connect error); else memory
     pub fn from_env() -> Self {
         use rand::RngCore;
 
@@ -84,6 +87,8 @@ impl Config {
             .filter(|&n| n > 0)
             .unwrap_or(300);
 
+        let redis_url = env::var("REDIS_URL").ok().filter(|s| !s.is_empty());
+
         Self {
             listen_addr,
             database_url,
@@ -92,6 +97,7 @@ impl Config {
             min_password_length,
             sync_max_concurrent,
             sync_poll_secs,
+            redis_url,
         }
     }
 }
@@ -113,6 +119,7 @@ mod tests {
             env::remove_var("MIN_PASSWORD_LENGTH");
             env::remove_var("SYNC_MAX_CONCURRENT");
             env::remove_var("SYNC_POLL_SECS");
+            env::remove_var("REDIS_URL");
         }
 
         let cfg = Config::from_env();
@@ -122,6 +129,7 @@ mod tests {
         assert_eq!(cfg.min_password_length, 8);
         assert_eq!(cfg.sync_max_concurrent, 3);
         assert_eq!(cfg.sync_poll_secs, 300);
+        assert!(cfg.redis_url.is_none());
         assert!(cfg.session_secret.len() >= 32);
     }
 }

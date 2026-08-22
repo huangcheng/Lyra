@@ -7,8 +7,10 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod memory;
+mod redis;
 
 pub use memory::MemoryKv;
+pub use redis::RedisKv;
 
 use async_trait::async_trait;
 

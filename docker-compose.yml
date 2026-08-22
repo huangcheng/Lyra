@@ -1,4 +1,8 @@
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
   lyra:
     build:
       context: .
@@ -13,11 +17,14 @@ services:
       DATABASE_URL: sqlite:/data/lyra.db
       DATA_DIR: /data
       RUST_LOG: info
+      REDIS_URL: redis://redis:6379
       # Dev default; override for anything beyond local OrbStack use.
       SESSION_SECRET: lyra-local-dev-session-secret-change-me-32b
       LYRA_MASTER_KEY: lyra-default-master-key-for-dev-only
     volumes:
       - lyra-data:/data
+    depends_on:
+      - redis
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health"]
