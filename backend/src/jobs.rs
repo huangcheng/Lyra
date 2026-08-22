@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::kernel::App;
 use crate::storage::DbPool;
@@ -176,6 +176,37 @@ pub async fn claim_next(
     Ok(None)
 }
 
+/// Reset leftover `running` rows so a restarted worker can claim them.
+pub async fn reclaim_stale_running(pool: &sqlx::SqlitePool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r"
+        UPDATE jobs
+        SET status = 'pending', updated_at = datetime('now')
+        WHERE status = 'running'
+        ",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Acquire a worker permit, then claim. The permit is held for the job's
+/// lifetime so `running` cannot exceed `SYNC_MAX_CONCURRENT`.
+pub async fn try_claim_with_permit(
+    pool: &sqlx::SqlitePool,
+    now: &str,
+    inflight: &InFlight,
+    sem: &Arc<Semaphore>,
+) -> Result<Option<(ClaimedJob, OwnedSemaphorePermit)>, sqlx::Error> {
+    let Ok(permit) = Arc::clone(sem).try_acquire_owned() else {
+        return Ok(None);
+    };
+    match claim_next(pool, now, inflight).await? {
+        Some(job) => Ok(Some((job, permit))),
+        None => Ok(None),
+    }
+}
+
 const ERROR_MAX_CHARS: usize = 512;
 
 #[allow(dead_code)]
@@ -255,11 +286,12 @@ async fn revert_pending(pool: &sqlx::SqlitePool, id: &str) -> Result<(), sqlx::E
 }
 
 /// Dispatch a claimed job. Plugin errors mark the job `failed` (no panic).
+/// `permit` must already be held; it is released when this future ends.
 pub async fn process_job(
     pool: &sqlx::SqlitePool,
     app: &App,
     inflight: &InFlight,
-    sem: &Semaphore,
+    _permit: OwnedSemaphorePermit,
     job: ClaimedJob,
 ) -> Result<(), sqlx::Error> {
     match job.payload {
@@ -271,14 +303,8 @@ pub async fn process_job(
                 revert_pending(pool, &job.id).await?;
                 return Ok(());
             }
-            let Ok(permit) = sem.acquire().await else {
-                inflight.finish(&account_id).await;
-                revert_pending(pool, &job.id).await?;
-                return Ok(());
-            };
             let db = DbPool::Sqlite(pool.clone());
             let result = crate::sync::run_account_sync(&db, app, &user_id, &account_id).await;
-            drop(permit);
             inflight.finish(&account_id).await;
             match result {
                 Ok(_) => mark_completed(pool, &job.id).await?,
@@ -311,16 +337,18 @@ fn spawn_sqlite_workers(pool: sqlx::SqlitePool, app: Arc<App>, max_concurrent: u
     let inflight = Arc::new(InFlight::new());
     let sem = Arc::new(Semaphore::new(max_concurrent.max(1)));
     tokio::spawn(async move {
+        if let Err(error) = reclaim_stale_running(&pool).await {
+            tracing::error!(%error, "failed to reclaim stale running jobs");
+        }
         loop {
             let now = chrono::Utc::now().to_rfc3339();
-            match claim_next(&pool, &now, &inflight).await {
-                Ok(Some(job)) => {
+            match try_claim_with_permit(&pool, &now, &inflight, &sem).await {
+                Ok(Some((job, permit))) => {
                     let pool = pool.clone();
                     let app = Arc::clone(&app);
                     let inflight = Arc::clone(&inflight);
-                    let sem = Arc::clone(&sem);
                     tokio::spawn(async move {
-                        if let Err(error) = process_job(&pool, &app, &inflight, &sem, job).await {
+                        if let Err(error) = process_job(&pool, &app, &inflight, permit, job).await {
                             tracing::error!(%error, "job process failed");
                         }
                     });
@@ -510,8 +538,11 @@ mod tests {
         let claimed = claim_due(&pool, now).await.unwrap().expect("due job");
 
         let inflight = InFlight::new();
-        let sem = Semaphore::new(3);
-        process_job(&pool, &app, &inflight, &sem, claimed)
+        let sem = Arc::new(Semaphore::new(3));
+        let permit = Arc::clone(&sem)
+            .try_acquire_owned()
+            .expect("test semaphore has a permit");
+        process_job(&pool, &app, &inflight, permit, claimed)
             .await
             .expect("plugin error must not panic");
 
@@ -540,5 +571,79 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(cursor, "uid:100");
+    }
+
+    #[tokio::test]
+    async fn stale_running_job_reclaimed_then_claimable() {
+        let pool = test_pool().await;
+        let now = "2026-08-22T00:00:00+00:00";
+        let inflight = InFlight::new();
+        let payload = JobPayload::SyncAccount {
+            account_id: "acc-stale".into(),
+            user_id: "user-1".into(),
+        };
+
+        let job_id = enqueue(&pool, &payload, now).await.unwrap();
+        sqlx::query("UPDATE jobs SET status = 'running' WHERE id = ?")
+            .bind(&job_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            claim_next(&pool, now, &inflight).await.unwrap().is_none(),
+            "running leftovers must not be claimed before reclaim"
+        );
+
+        let reclaimed = reclaim_stale_running(&pool).await.unwrap();
+        assert_eq!(reclaimed, 1);
+
+        let claimed = claim_next(&pool, now, &inflight)
+            .await
+            .unwrap()
+            .expect("reclaimed job should be claimable via claim_next");
+        assert_eq!(claimed.id, job_id);
+        assert_eq!(claimed.status, "running");
+    }
+
+    #[tokio::test]
+    async fn claim_does_not_exceed_semaphore_cap() {
+        let pool = test_pool().await;
+        let now = "2026-08-22T00:00:00+00:00";
+        let inflight = InFlight::new();
+        let sem = Arc::new(Semaphore::new(1));
+
+        for i in 0..3 {
+            enqueue(
+                &pool,
+                &JobPayload::SyncAccount {
+                    account_id: format!("acc-{i}"),
+                    user_id: "user-1".into(),
+                },
+                now,
+            )
+            .await
+            .unwrap();
+        }
+
+        let first = try_claim_with_permit(&pool, now, &inflight, &sem)
+            .await
+            .unwrap()
+            .expect("should claim when a permit is available");
+
+        let second = try_claim_with_permit(&pool, now, &inflight, &sem)
+            .await
+            .unwrap();
+        assert!(
+            second.is_none(),
+            "must not mark another job running without a permit"
+        );
+
+        let running: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status = 'running'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(running, 1, "running count must stay within the worker cap");
+        drop(first);
     }
 }
