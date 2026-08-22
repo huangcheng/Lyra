@@ -4,7 +4,7 @@
 
 use crate::kernel::events::EventBus;
 use crate::kernel::plugin::Plugin;
-use crate::protocol::ReceiveHandle;
+use crate::protocol::{ReceiveHandle, SendHandle};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -21,6 +21,7 @@ pub enum KernelError {
 pub struct App {
     provided: HashMap<&'static str, ()>,
     receive: HashMap<String, ReceiveHandle>,
+    send: HashMap<String, SendHandle>,
     pub events: EventBus,
 }
 
@@ -30,6 +31,7 @@ impl App {
         Self {
             provided: HashMap::new(),
             receive: HashMap::new(),
+            send: HashMap::new(),
             events: EventBus::new(),
         }
     }
@@ -60,6 +62,17 @@ impl App {
             .get(id)
             .cloned()
             .ok_or_else(|| KernelError::UnknownReceive(id.into()))
+    }
+
+    pub fn register_send(&mut self, plugin: SendHandle) {
+        self.send.insert(plugin.id().into(), plugin);
+    }
+
+    pub fn send(&self, id: &str) -> Result<SendHandle, KernelError> {
+        self.send
+            .get(id)
+            .cloned()
+            .ok_or_else(|| KernelError::UnknownSend(id.into()))
     }
 }
 
@@ -130,6 +143,13 @@ mod tests {
         let app = App::new();
         let err = app.receive("pop3").err().expect("expected UnknownReceive");
         assert!(matches!(err, KernelError::UnknownReceive(id) if id == "pop3"));
+    }
+
+    #[test]
+    fn unknown_send_is_error() {
+        let app = App::new();
+        let err = app.send("graph").err().expect("expected UnknownSend");
+        assert!(matches!(err, KernelError::UnknownSend(id) if id == "graph"));
     }
 
     #[test]

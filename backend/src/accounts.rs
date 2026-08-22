@@ -297,6 +297,12 @@ async fn create_account(
 
     let id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
     let protocol = body.protocol.unwrap_or_else(|| "imap".into());
+    let receive_protocol = if protocol == "jmap" {
+        "jmap".to_string()
+    } else {
+        "imap".to_string()
+    };
+    let send_protocol = "smtp".to_string();
     let auth_type = body.auth_type.unwrap_or_else(|| "password".into());
 
     sqlx::query(
@@ -304,8 +310,9 @@ async fn create_account(
         INSERT INTO mail_account (
             id, user_id, display_name, email_address, protocol, auth_type,
             credential, imap_host, imap_port, imap_security,
-            smtp_host, smtp_port, smtp_security, is_active, sync_enabled
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+            smtp_host, smtp_port, smtp_security, is_active, sync_enabled,
+            receive_protocol, send_protocol
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
         ",
     )
     .bind(&id)
@@ -321,6 +328,8 @@ async fn create_account(
     .bind(&body.smtp_host)
     .bind(body.smtp_port)
     .bind(&body.smtp_security)
+    .bind(&receive_protocol)
+    .bind(&send_protocol)
     .execute(pool)
     .await?;
 

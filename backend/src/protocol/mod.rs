@@ -39,3 +39,11 @@ pub trait ReceivePlugin: Send + Sync {
 }
 
 pub type ReceiveHandle = Arc<dyn ReceivePlugin>;
+
+#[async_trait]
+pub trait SendPlugin: Send + Sync {
+    fn id(&self) -> &'static str;
+    async fn send(&self, account_id: &str, raw: &str) -> Result<(), String>;
+}
+
+pub type SendHandle = Arc<dyn SendPlugin>;
