@@ -1,11 +1,15 @@
 /**
- * Utility functions for Lyra.
+ * Shared helpers for the Lyra web client.
  */
 
-/**
- * Format a date string for display in the mail list.
- * Shows time for today, date for older messages.
- */
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+/** Time for today, short date otherwise. */
 export function formatMailDate(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
@@ -27,19 +31,9 @@ export function formatMailDate(dateStr: string): string {
   });
 }
 
-/**
- * Get initials from a name or email address.
- */
 export function getInitials(nameOrEmail: string): string {
   const parts = nameOrEmail.split(/[@.\s]+/).filter(Boolean);
   if (parts.length === 0) return '?';
   if (parts.length === 1) return parts[0].charAt(0).toUpperCase();
   return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
-}
-
-/**
- * Join class names, filtering out falsy values.
- */
-export function cn(...classes: (string | false | null | undefined)[]): string {
-  return classes.filter(Boolean).join(' ');
 }

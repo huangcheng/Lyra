@@ -574,13 +574,12 @@ async fn sync_contacts(
         let phones_json = serde_json::to_string(&phones).unwrap_or_else(|_| "[]".into());
         let external_id = href.clone();
 
-        let existing: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM contact WHERE account_id = ? AND external_id = ?",
-        )
-        .bind(&account_id)
-        .bind(&external_id)
-        .fetch_optional(pool)
-        .await?;
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT id FROM contact WHERE account_id = ? AND external_id = ?")
+                .bind(&account_id)
+                .bind(&external_id)
+                .fetch_optional(pool)
+                .await?;
 
         if let Some(id) = existing {
             sqlx::query(
@@ -678,13 +677,12 @@ async fn sync_calendars(
 
     // Ensure a local calendar row exists for this URL.
     let calendar_id: String = {
-        let existing: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM calendar WHERE account_id = ? AND calendar_url = ?",
-        )
-        .bind(&account_id)
-        .bind(&base_url)
-        .fetch_optional(pool)
-        .await?;
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT id FROM calendar WHERE account_id = ? AND calendar_url = ?")
+                .bind(&account_id)
+                .bind(&base_url)
+                .fetch_optional(pool)
+                .await?;
         if let Some(id) = existing {
             id
         } else {

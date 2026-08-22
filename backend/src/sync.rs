@@ -121,6 +121,7 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/accounts/{account_id}/sync", post(trigger_sync))
         .route("/api/messages/send", post(send_message))
         .route("/api/messages/search", get(search_messages))
+        .route("/api/messages", get(list_messages_query))
         .route("/api/folders", get(list_folders))
         .route("/api/folders/{folder_id}/messages", get(list_messages))
         .route(
@@ -439,6 +440,70 @@ async fn list_messages(
     Ok(Json(messages))
 }
 
+/// Query for GET /api/messages (unified inbox / role filter).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListMessagesQuery {
+    role: Option<String>,
+    account_id: Option<String>,
+}
+
+/// List messages across folders, optionally filtered by standard role and account.
+async fn list_messages_query(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Query(query): Query<ListMessagesQuery>,
+) -> Result<Json<Vec<MessageResponse>>, SyncError> {
+    let user_id = get_user_id(&state, &headers).await?;
+    let pool = get_sqlite_pool(state.db());
+
+    let rows = sqlx::query(
+        r"
+        SELECT m.id, m.account_id, m.folder_id, m.subject, m.from_address,
+               m.to_addresses, m.cc_addresses, m.date, m.snippet,
+               m.body_text, m.body_html, m.is_read, m.is_starred, m.has_attachments
+        FROM message m
+        JOIN folder f ON m.folder_id = f.id
+        JOIN mail_account a ON m.account_id = a.id
+        WHERE a.user_id = ?
+          AND m.is_deleted = 0
+          AND (? IS NULL OR f.role = ?)
+          AND (? IS NULL OR m.account_id = ?)
+        ORDER BY m.date DESC
+        LIMIT 500
+        ",
+    )
+    .bind(&user_id)
+    .bind(&query.role)
+    .bind(&query.role)
+    .bind(&query.account_id)
+    .bind(&query.account_id)
+    .fetch_all(pool)
+    .await?;
+
+    let messages: Vec<MessageResponse> = rows
+        .iter()
+        .map(|row| MessageResponse {
+            id: row.get("id"),
+            account_id: row.get("account_id"),
+            folder_id: row.get("folder_id"),
+            subject: row.get("subject"),
+            from_address: row.get("from_address"),
+            to_addresses: row.get("to_addresses"),
+            cc_addresses: row.get("cc_addresses"),
+            date: row.get("date"),
+            snippet: row.get("snippet"),
+            body_text: row.get("body_text"),
+            body_html: row.get("body_html"),
+            is_read: row.get::<bool, _>("is_read"),
+            is_starred: row.get::<bool, _>("is_starred"),
+            has_attachments: row.get::<bool, _>("has_attachments"),
+        })
+        .collect();
+
+    Ok(Json(messages))
+}
+
 /// Query for GET /api/messages/search.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -463,7 +528,9 @@ async fn search_messages(
         return Err(SyncError::InvalidInput("q is required".into()));
     }
     if q.chars().count() < 2 {
-        return Err(SyncError::InvalidInput("q must be at least 2 characters".into()));
+        return Err(SyncError::InvalidInput(
+            "q must be at least 2 characters".into(),
+        ));
     }
 
     let pattern = format!("%{q}%");
@@ -608,12 +675,15 @@ async fn download_attachment(
     let ct = content_type.unwrap_or_else(|| "application/octet-stream".into());
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&ct).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+        HeaderValue::from_str(&ct)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
     );
     if let Some(name) = filename {
         let safe = name.replace(['"', '\\', '\r', '\n'], "_");
         if let Ok(val) = HeaderValue::from_str(&format!("attachment; filename=\"{safe}\"")) {
-            response.headers_mut().insert(header::CONTENT_DISPOSITION, val);
+            response
+                .headers_mut()
+                .insert(header::CONTENT_DISPOSITION, val);
         }
     }
     Ok(response)
@@ -846,7 +916,8 @@ async fn get_message(
     let mut row = load_message_row(pool, &user_id, &message_id).await?;
 
     let needs_body = row.body_text.is_none() && row.body_html.is_none();
-    if needs_body && row.protocol == "imap"
+    if needs_body
+        && row.protocol == "imap"
         && let Ok(uid) = parse_imap_uid(row.external_id.as_deref())
     {
         let (mut client, _) = connect_imap_for_account(pool, &user_id, &row.account_id).await?;
@@ -991,12 +1062,10 @@ async fn move_message_to_role(
 
     let Some(dest) = dest else {
         // No destination folder: soft-delete locally.
-        sqlx::query(
-            "UPDATE message SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(&row.id)
-        .execute(pool)
-        .await?;
+        sqlx::query("UPDATE message SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?")
+            .bind(&row.id)
+            .execute(pool)
+            .await?;
         update_folder_counts(pool, &row.folder_id).await?;
         return Ok(Json(serde_json::json!({
             "status": "ok",
@@ -1773,12 +1842,11 @@ async fn clear_folder_messages(pool: &sqlx::SqlitePool, folder_id: &str) -> Resu
 
 /// Update folder message counts from the message table.
 async fn update_folder_counts(pool: &sqlx::SqlitePool, folder_id: &str) -> Result<(), SyncError> {
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = 0",
-    )
-    .bind(folder_id)
-    .fetch_one(pool)
-    .await?;
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = 0")
+            .bind(folder_id)
+            .fetch_one(pool)
+            .await?;
 
     let unread: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = 0 AND is_read = 0",

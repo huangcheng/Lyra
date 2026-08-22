@@ -2,30 +2,41 @@
  * Auth page — orchestrates the authentication flow.
  *
  * Renders the appropriate UI based on the auth state machine.
- * Syncs the session token from the XState machine to the Zustand store.
+ * Syncs the session token from the XState machine to the Zustand store,
+ * then navigates to the mail shell (TanStack beforeLoad does not re-run
+ * when Zustand updates).
  */
 
+import { useNavigate } from '@tanstack/react-router';
 import { useMachine } from '@xstate/react';
+import { useEffect, useRef } from 'react';
+
+import { t } from '@/i18n';
 import { authMachine } from '../machines/auth';
 import { useAuthStore } from '../stores/auth';
+import { useUIStore } from '../stores/ui';
 import { LoginForm } from './login-form';
-import { useEffect, useRef } from 'react';
 
 export function AuthPage() {
   const [state, send] = useMachine(authMachine);
+  const navigate = useNavigate();
+  const locale = useUIStore((s) => s.locale);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const authStore = useAuthStore();
   const syncedRef = useRef(false);
 
-  // Sync machine state to Zustand store when authenticated
+  useEffect(() => {
+    if (isAuthenticated) {
+      void navigate({ to: '/' });
+    }
+  }, [isAuthenticated, navigate]);
+
   useEffect(() => {
     if (state.matches('authenticated') && state.context.token && !syncedRef.current) {
       syncedRef.current = true;
       const token = state.context.token;
-
-      // Store token in Zustand
       authStore.setToken(token);
 
-      // Fetch user info with the token
       fetch('/api/auth/me', {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -43,13 +54,14 @@ export function AuthPage() {
           });
         })
         .catch(() => {
+          localStorage.removeItem('lyra_token');
           authStore.clearSession();
           syncedRef.current = false;
+          send({ type: 'LOGOUT' });
         });
     }
-  }, [state, state.context.token, authStore]);
+  }, [state, state.context.token, authStore, send]);
 
-  // Reset sync flag when leaving authenticated state
   useEffect(() => {
     if (!state.matches('authenticated')) {
       syncedRef.current = false;
@@ -73,19 +85,28 @@ export function AuthPage() {
     send({ type: 'TOTP_SUBMIT', code });
   };
 
-  // If authenticated, the router will redirect to /
   if (state.matches('authenticated')) {
-    return null;
+    return (
+      <div className="flex min-h-svh items-center justify-center p-6 text-sm text-muted-foreground">
+        {t(locale, 'common.loading')}
+      </div>
+    );
   }
 
   return (
-    <LoginForm
-      onLogin={handleLogin}
-      onBootstrap={handleBootstrap}
-      onTotpVerify={handleTotpVerify}
-      error={state.context.error}
-      hasUser={state.matches('bootstrap') ? false : state.matches('checkingStatus') ? null : true}
-      requiresTotp={state.matches('totpChallenge') || state.matches('verifyingTotp')}
-    />
+    <div className="flex min-h-svh w-full items-center justify-center p-6 md:p-10">
+      <div className="w-full max-w-sm">
+        <LoginForm
+          onLogin={handleLogin}
+          onBootstrap={handleBootstrap}
+          onTotpVerify={handleTotpVerify}
+          error={state.context.error}
+          hasUser={
+            state.matches('bootstrap') ? false : state.matches('checkingStatus') ? null : true
+          }
+          requiresTotp={state.matches('totpChallenge') || state.matches('verifyingTotp')}
+        />
+      </div>
+    </div>
   );
 }

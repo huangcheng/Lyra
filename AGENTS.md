@@ -61,7 +61,9 @@ Detail lives in specs; this file stays short and accurate.
 | Clean/robust code, deep modules, state roles, verification | `docs/specs/2026-08-20-lyra-engineering-standards.md` |
 | Data model, dual-DB schema, migrations | `docs/specs/2026-08-20-lyra-data-model-spec.md` |
 | Sync engine, protocols, auto-config | `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md` |
+| Plugin kernel, workers, jobs/snooze, Redis kv | `docs/specs/2026-08-22-lyra-plugin-kernel-spec.md` |
 | Other design/tech decisions | `docs/specs/YYYY-MM-DD-<topic>-spec.md` as added |
+| Product UI (shadcn mail + login-01 + unified inbox) | `docs/specs/2026-08-21-lyra-shadcn-mail-ui.md` |
 
 Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall back to **IMAP**. Honor v1 non-goals (no collaboration suite, no SaaS, no multi-user UX yet). Ship a **client-agnostic `/api/v1`**; native apps are far-horizon only.
 
@@ -78,7 +80,7 @@ Lyra/
     specs/                      ← data model, sync, engineering standards
   frontend/                     ← Vite + React + TanStack Router + shadcn mail
     src/
-      components/               ← three-pane mail chrome (sidebar, list, view)
+      components/               ← shadcn/ui + mail example (unified inbox)
       stores/                   ← Zustand (mail data, UI state)
       machines/                 ← XState (auth, account-setup flows)
       rxjs/                     ← RxJS (sync event streams)
@@ -100,7 +102,7 @@ Lyra/
 
 | Area | Path | Notes |
 |------|------|--------|
-| Web UI | `frontend/` | React, TanStack Router, shadcn mail, en/zh i18n |
+| Web UI | `frontend/` | React, TanStack Router, Tailwind + shadcn mail, en/zh i18n |
 | API + sync | `backend/` | Rust + Axum; health + version routes, storage seam |
 | DB | `backend/migrations/` | sqlx; SQLite + PostgreSQL; auto-migrate on startup |
 

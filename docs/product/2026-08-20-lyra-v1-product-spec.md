@@ -101,9 +101,11 @@ Detailed sync algorithms, table schemas, and API shapes belong under `docs/specs
 ## User experience
 
 - Desktop-first three-pane mail layout from shadcn mail (folders / list / reading pane)  
+- Default view is a **unified inbox** across accounts; the account switcher still opens a single account  
+- Login uses the [shadcn login-01](https://ui.shadcn.com/blocks/login) card (username/password; same card for bootstrap and TOTP)  
 - Responsive enough for phone and tablet; no native app in v1  
 - Familiar mail actions: compose, reply/forward, flags, search, attachments, threads  
-- Account switcher for multiple accounts  
+- Account switcher for multiple accounts (plus unified inbox as the default)  
 - Settings: theme, accounts, sync, security (2FA), language (en / zh)  
 - All user-facing copy goes through i18n; no hardcoded English-only UI strings  
 

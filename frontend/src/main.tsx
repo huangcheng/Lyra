@@ -2,14 +2,15 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { RouterProvider } from '@tanstack/react-router';
 import { createRouter } from './router';
-import '@fontsource-variable/instrument-sans';
-import '@fontsource/instrument-serif';
+import { restoreSession } from './lib/session';
+import '@fontsource-variable/geist';
 import './index.css';
 
-const router = createRouter();
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <RouterProvider router={router} />
-  </StrictMode>,
-);
+void restoreSession().then(() => {
+  const router = createRouter();
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <RouterProvider router={router} />
+    </StrictMode>,
+  );
+});

@@ -6,6 +6,7 @@
 
 import { useState, useEffect } from 'react';
 import { t } from '../i18n';
+import { SecondaryPage } from './secondary-page';
 import { useUIStore } from '../stores/ui';
 import { useAuthStore } from '../stores/auth';
 
@@ -192,67 +193,71 @@ export function CalendarPage() {
   }
 
   return (
-    <div className="calendar-page">
-      <div className="calendar-sidebar">
-        <div className="calendar-list-header">
-          <h2>{t(locale, 'calendar.calendars')}</h2>
-        </div>
-        {loading ? (
-          <div className="loading">{t(locale, 'common.loading')}</div>
-        ) : (
-          <div className="calendar-list">
-            {calendars.map((calendar) => (
-              <div
-                key={calendar.id}
-                className={`calendar-item ${selectedCalendar?.id === calendar.id ? 'selected' : ''}`}
-                onClick={() => setSelectedCalendar(calendar)}
-              >
+    <SecondaryPage title={t(locale, 'calendar.title')}>
+      <div className="mx-auto flex max-w-5xl gap-6">
+        <div className="calendar-sidebar">
+          <div className="calendar-list-header">
+            <h2>{t(locale, 'calendar.calendars')}</h2>
+          </div>
+          {loading ? (
+            <div className="loading">{t(locale, 'common.loading')}</div>
+          ) : (
+            <div className="calendar-list">
+              {calendars.map((calendar) => (
                 <div
-                  className="calendar-color"
-                  style={{ backgroundColor: calendar.color || '#3b82f6' }}
-                />
-                <div className="calendar-name">{calendar.name}</div>
+                  key={calendar.id}
+                  className={`calendar-item ${selectedCalendar?.id === calendar.id ? 'selected' : ''}`}
+                  onClick={() => setSelectedCalendar(calendar)}
+                >
+                  <div
+                    className="calendar-color"
+                    style={{ backgroundColor: calendar.color || '#3b82f6' }}
+                  />
+                  <div className="calendar-name">{calendar.name}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="calendar-main">
+          <div className="calendar-toolbar">
+            <button onClick={() => navigateMonth(-1)}>←</button>
+            <h2>
+              {currentDate.toLocaleDateString(undefined, {
+                month: 'long',
+                year: 'numeric',
+              })}
+            </h2>
+            <button onClick={() => navigateMonth(1)}>→</button>
+            <button onClick={() => setCurrentDate(new Date())}>
+              {t(locale, 'calendar.today')}
+            </button>
+          </div>
+
+          {renderCalendarGrid()}
+        </div>
+
+        {selectedEvent && (
+          <div className="event-detail-panel">
+            <div className="event-detail-header">
+              <h3>{selectedEvent.summary || t(locale, 'calendar.noTitle')}</h3>
+              <button onClick={() => setSelectedEvent(null)}>×</button>
+            </div>
+            <div className="event-detail-body">
+              <div className="event-time">
+                {formatEventDate(selectedEvent)} • {formatEventTime(selectedEvent)}
               </div>
-            ))}
+              {selectedEvent.location && (
+                <div className="event-location">📍 {selectedEvent.location}</div>
+              )}
+              {selectedEvent.description && (
+                <div className="event-description">{selectedEvent.description}</div>
+              )}
+            </div>
           </div>
         )}
       </div>
-
-      <div className="calendar-main">
-        <div className="calendar-toolbar">
-          <button onClick={() => navigateMonth(-1)}>←</button>
-          <h2>
-            {currentDate.toLocaleDateString(undefined, {
-              month: 'long',
-              year: 'numeric',
-            })}
-          </h2>
-          <button onClick={() => navigateMonth(1)}>→</button>
-          <button onClick={() => setCurrentDate(new Date())}>{t(locale, 'calendar.today')}</button>
-        </div>
-
-        {renderCalendarGrid()}
-      </div>
-
-      {selectedEvent && (
-        <div className="event-detail-panel">
-          <div className="event-detail-header">
-            <h3>{selectedEvent.summary || t(locale, 'calendar.noTitle')}</h3>
-            <button onClick={() => setSelectedEvent(null)}>×</button>
-          </div>
-          <div className="event-detail-body">
-            <div className="event-time">
-              {formatEventDate(selectedEvent)} • {formatEventTime(selectedEvent)}
-            </div>
-            {selectedEvent.location && (
-              <div className="event-location">📍 {selectedEvent.location}</div>
-            )}
-            {selectedEvent.description && (
-              <div className="event-description">{selectedEvent.description}</div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
+    </SecondaryPage>
   );
 }

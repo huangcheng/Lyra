@@ -593,16 +593,14 @@ fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, Vec<Extrac
                     .as_deref()
                     .and_then(extract_filename)
                     .or_else(|| {
-                        content_type
-                            .split(';')
-                            .find_map(|p| {
-                                let p = p.trim();
-                                if p.to_lowercase().starts_with("name=") {
-                                    Some(p.split_once('=')?.1.trim_matches('"').to_string())
-                                } else {
-                                    None
-                                }
-                            })
+                        content_type.split(';').find_map(|p| {
+                            let p = p.trim();
+                            if p.to_lowercase().starts_with("name=") {
+                                Some(p.split_once('=')?.1.trim_matches('"').to_string())
+                            } else {
+                                None
+                            }
+                        })
                     })
                     .unwrap_or_else(|| "attachment.bin".to_string());
                 let is_inline = disposition

@@ -2,30 +2,38 @@
  * Zustand store for mail data.
  *
  * Owns normalised mail data: messages, folders, threads, accounts.
- * This is the single source of truth for domain data the views read.
- *
- * Role: DATA only. No UI chrome state (→ uiStore), no flow logic (→ XState),
- * no async orchestration (→ RxJS).
  */
 
 import { create } from 'zustand';
-import type { MailMessage, MailFolder, MailThread, MailAccount } from '../types';
+
+import { ALL_ACCOUNTS, STANDARD_FOLDER_ROLES, type StandardFolderRole } from '@/lib/mail-api';
+import type { MailAccount, MailFolder, MailMessage, MailThread } from '@/types';
+
+export interface UnifiedFolder {
+  role: StandardFolderRole;
+  unreadCount: number;
+  totalCount: number;
+}
 
 interface MailState {
-  // ── Data ─────────────────────────────────────────────────────
   accounts: MailAccount[];
   folders: Record<string, MailFolder>;
   messages: Record<string, MailMessage>;
   threads: Record<string, MailThread>;
 
-  // ── Derived helpers (selectors) ──────────────────────────────
   getAccountById: (id: string) => MailAccount | undefined;
   getFoldersForAccount: (accountId: string) => MailFolder[];
+  getUnifiedFolders: () => UnifiedFolder[];
   getMessagesForFolder: (folderId: string) => MailMessage[];
+  getMessagesForView: (opts: {
+    accountId: string | typeof ALL_ACCOUNTS;
+    folderId: string | null;
+    folderRole: string | null;
+  }) => MailMessage[];
   getThreadById: (id: string) => MailThread | undefined;
 
-  // ── Mutations ────────────────────────────────────────────────
   setAccounts: (accounts: MailAccount[]) => void;
+  setFolders: (folders: MailFolder[]) => void;
   upsertFolder: (folder: MailFolder) => void;
   upsertMessage: (message: MailMessage) => void;
   upsertThread: (thread: MailThread) => void;
@@ -35,13 +43,11 @@ interface MailState {
 }
 
 export const useMailStore = create<MailState>((set, get) => ({
-  // ── Initial state ────────────────────────────────────────────
   accounts: [],
   folders: {},
   messages: {},
   threads: {},
 
-  // ── Selectors ────────────────────────────────────────────────
   getAccountById: (id) => get().accounts.find((a) => a.id === id),
 
   getFoldersForAccount: (accountId) =>
@@ -49,15 +55,43 @@ export const useMailStore = create<MailState>((set, get) => ({
       .filter((f) => f.accountId === accountId)
       .sort((a, b) => a.sortOrder - b.sortOrder),
 
+  getUnifiedFolders: () => {
+    const folders = Object.values(get().folders);
+    return STANDARD_FOLDER_ROLES.map((role) => {
+      const matching = folders.filter((f) => f.role === role);
+      return {
+        role,
+        unreadCount: matching.reduce((sum, f) => sum + f.unreadCount, 0),
+        totalCount: matching.reduce((sum, f) => sum + f.totalCount, 0),
+      };
+    });
+  },
+
   getMessagesForFolder: (folderId) =>
     Object.values(get().messages)
       .filter((m) => m.folderId === folderId)
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()),
 
+  getMessagesForView: ({ accountId, folderId, folderRole }) => {
+    const messages = Object.values(get().messages);
+    const folders = get().folders;
+    const filtered = messages.filter((m) => {
+      if (accountId !== ALL_ACCOUNTS && m.accountId !== accountId) return false;
+      if (folderId) return m.folderId === folderId;
+      if (folderRole) return folders[m.folderId]?.role === folderRole;
+      return false;
+    });
+    return filtered.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  },
+
   getThreadById: (id) => get().threads[id],
 
-  // ── Mutations ────────────────────────────────────────────────
   setAccounts: (accounts) => set({ accounts }),
+
+  setFolders: (folders) =>
+    set({
+      folders: Object.fromEntries(folders.map((f) => [f.id, f])),
+    }),
 
   upsertFolder: (folder) =>
     set((state) => ({

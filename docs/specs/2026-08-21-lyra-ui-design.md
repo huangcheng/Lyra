@@ -1,7 +1,7 @@
 # Lyra — UI design language
 
 **Date:** 2026-08-21  
-**Status:** Accepted (iteration — cool utility gray)  
+**Status:** Superseded by `docs/specs/2026-08-21-lyra-shadcn-mail-ui.md` (shadcn mail + login-01). Kept as historical reference.  
 **Audience:** Design + frontend  
 **Reference:** Linear-style cool neutrals (user-provided screenshot)
 

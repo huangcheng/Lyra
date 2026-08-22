@@ -4,6 +4,8 @@
 **Status:** Draft  
 **Companion:** Data model (`docs/specs/2026-08-20-lyra-data-model-spec.md`), Engineering standards (`docs/specs/2026-08-20-lyra-engineering-standards.md`)
 
+**Architecture (2026-08-22):** Plugin kernel, workers, jobs/snooze, and Redis kv are specified in `docs/specs/2026-08-22-lyra-plugin-kernel-spec.md`. That document **supersedes** §3.1’s single `MailProtocol` trait (fetch + send on every adapter) and the rule that an account has one `protocol` field. IMAP/JMAP/SMTP **algorithms** in this file still apply.
+
 ---
 
 ## 1. Overview
@@ -27,7 +29,7 @@ The sync engine is Lyra's deepest module. Its job: keep the local database a fai
 | 2 | **IMAP** | JMAP unavailable; IMAP with IDLE for push, polling as fallback |
 | 3 | **SMTP** | Send only (not sync); used for outgoing messages regardless of receive protocol |
 
-The sync engine does **not** mix protocols for a single account. An account is either JMAP or IMAP; the protocol is selected at account-creation time and stored in `mail_account.protocol`.
+An account binds **receive** and **send** plugins separately (`receive_protocol` + `send_protocol`). The engine does not mix adapters inside one plugin. See `docs/specs/2026-08-22-lyra-plugin-kernel-spec.md`.
 
 ---
 

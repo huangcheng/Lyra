@@ -1,13 +1,17 @@
 /**
- * Login / bootstrap / TOTP — form-first polish (no watermark / globe).
- * Design: docs/superpowers/specs/2026-08-21-lyra-auth-editorial-design.md
+ * Login / bootstrap / TOTP — shadcn login-01 card, adapted for Lyra.
  */
 
-import { useState, type ReactNode } from 'react';
-import { motion, useReducedMotion, type Variants } from 'motion/react';
-import { t } from '../i18n';
-import { useUIStore } from '../stores/ui';
-import { StampMark } from './stamp-mark';
+import type { ComponentProps, FormEvent } from 'react';
+import { useState } from 'react';
+
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field';
+import { Input } from '@/components/ui/input';
+import { t } from '@/i18n';
+import { cn } from '@/lib/utils';
+import { useUIStore } from '@/stores/ui';
 
 interface LoginFormProps {
   onLogin: (username: string, password: string) => void;
@@ -18,80 +22,18 @@ interface LoginFormProps {
   requiresTotp: boolean;
 }
 
-const easeOut = [0.22, 1, 0.36, 1] as const;
-
-const stackVariants: Variants = {
-  hidden: {},
-  show: {
-    transition: { staggerChildren: 0.055, delayChildren: 0.03 },
-  },
-};
-
-const itemVariants: Variants = {
-  hidden: { opacity: 0, y: 8 },
-  show: {
-    opacity: 1,
-    y: 0,
-    transition: { duration: 0.28, ease: easeOut },
-  },
-};
-
-function AuthShell({ children }: { children: ReactNode }) {
-  const locale = useUIStore((s) => s.locale);
-  const reduceMotion = useReducedMotion();
-
-  return (
-    <div className="auth-page">
-      <motion.div
-        className="auth-stack"
-        variants={stackVariants}
-        initial={reduceMotion ? false : 'hidden'}
-        animate="show"
-      >
-        {children}
-        <motion.p className="auth-tagline" variants={itemVariants}>
-          {t(locale, 'app.tagline')}
-        </motion.p>
-      </motion.div>
-    </div>
-  );
-}
-
-function BrandBlock() {
-  return (
-    <motion.header className="auth-brand-block" variants={itemVariants}>
-      <StampMark size={44} className="auth-stamp" />
-      <p className="auth-wordmark">Lyra</p>
-    </motion.header>
-  );
-}
-
-function AuthCopy({ title, description }: { title: string; description?: string }) {
-  return (
-    <motion.div className="auth-copy" variants={itemVariants}>
-      <h1 className="auth-title">{title}</h1>
-      {description ? <p className="auth-muted">{description}</p> : null}
-    </motion.div>
-  );
-}
-
-function AuthFormWrap({ children }: { children: ReactNode }) {
-  return (
-    <motion.div className="auth-form-wrap" variants={itemVariants}>
-      {children}
-    </motion.div>
-  );
-}
-
 export function LoginForm({
+  className,
   onLogin,
   onBootstrap,
   onTotpVerify,
   error,
   hasUser,
   requiresTotp,
-}: LoginFormProps) {
+  ...props
+}: LoginFormProps & ComponentProps<'div'>) {
   const locale = useUIStore((s) => s.locale);
+  const setLocale = useUIStore((s) => s.setLocale);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -99,7 +41,9 @@ export function LoginForm({
   const [totpCode, setTotpCode] = useState('');
   const [validationError, setValidationError] = useState<string | null>(null);
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const formError = error || validationError;
+
+  const handleLoginSubmit = (e: FormEvent) => {
     e.preventDefault();
     setValidationError(null);
     if (!username || !password) {
@@ -109,7 +53,7 @@ export function LoginForm({
     onLogin(username, password);
   };
 
-  const handleBootstrapSubmit = (e: React.FormEvent) => {
+  const handleBootstrapSubmit = (e: FormEvent) => {
     e.preventDefault();
     setValidationError(null);
     if (!username || !password) {
@@ -123,7 +67,7 @@ export function LoginForm({
     onBootstrap(username, password, displayName || undefined, locale);
   };
 
-  const handleTotpSubmit = (e: React.FormEvent) => {
+  const handleTotpSubmit = (e: FormEvent) => {
     e.preventDefault();
     setValidationError(null);
     if (!totpCode || totpCode.length !== 6) {
@@ -133,158 +77,159 @@ export function LoginForm({
     onTotpVerify(totpCode);
   };
 
-  if (hasUser === null) {
-    return (
-      <AuthShell>
-        <motion.div className="auth-loading" variants={itemVariants}>
-          <div className="auth-spinner" aria-hidden />
-          <p className="auth-muted">{t(locale, 'common.loading')}</p>
-        </motion.div>
-      </AuthShell>
-    );
-  }
-
-  if (requiresTotp) {
-    return (
-      <AuthShell>
-        <BrandBlock />
-        <AuthCopy
-          title={t(locale, 'auth.totpTitle')}
-          description={t(locale, 'auth.totpDescription')}
-        />
-        <AuthFormWrap>
-          <form onSubmit={handleTotpSubmit} className="auth-form">
-            <label className="auth-field" htmlFor="totp-code">
-              <span className="auth-label">{t(locale, 'auth.totpCode')}</span>
-              <input
-                id="totp-code"
-                type="text"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                maxLength={6}
-                value={totpCode}
-                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ''))}
-                className="auth-input auth-input--otp"
-                placeholder="000000"
-                autoFocus
-              />
-            </label>
-            {(error || validationError) && (
-              <p className="auth-error">{error || validationError}</p>
-            )}
-            <button type="submit" className="auth-submit">
-              {t(locale, 'auth.totpVerify')}
-            </button>
-          </form>
-        </AuthFormWrap>
-      </AuthShell>
-    );
-  }
-
-  if (!hasUser) {
-    return (
-      <AuthShell>
-        <BrandBlock />
-        <AuthCopy
-          title={t(locale, 'auth.bootstrapTitle')}
-          description={t(locale, 'auth.bootstrapDescription')}
-        />
-        <AuthFormWrap>
-          <form onSubmit={handleBootstrapSubmit} className="auth-form">
-            <label className="auth-field" htmlFor="username">
-              <span className="auth-label">{t(locale, 'auth.username')}</span>
-              <input
-                id="username"
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="auth-input"
-                autoFocus
-                autoComplete="username"
-              />
-            </label>
-            <label className="auth-field" htmlFor="display-name">
-              <span className="auth-label">{t(locale, 'auth.displayName')}</span>
-              <input
-                id="display-name"
-                type="text"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                className="auth-input"
-                autoComplete="name"
-              />
-            </label>
-            <label className="auth-field" htmlFor="password">
-              <span className="auth-label">{t(locale, 'auth.password')}</span>
-              <input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="auth-input"
-                autoComplete="new-password"
-              />
-            </label>
-            <label className="auth-field" htmlFor="confirm-password">
-              <span className="auth-label">{t(locale, 'auth.confirmPassword')}</span>
-              <input
-                id="confirm-password"
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                className="auth-input"
-                autoComplete="new-password"
-              />
-            </label>
-            {(error || validationError) && (
-              <p className="auth-error">{error || validationError}</p>
-            )}
-            <button type="submit" className="auth-submit">
-              {t(locale, 'auth.createAccount')}
-            </button>
-          </form>
-        </AuthFormWrap>
-      </AuthShell>
-    );
+  let title = t(locale, 'auth.loginTitle');
+  let description = t(locale, 'auth.loginDescription');
+  if (hasUser === false) {
+    title = t(locale, 'auth.bootstrapTitle');
+    description = t(locale, 'auth.bootstrapDescription');
+  } else if (requiresTotp) {
+    title = t(locale, 'auth.totpTitle');
+    description = t(locale, 'auth.totpDescription');
   }
 
   return (
-    <AuthShell>
-      <BrandBlock />
-      <AuthCopy title={t(locale, 'auth.loginTitle')} />
-      <AuthFormWrap>
-        <form onSubmit={handleLoginSubmit} className="auth-form">
-          <label className="auth-field" htmlFor="username">
-            <span className="auth-label">{t(locale, 'auth.username')}</span>
-            <input
-              id="username"
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="auth-input"
-              autoFocus
-              autoComplete="username"
-            />
-          </label>
-          <label className="auth-field" htmlFor="password">
-            <span className="auth-label">{t(locale, 'auth.password')}</span>
-            <input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="auth-input"
-              autoComplete="current-password"
-            />
-          </label>
-          {(error || validationError) && (
-            <p className="auth-error">{error || validationError}</p>
+    <div className={cn('flex flex-col gap-6', className)} {...props}>
+      <Card>
+        <CardHeader>
+          <CardTitle>{hasUser === null ? t(locale, 'common.loading') : title}</CardTitle>
+          {hasUser !== null ? <CardDescription>{description}</CardDescription> : null}
+        </CardHeader>
+        <CardContent>
+          {hasUser === null ? (
+            <p className="text-sm text-muted-foreground">{t(locale, 'common.loading')}</p>
+          ) : requiresTotp ? (
+            <form onSubmit={handleTotpSubmit}>
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="totp-code">{t(locale, 'auth.totpCode')}</FieldLabel>
+                  <Input
+                    id="totp-code"
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    maxLength={6}
+                    value={totpCode}
+                    onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ''))}
+                    placeholder="000000"
+                    autoFocus
+                    required
+                  />
+                </Field>
+                {formError ? <FieldError>{formError}</FieldError> : null}
+                <Field>
+                  <Button type="submit">{t(locale, 'auth.totpVerify')}</Button>
+                </Field>
+              </FieldGroup>
+            </form>
+          ) : !hasUser ? (
+            <form onSubmit={handleBootstrapSubmit}>
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="username">{t(locale, 'auth.username')}</FieldLabel>
+                  <Input
+                    id="username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    autoComplete="username"
+                    autoFocus
+                    required
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="display-name">{t(locale, 'auth.displayName')}</FieldLabel>
+                  <Input
+                    id="display-name"
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
+                    autoComplete="name"
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="password">{t(locale, 'auth.password')}</FieldLabel>
+                  <Input
+                    id="password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    autoComplete="new-password"
+                    required
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="confirm-password">
+                    {t(locale, 'auth.confirmPassword')}
+                  </FieldLabel>
+                  <Input
+                    id="confirm-password"
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    autoComplete="new-password"
+                    required
+                  />
+                </Field>
+                {formError ? <FieldError>{formError}</FieldError> : null}
+                <Field>
+                  <Button type="submit">{t(locale, 'auth.createAccount')}</Button>
+                </Field>
+              </FieldGroup>
+            </form>
+          ) : (
+            <form onSubmit={handleLoginSubmit}>
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="username">{t(locale, 'auth.username')}</FieldLabel>
+                  <Input
+                    id="username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    autoComplete="username"
+                    placeholder="admin"
+                    autoFocus
+                    required
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="password">{t(locale, 'auth.password')}</FieldLabel>
+                  <Input
+                    id="password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    autoComplete="current-password"
+                    required
+                  />
+                </Field>
+                {formError ? <FieldError>{formError}</FieldError> : null}
+                <Field>
+                  <Button type="submit">{t(locale, 'auth.login')}</Button>
+                  <FieldDescription className="text-center">
+                    {t(locale, 'app.tagline')}
+                  </FieldDescription>
+                </Field>
+              </FieldGroup>
+            </form>
           )}
-          <button type="submit" className="auth-submit">
-            {t(locale, 'auth.login')}
-          </button>
-        </form>
-      </AuthFormWrap>
-    </AuthShell>
+        </CardContent>
+      </Card>
+      <div className="flex justify-center gap-2">
+        <Button
+          type="button"
+          variant={locale === 'en' ? 'secondary' : 'ghost'}
+          size="sm"
+          onClick={() => setLocale('en')}
+        >
+          EN
+        </Button>
+        <Button
+          type="button"
+          variant={locale === 'zh' ? 'secondary' : 'ghost'}
+          size="sm"
+          onClick={() => setLocale('zh')}
+        >
+          中文
+        </Button>
+      </div>
+    </div>
   );
 }

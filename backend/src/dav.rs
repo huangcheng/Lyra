@@ -54,7 +54,10 @@ impl DavClient {
 
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, self.auth_header());
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/xml; charset=utf-8"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/xml; charset=utf-8"),
+        );
         headers.insert("Depth", HeaderValue::from_static("1"));
 
         let res = self
@@ -136,7 +139,9 @@ pub fn resolve_href(base: &str, href: &str) -> String {
 }
 
 /// Very small vCard 3.0/4.0 field extractor.
-pub fn parse_vcard_fields(vcard: &str) -> (Option<String>, Vec<String>, Vec<String>, Option<String>) {
+pub fn parse_vcard_fields(
+    vcard: &str,
+) -> (Option<String>, Vec<String>, Vec<String>, Option<String>) {
     let mut display_name = None;
     let mut emails = Vec::new();
     let mut phones = Vec::new();

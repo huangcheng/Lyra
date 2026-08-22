@@ -1,15 +1,25 @@
 /**
  * Compose dialog for writing new emails.
- *
- * Full-screen modal with To, Subject, and body fields.
- * Sends via POST /api/messages/send using the selected account's SMTP.
  */
 
 import { useEffect, useState } from 'react';
-import { t } from '../i18n';
-import { useUIStore } from '../stores/ui';
-import { useMailStore } from '../stores/mail';
-import { useAuthStore } from '../stores/auth';
+
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { t } from '@/i18n';
+import { ALL_ACCOUNTS } from '@/lib/mail-api';
+import { useAuthStore } from '@/stores/auth';
+import { useMailStore } from '@/stores/mail';
+import { useUIStore } from '@/stores/ui';
 
 interface ComposeForm {
   to: string;
@@ -29,6 +39,7 @@ export function ComposeDialog() {
   const accounts = useMailStore((s) => s.accounts);
   const token = useAuthStore((s) => s.token);
 
+  const [fromAccountId, setFromAccountId] = useState('');
   const [form, setForm] = useState<ComposeForm>({
     to: '',
     cc: '',
@@ -49,13 +60,13 @@ export function ComposeDialog() {
       subject: composeDraft?.subject ?? '',
       body: composeDraft?.body ?? '',
     });
+    setFromAccountId(
+      selectedAccountId === ALL_ACCOUNTS ? (accounts[0]?.id ?? '') : selectedAccountId,
+    );
     setError(null);
     setSuccess(false);
-  }, [composeOpen, composeDraft]);
+  }, [composeOpen, composeDraft, selectedAccountId, accounts]);
 
-  if (!composeOpen) return null;
-
-  const accountId = selectedAccountId ?? accounts[0]?.id;
   const titleKey =
     composeDraft?.mode === 'reply'
       ? 'mail.reply'
@@ -80,8 +91,8 @@ export function ComposeDialog() {
       setError(t(locale, 'mail.subject') + ' is required');
       return;
     }
-    if (!accountId) {
-      setError('No account selected');
+    if (!fromAccountId) {
+      setError(t(locale, 'settings.accounts.empty'));
       return;
     }
 
@@ -89,27 +100,12 @@ export function ComposeDialog() {
     setError(null);
 
     try {
-      const toRecipients = form.to
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((email) => ({ email }));
-
-      const ccRecipients = form.cc
-        ? form.cc
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .map((email) => ({ email }))
-        : [];
-
-      const bccRecipients = form.bcc
-        ? form.bcc
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .map((email) => ({ email }))
-        : [];
+      const split = (value: string) =>
+        value
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((email) => ({ email }));
 
       const res = await fetch('/api/messages/send', {
         method: 'POST',
@@ -118,10 +114,10 @@ export function ComposeDialog() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          accountId,
-          to: toRecipients,
-          cc: ccRecipients,
-          bcc: bccRecipients,
+          accountId: fromAccountId,
+          to: split(form.to),
+          cc: split(form.cc),
+          bcc: split(form.bcc),
           subject: form.subject,
           bodyText: form.body,
           bodyHtml: null,
@@ -129,12 +125,12 @@ export function ComposeDialog() {
       });
 
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(data.error || t(locale, 'mail.sendError'));
       }
 
       setSuccess(true);
-      setTimeout(() => handleClose(), 1500);
+      window.setTimeout(() => handleClose(), 1500);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : t(locale, 'mail.sendError'));
     } finally {
@@ -143,92 +139,72 @@ export function ComposeDialog() {
   };
 
   return (
-    <div className="compose-overlay" onClick={handleClose}>
-      <div className="compose-dialog" onClick={(e) => e.stopPropagation()}>
-        <div className="compose-header">
-          <h2>{t(locale, titleKey)}</h2>
-          <button type="button" className="compose-close" onClick={handleClose} aria-label="Close">
-            ✕
-          </button>
-        </div>
-
-        <div className="compose-fields">
-          <div className="compose-field">
-            <label htmlFor="compose-to">{t(locale, 'mail.to')}</label>
-            <input
+    <Dialog open={composeOpen} onOpenChange={(open) => !open && handleClose()}>
+      <DialogContent className="sm:max-w-xl" showCloseButton>
+        <DialogHeader>
+          <DialogTitle>{t(locale, titleKey)}</DialogTitle>
+        </DialogHeader>
+        <FieldGroup>
+          {accounts.length > 1 ? (
+            <Field>
+              <FieldLabel htmlFor="compose-from">{t(locale, 'mail.from')}</FieldLabel>
+              <select
+                id="compose-from"
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                value={fromAccountId}
+                onChange={(e) => setFromAccountId(e.target.value)}
+              >
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.displayName || a.emailAddress}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : null}
+          <Field>
+            <FieldLabel htmlFor="compose-to">{t(locale, 'mail.to')}</FieldLabel>
+            <Input
               id="compose-to"
-              type="text"
               value={form.to}
               onChange={(e) => setForm((f) => ({ ...f, to: e.target.value }))}
               placeholder={t(locale, 'mail.toPlaceholder')}
               autoFocus
             />
-          </div>
-
-          <div className="compose-field">
-            <label htmlFor="compose-cc">{t(locale, 'mail.cc')}</label>
-            <input
-              id="compose-cc"
-              type="text"
-              value={form.cc}
-              onChange={(e) => setForm((f) => ({ ...f, cc: e.target.value }))}
-              placeholder={t(locale, 'mail.toPlaceholder')}
-            />
-          </div>
-
-          <div className="compose-field">
-            <label htmlFor="compose-bcc">{t(locale, 'mail.bcc')}</label>
-            <input
-              id="compose-bcc"
-              type="text"
-              value={form.bcc}
-              onChange={(e) => setForm((f) => ({ ...f, bcc: e.target.value }))}
-              placeholder={t(locale, 'mail.toPlaceholder')}
-            />
-          </div>
-
-          <div className="compose-field">
-            <label htmlFor="compose-subject">{t(locale, 'mail.subject')}</label>
-            <input
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="compose-subject">{t(locale, 'mail.subject')}</FieldLabel>
+            <Input
               id="compose-subject"
-              type="text"
               value={form.subject}
               onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))}
               placeholder={t(locale, 'mail.subjectPlaceholder')}
             />
-          </div>
-        </div>
-
-        <div className="compose-body">
-          <textarea
-            value={form.body}
-            onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))}
-            placeholder={t(locale, 'mail.bodyPlaceholder')}
-          />
-        </div>
-
-        {error && <div className="compose-error">{error}</div>}
-        {success && <div className="compose-success">{t(locale, 'mail.sendSuccess')}</div>}
-
-        <div className="compose-actions">
-          <button
-            type="button"
-            className="compose-send-btn"
-            onClick={handleSend}
-            disabled={sending}
-          >
-            {sending ? t(locale, 'mail.sending') : t(locale, 'mail.send')}
-          </button>
-          <button
-            type="button"
-            className="compose-discard-btn"
-            onClick={handleClose}
-            disabled={sending}
-          >
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="compose-body">{t(locale, 'mail.bodyPlaceholder')}</FieldLabel>
+            <Textarea
+              id="compose-body"
+              className="min-h-40"
+              value={form.body}
+              onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))}
+              placeholder={t(locale, 'mail.bodyPlaceholder')}
+            />
+          </Field>
+          {error ? <p className="text-sm text-destructive">{error}</p> : null}
+          {success ? (
+            <p className="text-sm text-muted-foreground">{t(locale, 'mail.sendSuccess')}</p>
+          ) : null}
+        </FieldGroup>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={handleClose} disabled={sending}>
             {t(locale, 'mail.discard')}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+          <Button type="button" onClick={() => void handleSend()} disabled={sending}>
+            {sending ? t(locale, 'mail.sending') : t(locale, 'mail.send')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

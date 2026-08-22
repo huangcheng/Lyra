@@ -22,6 +22,7 @@ backend/target/
 .orch/
 *.log
 /tmp/
+/tmp-visual/
 
 # Coverage / caches
 coverage/
