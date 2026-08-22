@@ -169,10 +169,43 @@ async fn sync_status(
     .fetch_one(pool)
     .await?;
 
+    // Pending or running sync_account jobs for this user (payload JSON has user_id).
+    let syncing = user_has_active_sync_job(pool, &user_id).await?;
+
     Ok(Json(SyncStatus {
         active_accounts: count,
-        syncing: false, // v1: synchronous sync, never "in progress"
+        syncing,
     }))
+}
+
+/// True when any `sync_account` job for `user_id` is pending or running.
+async fn user_has_active_sync_job(
+    pool: &sqlx::SqlitePool,
+    user_id: &str,
+) -> Result<bool, SyncError> {
+    let rows = sqlx::query(
+        r"
+        SELECT payload FROM jobs
+        WHERE kind = 'sync_account' AND status IN ('pending', 'running')
+        ",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for row in rows {
+        let payload_json: String = row.get("payload");
+        let Ok(payload) = serde_json::from_str::<crate::jobs::JobPayload>(&payload_json) else {
+            continue;
+        };
+        if let crate::jobs::JobPayload::SyncAccount {
+            user_id: job_user, ..
+        } = payload
+            && job_user == user_id
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Trigger a sync for a specific account (enqueue; do not await IMAP).
@@ -2137,6 +2170,29 @@ mod tests {
         .unwrap();
 
         (user_id, account_id)
+    }
+
+    #[tokio::test]
+    async fn user_has_active_sync_job_filters_by_user() {
+        let pool = test_pool().await;
+        let (user_id, account_id) = seed_user_and_account(&pool).await;
+        let other_user = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+
+        assert!(!user_has_active_sync_job(&pool, &user_id).await.unwrap());
+
+        crate::jobs::enqueue(
+            &pool,
+            &crate::jobs::JobPayload::SyncAccount {
+                account_id: account_id.clone(),
+                user_id: user_id.clone(),
+            },
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .await
+        .unwrap();
+
+        assert!(user_has_active_sync_job(&pool, &user_id).await.unwrap());
+        assert!(!user_has_active_sync_job(&pool, &other_user).await.unwrap());
     }
 
     #[test]

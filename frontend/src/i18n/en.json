@@ -107,6 +107,8 @@
     "chinese": "中文",
     "theme": "Theme",
     "session": "Session",
+    "syncNow": "Sync now",
+    "syncQueued": "Sync queued",
     "accounts": {
       "title": "Mail Accounts",
       "add": "Add Account",

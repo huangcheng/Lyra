@@ -70,6 +70,8 @@ export function SettingsPage() {
 
   const [probing, setProbing] = useState(false);
   const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
   useEffect(() => {
     fetchAccounts();
@@ -88,6 +90,51 @@ export function SettingsPage() {
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function pollUntilSyncIdle() {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const res = await fetch('/api/sync/status', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(t(locale, 'sync.syncError'));
+      const status: { syncing: boolean } = await res.json();
+      if (!status.syncing) return;
+    }
+  }
+
+  async function handleSync(id: string) {
+    try {
+      setError(null);
+      setSyncing(true);
+      setSyncMessage(null);
+      const res = await fetch(`/api/accounts/${id}/sync`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      // 202 Accepted is success (res.ok)
+      if (!res.ok) throw new Error(t(locale, 'mail.syncError'));
+      setSyncMessage(t(locale, 'settings.syncQueued'));
+      await pollUntilSyncIdle();
+      await fetchAccounts();
+      window.dispatchEvent(new Event('lyra:sync-complete'));
+      setSyncMessage(t(locale, 'sync.syncComplete'));
+    } catch (err: any) {
+      setError(err.message);
+      setSyncMessage(null);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  function formatLastSync(iso?: string) {
+    if (!iso) return null;
+    try {
+      return new Date(iso).toLocaleString(locale === 'zh' ? 'zh-CN' : 'en-US');
+    } catch {
+      return iso;
     }
   }
 
@@ -268,6 +315,11 @@ export function SettingsPage() {
           </div>
 
           {error && <div className="error-message">{error}</div>}
+          {syncMessage && (
+            <div className="text-sm text-muted-foreground" role="status">
+              {syncing ? t(locale, 'sync.syncing') : syncMessage}
+            </div>
+          )}
 
           {loading ? (
             <div>{t(locale, 'common.loading')}</div>
@@ -289,8 +341,21 @@ export function SettingsPage() {
                       {account.protocol.toUpperCase()}
                       {account.imapHost && ` • ${account.imapHost}`}
                     </p>
+                    {account.lastSyncAt && (
+                      <p className="text-xs text-muted-foreground">
+                        {t(locale, 'sync.lastSync')}: {formatLastSync(account.lastSyncAt)}
+                      </p>
+                    )}
                   </div>
                   <div className="flex gap-2">
+                    <button
+                      type="button"
+                      className="rounded-md border px-3 py-1.5 text-sm hover:bg-accent disabled:opacity-50"
+                      disabled={syncing}
+                      onClick={() => void handleSync(account.id)}
+                    >
+                      {syncing ? t(locale, 'sync.syncing') : t(locale, 'settings.syncNow')}
+                    </button>
                     <button
                       type="button"
                       className="rounded-md border px-3 py-1.5 text-sm hover:bg-accent"
