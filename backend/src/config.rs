@@ -24,6 +24,8 @@ pub struct Config {
     pub min_password_length: usize,
     /// Max concurrent mailbox syncs (`SYNC_MAX_CONCURRENT`, default 3).
     pub sync_max_concurrent: usize,
+    /// Seconds between active-account poll ticks (`SYNC_POLL_SECS`, default 300).
+    pub sync_poll_secs: u64,
 }
 
 impl Config {
@@ -37,6 +39,7 @@ impl Config {
     ///   - `LISTEN_ADDR` — default `0.0.0.0:3000`
     ///   - `DATA_DIR`    — default `./data`
     ///   - `SYNC_MAX_CONCURRENT` — default `3`
+    ///   - `SYNC_POLL_SECS` — default `300`
     pub fn from_env() -> Self {
         use rand::RngCore;
 
@@ -75,6 +78,12 @@ impl Config {
             .filter(|&n| n > 0)
             .unwrap_or(3);
 
+        let sync_poll_secs: u64 = env::var("SYNC_POLL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(300);
+
         Self {
             listen_addr,
             database_url,
@@ -82,6 +91,7 @@ impl Config {
             session_secret,
             min_password_length,
             sync_max_concurrent,
+            sync_poll_secs,
         }
     }
 }
@@ -102,6 +112,7 @@ mod tests {
             env::remove_var("SESSION_SECRET");
             env::remove_var("MIN_PASSWORD_LENGTH");
             env::remove_var("SYNC_MAX_CONCURRENT");
+            env::remove_var("SYNC_POLL_SECS");
         }
 
         let cfg = Config::from_env();
@@ -110,6 +121,7 @@ mod tests {
         assert_eq!(cfg.data_dir, "./data");
         assert_eq!(cfg.min_password_length, 8);
         assert_eq!(cfg.sync_max_concurrent, 3);
+        assert_eq!(cfg.sync_poll_secs, 300);
         assert!(cfg.session_secret.len() >= 32);
     }
 }

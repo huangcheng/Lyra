@@ -334,6 +334,19 @@ async fn create_account(
     .await?;
 
     let now = chrono::Utc::now().to_rfc3339();
+    if let Err(error) = crate::jobs::enqueue(
+        pool,
+        &crate::jobs::JobPayload::SyncAccount {
+            account_id: id.clone(),
+            user_id: user_id.clone(),
+        },
+        &now,
+    )
+    .await
+    {
+        tracing::warn!(%error, account_id = %id, "failed to enqueue sync after create");
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(Account {

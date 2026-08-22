@@ -20,6 +20,7 @@ mod kernel;
 mod pim;
 mod plugins;
 mod protocol;
+mod scheduler;
 mod smtp;
 mod storage;
 mod sync;
@@ -52,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
         std::sync::Arc::clone(&auth_state.app),
         config.sync_max_concurrent,
     );
+    scheduler::start_scheduler(auth_state.db.clone(), config.sync_poll_secs);
 
     let api = Router::new()
         .route("/health", axum::routing::get(health))
