@@ -28,14 +28,29 @@ use crate::storage::DbPool;
 
 // ── Public types ────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+/// Sessions live for 7 days, fixed from creation. The kv seam has no
+/// touch/expire operation, so rolling renewal would cost a write on every
+/// authenticated request; a fixed TTL keeps session reads cheap.
+const SESSION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+/// Pending TOTP tokens (password ok, second factor outstanding) live 5 minutes.
+const PENDING_TTL_SECS: u64 = 5 * 60;
+/// Rate limit: 5 failed attempts within a 15-minute fixed window.
+const RATE_LIMIT_MAX_ATTEMPTS: i64 = 5;
+const RATE_LIMIT_WINDOW_SECS: u64 = 15 * 60;
+/// The last accepted TOTP timestep is remembered for 2 minutes so a code
+/// cannot be replayed inside its ±1-step validity window.
+const TOTP_LAST_STEP_TTL_SECS: u64 = 120;
+/// Password length cap: Argon2 is memory-hard, so unbounded inputs are a DoS.
+const MAX_PASSWORD_LENGTH: usize = 1024;
+
+#[derive(Debug, Serialize)]
 pub struct LoginResponse {
     pub token: String,
     pub user: UserInfo,
     pub requires_totp: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct UserInfo {
     pub id: String,
     pub username: String,
@@ -44,13 +59,13 @@ pub struct UserInfo {
     pub totp_enabled: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct AuthStatus {
     pub has_user: bool,
     pub totp_enabled: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct TotpEnrollResponse {
     pub secret: String,
     pub otpauth_uri: String,
@@ -88,6 +103,17 @@ pub struct TotpEnrollConfirmRequest {
     pub code: String,
 }
 
+#[derive(Deserialize)]
+pub struct TotpDisableRequest {
+    pub password: String,
+}
+
+#[derive(Deserialize)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
 // ── Password hashing ────────────────────────────────────────────────
 
 fn hash_password(password: &str) -> Result<String, StatusCode> {
@@ -114,6 +140,11 @@ fn verify_password(password: &str, hash: &str) -> Result<bool, StatusCode> {
 }
 
 fn validate_password(password: &str, min_length: usize) -> Result<(), String> {
+    if password.len() > MAX_PASSWORD_LENGTH {
+        return Err(format!(
+            "Password must be at most {MAX_PASSWORD_LENGTH} characters"
+        ));
+    }
     if password.len() < min_length {
         return Err(format!("Password must be at least {min_length} characters"));
     }
@@ -304,7 +335,7 @@ async fn find_user_by_id(db: &DbPool, user_id: &str) -> Result<Option<UserData>,
     match db {
         DbPool::Sqlite(pool) => {
             let row = sqlx::query(
-                "SELECT id, username, totp_enabled, totp_secret, display_name, locale FROM lyra_user WHERE id = ?",
+                "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale FROM lyra_user WHERE id = ?",
             )
             .bind(user_id)
             .fetch_optional(pool)
@@ -316,7 +347,7 @@ async fn find_user_by_id(db: &DbPool, user_id: &str) -> Result<Option<UserData>,
             Ok(row.map(|r| UserData {
                 id: r.get("id"),
                 username: r.get("username"),
-                password_hash: None,
+                password_hash: Some(r.get("password_hash")),
                 totp_enabled: r.get("totp_enabled"),
                 totp_secret: r.get("totp_secret"),
                 display_name: r.get("display_name"),
@@ -326,7 +357,7 @@ async fn find_user_by_id(db: &DbPool, user_id: &str) -> Result<Option<UserData>,
         #[cfg(feature = "postgres")]
         DbPool::Postgres(pool) => {
             let row = sqlx::query(
-                "SELECT id, username, totp_enabled, totp_secret, display_name, locale FROM lyra_user WHERE id = $1",
+                "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale FROM lyra_user WHERE id = $1",
             )
             .bind(user_id)
             .fetch_optional(pool)
@@ -338,7 +369,7 @@ async fn find_user_by_id(db: &DbPool, user_id: &str) -> Result<Option<UserData>,
             Ok(row.map(|r| UserData {
                 id: r.get("id"),
                 username: r.get("username"),
-                password_hash: None,
+                password_hash: Some(r.get("password_hash")),
                 totp_enabled: r.get("totp_enabled"),
                 totp_secret: r.get("totp_secret"),
                 display_name: r.get("display_name"),
@@ -390,6 +421,43 @@ async fn update_user_totp(
 
 // ── Session store (KvStore + sess_epoch) ─────────────────────────────
 
+async fn update_user_password(
+    db: &DbPool,
+    user_id: &str,
+    password_hash: &str,
+) -> Result<(), StatusCode> {
+    match db {
+        DbPool::Sqlite(pool) => {
+            sqlx::query(
+                "UPDATE lyra_user SET password_hash = ?, updated_at = datetime('now') WHERE id = ?",
+            )
+            .bind(password_hash)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to update password: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        }
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(pool) => {
+            sqlx::query(
+                "UPDATE lyra_user SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+            )
+            .bind(password_hash)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to update password: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        }
+    }
+    Ok(())
+}
+
 use std::sync::Arc;
 
 fn sess_key(epoch: i64, token: &str) -> String {
@@ -402,6 +470,126 @@ fn tok_key(token: &str) -> String {
 
 fn pending_key(token: &str) -> String {
     format!("pending:{token}")
+}
+
+// ── Rate limiting (fixed window per key, via kv counters) ────────────
+
+fn login_rl_key(username: &str) -> String {
+    format!("rl:login:{username}")
+}
+
+fn totp_rl_key(pending_token: &str) -> String {
+    format!("rl:totp:{pending_token}")
+}
+
+fn totp_step_key(user_id: &str) -> String {
+    format!("totp_last_step:{user_id}")
+}
+
+fn too_many_requests() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(ErrorResponse {
+            error: "Too many failed attempts. Try again later.".to_string(),
+        }),
+    )
+}
+
+fn internal_error(context: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: context.to_string(),
+        }),
+    )
+}
+
+/// True once `key` has hit `max_attempts` within its current window.
+async fn is_rate_limited(
+    kv: &dyn KvStore,
+    key: &str,
+    max_attempts: i64,
+) -> Result<bool, StatusCode> {
+    let attempts = kv
+        .get(key)
+        .await
+        .map_err(|e| {
+            tracing::error!("rate limit read failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    Ok(attempts >= max_attempts)
+}
+
+/// Count a failed attempt. The counter TTL is set on first failure, so the
+/// fixed window starts then and restarts after expiry.
+async fn record_failed_attempt(
+    kv: &dyn KvStore,
+    key: &str,
+    window_secs: u64,
+) -> Result<i64, StatusCode> {
+    kv.incr(key, 1, Some(window_secs)).await.map_err(|e| {
+        tracing::error!("rate limit incr failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+/// Reset the counter after a successful attempt.
+async fn clear_failed_attempts(kv: &dyn KvStore, key: &str) {
+    if let Err(e) = kv.del(key).await {
+        tracing::warn!("rate limit clear failed: {e}");
+    }
+}
+
+/// 429 when `key` is at the attempt cap; kv failures surface as 500 with `op`.
+async fn ensure_not_rate_limited(
+    kv: &dyn KvStore,
+    key: &str,
+    op: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if is_rate_limited(kv, key, RATE_LIMIT_MAX_ATTEMPTS)
+        .await
+        .map_err(|e| {
+            (
+                e,
+                Json(ErrorResponse {
+                    error: op.to_string(),
+                }),
+            )
+        })?
+    {
+        return Err(too_many_requests());
+    }
+    Ok(())
+}
+
+/// Record a failed attempt; kv failures surface as 500 with `op`.
+async fn note_failed_attempt(
+    kv: &dyn KvStore,
+    key: &str,
+    op: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    record_failed_attempt(kv, key, RATE_LIMIT_WINDOW_SECS)
+        .await
+        .map_err(|e| {
+            (
+                e,
+                Json(ErrorResponse {
+                    error: op.to_string(),
+                }),
+            )
+        })?;
+    Ok(())
+}
+
+fn invalid_credentials() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+            error: "Invalid username or password".to_string(),
+        }),
+    )
 }
 
 async fn fetch_sess_epoch(db: &DbPool, user_id: &str) -> Result<i64, StatusCode> {
@@ -432,7 +620,6 @@ async fn fetch_sess_epoch(db: &DbPool, user_id: &str) -> Result<i64, StatusCode>
 }
 
 /// Bump `sess_epoch` and delete session keys for the previous epoch.
-#[allow(dead_code)] // wired to password-change in a later task
 pub async fn invalidate_user_sessions(
     pool: &DbPool,
     kv: &dyn KvStore,
@@ -480,7 +667,6 @@ impl SessionStore {
     }
 
     #[must_use]
-    #[allow(dead_code)]
     pub fn kv(&self) -> &Arc<dyn KvStore> {
         &self.kv
     }
@@ -489,7 +675,7 @@ impl SessionStore {
         let epoch = fetch_sess_epoch(&self.db, user_id).await?;
         let token = generate_token();
         self.kv
-            .set(&sess_key(epoch, &token), user_id, None)
+            .set(&sess_key(epoch, &token), user_id, Some(SESSION_TTL_SECS))
             .await
             .map_err(|e| {
                 tracing::error!("session set failed: {e}");
@@ -497,7 +683,7 @@ impl SessionStore {
             })?;
         // Reverse index so get_session can resolve token → user, then check current epoch.
         self.kv
-            .set(&tok_key(&token), user_id, None)
+            .set(&tok_key(&token), user_id, Some(SESSION_TTL_SECS))
             .await
             .map_err(|e| {
                 tracing::error!("session tok index set failed: {e}");
@@ -509,7 +695,7 @@ impl SessionStore {
     pub async fn create_pending_session(&self, user_id: &str) -> Result<String, StatusCode> {
         let token = generate_token();
         self.kv
-            .set(&pending_key(&token), user_id, None)
+            .set(&pending_key(&token), user_id, Some(PENDING_TTL_SECS))
             .await
             .map_err(|e| {
                 tracing::error!("pending session set failed: {e}");
@@ -701,6 +887,7 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/auth/login", post(auth_login))
         .route("/api/auth/logout", post(auth_logout))
         .route("/api/auth/me", get(auth_me))
+        .route("/api/auth/change-password", post(change_password))
         .route("/api/auth/totp/enroll", post(totp_enroll))
         .route("/api/auth/totp/confirm", post(totp_enroll_confirm))
         .route("/api/auth/totp/verify", post(totp_verify))
@@ -836,7 +1023,11 @@ async fn auth_login(
     State(state): State<AuthState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let user = find_user_by_username(&state.db, &req.username)
+    let kv = Arc::clone(state.sessions.kv());
+    let rl_key = login_rl_key(&req.username);
+    ensure_not_rate_limited(kv.as_ref(), &rl_key, "Authentication failed").await?;
+
+    let Some(user) = find_user_by_username(&state.db, &req.username)
         .await
         .map_err(|e| {
             (
@@ -846,25 +1037,16 @@ async fn auth_login(
                 }),
             )
         })?
-        .ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "Invalid username or password".to_string(),
-                }),
-            )
-        })?;
+    else {
+        note_failed_attempt(kv.as_ref(), &rl_key, "Authentication failed").await?;
+        return Err(invalid_credentials());
+    };
 
     let valid = verify_password(
         &req.password,
-        &user.password_hash.ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Password hash not available".to_string(),
-                }),
-            )
-        })?,
+        &user
+            .password_hash
+            .ok_or_else(|| internal_error("Password hash not available"))?,
     )
     .map_err(|e| {
         (
@@ -876,13 +1058,12 @@ async fn auth_login(
     })?;
 
     if !valid {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "Invalid username or password".to_string(),
-            }),
-        ));
+        note_failed_attempt(kv.as_ref(), &rl_key, "Authentication failed").await?;
+        return Err(invalid_credentials());
     }
+
+    // Password correct: reset the failed-attempt counter for this username.
+    clear_failed_attempts(kv.as_ref(), &rl_key).await;
 
     if user.totp_enabled {
         let pending_token = state
@@ -936,6 +1117,10 @@ async fn totp_verify(
     State(state): State<AuthState>,
     Json(req): Json<TotpVerifyRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let kv = Arc::clone(state.sessions.kv());
+    let rl_key = totp_rl_key(&req.pending_token);
+    ensure_not_rate_limited(kv.as_ref(), &rl_key, "Verification failed").await?;
+
     let user_id = state
         .sessions
         .get_pending_session(&req.pending_token)
@@ -959,44 +1144,9 @@ async fn totp_verify(
                 }),
             )
         })?
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "User not found".to_string(),
-                }),
-            )
-        })?;
+        .ok_or_else(|| internal_error("User not found"))?;
 
-    let stored_secret = user.totp_secret.as_deref().ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "TOTP not configured".to_string(),
-            }),
-        )
-    })?;
-    let dek = AuthState::get_user_dek(&state.db, &user_id)
-        .await
-        .map_err(|e| crypto_err(&e))?;
-    let secret = decrypt_totp_secret(&dek, stored_secret).map_err(|e| crypto_err(&e))?;
-    let totp = build_totp(&secret, &user.username).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to build TOTP".to_string(),
-            }),
-        )
-    })?;
-
-    if !totp.check_current(&req.code).unwrap_or(false) {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "Invalid TOTP code".to_string(),
-            }),
-        ));
-    }
+    verify_totp_code(&state, kv.as_ref(), &rl_key, &user_id, &user, &req.code).await?;
 
     let token = state
         .sessions
@@ -1032,6 +1182,66 @@ async fn totp_verify(
     }))
 }
 
+/// Verify a login TOTP code for `user`, with per-pending-token rate limiting
+/// and per-user replay protection (last accepted timestep in kv).
+async fn verify_totp_code(
+    state: &AuthState,
+    kv: &dyn KvStore,
+    rl_key: &str,
+    user_id: &str,
+    user: &UserData,
+    code: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let stored_secret = user
+        .totp_secret
+        .as_deref()
+        .ok_or_else(|| internal_error("TOTP not configured"))?;
+    let dek = AuthState::get_user_dek(&state.db, user_id)
+        .await
+        .map_err(|e| crypto_err(&e))?;
+    let secret = decrypt_totp_secret(&dek, stored_secret).map_err(|e| crypto_err(&e))?;
+    let totp =
+        build_totp(&secret, &user.username).map_err(|_| internal_error("Failed to build TOTP"))?;
+
+    let Some(step) = matched_totp_step(&totp, code) else {
+        note_failed_attempt(kv, rl_key, "Verification failed").await?;
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Invalid TOTP code".to_string(),
+            }),
+        ));
+    };
+
+    // Replay guard: a code at or below the last accepted timestep was already
+    // used (codes stay valid for ±1 step, so the ±1 skew allows reuse).
+    let step_key = totp_step_key(user_id);
+    let last_step: Option<u64> = kv
+        .get(&step_key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok());
+    if last_step.is_some_and(|s| step <= s) {
+        note_failed_attempt(kv, rl_key, "Verification failed").await?;
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "TOTP code already used".to_string(),
+            }),
+        ));
+    }
+    let step_value = step.to_string();
+    kv.set(&step_key, &step_value, Some(TOTP_LAST_STEP_TTL_SECS))
+        .await
+        .map_err(|e| {
+            tracing::error!("totp step store failed: {e}");
+            internal_error("Verification failed")
+        })?;
+    clear_failed_attempts(kv, rl_key).await;
+    Ok(())
+}
+
 async fn totp_enroll(
     State(state): State<AuthState>,
     headers: HeaderMap,
@@ -1056,6 +1266,17 @@ async fn totp_enroll(
                 }),
             )
         })?;
+
+    // Re-enrolling while 2FA is active would silently rotate the secret;
+    // the user must disable first (which requires the password).
+    if user.totp_enabled {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "TOTP is already enabled. Disable it before re-enrolling.".to_string(),
+            }),
+        ));
+    }
 
     let secret_bytes = totp_rs::Secret::generate_secret().to_bytes().map_err(|e| {
         tracing::error!("Failed to generate TOTP secret: {e}");
@@ -1178,8 +1399,46 @@ async fn totp_enroll_confirm(
 async fn totp_disable(
     State(state): State<AuthState>,
     headers: HeaderMap,
+    Json(req): Json<TotpDisableRequest>,
 ) -> Result<Json<AuthStatus>, (StatusCode, Json<ErrorResponse>)> {
     let user_id = extract_session(&state, &headers).await?;
+
+    // Disabling 2FA weakens account security, so it requires re-authentication
+    // with the current password, not just a session token.
+    let user = find_user_by_id(&state.db, &user_id)
+        .await
+        .map_err(|e| {
+            (
+                e,
+                Json(ErrorResponse {
+                    error: "Failed to look up user".to_string(),
+                }),
+            )
+        })?
+        .ok_or_else(|| internal_error("User not found"))?;
+
+    let valid = verify_password(
+        &req.password,
+        &user
+            .password_hash
+            .ok_or_else(|| internal_error("Password hash not available"))?,
+    )
+    .map_err(|e| {
+        (
+            e,
+            Json(ErrorResponse {
+                error: "Verification failed".to_string(),
+            }),
+        )
+    })?;
+    if !valid {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Invalid password".to_string(),
+            }),
+        ));
+    }
 
     update_user_totp(&state.db, &user_id, None, false)
         .await
@@ -1196,6 +1455,88 @@ async fn totp_disable(
         has_user: true,
         totp_enabled: false,
     }))
+}
+
+async fn change_password(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let user_id = extract_session(&state, &headers).await?;
+
+    let user = find_user_by_id(&state.db, &user_id)
+        .await
+        .map_err(|e| {
+            (
+                e,
+                Json(ErrorResponse {
+                    error: "Failed to look up user".to_string(),
+                }),
+            )
+        })?
+        .ok_or_else(|| internal_error("User not found"))?;
+
+    let valid = verify_password(
+        &req.current_password,
+        &user
+            .password_hash
+            .ok_or_else(|| internal_error("Password hash not available"))?,
+    )
+    .map_err(|e| {
+        (
+            e,
+            Json(ErrorResponse {
+                error: "Verification failed".to_string(),
+            }),
+        )
+    })?;
+    if !valid {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Current password is incorrect".to_string(),
+            }),
+        ));
+    }
+
+    if let Err(msg) = validate_password(&req.new_password, state.min_password_length) {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: msg })));
+    }
+
+    let new_hash = hash_password(&req.new_password).map_err(|e| {
+        (
+            e,
+            Json(ErrorResponse {
+                error: "Failed to hash password".to_string(),
+            }),
+        )
+    })?;
+    update_user_password(&state.db, &user_id, &new_hash)
+        .await
+        .map_err(|e| {
+            (
+                e,
+                Json(ErrorResponse {
+                    error: "Failed to update password".to_string(),
+                }),
+            )
+        })?;
+
+    // Kick every session, including the caller's: after a password change all
+    // clients must log in again with the new password. (Simplest and safest —
+    // the caller's session is not special-cased.)
+    invalidate_user_sessions(&state.db, state.sessions.kv().as_ref(), &user_id)
+        .await
+        .map_err(|e| {
+            (
+                e,
+                Json(ErrorResponse {
+                    error: "Failed to invalidate sessions".to_string(),
+                }),
+            )
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn auth_logout(
@@ -1317,6 +1658,19 @@ fn build_totp_from_raw(secret_bytes: &[u8], username: &str) -> Result<TOTP, Stat
         tracing::error!("Failed to create TOTP: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })
+}
+
+/// Find the timestep at which `code` is valid (current ± 1 step, matching the
+/// skew of `TOTP::check_current`) so replay protection can compare steps.
+/// Returns `None` when the code matches no step in the window.
+fn matched_totp_step(totp: &TOTP, code: &str) -> Option<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let step = totp.step;
+    let current = now / step;
+    (current.saturating_sub(1)..=current + 1).find(|&s| totp.generate(s * step) == code)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -1556,7 +1910,9 @@ mod tests {
         install_test_master_key();
         seed_user(&db, "user-legacy").await;
 
-        let err = AuthState::get_user_dek(&db, "user-legacy").await.unwrap_err();
+        let err = AuthState::get_user_dek(&db, "user-legacy")
+            .await
+            .unwrap_err();
         assert!(matches!(err, CryptoError::MissingDek));
         assert!(err.to_string().contains("reset the database"));
     }
@@ -1590,21 +1946,19 @@ mod tests {
             .unwrap();
         let plaintext_secret = enroll.secret.clone();
 
-        let stored: String =
-            sqlx::query_scalar("SELECT totp_secret FROM lyra_user WHERE id = ?")
-                .bind(&user_id)
-                .fetch_one(sqlite_pool(&db))
-                .await
-                .unwrap();
+        let stored: String = sqlx::query_scalar("SELECT totp_secret FROM lyra_user WHERE id = ?")
+            .bind(&user_id)
+            .fetch_one(sqlite_pool(&db))
+            .await
+            .unwrap();
         assert_ne!(stored, plaintext_secret);
         assert!(!stored.contains(&plaintext_secret));
         serde_json::from_str::<crypto::EncryptedCredential>(&stored).unwrap();
-        let enabled: bool =
-            sqlx::query_scalar("SELECT totp_enabled FROM lyra_user WHERE id = ?")
-                .bind(&user_id)
-                .fetch_one(sqlite_pool(&db))
-                .await
-                .unwrap();
+        let enabled: bool = sqlx::query_scalar("SELECT totp_enabled FROM lyra_user WHERE id = ?")
+            .bind(&user_id)
+            .fetch_one(sqlite_pool(&db))
+            .await
+            .unwrap();
         assert!(!enabled, "enroll alone must not enable 2FA");
 
         // Confirm with a valid code flips totp_enabled on.
@@ -1647,5 +2001,414 @@ mod tests {
         let err = decrypt_totp_secret(&dek, "JBSWY3DPEHPK3PXP").unwrap_err();
         assert!(matches!(err, CryptoError::Decrypt(_)));
         assert!(err.to_string().contains("re-enroll"));
+    }
+
+    // ── Session TTLs, rate limiting, password change, 2FA hardening ──
+
+    /// Seed a user with a known username/password and TOTP already enabled.
+    /// Returns the plaintext base32 TOTP secret.
+    async fn seed_user_with_totp(db: &DbPool, id: &str, username: &str, password: &str) -> String {
+        seed_user_with_dek(db, id).await;
+        let hash = hash_password(password).unwrap();
+        let secret_bytes = totp_rs::Secret::generate_secret().to_bytes().unwrap();
+        let secret_b32 =
+            base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &secret_bytes);
+        let dek = AuthState::get_user_dek(db, id).await.unwrap();
+        let stored = encrypt_totp_secret(&dek, &secret_b32).unwrap();
+        sqlx::query(
+            "UPDATE lyra_user SET username = ?, password_hash = ?, totp_secret = ?, totp_enabled = 1 WHERE id = ?",
+        )
+        .bind(username)
+        .bind(hash)
+        .bind(stored)
+        .bind(id)
+        .execute(sqlite_pool(db))
+        .await
+        .unwrap();
+        secret_b32
+    }
+
+    /// Bootstrap user "alice" / "Str0ngPass1" and return a session token.
+    async fn bootstrap_alice(state: &AuthState) -> String {
+        auth_bootstrap(
+            State(state.clone()),
+            Json(BootstrapRequest {
+                username: "alice".into(),
+                password: "Str0ngPass1".into(),
+                display_name: None,
+                locale: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let user_id: String =
+            sqlx::query_scalar("SELECT id FROM lyra_user WHERE username = 'alice'")
+                .fetch_one(sqlite_pool(state.db()))
+                .await
+                .unwrap();
+        state.sessions.create_session(&user_id).await.unwrap()
+    }
+
+    #[test]
+    fn password_max_length() {
+        // 1024 chars passes, 1025 is rejected (Argon2 DoS cap).
+        let ok = format!("Aa1{}", "a".repeat(1021));
+        assert_eq!(ok.len(), 1024);
+        assert!(validate_password(&ok, 8).is_ok());
+        let too_long = format!("Aa1{}", "a".repeat(1022));
+        assert_eq!(too_long.len(), 1025);
+        assert!(validate_password(&too_long, 8).is_err());
+    }
+
+    #[tokio::test]
+    async fn session_entries_carry_a_ttl() {
+        let db = test_pool().await;
+        seed_user(&db, "user-1").await;
+        let kv = MemoryKv::new();
+        let store = SessionStore::new(db.clone(), Arc::new(kv.clone()));
+        let token = store.create_session("user-1").await.unwrap();
+        let epoch = fetch_sess_epoch(&db, "user-1").await.unwrap();
+
+        let sess_ttl = kv.ttl_remaining(&sess_key(epoch, &token)).await;
+        let tok_ttl = kv.ttl_remaining(&tok_key(&token)).await;
+        assert!(sess_ttl.is_some(), "session entry must have a TTL");
+        assert!(tok_ttl.is_some(), "token index must have a TTL");
+        // 7-day TTL, minus slack for test execution time.
+        let floor = std::time::Duration::from_secs(SESSION_TTL_SECS - 60);
+        assert!(sess_ttl.unwrap() > floor);
+        assert!(tok_ttl.unwrap() > floor);
+    }
+
+    #[tokio::test]
+    async fn pending_session_has_short_ttl() {
+        let db = test_pool().await;
+        seed_user(&db, "user-1").await;
+        let kv = MemoryKv::new();
+        let store = SessionStore::new(db, Arc::new(kv.clone()));
+        let token = store.create_pending_session("user-1").await.unwrap();
+        let ttl = kv.ttl_remaining(&pending_key(&token)).await;
+        assert!(ttl.is_some(), "pending token must have a TTL");
+        assert!(ttl.unwrap() <= std::time::Duration::from_secs(PENDING_TTL_SECS));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_counter_window_expires() {
+        let kv = MemoryKv::new();
+        for _ in 0..RATE_LIMIT_MAX_ATTEMPTS {
+            record_failed_attempt(&kv, "rl:test", 1).await.unwrap();
+        }
+        assert!(
+            is_rate_limited(&kv, "rl:test", RATE_LIMIT_MAX_ATTEMPTS)
+                .await
+                .unwrap()
+        );
+        // Window of 1s expires; the counter resets and attempts are allowed again.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert!(
+            !is_rate_limited(&kv, "rl:test", RATE_LIMIT_MAX_ATTEMPTS)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn login_rate_limited_after_five_failures() {
+        let db = test_pool().await;
+        let state = test_state(db);
+        bootstrap_alice(&state).await;
+
+        let bad_login = |password: &str| LoginRequest {
+            username: "alice".into(),
+            password: password.into(),
+        };
+        for _ in 0..RATE_LIMIT_MAX_ATTEMPTS {
+            let err = auth_login(State(state.clone()), Json(bad_login("Wr0ngPass1")))
+                .await
+                .unwrap_err();
+            assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        }
+        // Sixth attempt is rejected before any password check.
+        let err = auth_login(State(state.clone()), Json(bad_login("Wr0ngPass1")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+        // Even the correct password is locked out inside the window.
+        let err = auth_login(State(state.clone()), Json(bad_login("Str0ngPass1")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn successful_login_resets_rate_limit() {
+        let db = test_pool().await;
+        let state = test_state(db);
+        bootstrap_alice(&state).await;
+
+        let attempt = |password: &str| {
+            let state = state.clone();
+            let password = password.to_string();
+            async move {
+                auth_login(
+                    State(state),
+                    Json(LoginRequest {
+                        username: "alice".into(),
+                        password,
+                    }),
+                )
+                .await
+            }
+        };
+        // Four failures stay under the cap; a success clears the counter.
+        for _ in 0..4 {
+            assert!(attempt("Wr0ngPass1").await.is_err());
+        }
+        assert!(attempt("Str0ngPass1").await.is_ok());
+        // Four more failures must not trip the limit either.
+        for _ in 0..4 {
+            let err = attempt("Wr0ngPass1").await.unwrap_err();
+            assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn totp_verify_rate_limited_after_five_failures() {
+        let db = test_pool().await;
+        seed_user_with_totp(&db, "user-1", "alice", "Str0ngPass1").await;
+        let state = test_state(db);
+
+        let login = auth_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                username: "alice".into(),
+                password: "Str0ngPass1".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(login.requires_totp);
+        let pending = login.token.clone();
+
+        for _ in 0..RATE_LIMIT_MAX_ATTEMPTS {
+            let err = totp_verify(
+                State(state.clone()),
+                Json(TotpVerifyRequest {
+                    code: "000000".into(),
+                    pending_token: pending.clone(),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        }
+        let err = totp_verify(
+            State(state.clone()),
+            Json(TotpVerifyRequest {
+                code: "000000".into(),
+                pending_token: pending,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn change_password_kicks_all_sessions() {
+        let db = test_pool().await;
+        let state = test_state(db);
+        let token_a = bootstrap_alice(&state).await;
+
+        let login_b = auth_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                username: "alice".into(),
+                password: "Str0ngPass1".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let token_b = login_b.token.clone();
+
+        let status = change_password(
+            State(state.clone()),
+            bearer_headers(&token_a),
+            Json(ChangePasswordRequest {
+                current_password: "Str0ngPass1".into(),
+                new_password: "N3wPassword!x".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Every prior session (including the caller's) is dead.
+        assert!(state.sessions.get_session(&token_a).await.is_none());
+        assert!(state.sessions.get_session(&token_b).await.is_none());
+
+        // Old password fails, new password logs in.
+        let old = auth_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                username: "alice".into(),
+                password: "Str0ngPass1".into(),
+            }),
+        )
+        .await;
+        assert!(old.is_err());
+        let new = auth_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                username: "alice".into(),
+                password: "N3wPassword!x".into(),
+            }),
+        )
+        .await;
+        assert!(new.is_ok());
+    }
+
+    #[tokio::test]
+    async fn change_password_wrong_current_password_rejected() {
+        let db = test_pool().await;
+        let state = test_state(db);
+        let token = bootstrap_alice(&state).await;
+
+        let err = change_password(
+            State(state.clone()),
+            bearer_headers(&token),
+            Json(ChangePasswordRequest {
+                current_password: "Wr0ngPass1".into(),
+                new_password: "N3wPassword!x".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        // The session is untouched and the old password still works.
+        assert!(state.sessions.get_session(&token).await.is_some());
+        assert!(
+            auth_login(
+                State(state.clone()),
+                Json(LoginRequest {
+                    username: "alice".into(),
+                    password: "Str0ngPass1".into(),
+                }),
+            )
+            .await
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_weak_new_password_rejected() {
+        let db = test_pool().await;
+        let state = test_state(db);
+        let token = bootstrap_alice(&state).await;
+
+        let err = change_password(
+            State(state.clone()),
+            bearer_headers(&token),
+            Json(ChangePasswordRequest {
+                current_password: "Str0ngPass1".into(),
+                new_password: "weak".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(state.sessions.get_session(&token).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn totp_disable_requires_current_password() {
+        let db = test_pool().await;
+        seed_user_with_totp(&db, "user-1", "alice", "Str0ngPass1").await;
+        let state = test_state(db);
+        let token = state.sessions.create_session("user-1").await.unwrap();
+
+        // Wrong password → rejected, TOTP stays enabled.
+        let err = totp_disable(
+            State(state.clone()),
+            bearer_headers(&token),
+            Json(TotpDisableRequest {
+                password: "Wr0ngPass1".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        let enabled: bool =
+            sqlx::query_scalar("SELECT totp_enabled FROM lyra_user WHERE id = 'user-1'")
+                .fetch_one(sqlite_pool(state.db()))
+                .await
+                .unwrap();
+        assert!(enabled);
+
+        // Correct password → disabled.
+        let status = totp_disable(
+            State(state.clone()),
+            bearer_headers(&token),
+            Json(TotpDisableRequest {
+                password: "Str0ngPass1".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!status.totp_enabled);
+    }
+
+    #[tokio::test]
+    async fn totp_enroll_rejected_when_already_enabled() {
+        let db = test_pool().await;
+        seed_user_with_totp(&db, "user-1", "alice", "Str0ngPass1").await;
+        let state = test_state(db);
+        let token = state.sessions.create_session("user-1").await.unwrap();
+
+        let err = totp_enroll(State(state.clone()), bearer_headers(&token))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn totp_code_cannot_be_replayed() {
+        let db = test_pool().await;
+        let secret = seed_user_with_totp(&db, "user-1", "alice", "Str0ngPass1").await;
+        let state = test_state(db);
+        let totp = build_totp(&secret, "alice").unwrap();
+        let code = totp.generate_current().unwrap();
+
+        let login = || LoginRequest {
+            username: "alice".into(),
+            password: "Str0ngPass1".into(),
+        };
+        let first = auth_login(State(state.clone()), Json(login()))
+            .await
+            .unwrap();
+        let res = totp_verify(
+            State(state.clone()),
+            Json(TotpVerifyRequest {
+                code: code.clone(),
+                pending_token: first.token.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!res.requires_totp);
+
+        // Fresh login + same code → rejected as a replay.
+        let second = auth_login(State(state.clone()), Json(login()))
+            .await
+            .unwrap();
+        let err = totp_verify(
+            State(state.clone()),
+            Json(TotpVerifyRequest {
+                code,
+                pending_token: second.token.clone(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
     }
 }

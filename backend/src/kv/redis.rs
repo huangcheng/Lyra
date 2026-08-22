@@ -82,9 +82,21 @@ impl KvStore for RedisKv {
         Ok(())
     }
 
-    async fn incr(&self, key: &str, delta: i64) -> Result<i64, KvError> {
+    async fn incr(&self, key: &str, delta: i64, ttl_secs: Option<u64>) -> Result<i64, KvError> {
         let mut conn = self.conn.clone();
-        conn.incr(key, delta).await.map_err(|e| Self::map_err(&e))
+        let next: i64 = conn.incr(key, delta).await.map_err(|e| Self::map_err(&e))?;
+        // Fixed window: set the TTL only when the counter was just created
+        // (INCR on a missing key starts at 0, so next == delta means new key).
+        if next == delta
+            && let Some(secs) = ttl_secs
+        {
+            #[allow(clippy::cast_possible_wrap)]
+            let _: () = conn
+                .expire(key, secs as i64)
+                .await
+                .map_err(|e| Self::map_err(&e))?;
+        }
+        Ok(next)
     }
 }
 
@@ -115,8 +127,8 @@ mod tests {
         assert!(kv.get(&key).await.unwrap().is_none());
 
         let counter = format!("lyra:test:incr:{}", uuid::Uuid::now_v7());
-        assert_eq!(kv.incr(&counter, 1).await.unwrap(), 1);
-        assert_eq!(kv.incr(&counter, 2).await.unwrap(), 3);
+        assert_eq!(kv.incr(&counter, 1, Some(30)).await.unwrap(), 1);
+        assert_eq!(kv.incr(&counter, 2, Some(30)).await.unwrap(), 3);
         kv.del(&counter).await.unwrap();
     }
 }

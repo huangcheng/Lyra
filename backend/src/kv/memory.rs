@@ -25,6 +25,17 @@ impl MemoryKv {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Remaining TTL for a key; `None` if the key is missing, expired, or
+    /// has no TTL. Test-only inspection hook for TTL behavior tests.
+    #[cfg(test)]
+    pub async fn ttl_remaining(&self, key: &str) -> Option<Duration> {
+        let map = self.inner.read().await;
+        let entry = map.get(key)?;
+        entry
+            .expires_at
+            .and_then(|e| e.checked_duration_since(Instant::now()))
+    }
 }
 
 #[async_trait]
@@ -66,30 +77,40 @@ impl KvStore for MemoryKv {
         Ok(())
     }
 
-    async fn incr(&self, key: &str, delta: i64) -> Result<i64, KvError> {
+    async fn incr(&self, key: &str, delta: i64, ttl_secs: Option<u64>) -> Result<i64, KvError> {
         let mut map = self.inner.write().await;
+        // Drop an expired entry first so a fixed window restarts cleanly.
         if let Some(entry) = map.get(key)
             && let Some(expires_at) = entry.expires_at
             && Instant::now() >= expires_at
         {
             map.remove(key);
         }
-        let current = match map.get(key) {
-            Some(entry) => entry
-                .value
+        let existing = map.get(key).map(|e| (e.value.clone(), e.expires_at));
+        if let Some((value, expires_at)) = existing {
+            let current = value
                 .parse::<i64>()
-                .map_err(|e| KvError::Internal(e.to_string()))?,
-            None => 0,
-        };
-        let next = current.saturating_add(delta);
-        map.insert(
-            key.to_string(),
-            Entry {
-                value: next.to_string(),
-                expires_at: None,
-            },
-        );
-        Ok(next)
+                .map_err(|e| KvError::Internal(e.to_string()))?;
+            let next = current.saturating_add(delta);
+            // Keep the existing expiry: the window started at first incr.
+            map.insert(
+                key.to_string(),
+                Entry {
+                    value: next.to_string(),
+                    expires_at,
+                },
+            );
+            Ok(next)
+        } else {
+            map.insert(
+                key.to_string(),
+                Entry {
+                    value: delta.to_string(),
+                    expires_at: ttl_secs.map(|s| Instant::now() + Duration::from_secs(s)),
+                },
+            );
+            Ok(delta)
+        }
     }
 }
 
@@ -133,7 +154,20 @@ mod tests {
     #[tokio::test]
     async fn incr_starts_at_zero() {
         let kv = MemoryKv::new();
-        assert_eq!(kv.incr("n", 1).await.unwrap(), 1);
-        assert_eq!(kv.incr("n", 2).await.unwrap(), 3);
+        assert_eq!(kv.incr("n", 1, None).await.unwrap(), 1);
+        assert_eq!(kv.incr("n", 2, None).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn incr_applies_ttl_only_on_first_create() {
+        let kv = MemoryKv::new();
+        assert_eq!(kv.incr("c", 1, Some(1)).await.unwrap(), 1);
+        let first_ttl = kv.ttl_remaining("c").await.expect("ttl set on create");
+        // A later incr without a TTL must not clear the window.
+        assert_eq!(kv.incr("c", 1, None).await.unwrap(), 2);
+        assert!(kv.ttl_remaining("c").await.is_some_and(|t| t <= first_ttl));
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // Window expired: the counter starts over.
+        assert_eq!(kv.incr("c", 1, Some(60)).await.unwrap(), 1);
     }
 }

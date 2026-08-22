@@ -153,6 +153,9 @@ export const authMachine = setup({
       return {
         token: output.token,
         username: output.user.username,
+        // Drop secrets from context once authentication succeeds.
+        password: '',
+        totpCode: '',
       };
     }),
     setTotpResult: assign(({ event }) => {
@@ -161,6 +164,9 @@ export const authMachine = setup({
       persistToken(output.token);
       return {
         token: output.token,
+        // Drop secrets from context once authentication succeeds.
+        password: '',
+        totpCode: '',
       };
     }),
     setPendingToken: assign(({ event }) => {

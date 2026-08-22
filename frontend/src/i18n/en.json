@@ -109,6 +109,19 @@
     "session": "Session",
     "syncNow": "Sync now",
     "syncQueued": "Sync queued",
+    "security": {
+      "title": "Security",
+      "changePasswordTitle": "Change Password",
+      "currentPassword": "Current password",
+      "newPassword": "New password",
+      "changePassword": "Change password",
+      "changePasswordError": "Failed to change password",
+      "disableTotpTitle": "Two-Factor Authentication",
+      "disableTotpDescription": "Enter your current password to disable two-factor authentication.",
+      "disableTotp": "Disable 2FA",
+      "disableTotpSuccess": "Two-factor authentication disabled",
+      "disableTotpError": "Failed to disable two-factor authentication"
+    },
     "accounts": {
       "title": "Mail Accounts",
       "add": "Add Account",

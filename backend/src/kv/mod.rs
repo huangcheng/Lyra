@@ -29,9 +29,10 @@ pub trait KvStore: Send + Sync {
     async fn set(&self, key: &str, value: &str, ttl_secs: Option<u64>) -> Result<(), KvError>;
     async fn del(&self, key: &str) -> Result<(), KvError>;
     /// Delete all keys with the given prefix (used for epoch session wipe).
-    #[allow(dead_code)]
     async fn del_prefix(&self, prefix: &str) -> Result<(), KvError>;
     /// Atomically increment a counter key (rate limits / OTP attempts).
-    #[allow(dead_code)]
-    async fn incr(&self, key: &str, delta: i64) -> Result<i64, KvError>;
+    ///
+    /// `ttl_secs` applies only when the key is first created, giving the
+    /// counter a fixed window that restarts after expiry.
+    async fn incr(&self, key: &str, delta: i64, ttl_secs: Option<u64>) -> Result<i64, KvError>;
 }

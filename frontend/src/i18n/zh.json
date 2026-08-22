@@ -109,6 +109,19 @@
     "session": "会话",
     "syncNow": "立即同步",
     "syncQueued": "已加入同步队列",
+    "security": {
+      "title": "安全",
+      "changePasswordTitle": "修改密码",
+      "currentPassword": "当前密码",
+      "newPassword": "新密码",
+      "changePassword": "修改密码",
+      "changePasswordError": "修改密码失败",
+      "disableTotpTitle": "两步验证",
+      "disableTotpDescription": "输入当前密码以关闭两步验证。",
+      "disableTotp": "关闭两步验证",
+      "disableTotpSuccess": "两步验证已关闭",
+      "disableTotpError": "关闭两步验证失败"
+    },
     "accounts": {
       "title": "邮箱账户",
       "add": "添加账户",

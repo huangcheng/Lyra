@@ -73,8 +73,24 @@ export function SettingsPage() {
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
+  // Security section state
+  const [totpEnabled, setTotpEnabled] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [securityMessage, setSecurityMessage] = useState<string | null>(null);
+  const [securityError, setSecurityError] = useState<string | null>(null);
+  const [totpPassword, setTotpPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [disablingTotp, setDisablingTotp] = useState(false);
+
   useEffect(() => {
     fetchAccounts();
+    fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((me) => {
+        if (me) setTotpEnabled(Boolean(me.totp_enabled));
+      })
+      .catch(() => {});
   }, []);
 
   async function fetchAccounts() {
@@ -224,6 +240,66 @@ export function SettingsPage() {
     }
   }
 
+  async function handleChangePassword(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      setChangingPassword(true);
+      setSecurityError(null);
+      setSecurityMessage(null);
+      const res = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || t(locale, 'settings.security.changePasswordError'));
+      }
+      // The backend invalidates every session on password change; log out
+      // locally and send the user back to the login page.
+      localStorage.removeItem('lyra_token');
+      clearSession();
+      void navigate({ to: '/login' });
+    } catch (err: any) {
+      setSecurityError(err.message);
+      setChangingPassword(false);
+    }
+  }
+
+  async function handleDisableTotp(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      setDisablingTotp(true);
+      setSecurityError(null);
+      setSecurityMessage(null);
+      const res = await fetch('/api/auth/totp/disable', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ password: totpPassword }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || t(locale, 'settings.security.disableTotpError'));
+      }
+      setTotpEnabled(false);
+      setTotpPassword('');
+      setSecurityMessage(t(locale, 'settings.security.disableTotpSuccess'));
+    } catch (err: any) {
+      setSecurityError(err.message);
+    } finally {
+      setDisablingTotp(false);
+    }
+  }
+
   function handleEdit(account: MailAccount) {
     setEditingAccount(account);
     setFormData({
@@ -296,6 +372,83 @@ export function SettingsPage() {
               {t(locale, 'auth.logout')}
             </Button>
           </div>
+        </section>
+
+        <section className="space-y-4 rounded-lg border p-4">
+          <h2 className="text-base font-semibold">{t(locale, 'settings.security.title')}</h2>
+          {securityError && <div className="error-message">{securityError}</div>}
+          {securityMessage && (
+            <div className="text-sm text-muted-foreground" role="status">
+              {securityMessage}
+            </div>
+          )}
+          <form onSubmit={handleChangePassword} className="space-y-3">
+            <h3 className="text-sm font-medium">
+              {t(locale, 'settings.security.changePasswordTitle')}
+            </h3>
+            <div className="space-y-2">
+              <label className="text-sm" htmlFor="settings-current-password">
+                {t(locale, 'settings.security.currentPassword')}
+              </label>
+              <input
+                id="settings-current-password"
+                type="password"
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                autoComplete="current-password"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm" htmlFor="settings-new-password">
+                {t(locale, 'settings.security.newPassword')}
+              </label>
+              <input
+                id="settings-new-password"
+                type="password"
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                autoComplete="new-password"
+                required
+              />
+            </div>
+            <Button type="submit" variant="outline" size="sm" disabled={changingPassword}>
+              {changingPassword
+                ? t(locale, 'common.loading')
+                : t(locale, 'settings.security.changePassword')}
+            </Button>
+          </form>
+          {totpEnabled && (
+            <form onSubmit={handleDisableTotp} className="space-y-3 border-t pt-4">
+              <h3 className="text-sm font-medium">
+                {t(locale, 'settings.security.disableTotpTitle')}
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                {t(locale, 'settings.security.disableTotpDescription')}
+              </p>
+              <div className="space-y-2">
+                <label className="text-sm" htmlFor="settings-totp-password">
+                  {t(locale, 'auth.password')}
+                </label>
+                <input
+                  id="settings-totp-password"
+                  type="password"
+                  className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                  value={totpPassword}
+                  onChange={(e) => setTotpPassword(e.target.value)}
+                  autoComplete="current-password"
+                  required
+                />
+              </div>
+              <Button type="submit" variant="outline" size="sm" disabled={disablingTotp}>
+                {disablingTotp
+                  ? t(locale, 'common.loading')
+                  : t(locale, 'settings.security.disableTotp')}
+              </Button>
+            </form>
+          )}
         </section>
 
         <section className="space-y-4">
