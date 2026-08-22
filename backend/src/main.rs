@@ -10,6 +10,7 @@
 
 #[macro_use]
 mod db_sql;
+mod db_row;
 mod accounts;
 mod auth;
 mod config;

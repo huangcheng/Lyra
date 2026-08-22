@@ -21,6 +21,9 @@ use uuid::Uuid;
 
 use crate::auth::{AuthState, AuthUser};
 use crate::crypto;
+use crate::db_row::{
+    InvalidIdError, id_from_row, id_param, opt_ts_from_row, ts_from_row,
+};
 
 /// Routes for account management.
 pub fn routes() -> Router<AuthState> {
@@ -128,6 +131,12 @@ pub enum AccountError {
     InvalidInput(String),
 }
 
+impl From<InvalidIdError> for AccountError {
+    fn from(_: InvalidIdError) -> Self {
+        Self::NotFound
+    }
+}
+
 impl IntoResponse for AccountError {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match self {
@@ -147,7 +156,7 @@ impl IntoResponse for AccountError {
 macro_rules! account_from_row {
     ($row:expr) => {{
         Account {
-            id: $row.get("id"),
+            id: id_from_row(&$row, "id"),
             display_name: $row
                 .get::<Option<String>, _>("display_name")
                 .unwrap_or_default(),
@@ -163,9 +172,9 @@ macro_rules! account_from_row {
             caldav_url: $row.get("caldav_url"),
             is_active: $row.get::<bool, _>("is_active"),
             sync_enabled: $row.get::<bool, _>("sync_enabled"),
-            last_sync_at: $row.get("last_sync_at"),
-            created_at: $row.get("created_at"),
-            updated_at: $row.get("updated_at"),
+            last_sync_at: opt_ts_from_row(&$row, "last_sync_at"),
+            created_at: ts_from_row(&$row, "created_at"),
+            updated_at: ts_from_row(&$row, "updated_at"),
         }
     }};
 }
@@ -186,6 +195,7 @@ async fn list_accounts(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<Account>>, AccountError> {
     let db = state.db();
+    let user_id = id_param(db, &user_id)?;
     let sql = format!(
         "{ACCOUNT_SELECT}        WHERE user_id = ?\n        ORDER BY created_at DESC\n        "
     );
@@ -200,6 +210,8 @@ async fn get_account(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Account>, AccountError> {
     let db = state.db();
+    let id = id_param(db, &id)?;
+    let user_id = id_param(db, &user_id)?;
     let sql = format!("{ACCOUNT_SELECT}        WHERE id = ? AND user_id = ?\n        ");
     let account = db_fetch_optional!(db, &sql, |row| account_from_row!(&row), &id, &user_id)?
         .ok_or(AccountError::NotFound)?;
@@ -250,6 +262,8 @@ async fn create_account(
     };
     let send_protocol = "smtp".to_string();
     let auth_type = body.auth_type.unwrap_or_else(|| "password".into());
+    let id_bind = id_param(db, &id)?;
+    let user_bind = id_param(db, &user_id)?;
 
     db_execute!(
         db,
@@ -261,8 +275,8 @@ async fn create_account(
             receive_protocol, send_protocol
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
-        &id,
-        &user_id,
+        &id_bind,
+        &user_bind,
         &body.display_name,
         &body.email_address,
         &protocol,
@@ -328,13 +342,15 @@ async fn update_account(
 ) -> Result<Json<Account>, AccountError> {
     let db = state.db();
 
+    let id_bind = id_param(db, &id)?;
+    let user_bind = id_param(db, &user_id)?;
+
     // Verify account exists and belongs to user
-    let existing: Option<String> = db_scalar_optional!(
+    let existing: Option<String> = db_id_optional!(
         db,
-        String,
         "SELECT id FROM mail_account WHERE id = ? AND user_id = ?",
-        &id,
-        &user_id
+        &id_bind,
+        &user_bind
     )?;
     if existing.is_none() {
         return Err(AccountError::NotFound);
@@ -424,8 +440,8 @@ async fn update_account(
         body.smtp_host.as_ref(),
         body.smtp_port,
         smtp_security.as_ref(),
-        &id,
-        &user_id
+        &id_bind,
+        &user_bind
     )?;
 
     let select_sql = format!("{ACCOUNT_SELECT}        WHERE id = ? AND user_id = ?\n        ");
@@ -433,8 +449,8 @@ async fn update_account(
         db,
         &select_sql,
         |row| account_from_row!(&row),
-        &id,
-        &user_id
+        &id_bind,
+        &user_bind
     )?;
     Ok(Json(account))
 }
@@ -447,6 +463,8 @@ async fn delete_account(
 ) -> Result<StatusCode, AccountError> {
     let db = state.db();
 
+    let id = id_param(db, &id)?;
+    let user_id = id_param(db, &user_id)?;
     let affected = db_execute!(
         db,
         "DELETE FROM mail_account WHERE id = ? AND user_id = ?",

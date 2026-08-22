@@ -4,6 +4,20 @@
 //! `IFNULL`, `ON CONFLICT(`). The Postgres arm runs [`to_postgres`] on that
 //! string. This is not an ORM — just placeholder / function rewriting.
 
+/// JSONB columns that must be cast to `text` before `COALESCE(..., '')` or `ILIKE`.
+const JSONB_TEXT_COLS: &[&str] = &[
+    "from_address",
+    "to_addresses",
+    "cc_addresses",
+    "bcc_addresses",
+    "reply_to",
+    "flags",
+    "labels",
+    "email_addresses",
+    "phone_numbers",
+    "participants",
+];
+
 /// Integer-flag columns that SQLite stores as 0/1 and Postgres stores as BOOLEAN.
 const SQLITE_BOOL_FLAGS: &[&str] = &[
     "is_active",
@@ -34,8 +48,10 @@ pub fn to_postgres(sql: &str) -> String {
     let sql = sql.replace("IFNULL(", "COALESCE(");
     let sql = sql.replace("ifnull(", "COALESCE(");
     let sql = sql.replace("ON CONFLICT(", "ON CONFLICT (");
+    let sql = sql.replace("AS TIMESTAMP)", "AS TIMESTAMPTZ)");
     let sql = rewrite_bool_flag_literals(&sql);
     let sql = rewrite_like_to_ilike(&sql);
+    let sql = rewrite_jsonb_text_casts(&sql);
 
     let mut out = String::with_capacity(sql.len() + 8);
     let mut chars = sql.chars().peekable();
@@ -175,6 +191,87 @@ fn rewrite_like_to_ilike(sql: &str) -> String {
         i += 1;
     }
     out
+}
+
+fn rewrite_jsonb_text_casts(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len() + 16);
+    let mut i = 0;
+    let mut in_single = false;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            out.push('\'');
+            if in_single {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            } else {
+                in_single = true;
+            }
+            i += 1;
+            continue;
+        }
+        if !in_single && let Some(consumed) = match_jsonb_text_cast(sql, i) {
+            let ident = &sql[i..i + consumed];
+            out.push_str(ident);
+            if !ident.ends_with("::text") {
+                out.push_str("::text");
+            }
+            i += consumed;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn match_jsonb_text_cast(sql: &str, i: usize) -> Option<usize> {
+    if i > 0 {
+        let prev = sql.as_bytes()[i - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return None;
+        }
+    }
+    let rest = sql.get(i..)?;
+    let ident_end = rest
+        .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '.')
+        .unwrap_or(rest.len());
+    if ident_end == 0 {
+        return None;
+    }
+    let ident = &rest[..ident_end];
+    if ident.ends_with("::text") {
+        return None;
+    }
+    let col = ident.rsplit('.').next()?;
+    if !JSONB_TEXT_COLS.contains(&col) {
+        return None;
+    }
+    let after = rest.get(ident_end..)?.trim_start();
+    let needs_text = after.starts_with(", ''")
+        || after.starts_with(",''")
+        || after.starts_with(", \"\"")
+        || ilike_or_like_keyword(after);
+    if needs_text {
+        Some(ident_end)
+    } else {
+        None
+    }
+}
+
+fn ilike_or_like_keyword(sql: &str) -> bool {
+    if sql.len() >= 5 && sql[..5].eq_ignore_ascii_case("ilike") {
+        return sql.len() == 5 || {
+            let next = sql.as_bytes()[5];
+            !next.is_ascii_alphanumeric() && next != b'_'
+        };
+    }
+    like_keyword_at(sql, 0)
 }
 
 fn like_keyword_at(sql: &str, i: usize) -> bool {
@@ -343,6 +440,30 @@ macro_rules! db_scalar {
     }};
 }
 
+/// `query_scalar` for a UUID `id` column: `String` on SQLite, `Uuid` → String on Postgres.
+#[macro_export]
+macro_rules! db_id_optional {
+    ($db:expr, $sql:expr $(, $bind:expr)* $(,)?) => {{
+        match $db {
+            $crate::storage::DbPool::Sqlite(pool) => {
+                sqlx::query_scalar::<_, String>($sql)
+                    $(.bind($bind))*
+                    .fetch_optional(pool)
+                    .await
+            }
+            #[cfg(feature = "postgres")]
+            $crate::storage::DbPool::Postgres(pool) => {
+                let __sql = $crate::db_sql::to_postgres($sql);
+                sqlx::query_scalar::<_, ::uuid::Uuid>(&__sql)
+                    $(.bind($bind))*
+                    .fetch_optional(pool)
+                    .await
+                    .map(|opt| opt.map(|u| u.to_string()))
+            }
+        }
+    }};
+}
+
 /// Bind a slice of values onto a SQLite or Postgres query.
 #[macro_export]
 macro_rules! db_execute_binds {
@@ -444,6 +565,35 @@ mod tests {
         assert_eq!(
             to_postgres("SELECT id FROM t WHERE name ILIKE ?"),
             "SELECT id FROM t WHERE name ILIKE $1"
+        );
+    }
+
+    #[test]
+    fn casts_jsonb_coalesce_and_ilike_to_text() {
+        assert_eq!(
+            to_postgres(
+                "SELECT id FROM message m WHERE IFNULL(m.from_address, '') LIKE ?"
+            ),
+            "SELECT id FROM message m WHERE COALESCE(m.from_address::text, '') ILIKE $1"
+        );
+        assert_eq!(
+            to_postgres(
+                "SELECT id FROM contact c WHERE c.display_name LIKE ? OR c.email_addresses LIKE ?"
+            ),
+            "SELECT id FROM contact c WHERE c.display_name ILIKE $1 OR c.email_addresses::text ILIKE $2"
+        );
+        // SELECT list must stay native JSONB so the decode seam can run.
+        assert_eq!(
+            to_postgres("SELECT m.from_address, m.to_addresses FROM message m"),
+            "SELECT m.from_address, m.to_addresses FROM message m"
+        );
+    }
+
+    #[test]
+    fn rewrites_timestamp_cast_to_timestamptz() {
+        assert_eq!(
+            to_postgres("UPDATE t SET snoozed_until = CAST(? AS TIMESTAMP) WHERE id = ?"),
+            "UPDATE t SET snoozed_until = CAST($1 AS TIMESTAMPTZ) WHERE id = $2"
         );
     }
 }

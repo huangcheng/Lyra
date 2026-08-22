@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::auth::{AuthState, AuthUser};
+use crate::db_row::{
+    InvalidIdError, id_from_row, id_param, json_text_from_row, opt_id_from_row, opt_json_param,
+    opt_ts_from_row, opt_ts_param, ts_from_row,
+};
 
 /// Routes for PIM endpoints.
 pub fn routes() -> Router<AuthState> {
@@ -126,6 +130,12 @@ pub enum PimError {
     Unauthorized,
 }
 
+impl From<InvalidIdError> for PimError {
+    fn from(_: InvalidIdError) -> Self {
+        Self::NotFound
+    }
+}
+
 impl IntoResponse for PimError {
     fn into_response(self) -> axum::response::Response {
         // Internal variants may carry SQL detail or upstream error text: log
@@ -149,18 +159,18 @@ impl IntoResponse for PimError {
 
 macro_rules! contact_from_row {
     ($row:expr) => {{
-        let emails: Option<String> = $row.get("email_addresses");
-        let phones: Option<String> = $row.get("phone_numbers");
+        let emails = json_text_from_row(&$row, "email_addresses");
+        let phones = json_text_from_row(&$row, "phone_numbers");
         Contact {
-            id: $row.get("id"),
-            account_id: $row.get("account_id"),
+            id: id_from_row(&$row, "id"),
+            account_id: id_from_row(&$row, "account_id"),
             display_name: $row.get("display_name"),
             email_addresses: parse_json_array(emails.as_deref()),
             phone_numbers: parse_json_array(phones.as_deref()),
             organisation: $row.get("organisation"),
             photo_path: $row.get("photo_path"),
-            created_at: $row.get("created_at"),
-            updated_at: $row.get("updated_at"),
+            created_at: ts_from_row(&$row, "created_at"),
+            updated_at: ts_from_row(&$row, "updated_at"),
         }
     }};
 }
@@ -168,15 +178,15 @@ macro_rules! contact_from_row {
 macro_rules! calendar_from_row {
     ($row:expr) => {{
         Calendar {
-            id: $row.get("id"),
-            account_id: $row.get("account_id"),
+            id: id_from_row(&$row, "id"),
+            account_id: id_from_row(&$row, "account_id"),
             name: $row.get("name"),
             color: $row.get("color"),
             description: $row.get("description"),
             timezone: $row.get("timezone"),
             is_active: $row.get::<bool, _>("is_active"),
-            created_at: $row.get("created_at"),
-            updated_at: $row.get("updated_at"),
+            created_at: ts_from_row(&$row, "created_at"),
+            updated_at: ts_from_row(&$row, "updated_at"),
         }
     }};
 }
@@ -184,18 +194,18 @@ macro_rules! calendar_from_row {
 macro_rules! event_from_row {
     ($row:expr) => {{
         CalendarEvent {
-            id: $row.get("id"),
-            calendar_id: $row.get("calendar_id"),
+            id: id_from_row(&$row, "id"),
+            calendar_id: opt_id_from_row(&$row, "calendar_id"),
             summary: $row.get("summary"),
             description: $row.get("description"),
-            dtstart: $row.get("dtstart"),
-            dtend: $row.get("dtend"),
+            dtstart: opt_ts_from_row(&$row, "dtstart"),
+            dtend: opt_ts_from_row(&$row, "dtend"),
             location: $row.get("location"),
             is_all_day: $row.get::<bool, _>("is_all_day"),
             status: $row.get("status"),
             recurrence_rule: $row.get("recurrence_rule"),
-            created_at: $row.get("created_at"),
-            updated_at: $row.get("updated_at"),
+            created_at: ts_from_row(&$row, "created_at"),
+            updated_at: ts_from_row(&$row, "updated_at"),
         }
     }};
 }
@@ -209,8 +219,10 @@ async fn list_contacts(
     let db = state.db();
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
+    let user_bind = id_param(db, &user_id)?;
 
     let contacts = if let Some(account_id) = &query.account_id {
+        let account_bind = id_param(db, account_id)?;
         db_fetch_all!(
             db,
             r"
@@ -224,8 +236,8 @@ async fn list_contacts(
             LIMIT ? OFFSET ?
             ",
             |row| contact_from_row!(row),
-            &user_id,
-            account_id,
+            &user_bind,
+            &account_bind,
             limit,
             offset
         )?
@@ -244,7 +256,7 @@ async fn list_contacts(
             LIMIT ? OFFSET ?
             ",
             |row| contact_from_row!(row),
-            &user_id,
+            &user_bind,
             &pattern,
             &pattern,
             limit,
@@ -264,7 +276,7 @@ async fn list_contacts(
             LIMIT ? OFFSET ?
             ",
             |row| contact_from_row!(row),
-            &user_id,
+            &user_bind,
             limit,
             offset
         )?
@@ -280,6 +292,8 @@ async fn get_contact(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Contact>, PimError> {
     let db = state.db();
+    let id = id_param(db, &id)?;
+    let user_id = id_param(db, &user_id)?;
     let contact = db_fetch_optional!(
         db,
         r"
@@ -305,8 +319,10 @@ async fn list_calendars(
     Query(query): Query<ListCalendarsQuery>,
 ) -> Result<Json<Vec<Calendar>>, PimError> {
     let db = state.db();
+    let user_bind = id_param(db, &user_id)?;
 
     let calendars = if let Some(account_id) = &query.account_id {
+        let account_bind = id_param(db, account_id)?;
         db_fetch_all!(
             db,
             r"
@@ -319,8 +335,8 @@ async fn list_calendars(
             ORDER BY cal.name
             ",
             |row| calendar_from_row!(row),
-            &user_id,
-            account_id
+            &user_bind,
+            &account_bind
         )?
     } else {
         db_fetch_all!(
@@ -335,7 +351,7 @@ async fn list_calendars(
             ORDER BY cal.name
             ",
             |row| calendar_from_row!(row),
-            &user_id
+            &user_bind
         )?
     };
 
@@ -349,6 +365,8 @@ async fn get_calendar(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Calendar>, PimError> {
     let db = state.db();
+    let id = id_param(db, &id)?;
+    let user_id = id_param(db, &user_id)?;
     let calendar = db_fetch_optional!(
         db,
         r"
@@ -375,24 +393,27 @@ async fn list_events(
     Query(query): Query<ListEventsQuery>,
 ) -> Result<Json<Vec<CalendarEvent>>, PimError> {
     let db = state.db();
+    let calendar_bind = id_param(db, &calendar_id)?;
+    let user_bind = id_param(db, &user_id)?;
 
     // Verify calendar belongs to user
-    let calendar: Option<String> = db_scalar_optional!(
+    let calendar: Option<String> = db_id_optional!(
         db,
-        String,
         r"
         SELECT cal.id
         FROM calendar cal
         JOIN mail_account a ON cal.account_id = a.id
         WHERE cal.id = ? AND a.user_id = ?
         ",
-        &calendar_id,
-        &user_id
+        &calendar_bind,
+        &user_bind
     )?;
     if calendar.is_none() {
         return Err(PimError::NotFound);
     }
 
+    let start = opt_ts_param(db, query.start.as_deref());
+    let end = opt_ts_param(db, query.end.as_deref());
     let events = if query.start.is_some() || query.end.is_some() {
         db_fetch_all!(
             db,
@@ -407,11 +428,11 @@ async fn list_events(
             ORDER BY dtstart
             ",
             |row| event_from_row!(row),
-            &calendar_id,
-            &query.start,
-            &query.start,
-            &query.end,
-            &query.end
+            &calendar_bind,
+            &start,
+            &start,
+            &end,
+            &end
         )?
     } else {
         db_fetch_all!(
@@ -425,7 +446,7 @@ async fn list_events(
             ORDER BY dtstart
             ",
             |row| event_from_row!(row),
-            &calendar_id
+            &calendar_bind
         )?
     };
 
@@ -439,6 +460,8 @@ async fn get_event(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<CalendarEvent>, PimError> {
     let db = state.db();
+    let id = id_param(db, &id)?;
+    let user_id = id_param(db, &user_id)?;
     let event = db_fetch_optional!(
         db,
         r"
@@ -466,6 +489,8 @@ async fn sync_contacts(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, PimError> {
     let db = state.db();
+    let account_bind = id_param(db, &account_id)?;
+    let user_bind = id_param(db, &user_id)?;
 
     let row = db_fetch_optional!(
         db,
@@ -480,8 +505,8 @@ async fn sync_contacts(
             let credential_json: String = row.get("credential");
             (carddav_url, email, credential_json)
         },
-        &account_id,
-        &user_id
+        &account_bind,
+        &user_bind
     )?
     .ok_or(PimError::AccountNotFound)?;
 
@@ -520,11 +545,10 @@ async fn sync_contacts(
         let phones_json = serde_json::to_string(&phones).unwrap_or_else(|_| "[]".into());
         let external_id = href.clone();
 
-        let existing: Option<String> = db_scalar_optional!(
+        let existing: Option<String> = db_id_optional!(
             db,
-            String,
             "SELECT id FROM contact WHERE account_id = ? AND external_id = ?",
-            &account_id,
+            &account_bind,
             &external_id
         )?;
 
@@ -540,11 +564,11 @@ async fn sync_contacts(
                 ",
                 &vcard,
                 &display_name,
-                &emails_json,
-                &phones_json,
+                opt_json_param(db, Some(emails_json.as_str())),
+                opt_json_param(db, Some(phones_json.as_str())),
                 &org,
                 &base_url,
-                &id
+                &id_param(db, &id)?
             )?;
         } else {
             let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
@@ -556,13 +580,13 @@ async fn sync_contacts(
                   email_addresses, phone_numbers, organisation, addressbook_url
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ",
-                &id,
-                &account_id,
+                &id_param(db, &id)?,
+                &account_bind,
                 &external_id,
                 &vcard,
                 &display_name,
-                &emails_json,
-                &phones_json,
+                opt_json_param(db, Some(emails_json.as_str())),
+                opt_json_param(db, Some(phones_json.as_str())),
                 &org,
                 &base_url
             )?;
@@ -584,6 +608,8 @@ async fn sync_calendars(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, PimError> {
     let db = state.db();
+    let account_bind = id_param(db, &account_id)?;
+    let user_bind = id_param(db, &user_id)?;
 
     let row = db_fetch_optional!(
         db,
@@ -598,8 +624,8 @@ async fn sync_calendars(
             let credential_json: String = row.get("credential");
             (caldav_url, email, credential_json)
         },
-        &account_id,
-        &user_id
+        &account_bind,
+        &user_bind
     )?
     .ok_or(PimError::AccountNotFound)?;
 
@@ -626,11 +652,10 @@ async fn sync_calendars(
 
     // Ensure a local calendar row exists for this URL.
     let calendar_id: String = {
-        let existing: Option<String> = db_scalar_optional!(
+        let existing: Option<String> = db_id_optional!(
             db,
-            String,
             "SELECT id FROM calendar WHERE account_id = ? AND calendar_url = ?",
-            &account_id,
+            &account_bind,
             &base_url
         )?;
         if let Some(id) = existing {
@@ -643,8 +668,8 @@ async fn sync_calendars(
                 INSERT INTO calendar (id, account_id, name, calendar_url, is_active)
                 VALUES (?, ?, ?, ?, ?)
                 ",
-                &id,
-                &account_id,
+                &id_param(db, &id)?,
+                &account_bind,
                 "Calendar",
                 &base_url,
                 true
@@ -676,11 +701,10 @@ async fn sync_calendars(
             crate::dav::parse_vevent_fields(&ical);
         let external_id = href.clone();
 
-        let existing: Option<String> = db_scalar_optional!(
+        let existing: Option<String> = db_id_optional!(
             db,
-            String,
             "SELECT id FROM calendar_event WHERE account_id = ? AND external_id = ?",
-            &account_id,
+            &account_bind,
             &external_id
         )?;
 
@@ -694,16 +718,16 @@ async fn sync_calendars(
                   calendar_url = ?, updated_at = datetime('now')
                 WHERE id = ?
                 ",
-                &calendar_id,
+                &id_param(db, &calendar_id)?,
                 &ical,
                 &summary,
                 &description,
-                &dtstart,
-                &dtend,
+                opt_ts_param(db, dtstart.as_deref()),
+                opt_ts_param(db, dtend.as_deref()),
                 &location,
                 is_all_day,
                 &base_url,
-                &id
+                &id_param(db, &id)?
             )?;
         } else {
             let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
@@ -715,15 +739,15 @@ async fn sync_calendars(
                   summary, description, dtstart, dtend, location, is_all_day, calendar_url
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ",
-                &id,
-                &account_id,
-                &calendar_id,
+                &id_param(db, &id)?,
+                &account_bind,
+                &id_param(db, &calendar_id)?,
                 &external_id,
                 &ical,
                 &summary,
                 &description,
-                &dtstart,
-                &dtend,
+                opt_ts_param(db, dtstart.as_deref()),
+                opt_ts_param(db, dtend.as_deref()),
                 &location,
                 is_all_day,
                 &base_url

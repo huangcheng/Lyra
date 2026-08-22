@@ -20,6 +20,10 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::auth::{AuthState, AuthUser};
+use crate::db_row::{
+    InvalidIdError, TsParam, id_from_row, id_param, json_text_from_row, opt_id_param,
+    opt_json_param, opt_ts_from_row, opt_ts_param,
+};
 use crate::imap::{ImapClient, ImapConfig, ImapError, ImapMessage, ImapSecurity};
 use crate::jmap::{JmapClient, JmapError};
 use crate::kernel::App;
@@ -86,6 +90,12 @@ pub enum SyncError {
     InvalidInput(String),
     #[error("protocol error: {0}")]
     Protocol(String),
+}
+
+impl From<InvalidIdError> for SyncError {
+    fn from(_: InvalidIdError) -> Self {
+        Self::InvalidInput("invalid id".into())
+    }
 }
 
 impl IntoResponse for SyncError {
@@ -183,12 +193,13 @@ async fn sync_status(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<SyncStatus>, SyncError> {
     let db = state.db();
+    let user_bind = id_param(db, &user_id)?;
 
     let count: i64 = db_scalar!(
         db,
         i64,
         "SELECT COUNT(*) FROM mail_account WHERE user_id = ? AND is_active = ? AND sync_enabled = ?",
-        &user_id,
+        &user_bind,
         true,
         true
     )?;
@@ -235,13 +246,14 @@ async fn trigger_sync(
     AuthUser(user_id): AuthUser,
 ) -> Result<(StatusCode, Json<EnqueuedSync>), SyncError> {
     let db = state.db();
+    let account_bind = id_param(db, &account_id)?;
+    let user_bind = id_param(db, &user_id)?;
 
-    let exists: Option<String> = db_scalar_optional!(
+    let exists: Option<String> = db_id_optional!(
         db,
-        String,
         "SELECT id FROM mail_account WHERE id = ? AND user_id = ?",
-        &account_id,
-        &user_id
+        &account_bind,
+        &user_bind
     )?;
     if exists.is_none() {
         return Err(SyncError::AccountNotFound);
@@ -290,6 +302,8 @@ async fn send_message(
     Json(body): Json<SendMessageRequest>,
 ) -> Result<Json<SendMessageResponse>, SyncError> {
     let db = state.db();
+    let account_bind = id_param(db, &body.account_id)?;
+    let user_bind = id_param(db, &user_id)?;
 
     let row = db_fetch_optional!(
         db,
@@ -304,8 +318,8 @@ async fn send_message(
             let email_address: String = row.get("email_address");
             (is_active, send_protocol, email_address)
         },
-        &body.account_id,
-        &user_id
+        &account_bind,
+        &user_bind
     )?
     .ok_or(SyncError::AccountNotFound)?;
 
@@ -404,7 +418,7 @@ pub(crate) async fn prepare_smtp_send(
             let smtp_security: Option<String> = row.get("smtp_security");
             let credential_json: String = row.get("credential");
             let email_address: String = row.get("email_address");
-            let user_id: String = row.get("user_id");
+            let user_id = id_from_row(&row, "user_id");
             (
                 is_active,
                 smtp_host,
@@ -415,7 +429,7 @@ pub(crate) async fn prepare_smtp_send(
                 user_id,
             )
         },
-        account_id
+        &id_param(db, account_id)?
     )?
     .ok_or(SyncError::AccountNotFound)?;
 
@@ -565,14 +579,14 @@ pub struct MessageResponse {
 macro_rules! message_response_from_sql {
     ($row:expr) => {{
         MessageResponse {
-            id: $row.get("id"),
-            account_id: $row.get("account_id"),
-            folder_id: $row.get("folder_id"),
+            id: id_from_row(&$row, "id"),
+            account_id: id_from_row(&$row, "account_id"),
+            folder_id: id_from_row(&$row, "folder_id"),
             subject: $row.get("subject"),
-            from_address: $row.get("from_address"),
-            to_addresses: $row.get("to_addresses"),
-            cc_addresses: $row.get("cc_addresses"),
-            date: $row.get("date"),
+            from_address: json_text_from_row(&$row, "from_address"),
+            to_addresses: json_text_from_row(&$row, "to_addresses"),
+            cc_addresses: json_text_from_row(&$row, "cc_addresses"),
+            date: opt_ts_from_row(&$row, "date"),
             snippet: $row.get("snippet"),
             body_text: $row.get("body_text"),
             body_html: $row.get("body_html"),
@@ -589,6 +603,7 @@ async fn list_folders(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<FolderResponse>>, SyncError> {
     let db = state.db();
+    let user_bind = id_param(db, &user_id)?;
 
     let folders = db_fetch_all!(
         db,
@@ -601,15 +616,15 @@ async fn list_folders(
         ORDER BY f.sort_order, f.name
         ",
         |row| FolderResponse {
-            id: row.get("id"),
-            account_id: row.get("account_id"),
+            id: id_from_row(row, "id"),
+            account_id: id_from_row(row, "account_id"),
             name: row.get("name"),
             role: row.get("role"),
             sort_order: row.get("sort_order"),
             total_messages: row.get("total_messages"),
             unread_messages: row.get("unread_messages"),
         },
-        &user_id
+        &user_bind
     )?;
 
     Ok(Json(folders))
@@ -622,18 +637,19 @@ async fn list_messages(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<MessageResponse>>, SyncError> {
     let db = state.db();
+    let folder_bind = id_param(db, &folder_id)?;
+    let user_bind = id_param(db, &user_id)?;
 
     // Verify folder belongs to the user
-    let check: Option<String> = db_scalar_optional!(
+    let check: Option<String> = db_id_optional!(
         db,
-        String,
         r"
         SELECT f.id FROM folder f
         JOIN mail_account a ON f.account_id = a.id
         WHERE f.id = ? AND a.user_id = ?
         ",
-        &folder_id,
-        &user_id
+        &folder_bind,
+        &user_bind
     )?;
     if check.is_none() {
         return Err(SyncError::AccountNotFound);
@@ -652,7 +668,7 @@ async fn list_messages(
         LIMIT 500
         ",
         |row| message_response_from_sql!(row),
-        &folder_id,
+        &folder_bind,
         false
     )?;
 
@@ -691,6 +707,8 @@ async fn query_user_messages(
     role: Option<&str>,
     account_id: Option<&str>,
 ) -> Result<Vec<MessageResponse>, SyncError> {
+    let user_bind = id_param(db, user_id)?;
+    let account_bind = opt_id_param(db, account_id)?;
     db_fetch_all!(
         db,
         r"
@@ -709,12 +727,12 @@ async fn query_user_messages(
         LIMIT 500
         ",
         |row| message_response_from_sql!(row),
-        user_id,
+        &user_bind,
         false,
         role,
         role,
-        account_id,
-        account_id
+        &account_bind,
+        &account_bind
     )
     .map_err(SyncError::from)
 }
@@ -749,6 +767,9 @@ async fn search_messages(
 
     let pattern = format!("%{q}%");
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let user_bind = id_param(db, &user_id)?;
+    let account_bind = opt_id_param(db, query.account_id.as_deref())?;
+    let folder_bind = opt_id_param(db, query.folder_id.as_deref())?;
 
     let messages = db_fetch_all!(
         db,
@@ -772,12 +793,12 @@ async fn search_messages(
         LIMIT ?
         ",
         |row| message_response_from_sql!(row),
-        &user_id,
+        &user_bind,
         false,
-        &query.account_id,
-        &query.account_id,
-        &query.folder_id,
-        &query.folder_id,
+        &account_bind,
+        &account_bind,
+        &folder_bind,
+        &folder_bind,
         &pattern,
         &pattern,
         &pattern,
@@ -817,14 +838,14 @@ async fn list_attachments(
         ORDER BY created_at ASC
         ",
         |row| AttachmentResponse {
-            id: row.get("id"),
-            message_id: row.get("message_id"),
+            id: id_from_row(row, "id"),
+            message_id: id_from_row(row, "message_id"),
             filename: row.get("filename"),
             content_type: row.get("content_type"),
             size_bytes: row.get("size_bytes"),
             is_inline: row.get("is_inline"),
         },
-        &message_id
+        &id_param(db, &message_id)?
     )?;
 
     Ok(Json(rows))
@@ -852,8 +873,8 @@ async fn download_attachment(
             let content_type: Option<String> = row.get("content_type");
             (storage_path, filename, content_type)
         },
-        &attachment_id,
-        &user_id
+        &id_param(db, &attachment_id)?,
+        &id_param(db, &user_id)?
     )?
     .ok_or(SyncError::MessageNotFound)?;
 
@@ -891,12 +912,13 @@ async fn persist_attachments(
     if attachments.is_empty() {
         return Ok(());
     }
+    let message_bind = id_param(db, message_id)?;
 
     // Replace prior attachment rows for this message (re-fetch).
     db_execute!(
         db,
         "DELETE FROM attachment WHERE message_id = ?",
-        message_id
+        &message_bind
     )?;
 
     let dir = data_dir.join("attachments").join(message_id);
@@ -920,8 +942,8 @@ async fn persist_attachments(
                 storage_path, content_id, is_inline
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ",
-            &id,
-            message_id,
+            &id_param(db, &id)?,
+            &message_bind,
             &att.filename,
             &att.content_type,
             size,
@@ -935,7 +957,7 @@ async fn persist_attachments(
         db,
         "UPDATE message SET has_attachments = ?, updated_at = datetime('now') WHERE id = ?",
         true,
-        message_id
+        &message_bind
     )?;
 
     Ok(())
@@ -1009,9 +1031,9 @@ async fn load_message_row(
         WHERE m.id = ? AND a.user_id = ? AND m.is_deleted = ?
         ",
         |row| MessageRow {
-            id: row.get("id"),
-            account_id: row.get("account_id"),
-            folder_id: row.get("folder_id"),
+            id: id_from_row(&row, "id"),
+            account_id: id_from_row(&row, "account_id"),
+            folder_id: id_from_row(&row, "folder_id"),
             folder_name: row.get("folder_name"),
             external_id: row.get("external_id"),
             protocol: row.get("protocol"),
@@ -1020,15 +1042,15 @@ async fn load_message_row(
             is_read: row.get("is_read"),
             is_starred: row.get("is_starred"),
             subject: row.get("subject"),
-            from_address: row.get("from_address"),
-            to_addresses: row.get("to_addresses"),
-            cc_addresses: row.get("cc_addresses"),
-            date: row.get("date"),
+            from_address: json_text_from_row(&row, "from_address"),
+            to_addresses: json_text_from_row(&row, "to_addresses"),
+            cc_addresses: json_text_from_row(&row, "cc_addresses"),
+            date: opt_ts_from_row(&row, "date"),
             snippet: row.get("snippet"),
             has_attachments: row.get("has_attachments"),
         },
-        message_id,
-        user_id,
+        &id_param(db, message_id)?,
+        &id_param(db, user_id)?,
         false
     )?
     .ok_or(SyncError::MessageNotFound)
@@ -1062,8 +1084,8 @@ async fn connect_imap_for_account(
                 credential_json,
             )
         },
-        account_id,
-        user_id,
+        &id_param(db, account_id)?,
+        &id_param(db, user_id)?,
         true
     )?
     .ok_or(SyncError::AccountNotFound)?;
@@ -1146,7 +1168,7 @@ async fn get_message(
                     .body_text
                     .as_deref()
                     .map(|t| t.chars().take(120).collect::<String>()),
-                &row.id
+                &id_param(db, &row.id)?
             )?;
 
             row.body_text = fetched.body_text;
@@ -1208,7 +1230,7 @@ async fn patch_message(
         ",
         next_read,
         next_star,
-        &row.id
+        &id_param(db, &row.id)?
     )?;
 
     row.is_read = next_read;
@@ -1249,6 +1271,7 @@ struct SnoozeRequest {
 /// Inbox/folder filters compare `snoozed_until <= datetime('now')`. RFC3339 with a `T`
 /// separator sorts after the same wall time with a space, so same-day overdue rows would
 /// stay hidden if we stored client RFC3339 literally.
+#[cfg_attr(not(test), allow(dead_code))]
 fn sqlite_utc_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
@@ -1266,7 +1289,7 @@ async fn snooze_message(
         .map_err(|_| SyncError::InvalidInput("until must be RFC3339".into()))?
         .to_utc();
     let until_api = until_utc.to_rfc3339();
-    let until_sql = sqlite_utc_datetime(until_utc);
+    let until_sql = TsParam::from_utc(db, until_utc);
 
     db_execute!(
         db,
@@ -1276,7 +1299,7 @@ async fn snooze_message(
         WHERE id = ?
         ",
         &until_sql,
-        &row.id
+        &id_param(db, &row.id)?
     )?;
 
     // Job claim compares `run_at` to RFC3339 `now` from chrono — keep that format.
@@ -1313,13 +1336,13 @@ async fn move_message_to_role(
         LIMIT 1
         ",
         |dest| {
-            let dest_id: String = dest.get("id");
+            let dest_id = id_from_row(&dest, "id");
             let dest_name: String = dest
                 .get::<Option<String>, _>("external_id")
                 .unwrap_or_else(|| dest.get("name"));
             (dest_id, dest_name)
         },
-        &row.account_id,
+        &id_param(db, &row.account_id)?,
         role
     )?;
 
@@ -1329,7 +1352,7 @@ async fn move_message_to_role(
             db,
             "UPDATE message SET is_deleted = ?, updated_at = datetime('now') WHERE id = ?",
             true,
-            &row.id
+            &id_param(db, &row.id)?
         )?;
         update_folder_counts(db, &row.folder_id).await?;
         return Ok(Json(serde_json::json!({
@@ -1353,8 +1376,8 @@ async fn move_message_to_role(
         SET folder_id = ?, updated_at = datetime('now')
         WHERE id = ?
         ",
-        &dest_id,
-        &row.id
+        &id_param(db, &dest_id)?,
+        &id_param(db, &row.id)?
     )?;
 
     update_folder_counts(db, &row.folder_id).await?;
@@ -1394,8 +1417,8 @@ pub async fn run_account_sync(
             let protocol: String = row.get("protocol");
             (is_active, sync_enabled, receive_protocol, protocol)
         },
-        account_id,
-        user_id
+        &id_param(db, account_id)?,
+        &id_param(db, user_id)?
     )?
     .ok_or(SyncError::AccountNotFound)?;
 
@@ -1423,7 +1446,7 @@ pub async fn run_account_sync(
     db_execute!(
         db,
         "UPDATE mail_account SET last_sync_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-        account_id
+        &id_param(db, account_id)?
     )?;
 
     Ok(SyncResponse {
@@ -1517,8 +1540,8 @@ async fn load_account_sync_row(
             imap_security: row.get("imap_security"),
             jmap_base_url: row.get("jmap_base_url"),
         },
-        account_id,
-        user_id
+        &id_param(db, account_id)?,
+        &id_param(db, user_id)?
     )?
     .ok_or(SyncError::AccountNotFound)
 }
@@ -1737,12 +1760,13 @@ async fn upsert_jmap_message(
     email: &crate::jmap::JmapEmail,
 ) -> Result<bool, SyncError> {
     let external_id = &email.id;
+    let account_bind = id_param(db, account_id)?;
+    let folder_bind = id_param(db, folder_id)?;
 
-    let existing: Option<String> = db_scalar_optional!(
+    let existing: Option<String> = db_id_optional!(
         db,
-        String,
         "SELECT id FROM message WHERE account_id = ? AND external_id = ?",
-        account_id,
+        &account_bind,
         external_id
     )?;
 
@@ -1791,8 +1815,8 @@ async fn upsert_jmap_message(
             ",
             is_read,
             is_starred,
-            &flags_json,
-            &id
+            &opt_json_param(db, Some(flags_json.as_str())),
+            &id_param(db, &id)?
         )?;
 
         Ok(false)
@@ -1810,19 +1834,19 @@ async fn upsert_jmap_message(
                 snippet, has_attachments, body_text, body_html
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
-            &id,
-            account_id,
-            folder_id,
+            &id_param(db, &id)?,
+            &account_bind,
+            &folder_bind,
             external_id,
             email.message_id_header(),
             &email.subject,
-            &from_json,
-            &to_json,
-            &cc_json,
-            &email.received_at,
+            opt_json_param(db, from_json.as_deref()),
+            opt_json_param(db, to_json.as_deref()),
+            opt_json_param(db, cc_json.as_deref()),
+            opt_ts_param(db, email.received_at.as_deref()),
             is_read,
             is_starred,
-            &flags_json,
+            opt_json_param(db, Some(flags_json.as_str())),
             email.size.map(|s| i32::try_from(s).unwrap_or(i32::MAX)),
             email
                 .in_reply_to
@@ -1854,13 +1878,13 @@ async fn upsert_folder(
 ) -> Result<(), SyncError> {
     let role = infer_folder_role(name);
     let external_id = name;
+    let account_bind = id_param(db, account_id)?;
 
     // Try to find existing folder
-    let existing: Option<String> = db_scalar_optional!(
+    let existing: Option<String> = db_id_optional!(
         db,
-        String,
         "SELECT id FROM folder WHERE account_id = ? AND external_id = ?",
-        account_id,
+        &account_bind,
         external_id
     )?;
 
@@ -1869,7 +1893,7 @@ async fn upsert_folder(
             db,
             "UPDATE folder SET name = ?, updated_at = datetime('now') WHERE id = ?",
             name,
-            &id
+            &id_param(db, &id)?
         )?;
     } else {
         let id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
@@ -1879,8 +1903,8 @@ async fn upsert_folder(
             INSERT INTO folder (id, account_id, external_id, name, role, sort_order)
             VALUES (?, ?, ?, ?, ?, 0)
             ",
-            &id,
-            account_id,
+            &id_param(db, &id)?,
+            &account_bind,
             external_id,
             name,
             role
@@ -1892,11 +1916,10 @@ async fn upsert_folder(
 
 /// Get the local folder ID by `external_id`.
 async fn get_folder_id(db: &DbPool, account_id: &str, name: &str) -> Result<String, SyncError> {
-    db_scalar_optional!(
+    db_id_optional!(
         db,
-        String,
         "SELECT id FROM folder WHERE account_id = ? AND external_id = ?",
-        account_id,
+        &id_param(db, account_id)?,
         name
     )?
     .ok_or_else(|| SyncError::Database(sqlx::Error::RowNotFound))
@@ -1944,8 +1967,8 @@ async fn load_cursor(
         FROM sync_cursor
         WHERE account_id = ? AND folder_id = ? AND cursor_type = 'uidvalidity_uid'
         ",
-        account_id,
-        folder_id
+        &id_param(db, account_id)?,
+        &id_param(db, folder_id)?
     )?;
     Ok(value.as_deref().map(parse_cursor_value))
 }
@@ -1962,7 +1985,8 @@ async fn save_cursor(
     last_uid: u32,
 ) -> Result<(), SyncError> {
     let cursor_value = format!("{uid_validity}:{last_uid}");
-    let cursor_id = format!("{account_id}:{folder_id}:uidvalidity_uid");
+    // PK is UUID on Postgres; uniqueness is (account_id, folder_id, cursor_type).
+    let cursor_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
 
     db_execute!(
         db,
@@ -1972,9 +1996,9 @@ async fn save_cursor(
         ON CONFLICT(account_id, folder_id, cursor_type)
         DO UPDATE SET cursor_value = excluded.cursor_value, updated_at = excluded.updated_at
         ",
-        &cursor_id,
-        account_id,
-        folder_id,
+        &id_param(db, &cursor_id)?,
+        &id_param(db, account_id)?,
+        &id_param(db, folder_id)?,
         protocol,
         &cursor_value
     )?;
@@ -2014,8 +2038,8 @@ async fn load_jmap_cursor(
         FROM sync_cursor
         WHERE account_id = ? AND folder_id = ? AND cursor_type = 'state_token'
         ",
-        account_id,
-        folder_id
+        &id_param(db, account_id)?,
+        &id_param(db, folder_id)?
     )
     .map_err(SyncError::from)
 }
@@ -2030,7 +2054,7 @@ async fn save_jmap_cursor(
     folder_id: &str,
     query_state: &str,
 ) -> Result<(), SyncError> {
-    let cursor_id = format!("{account_id}:{folder_id}:state_token");
+    let cursor_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
 
     db_execute!(
         db,
@@ -2040,9 +2064,9 @@ async fn save_jmap_cursor(
         ON CONFLICT(account_id, folder_id, cursor_type)
         DO UPDATE SET cursor_value = excluded.cursor_value, updated_at = excluded.updated_at
         ",
-        &cursor_id,
-        account_id,
-        folder_id,
+        &id_param(db, &cursor_id)?,
+        &id_param(db, account_id)?,
+        &id_param(db, folder_id)?,
         query_state
     )?;
 
@@ -2061,13 +2085,14 @@ async fn upsert_message(
     msg: &ImapMessage,
 ) -> Result<bool, SyncError> {
     let external_id = msg.uid.to_string();
+    let account_bind = id_param(db, account_id)?;
+    let folder_bind = id_param(db, folder_id)?;
 
     // Check if message already exists
-    let existing: Option<String> = db_scalar_optional!(
+    let existing: Option<String> = db_id_optional!(
         db,
-        String,
         "SELECT id FROM message WHERE account_id = ? AND external_id = ?",
-        account_id,
+        &account_bind,
         &external_id
     )?;
 
@@ -2118,19 +2143,19 @@ async fn upsert_message(
             flags = excluded.flags,
             updated_at = datetime('now')
         ",
-        &id,
-        account_id,
-        folder_id,
+        &id_param(db, &id)?,
+        &account_bind,
+        &folder_bind,
         &external_id,
         &msg.message_id,
         &msg.subject,
-        &from_json,
-        &to_json,
-        &msg.cc,
-        &msg.date,
+        opt_json_param(db, from_json.as_deref()),
+        opt_json_param(db, to_json.as_deref()),
+        opt_json_param(db, msg.cc.as_deref()),
+        opt_ts_param(db, msg.date.as_deref()),
         is_read,
         is_starred,
-        &flags_json,
+        opt_json_param(db, Some(flags_json.as_str())),
         msg.size.map(i32::try_from).transpose().unwrap_or(None),
         &msg.in_reply_to,
         &msg.references,
@@ -2145,18 +2170,24 @@ async fn upsert_message(
 
 /// Delete all messages in a folder (used when UIDVALIDITY changes).
 async fn clear_folder_messages(db: &DbPool, folder_id: &str) -> Result<(), SyncError> {
-    db_execute!(db, "DELETE FROM message WHERE folder_id = ?", folder_id)?;
-    db_execute!(db, "DELETE FROM sync_cursor WHERE folder_id = ?", folder_id)?;
+    let folder_bind = id_param(db, folder_id)?;
+    db_execute!(db, "DELETE FROM message WHERE folder_id = ?", &folder_bind)?;
+    db_execute!(
+        db,
+        "DELETE FROM sync_cursor WHERE folder_id = ?",
+        &folder_bind
+    )?;
     Ok(())
 }
 
 /// Update folder message counts from the message table.
 async fn update_folder_counts(db: &DbPool, folder_id: &str) -> Result<(), SyncError> {
+    let folder_bind = id_param(db, folder_id)?;
     let total: i64 = db_scalar!(
         db,
         i64,
         "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = ?",
-        folder_id,
+        &folder_bind,
         false
     )?;
 
@@ -2164,7 +2195,7 @@ async fn update_folder_counts(db: &DbPool, folder_id: &str) -> Result<(), SyncEr
         db,
         i64,
         "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = ? AND is_read = ?",
-        folder_id,
+        &folder_bind,
         false,
         false
     )?;
@@ -2174,7 +2205,7 @@ async fn update_folder_counts(db: &DbPool, folder_id: &str) -> Result<(), SyncEr
         "UPDATE folder SET total_messages = ?, unread_messages = ?, updated_at = datetime('now') WHERE id = ?",
         i32::try_from(total).unwrap_or(i32::MAX),
         i32::try_from(unread).unwrap_or(i32::MAX),
-        folder_id
+        &folder_bind
     )?;
 
     Ok(())

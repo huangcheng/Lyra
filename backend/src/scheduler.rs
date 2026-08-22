@@ -13,6 +13,7 @@ use sqlx::Row;
 use tokio::sync::Mutex;
 
 use crate::jobs::{JobPayload, enqueue};
+use crate::db_row::id_from_row;
 use crate::storage::DbPool;
 
 const BASE_POLL_SECS: u64 = 300;
@@ -154,8 +155,8 @@ async fn list_active_accounts(db: &DbPool) -> Result<Vec<ActiveAccount>, sqlx::E
         WHERE is_active = ? AND sync_enabled = ?
         ",
         |row| ActiveAccount {
-            id: row.get("id"),
-            user_id: row.get("user_id"),
+            id: id_from_row(row, "id"),
+            user_id: id_from_row(row, "user_id"),
         },
         true,
         true

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
+use crate::db_row::id_param;
 use crate::kernel::App;
 use crate::storage::DbPool;
 use crate::sync::SyncError;
@@ -303,7 +304,7 @@ pub async fn process_job(
             db_execute!(
                 db,
                 "UPDATE message SET snoozed_until = NULL WHERE id = ?",
-                &message_id
+                &id_param(db, &message_id)?
             )?;
             mark_completed(db, &job.id).await?;
         }

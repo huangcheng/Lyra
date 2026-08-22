@@ -20,6 +20,7 @@ use totp_rs::{Algorithm, TOTP};
 use uuid::Uuid;
 
 use crate::crypto::{self, CryptoError};
+use crate::db_row::{id_from_row, id_param};
 use crate::kernel::App;
 use crate::kv::KvStore;
 #[cfg(test)]
@@ -335,12 +336,13 @@ async fn insert_user(
     locale: &str,
     encrypted_dek: &str,
 ) -> Result<(), sqlx::Error> {
+    let id = id_param(db, id)?;
     match db {
         DbPool::Sqlite(pool) => {
             sqlx::query(
                 "INSERT INTO lyra_user (id, username, password_hash, display_name, locale, encrypted_dek) VALUES (?, ?, ?, ?, ?, ?)",
             )
-            .bind(id)
+            .bind(&id)
             .bind(username)
             .bind(password_hash)
             .bind(display_name)
@@ -354,7 +356,7 @@ async fn insert_user(
             sqlx::query(
                 "INSERT INTO lyra_user (id, username, password_hash, display_name, locale, encrypted_dek) VALUES ($1, $2, $3, $4, $5, $6)",
             )
-            .bind(id)
+            .bind(&id)
             .bind(username)
             .bind(password_hash)
             .bind(display_name)
@@ -390,7 +392,7 @@ async fn find_user_by_username(db: &DbPool, username: &str) -> Result<Option<Use
                 AuthError::internal("Authentication failed")
             })?;
             Ok(row.map(|r| UserData {
-                id: r.get("id"),
+                id: id_from_row(&r, "id"),
                 username: r.get("username"),
                 password_hash: Some(r.get("password_hash")),
                 totp_enabled: r.get("totp_enabled"),
@@ -412,7 +414,7 @@ async fn find_user_by_username(db: &DbPool, username: &str) -> Result<Option<Use
                 AuthError::internal("Authentication failed")
             })?;
             Ok(row.map(|r| UserData {
-                id: r.get("id"),
+                id: id_from_row(&r, "id"),
                 username: r.get("username"),
                 password_hash: Some(r.get("password_hash")),
                 totp_enabled: r.get("totp_enabled"),
@@ -425,12 +427,15 @@ async fn find_user_by_username(db: &DbPool, username: &str) -> Result<Option<Use
 }
 
 async fn find_user_by_id(db: &DbPool, user_id: &str) -> Result<Option<UserData>, AuthError> {
+    let Ok(id) = id_param(db, user_id) else {
+        return Ok(None);
+    };
     match db {
         DbPool::Sqlite(pool) => {
             let row = sqlx::query(
                 "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale FROM lyra_user WHERE id = ?",
             )
-            .bind(user_id)
+            .bind(&id)
             .fetch_optional(pool)
             .await
             .map_err(|e| {
@@ -438,7 +443,7 @@ async fn find_user_by_id(db: &DbPool, user_id: &str) -> Result<Option<UserData>,
                 AuthError::internal("Failed to look up user")
             })?;
             Ok(row.map(|r| UserData {
-                id: r.get("id"),
+                id: id_from_row(&r, "id"),
                 username: r.get("username"),
                 password_hash: Some(r.get("password_hash")),
                 totp_enabled: r.get("totp_enabled"),
@@ -452,7 +457,7 @@ async fn find_user_by_id(db: &DbPool, user_id: &str) -> Result<Option<UserData>,
             let row = sqlx::query(
                 "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale FROM lyra_user WHERE id = $1",
             )
-            .bind(user_id)
+            .bind(&id)
             .fetch_optional(pool)
             .await
             .map_err(|e| {
@@ -460,7 +465,7 @@ async fn find_user_by_id(db: &DbPool, user_id: &str) -> Result<Option<UserData>,
                 AuthError::internal("Failed to look up user")
             })?;
             Ok(row.map(|r| UserData {
-                id: r.get("id"),
+                id: id_from_row(&r, "id"),
                 username: r.get("username"),
                 password_hash: Some(r.get("password_hash")),
                 totp_enabled: r.get("totp_enabled"),
@@ -478,6 +483,7 @@ async fn update_user_totp(
     totp_secret: Option<&str>,
     totp_enabled: bool,
 ) -> Result<(), StatusCode> {
+    let id = id_param(db, user_id).map_err(|_| StatusCode::NOT_FOUND)?;
     match db {
         DbPool::Sqlite(pool) => {
             sqlx::query(
@@ -485,7 +491,7 @@ async fn update_user_totp(
             )
             .bind(totp_secret)
             .bind(totp_enabled)
-            .bind(user_id)
+            .bind(&id)
             .execute(pool)
             .await
             .map_err(|e| {
@@ -500,7 +506,7 @@ async fn update_user_totp(
             )
             .bind(totp_secret)
             .bind(totp_enabled)
-            .bind(user_id)
+            .bind(&id)
             .execute(pool)
             .await
             .map_err(|e| {
@@ -517,13 +523,14 @@ async fn update_user_password(
     user_id: &str,
     password_hash: &str,
 ) -> Result<(), StatusCode> {
+    let id = id_param(db, user_id).map_err(|_| StatusCode::NOT_FOUND)?;
     match db {
         DbPool::Sqlite(pool) => {
             sqlx::query(
                 "UPDATE lyra_user SET password_hash = ?, updated_at = datetime('now') WHERE id = ?",
             )
             .bind(password_hash)
-            .bind(user_id)
+            .bind(&id)
             .execute(pool)
             .await
             .map_err(|e| {
@@ -537,7 +544,7 @@ async fn update_user_password(
                 "UPDATE lyra_user SET password_hash = $1, updated_at = NOW() WHERE id = $2",
             )
             .bind(password_hash)
-            .bind(user_id)
+            .bind(&id)
             .execute(pool)
             .await
             .map_err(|e| {
@@ -649,9 +656,10 @@ async fn note_failed_attempt(kv: &dyn KvStore, key: &str, op: &str) -> Result<()
 }
 
 async fn fetch_sess_epoch(db: &DbPool, user_id: &str) -> Result<i64, StatusCode> {
+    let id = id_param(db, user_id).map_err(|_| StatusCode::NOT_FOUND)?;
     let epoch: i64 = match db {
         DbPool::Sqlite(pool) => sqlx::query_scalar("SELECT sess_epoch FROM lyra_user WHERE id = ?")
-            .bind(user_id)
+            .bind(&id)
             .fetch_optional(pool)
             .await
             .map_err(|e| {
@@ -661,15 +669,17 @@ async fn fetch_sess_epoch(db: &DbPool, user_id: &str) -> Result<i64, StatusCode>
             .ok_or(StatusCode::NOT_FOUND)?,
         #[cfg(feature = "postgres")]
         DbPool::Postgres(pool) => {
-            sqlx::query_scalar("SELECT sess_epoch FROM lyra_user WHERE id = $1")
-                .bind(user_id)
+            // PG INTEGER is INT4; sqlx i64 is INT8. Decode i32, widen.
+            let epoch: i32 = sqlx::query_scalar("SELECT sess_epoch FROM lyra_user WHERE id = $1")
+                .bind(&id)
                 .fetch_optional(pool)
                 .await
                 .map_err(|e| {
                     tracing::error!("fetch sess_epoch failed: {e}");
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?
-                .ok_or(StatusCode::NOT_FOUND)?
+                .ok_or(StatusCode::NOT_FOUND)?;
+            i64::from(epoch)
         }
     };
     Ok(epoch)
@@ -682,11 +692,12 @@ pub async fn invalidate_user_sessions(
     user_id: &str,
 ) -> Result<(), StatusCode> {
     let old_epoch = fetch_sess_epoch(pool, user_id).await?;
+    let id = id_param(pool, user_id).map_err(|_| StatusCode::NOT_FOUND)?;
     // Split per dialect so we do not unify SqliteQueryResult with PgQueryResult.
     db_execute!(
         pool,
         "UPDATE lyra_user SET sess_epoch = sess_epoch + 1 WHERE id = ?",
-        user_id
+        &id
     )
     .map_err(|e| {
         tracing::error!("bump sess_epoch failed: {e}");
@@ -838,17 +849,18 @@ pub(crate) fn install_test_master_key() {
 
 /// Fetch the wrapped DEK blob from `lyra_user.encrypted_dek`.
 async fn fetch_encrypted_dek(db: &DbPool, user_id: &str) -> Result<String, CryptoError> {
+    let id = id_param(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
     let wrapped: Option<String> = match db {
         DbPool::Sqlite(pool) => {
             sqlx::query_scalar("SELECT encrypted_dek FROM lyra_user WHERE id = ?")
-                .bind(user_id)
+                .bind(&id)
                 .fetch_optional(pool)
                 .await
         }
         #[cfg(feature = "postgres")]
         DbPool::Postgres(pool) => {
             sqlx::query_scalar("SELECT encrypted_dek FROM lyra_user WHERE id = $1")
-                .bind(user_id)
+                .bind(&id)
                 .fetch_optional(pool)
                 .await
         }
