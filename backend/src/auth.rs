@@ -419,8 +419,6 @@ async fn update_user_totp(
     Ok(())
 }
 
-// ── Session store (KvStore + sess_epoch) ─────────────────────────────
-
 async fn update_user_password(
     db: &DbPool,
     user_id: &str,
@@ -458,6 +456,8 @@ async fn update_user_password(
     Ok(())
 }
 
+// ── Session store (KvStore + sess_epoch) ─────────────────────────────
+
 use std::sync::Arc;
 
 fn sess_key(epoch: i64, token: &str) -> String {
@@ -474,12 +474,24 @@ fn pending_key(token: &str) -> String {
 
 // ── Rate limiting (fixed window per key, via kv counters) ────────────
 
+// Keyed per username: an attacker who knows the (single, v1) username can
+// lock out the legit user for 15 minutes. That lockout-DoS tradeoff is
+// deliberate for single-user v1 — the alternative (keying per IP) is
+// trivially bypassed behind proxies and we have no trusted client IP yet.
 fn login_rl_key(username: &str) -> String {
     format!("rl:login:{username}")
 }
 
-fn totp_rl_key(pending_token: &str) -> String {
-    format!("rl:totp:{pending_token}")
+/// Keyed per user (not per pending token): re-logging in must not mint a
+/// fresh allowance of TOTP attempts.
+fn totp_rl_key(user_id: &str) -> String {
+    format!("rl:totp:{user_id}")
+}
+
+/// Guards password-gated endpoints (change-password, TOTP disable) so a
+/// stolen session is not an offline-speed password oracle.
+fn pwd_rl_key(user_id: &str) -> String {
+    format!("rl:pwd:{user_id}")
 }
 
 fn totp_step_key(user_id: &str) -> String {
@@ -1118,9 +1130,8 @@ async fn totp_verify(
     Json(req): Json<TotpVerifyRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
     let kv = Arc::clone(state.sessions.kv());
-    let rl_key = totp_rl_key(&req.pending_token);
-    ensure_not_rate_limited(kv.as_ref(), &rl_key, "Verification failed").await?;
-
+    // Resolve the pending session first so the limiter keys on the user, not
+    // the token — otherwise re-login would mint a fresh allowance.
     let user_id = state
         .sessions
         .get_pending_session(&req.pending_token)
@@ -1133,6 +1144,9 @@ async fn totp_verify(
                 }),
             )
         })?;
+
+    let rl_key = totp_rl_key(&user_id);
+    ensure_not_rate_limited(kv.as_ref(), &rl_key, "Verification failed").await?;
 
     let user = find_user_by_id(&state.db, &user_id)
         .await
@@ -1182,8 +1196,8 @@ async fn totp_verify(
     }))
 }
 
-/// Verify a login TOTP code for `user`, with per-pending-token rate limiting
-/// and per-user replay protection (last accepted timestep in kv).
+/// Verify a login TOTP code for `user`, with per-user rate limiting and
+/// replay protection (last accepted timestep in kv).
 async fn verify_totp_code(
     state: &AuthState,
     kv: &dyn KvStore,
@@ -1404,7 +1418,12 @@ async fn totp_disable(
     let user_id = extract_session(&state, &headers).await?;
 
     // Disabling 2FA weakens account security, so it requires re-authentication
-    // with the current password, not just a session token.
+    // with the current password, not just a session token. The password check
+    // is rate-limited per user so a stolen session is no password oracle.
+    let kv = Arc::clone(state.sessions.kv());
+    let rl_key = pwd_rl_key(&user_id);
+    ensure_not_rate_limited(kv.as_ref(), &rl_key, "Verification failed").await?;
+
     let user = find_user_by_id(&state.db, &user_id)
         .await
         .map_err(|e| {
@@ -1432,6 +1451,7 @@ async fn totp_disable(
         )
     })?;
     if !valid {
+        note_failed_attempt(kv.as_ref(), &rl_key, "Verification failed").await?;
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(ErrorResponse {
@@ -1439,6 +1459,7 @@ async fn totp_disable(
             }),
         ));
     }
+    clear_failed_attempts(kv.as_ref(), &rl_key).await;
 
     update_user_totp(&state.db, &user_id, None, false)
         .await
@@ -1463,6 +1484,12 @@ async fn change_password(
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let user_id = extract_session(&state, &headers).await?;
+
+    // The current-password check is rate-limited per user so a stolen session
+    // is no offline-speed password oracle.
+    let kv = Arc::clone(state.sessions.kv());
+    let rl_key = pwd_rl_key(&user_id);
+    ensure_not_rate_limited(kv.as_ref(), &rl_key, "Verification failed").await?;
 
     let user = find_user_by_id(&state.db, &user_id)
         .await
@@ -1491,6 +1518,7 @@ async fn change_password(
         )
     })?;
     if !valid {
+        note_failed_attempt(kv.as_ref(), &rl_key, "Verification failed").await?;
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(ErrorResponse {
@@ -1498,6 +1526,7 @@ async fn change_password(
             }),
         ));
     }
+    clear_failed_attempts(kv.as_ref(), &rl_key).await;
 
     if let Err(msg) = validate_password(&req.new_password, state.min_password_length) {
         return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: msg })));
@@ -1535,6 +1564,10 @@ async fn change_password(
                 }),
             )
         })?;
+
+    // Also clear any login lockout for this username, so the legit user is
+    // not stuck behind an attacker's failed-attempt window.
+    clear_failed_attempts(kv.as_ref(), &login_rl_key(&user.username)).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2410,5 +2443,152 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn totp_rate_limit_survives_fresh_pending_token() {
+        let db = test_pool().await;
+        seed_user_with_totp(&db, "user-1", "alice", "Str0ngPass1").await;
+        let state = test_state(db);
+
+        let login = || LoginRequest {
+            username: "alice".into(),
+            password: "Str0ngPass1".into(),
+        };
+        // Burn the 5 attempts on pending token A.
+        let first = auth_login(State(state.clone()), Json(login()))
+            .await
+            .unwrap();
+        for _ in 0..RATE_LIMIT_MAX_ATTEMPTS {
+            let err = totp_verify(
+                State(state.clone()),
+                Json(TotpVerifyRequest {
+                    code: "000000".into(),
+                    pending_token: first.token.clone(),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        }
+
+        // Regression: a fresh login mints pending token B, but the limiter is
+        // keyed per user, so the bypass attempt is still blocked.
+        let second = auth_login(State(state.clone()), Json(login()))
+            .await
+            .unwrap();
+        assert_ne!(first.token, second.token);
+        let err = totp_verify(
+            State(state.clone()),
+            Json(TotpVerifyRequest {
+                code: "000000".into(),
+                pending_token: second.token.clone(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn change_password_rate_limited_after_five_wrong_current() {
+        let db = test_pool().await;
+        let state = test_state(db);
+        let token = bootstrap_alice(&state).await;
+
+        let attempt = |current: &str| {
+            change_password(
+                State(state.clone()),
+                bearer_headers(&token),
+                Json(ChangePasswordRequest {
+                    current_password: current.into(),
+                    new_password: "N3wPassword!x".into(),
+                }),
+            )
+        };
+        for _ in 0..RATE_LIMIT_MAX_ATTEMPTS {
+            let err = attempt("Wr0ngPass1").await.unwrap_err();
+            assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        }
+        // Even the correct current password is locked out inside the window.
+        let err = attempt("Str0ngPass1").await.unwrap_err();
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn totp_disable_rate_limited_after_five_wrong_passwords() {
+        let db = test_pool().await;
+        seed_user_with_totp(&db, "user-1", "alice", "Str0ngPass1").await;
+        let state = test_state(db);
+        let token = state.sessions.create_session("user-1").await.unwrap();
+
+        let attempt = |password: &str| {
+            totp_disable(
+                State(state.clone()),
+                bearer_headers(&token),
+                Json(TotpDisableRequest {
+                    password: password.into(),
+                }),
+            )
+        };
+        for _ in 0..RATE_LIMIT_MAX_ATTEMPTS {
+            let err = attempt("Wr0ngPass1").await.unwrap_err();
+            assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        }
+        let err = attempt("Str0ngPass1").await.unwrap_err();
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+
+        // TOTP must still be enabled after the blocked attempts.
+        let enabled: bool =
+            sqlx::query_scalar("SELECT totp_enabled FROM lyra_user WHERE id = 'user-1'")
+                .fetch_one(sqlite_pool(state.db()))
+                .await
+                .unwrap();
+        assert!(enabled);
+    }
+
+    #[tokio::test]
+    async fn change_password_clears_login_rate_limit() {
+        let db = test_pool().await;
+        let state = test_state(db);
+        let token = bootstrap_alice(&state).await;
+
+        // An attacker locks out the username at the login endpoint.
+        for _ in 0..RATE_LIMIT_MAX_ATTEMPTS {
+            let err = auth_login(
+                State(state.clone()),
+                Json(LoginRequest {
+                    username: "alice".into(),
+                    password: "Wr0ngPass1".into(),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        }
+
+        // The legit user (valid session) changes their password...
+        change_password(
+            State(state.clone()),
+            bearer_headers(&token),
+            Json(ChangePasswordRequest {
+                current_password: "Str0ngPass1".into(),
+                new_password: "N3wPassword!x".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        // ...and can immediately log in with it: the attacker's login lockout
+        // was cleared by the password change.
+        let res = auth_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                username: "alice".into(),
+                password: "N3wPassword!x".into(),
+            }),
+        )
+        .await;
+        assert!(res.is_ok());
     }
 }
