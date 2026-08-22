@@ -22,6 +22,8 @@ pub struct Config {
     pub session_secret: Vec<u8>,
     /// Minimum password length (default: 8).
     pub min_password_length: usize,
+    /// Max concurrent mailbox syncs (`SYNC_MAX_CONCURRENT`, default 3).
+    pub sync_max_concurrent: usize,
 }
 
 impl Config {
@@ -34,6 +36,7 @@ impl Config {
     /// Optional (with defaults):
     ///   - `LISTEN_ADDR` — default `0.0.0.0:3000`
     ///   - `DATA_DIR`    — default `./data`
+    ///   - `SYNC_MAX_CONCURRENT` — default `3`
     pub fn from_env() -> Self {
         use rand::RngCore;
 
@@ -66,12 +69,19 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(8);
 
+        let sync_max_concurrent: usize = env::var("SYNC_MAX_CONCURRENT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(3);
+
         Self {
             listen_addr,
             database_url,
             data_dir,
             session_secret,
             min_password_length,
+            sync_max_concurrent,
         }
     }
 }
@@ -91,6 +101,7 @@ mod tests {
             env::remove_var("DATA_DIR");
             env::remove_var("SESSION_SECRET");
             env::remove_var("MIN_PASSWORD_LENGTH");
+            env::remove_var("SYNC_MAX_CONCURRENT");
         }
 
         let cfg = Config::from_env();
@@ -98,6 +109,7 @@ mod tests {
         assert!(cfg.database_url.contains("sqlite"));
         assert_eq!(cfg.data_dir, "./data");
         assert_eq!(cfg.min_password_length, 8);
+        assert_eq!(cfg.sync_max_concurrent, 3);
         assert!(cfg.session_secret.len() >= 32);
     }
 }

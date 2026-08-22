@@ -49,6 +49,14 @@ pub struct SyncResponse {
     pub messages_deleted: usize,
 }
 
+/// HTTP 202 body when a sync job is enqueued.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnqueuedSync {
+    pub job_id: String,
+    pub status: String,
+}
+
 /// Error type for sync operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -167,17 +175,43 @@ async fn sync_status(
     }))
 }
 
-/// Trigger a sync for a specific account.
+/// Trigger a sync for a specific account (enqueue; do not await IMAP).
 async fn trigger_sync(
     State(state): State<AuthState>,
     Path(account_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<SyncResponse>, SyncError> {
+) -> Result<(StatusCode, Json<EnqueuedSync>), SyncError> {
     let user_id = get_user_id(&state, &headers).await?;
+    let pool = get_sqlite_pool(state.db());
 
-    let result = run_account_sync(&state.db, &state.app, &user_id, &account_id).await?;
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM mail_account WHERE id = ? AND user_id = ?")
+            .bind(&account_id)
+            .bind(&user_id)
+            .fetch_optional(pool)
+            .await?;
+    if exists.is_none() {
+        return Err(SyncError::AccountNotFound);
+    }
 
-    Ok(Json(result))
+    let now = chrono::Utc::now().to_rfc3339();
+    let job_id = crate::jobs::enqueue(
+        pool,
+        &crate::jobs::JobPayload::SyncAccount {
+            account_id,
+            user_id,
+        },
+        &now,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(EnqueuedSync {
+            job_id,
+            status: "queued".into(),
+        }),
+    ))
 }
 
 /// Send a message via SMTP.

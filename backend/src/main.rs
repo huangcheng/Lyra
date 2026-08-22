@@ -15,6 +15,7 @@ mod crypto;
 mod dav;
 mod imap;
 mod jmap;
+mod jobs;
 mod kernel;
 mod pim;
 mod plugins;
@@ -46,6 +47,11 @@ async fn main() -> anyhow::Result<()> {
     }
     let app = std::sync::Arc::new(app);
     let auth_state = auth::AuthState::new(db, &config, app)?;
+    jobs::spawn_workers(
+        auth_state.db.clone(),
+        std::sync::Arc::clone(&auth_state.app),
+        config.sync_max_concurrent,
+    );
 
     let api = Router::new()
         .route("/health", axum::routing::get(health))
