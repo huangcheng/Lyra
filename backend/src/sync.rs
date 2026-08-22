@@ -150,6 +150,7 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/attachments/{attachment_id}", get(download_attachment))
         .route("/api/messages/{message_id}/trash", post(trash_message))
         .route("/api/messages/{message_id}/archive", post(archive_message))
+        .route("/api/messages/{message_id}/snooze", post(snooze_message))
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -594,6 +595,7 @@ async fn list_messages(
                body_text, body_html, is_read, is_starred, has_attachments
         FROM message
         WHERE folder_id = ? AND is_deleted = 0
+          AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
         ORDER BY date DESC
         LIMIT 500
         ",
@@ -641,7 +643,23 @@ async fn list_messages_query(
 ) -> Result<Json<Vec<MessageResponse>>, SyncError> {
     let user_id = get_user_id(&state, &headers).await?;
     let pool = get_sqlite_pool(state.db());
+    let messages = query_user_messages(
+        pool,
+        &user_id,
+        query.role.as_deref(),
+        query.account_id.as_deref(),
+    )
+    .await?;
+    Ok(Json(messages))
+}
 
+/// List messages for a user, optionally filtered by folder role and account.
+async fn query_user_messages(
+    pool: &sqlx::SqlitePool,
+    user_id: &str,
+    role: Option<&str>,
+    account_id: Option<&str>,
+) -> Result<Vec<MessageResponse>, SyncError> {
     let rows = sqlx::query(
         r"
         SELECT m.id, m.account_id, m.folder_id, m.subject, m.from_address,
@@ -652,21 +670,22 @@ async fn list_messages_query(
         JOIN mail_account a ON m.account_id = a.id
         WHERE a.user_id = ?
           AND m.is_deleted = 0
+          AND (m.snoozed_until IS NULL OR m.snoozed_until <= datetime('now'))
           AND (? IS NULL OR f.role = ?)
           AND (? IS NULL OR m.account_id = ?)
         ORDER BY m.date DESC
         LIMIT 500
         ",
     )
-    .bind(&user_id)
-    .bind(&query.role)
-    .bind(&query.role)
-    .bind(&query.account_id)
-    .bind(&query.account_id)
+    .bind(user_id)
+    .bind(role)
+    .bind(role)
+    .bind(account_id)
+    .bind(account_id)
     .fetch_all(pool)
     .await?;
 
-    let messages: Vec<MessageResponse> = rows
+    Ok(rows
         .iter()
         .map(|row| MessageResponse {
             id: row.get("id"),
@@ -684,9 +703,7 @@ async fn list_messages_query(
             is_starred: row.get::<bool, _>("is_starred"),
             has_attachments: row.get::<bool, _>("has_attachments"),
         })
-        .collect();
-
-    Ok(Json(messages))
+        .collect())
 }
 
 /// Query for GET /api/messages/search.
@@ -1220,6 +1237,53 @@ async fn archive_message(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, SyncError> {
     move_message_to_role(state, message_id, headers, "archive").await
+}
+
+/// POST /api/messages/{id}/snooze — hide locally until `until`, then unsnooze via job.
+#[derive(Deserialize)]
+struct SnoozeRequest {
+    until: String,
+}
+
+async fn snooze_message(
+    State(state): State<AuthState>,
+    Path(message_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<SnoozeRequest>,
+) -> Result<Json<serde_json::Value>, SyncError> {
+    let user_id = get_user_id(&state, &headers).await?;
+    let pool = get_sqlite_pool(state.db());
+    let row = load_message_row(pool, &user_id, &message_id).await?;
+
+    let parsed = chrono::DateTime::parse_from_rfc3339(&body.until)
+        .map_err(|_| SyncError::InvalidInput("until must be RFC3339".into()))?;
+    let until = parsed.to_utc().to_rfc3339();
+
+    sqlx::query(
+        r"
+        UPDATE message
+        SET snoozed_until = ?, updated_at = datetime('now')
+        WHERE id = ?
+        ",
+    )
+    .bind(&until)
+    .bind(&row.id)
+    .execute(pool)
+    .await?;
+
+    crate::jobs::enqueue(
+        pool,
+        &crate::jobs::JobPayload::UnsnoozeMessage {
+            message_id: row.id.clone(),
+        },
+        &until,
+    )
+    .await?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "until": until,
+    })))
 }
 
 async fn move_message_to_role(
@@ -2004,66 +2068,51 @@ async fn upsert_message(
         .as_ref()
         .map(|t| serde_json::json!(vec![t]).to_string());
 
-    if let Some(id) = existing {
-        // Update flags
-        sqlx::query(
-            r"
-            UPDATE message SET
-                is_read = ?,
-                is_starred = ?,
-                flags = ?,
-                updated_at = datetime('now')
-            WHERE id = ?
-            ",
-        )
-        .bind(is_read)
-        .bind(is_starred)
-        .bind(&flags_json)
-        .bind(&id)
-        .execute(pool)
-        .await?;
+    let was_new = existing.is_none();
+    let id =
+        existing.unwrap_or_else(|| Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string());
 
-        Ok(false)
-    } else {
-        // Insert new message
-        let id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+    // INSERT snoozed_until as NULL; ON CONFLICT must not overwrite an existing snooze.
+    sqlx::query(
+        r"
+        INSERT INTO message (
+            id, account_id, folder_id, external_id,
+            message_id_header, subject, from_address, to_addresses,
+            cc_addresses, date, is_read, is_starred,
+            flags, size_bytes, in_reply_to, references_headers,
+            snippet, has_attachments, body_text, body_html, snoozed_until
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        ON CONFLICT(account_id, external_id) DO UPDATE SET
+            is_read = excluded.is_read,
+            is_starred = excluded.is_starred,
+            flags = excluded.flags,
+            updated_at = datetime('now')
+        ",
+    )
+    .bind(&id)
+    .bind(account_id)
+    .bind(folder_id)
+    .bind(&external_id)
+    .bind(&msg.message_id)
+    .bind(&msg.subject)
+    .bind(&from_json)
+    .bind(&to_json)
+    .bind(&msg.cc)
+    .bind(&msg.date)
+    .bind(is_read)
+    .bind(is_starred)
+    .bind(&flags_json)
+    .bind(msg.size.map(i32::try_from).transpose().unwrap_or(None))
+    .bind(&msg.in_reply_to)
+    .bind(&msg.references)
+    .bind(&snippet)
+    .bind(msg.has_attachments)
+    .bind(&msg.body_text)
+    .bind(&msg.body_html)
+    .execute(pool)
+    .await?;
 
-        sqlx::query(
-            r"
-            INSERT INTO message (
-                id, account_id, folder_id, external_id,
-                message_id_header, subject, from_address, to_addresses,
-                cc_addresses, date, is_read, is_starred,
-                flags, size_bytes, in_reply_to, references_headers,
-                snippet, has_attachments, body_text, body_html
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ",
-        )
-        .bind(&id)
-        .bind(account_id)
-        .bind(folder_id)
-        .bind(&external_id)
-        .bind(&msg.message_id)
-        .bind(&msg.subject)
-        .bind(&from_json)
-        .bind(&to_json)
-        .bind(&msg.cc)
-        .bind(&msg.date)
-        .bind(is_read)
-        .bind(is_starred)
-        .bind(&flags_json)
-        .bind(msg.size.map(i32::try_from).transpose().unwrap_or(None))
-        .bind(&msg.in_reply_to)
-        .bind(&msg.references)
-        .bind(&snippet)
-        .bind(msg.has_attachments)
-        .bind(&msg.body_text)
-        .bind(&msg.body_html)
-        .execute(pool)
-        .await?;
-
-        Ok(true)
-    }
+    Ok(was_new)
 }
 
 /// Delete all messages in a folder (used when UIDVALIDITY changes).
@@ -2481,5 +2530,159 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unread, 1);
+    }
+
+    fn sample_imap_message(uid: u32) -> ImapMessage {
+        ImapMessage {
+            uid,
+            message_id: Some(format!("<snooze{uid}@example.com>")),
+            subject: Some(format!("Snooze {uid}")),
+            from: Some("sender@example.com".into()),
+            to: Some("test@example.com".into()),
+            cc: None,
+            date: Some("2026-08-22T10:00:00Z".into()),
+            in_reply_to: None,
+            references: None,
+            flags: vec![],
+            size: None,
+            body: None,
+            body_text: None,
+            body_html: None,
+            has_attachments: false,
+            attachments: vec![],
+        }
+    }
+
+    async fn message_id_for_uid(pool: &sqlx::SqlitePool, account_id: &str, uid: u32) -> String {
+        sqlx::query_scalar("SELECT id FROM message WHERE account_id = ? AND external_id = ?")
+            .bind(account_id)
+            .bind(uid.to_string())
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn inbox_hides_snoozed_message() {
+        let pool = test_pool().await;
+        let (user_id, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        upsert_message(&pool, &account_id, &folder_id, &sample_imap_message(7))
+            .await
+            .unwrap();
+        let message_id = message_id_for_uid(&pool, &account_id, 7).await;
+        sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
+            .bind("2099-01-01T00:00:00+00:00")
+            .bind(&message_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let inbox = query_user_messages(&pool, &user_id, Some("inbox"), None)
+            .await
+            .unwrap();
+        assert!(
+            inbox.is_empty(),
+            "future snoozed_until must hide the row from inbox"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsnooze_job_clears_column() {
+        let pool = test_pool().await;
+        let (user_id, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        upsert_message(&pool, &account_id, &folder_id, &sample_imap_message(8))
+            .await
+            .unwrap();
+        let message_id = message_id_for_uid(&pool, &account_id, 8).await;
+        sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
+            .bind("2099-01-01T00:00:00+00:00")
+            .bind(&message_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let now = "2026-08-22T00:00:00+00:00";
+        let payload = crate::jobs::JobPayload::UnsnoozeMessage {
+            message_id: message_id.clone(),
+        };
+        crate::jobs::enqueue(&pool, &payload, now).await.unwrap();
+        let claimed = crate::jobs::claim_due(&pool, now)
+            .await
+            .unwrap()
+            .expect("due unsnooze job");
+
+        let app = crate::kernel::App::new();
+        let inflight = crate::jobs::InFlight::new();
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = std::sync::Arc::clone(&sem)
+            .try_acquire_owned()
+            .expect("test semaphore has a permit");
+        crate::jobs::process_job(&pool, &app, &inflight, permit, claimed)
+            .await
+            .expect("unsnooze dispatch must not panic");
+        drop(app);
+
+        let snoozed: Option<String> =
+            sqlx::query_scalar("SELECT snoozed_until FROM message WHERE id = ?")
+                .bind(&message_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(snoozed.is_none(), "dispatch must SET snoozed_until = NULL");
+
+        let inbox = query_user_messages(&pool, &user_id, Some("inbox"), None)
+            .await
+            .unwrap();
+        assert_eq!(inbox.len(), 1, "unsnoozed message must reappear in inbox");
+        assert_eq!(inbox[0].id, message_id);
+    }
+
+    #[tokio::test]
+    async fn sync_does_not_clear_snooze() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&pool, &account_id, "INBOX", Some("/"))
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&pool, &account_id, "INBOX").await.unwrap();
+        let msg = sample_imap_message(9);
+        upsert_message(&pool, &account_id, &folder_id, &msg)
+            .await
+            .unwrap();
+        let message_id = message_id_for_uid(&pool, &account_id, 9).await;
+        let until = "2099-06-01T18:00:00+00:00";
+        sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
+            .bind(until)
+            .bind(&message_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut again = msg.clone();
+        again.flags = vec!["\\Seen".into()];
+        let was_new = upsert_message(&pool, &account_id, &folder_id, &again)
+            .await
+            .unwrap();
+        assert!(!was_new);
+
+        let snoozed: Option<String> =
+            sqlx::query_scalar("SELECT snoozed_until FROM message WHERE id = ?")
+                .bind(&message_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            snoozed.as_deref(),
+            Some(until),
+            "upsert_message must not overwrite snoozed_until"
+        );
     }
 }

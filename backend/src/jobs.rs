@@ -315,7 +315,14 @@ pub async fn process_job(
                 }
             }
         }
-        JobPayload::UnsnoozeMessage { .. } | JobPayload::SendMessage { .. } => {
+        JobPayload::UnsnoozeMessage { message_id } => {
+            sqlx::query("UPDATE message SET snoozed_until = NULL WHERE id = ?")
+                .bind(&message_id)
+                .execute(pool)
+                .await?;
+            mark_completed(pool, &job.id).await?;
+        }
+        JobPayload::SendMessage { .. } => {
             revert_pending(pool, &job.id).await?;
         }
     }

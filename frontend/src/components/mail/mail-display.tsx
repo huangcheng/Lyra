@@ -154,6 +154,28 @@ export function MailDisplay() {
     }
   };
 
+  const handleSnooze = async (until: Date) => {
+    if (!token || !mail || busy) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/messages/${mail.id}/snooze`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ until: until.toISOString() }),
+      });
+      if (!res.ok) throw new Error('snooze failed');
+      removeMessage(mail.id);
+      setSelectedMessage(null);
+    } catch {
+      /* retry */
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handlePatch = async (body: { isRead?: boolean; isStarred?: boolean }) => {
     if (!token || !mail) return;
     const res = await fetch(`/api/messages/${mail.id}`, {
@@ -246,25 +268,41 @@ export function MailDisplay() {
                 <div className="flex flex-col gap-2 border-r px-2 py-4">
                   <div className="px-4 text-sm font-medium">{t(locale, 'mail.snoozeUntil')}</div>
                   <div className="grid min-w-[250px] gap-1">
-                    <Button variant="ghost" className="justify-start font-normal">
+                    <Button
+                      variant="ghost"
+                      className="justify-start font-normal"
+                      onClick={() => void handleSnooze(addHours(today, 4))}
+                    >
                       {t(locale, 'mail.laterToday')}{' '}
                       <span className="ml-auto text-muted-foreground">
                         {format(addHours(today, 4), 'E, h:m b')}
                       </span>
                     </Button>
-                    <Button variant="ghost" className="justify-start font-normal">
+                    <Button
+                      variant="ghost"
+                      className="justify-start font-normal"
+                      onClick={() => void handleSnooze(addDays(today, 1))}
+                    >
                       {t(locale, 'mail.tomorrow')}
                       <span className="ml-auto text-muted-foreground">
                         {format(addDays(today, 1), 'E, h:m b')}
                       </span>
                     </Button>
-                    <Button variant="ghost" className="justify-start font-normal">
+                    <Button
+                      variant="ghost"
+                      className="justify-start font-normal"
+                      onClick={() => void handleSnooze(nextSaturday(today))}
+                    >
                       {t(locale, 'mail.thisWeekend')}
                       <span className="ml-auto text-muted-foreground">
                         {format(nextSaturday(today), 'E, h:m b')}
                       </span>
                     </Button>
-                    <Button variant="ghost" className="justify-start font-normal">
+                    <Button
+                      variant="ghost"
+                      className="justify-start font-normal"
+                      onClick={() => void handleSnooze(addDays(today, 7))}
+                    >
                       {t(locale, 'mail.nextWeek')}
                       <span className="ml-auto text-muted-foreground">
                         {format(addDays(today, 7), 'E, h:m b')}
@@ -273,7 +311,15 @@ export function MailDisplay() {
                   </div>
                 </div>
                 <div className="p-2">
-                  <Calendar />
+                  <Calendar
+                    mode="single"
+                    onSelect={(date) => {
+                      if (!date) return;
+                      const until = new Date(date);
+                      until.setHours(18, 0, 0, 0);
+                      void handleSnooze(until);
+                    }}
+                  />
                 </div>
               </PopoverContent>
             </Popover>
