@@ -36,12 +36,14 @@ pub enum SmtpError {
 }
 
 /// Security mode for SMTP connections.
+///
+/// Plaintext (`none`) is intentionally not supported: it sent credentials
+/// over an unencrypted, unauthenticated connection.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SmtpSecurity {
     Tls,
     Starttls,
-    None,
 }
 
 /// SMTP connection parameters.
@@ -91,7 +93,7 @@ pub struct SmtpAdapter {
 impl SmtpAdapter {
     /// Connect to an SMTP server.
     ///
-    /// Handles TLS (port 465), STARTTLS (port 587), and plain connections.
+    /// Handles TLS (port 465) and STARTTLS (port 587) connections.
     pub fn connect(config: &SmtpConfig) -> Result<Self, SmtpError> {
         let creds = Credentials::new(config.username.clone(), config.password.clone());
 
@@ -102,13 +104,6 @@ impl SmtpAdapter {
                 .build(),
             SmtpSecurity::Starttls => {
                 AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host)?
-                    .credentials(creds)
-                    .port(config.port)
-                    .build()
-            }
-            SmtpSecurity::None => {
-                // Plain SMTP — no encryption
-                AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.host)
                     .credentials(creds)
                     .port(config.port)
                     .build()

@@ -18,23 +18,51 @@ pub enum DavError {
 }
 
 /// Authenticated HTTP client for DAV endpoints.
+///
+/// Credentials are pinned to the origin of the configured base URL: hrefs
+/// pointing at a different origin are rejected before any request is made,
+/// so a malicious server cannot exfiltrate the account password by
+/// returning `<d:href>https://evil.example/x.vcf</d:href>`.
 pub struct DavClient {
     http: reqwest::Client,
     username: String,
     password: String,
+    origin: String,
 }
 
 impl DavClient {
-    /// Build a client with basic auth credentials.
-    pub fn new(username: String, password: String) -> Self {
-        Self {
+    /// Build a client with basic auth credentials pinned to `base_url`'s origin.
+    pub fn new(username: String, password: String, base_url: &str) -> Result<Self, DavError> {
+        crate::netsec::validate_server_url(base_url).map_err(DavError::Protocol)?;
+        let origin = crate::netsec::origin_of(base_url).map_err(DavError::Protocol)?;
+        Ok(Self {
             http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::limited(10))
+                // Never follow redirects: a redirect could carry the request
+                // to a different host, and we must never replay credentials
+                // cross-origin. Redirect responses surface as errors instead.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             username,
             password,
+            origin,
+        })
+    }
+
+    /// Refuse to send credentials to any origin other than the configured one.
+    fn check_origin(&self, url: &str) -> Result<(), DavError> {
+        let target = crate::netsec::origin_of(url).map_err(DavError::Protocol)?;
+        if target != self.origin {
+            tracing::warn!(
+                target_origin = %target,
+                expected_origin = %self.origin,
+                "DAV: refusing cross-origin request (credentials stay pinned)"
+            );
+            return Err(DavError::Protocol(format!(
+                "cross-origin DAV URL rejected: {url}"
+            )));
         }
+        Ok(())
     }
 
     fn auth_header(&self) -> HeaderValue {
@@ -47,6 +75,7 @@ impl DavClient {
 
     /// PROPFIND Depth 1 — returns hrefs found in the multistatus body.
     pub async fn propfind_hrefs(&self, url: &str) -> Result<Vec<String>, DavError> {
+        self.check_origin(url)?;
         let body = r#"<?xml version="1.0" encoding="utf-8" ?>
 <d:propfind xmlns:d="DAV:">
   <d:prop><d:displayname/><d:resourcetype/></d:prop>
@@ -82,6 +111,7 @@ impl DavClient {
 
     /// GET a resource as bytes/text.
     pub async fn get_text(&self, url: &str) -> Result<String, DavError> {
+        self.check_origin(url)?;
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, self.auth_header());
         let res = self.http.get(url).headers(headers).send().await?;
@@ -225,6 +255,58 @@ pub fn parse_vevent_fields(ical: &str) -> VEventFields {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_construction_validates_url() {
+        assert!(DavClient::new("u".into(), "p".into(), "not a url").is_err());
+        assert!(DavClient::new("u".into(), "p".into(), "ftp://x/").is_err());
+        // http to a public host is rejected; https or LAN http is fine.
+        assert!(DavClient::new("u".into(), "p".into(), "http://dav.example.com/").is_err());
+        assert!(DavClient::new("u".into(), "p".into(), "https://dav.example.com/").is_ok());
+        assert!(DavClient::new("u".into(), "p".into(), "http://192.168.1.10/").is_ok());
+    }
+
+    #[test]
+    fn check_origin_same_origin_ok() {
+        let client =
+            DavClient::new("u".into(), "p".into(), "https://dav.example.com/book/").unwrap();
+        assert!(
+            client
+                .check_origin("https://dav.example.com/book/alice.vcf")
+                .is_ok()
+        );
+        assert!(
+            client
+                .check_origin("https://dav.example.com:443/other")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn check_origin_cross_origin_rejected() {
+        let client =
+            DavClient::new("u".into(), "p".into(), "https://dav.example.com/book/").unwrap();
+        // A malicious server returning an absolute href to another host
+        // must never receive our credentials.
+        assert!(client.check_origin("https://evil.example/x.vcf").is_err());
+        assert!(client.check_origin("http://dav.example.com/x.vcf").is_err());
+        assert!(
+            client
+                .check_origin("https://dav.example.com:8443/x")
+                .is_err()
+        );
+        assert!(client.check_origin("not a url").is_err());
+    }
+
+    #[test]
+    fn resolve_then_check_pins_relative_hrefs() {
+        let base = "https://dav.example.com/book/";
+        let client = DavClient::new("u".into(), "p".into(), base).unwrap();
+        let url = resolve_href(base, "alice.vcf");
+        assert!(client.check_origin(&url).is_ok());
+        let url = resolve_href(base, "https://evil.example/x.vcf");
+        assert!(client.check_origin(&url).is_err());
+    }
 
     #[test]
     fn extract_hrefs_basic() {

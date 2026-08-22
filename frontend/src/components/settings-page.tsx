@@ -647,7 +647,6 @@ export function SettingsPage() {
                     >
                       <option value="tls">TLS</option>
                       <option value="starttls">STARTTLS</option>
-                      <option value="none">{t(locale, 'settings.accounts.none')}</option>
                     </select>
                   </div>
                 </fieldset>
@@ -693,7 +692,6 @@ export function SettingsPage() {
                     >
                       <option value="tls">TLS</option>
                       <option value="starttls">STARTTLS</option>
-                      <option value="none">{t(locale, 'settings.accounts.none')}</option>
                     </select>
                   </div>
                 </fieldset>

@@ -31,6 +31,10 @@ pub enum JmapError {
     Crypto(#[from] crypto::CryptoError),
     #[error("invalid response: {0}")]
     InvalidResponse(String),
+    #[error("invalid server URL: {0}")]
+    InvalidServerUrl(String),
+    #[error("cross-origin URL rejected (credentials stay pinned): {0}")]
+    CrossOrigin(String),
 }
 
 // ── JMAP Session Resource ───────────────────────────────────────────
@@ -118,11 +122,17 @@ pub struct JmapSyncState {
 ///
 /// Wraps the `reqwest` HTTP client and provides high-level operations
 /// for the sync engine: list mailboxes, query/fetch emails.
+///
+/// Credentials are pinned to the origin of the configured base URL: the
+/// session's `apiUrl`/`uploadUrl` must share that origin or discovery
+/// fails, so a malicious JMAP server cannot exfiltrate the account
+/// password by pointing those URLs at another host.
 pub struct JmapClient {
     client: Client,
     session: JmapSession,
     account_id: String,
     auth_token: String,
+    origin: String,
 }
 
 impl JmapClient {
@@ -134,8 +144,14 @@ impl JmapClient {
     /// 3. Parse the session resource
     /// 4. Extract the primary mail account ID
     pub async fn discover(base_url: &str, email: &str, password: &str) -> Result<Self, JmapError> {
+        crate::netsec::validate_server_url(base_url).map_err(JmapError::InvalidServerUrl)?;
+
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            // Never follow redirects: a redirect could carry the request to
+            // a different host, and we must never replay credentials
+            // cross-origin. Redirect responses surface as errors instead.
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
         // Step 1: Discover session URL
@@ -145,6 +161,8 @@ impl JmapClient {
             let trimmed = base_url.trim_end_matches('/');
             format!("{trimmed}/.well-known/jmap")
         };
+
+        let origin = crate::netsec::origin_of(&well_known).map_err(JmapError::InvalidServerUrl)?;
 
         let resp = client
             .get(&well_known)
@@ -160,6 +178,10 @@ impl JmapClient {
         }
 
         let session: JmapSession = resp.json().await?;
+
+        // The session document is server-controlled: pin every URL we will
+        // send credentials to against the configured origin.
+        check_session_urls(&origin, &session)?;
 
         // Step 2: Extract primary mail account
         let account_id = session
@@ -190,11 +212,15 @@ impl JmapClient {
             session,
             account_id,
             auth_token,
+            origin,
         })
     }
 
     /// Create a `JmapClient` directly from an existing session resource
     /// (avoids re-discovery).
+    ///
+    /// Pins credentials to the origin of the session's `apiUrl`; prefer
+    /// [`JmapClient::discover`], which pins to the configured base URL.
     #[allow(dead_code)]
     pub fn from_session(
         session: JmapSession,
@@ -204,6 +230,7 @@ impl JmapClient {
     ) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client");
 
@@ -216,11 +243,14 @@ impl JmapClient {
             )
         );
 
+        let origin = crate::netsec::origin_of(&session.api_url).unwrap_or_default();
+
         Self {
             client,
             session,
             account_id,
             auth_token,
+            origin,
         }
     }
 
@@ -415,6 +445,19 @@ impl JmapClient {
 
     /// Send a JMAP request to the API endpoint.
     async fn send_request(&self, request: &JmapRequest) -> Result<JmapResponse, JmapError> {
+        // Defensive re-check: discovery already pinned session URLs, but
+        // never attach Authorization without verifying the target origin.
+        let target =
+            crate::netsec::origin_of(&self.session.api_url).map_err(JmapError::InvalidServerUrl)?;
+        if target != self.origin {
+            tracing::warn!(
+                target_origin = %target,
+                expected_origin = %self.origin,
+                "JMAP: refusing cross-origin request (credentials stay pinned)"
+            );
+            return Err(JmapError::CrossOrigin(self.session.api_url.clone()));
+        }
+
         let resp = self
             .client
             .post(&self.session.api_url)
@@ -439,6 +482,27 @@ impl JmapClient {
 }
 
 // ── JMAP data types ─────────────────────────────────────────────────
+
+/// Verify every credential-bearing URL in the session document shares the
+/// configured origin (`apiUrl`, and `uploadUrl` when present).
+fn check_session_urls(origin: &str, session: &JmapSession) -> Result<(), JmapError> {
+    let mut urls = vec![session.api_url.as_str()];
+    if let Some(upload) = &session.upload_url {
+        urls.push(upload.as_str());
+    }
+    for url in urls {
+        let target = crate::netsec::origin_of(url).map_err(JmapError::InvalidServerUrl)?;
+        if target != origin {
+            tracing::warn!(
+                target_origin = %target,
+                expected_origin = %origin,
+                "JMAP: session URL points at a different origin; refusing to send credentials"
+            );
+            return Err(JmapError::CrossOrigin(url.to_string()));
+        }
+    }
+    Ok(())
+}
 
 /// A JMAP Mailbox object.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -651,6 +715,61 @@ pub async fn probe_jmap(domain: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_urls_same_origin_accepted() {
+        let session = JmapSession {
+            primary_accounts: PrimaryAccounts {
+                mail: Some("a1".into()),
+            },
+            capabilities: serde_json::json!({}),
+            accounts: serde_json::json!({}),
+            api_url: "https://jmap.example.com/api/".into(),
+            event_source_url: None,
+            upload_url: Some("https://jmap.example.com/upload/".into()),
+        };
+        assert!(check_session_urls("https://jmap.example.com:443", &session).is_ok());
+    }
+
+    #[test]
+    fn session_urls_cross_origin_rejected() {
+        // A malicious JMAP server pointing apiUrl at another host must not
+        // receive our Authorization header.
+        let session = JmapSession {
+            primary_accounts: PrimaryAccounts {
+                mail: Some("a1".into()),
+            },
+            capabilities: serde_json::json!({}),
+            accounts: serde_json::json!({}),
+            api_url: "https://evil.example/api/".into(),
+            event_source_url: None,
+            upload_url: None,
+        };
+        let err = check_session_urls("https://jmap.example.com:443", &session).unwrap_err();
+        assert!(matches!(err, JmapError::CrossOrigin(_)), "got: {err}");
+
+        let session = JmapSession {
+            api_url: "https://jmap.example.com/api/".into(),
+            upload_url: Some("https://evil.example/upload/".into()),
+            ..session
+        };
+        assert!(check_session_urls("https://jmap.example.com:443", &session).is_err());
+    }
+
+    #[test]
+    fn session_urls_unparseable_rejected() {
+        let session = JmapSession {
+            primary_accounts: PrimaryAccounts {
+                mail: Some("a1".into()),
+            },
+            capabilities: serde_json::json!({}),
+            accounts: serde_json::json!({}),
+            api_url: "not a url".into(),
+            event_source_url: None,
+            upload_url: None,
+        };
+        assert!(check_session_urls("https://jmap.example.com:443", &session).is_err());
+    }
 
     #[test]
     fn parse_jmap_mailbox() {

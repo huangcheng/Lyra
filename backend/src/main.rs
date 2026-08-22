@@ -18,6 +18,7 @@ mod jmap;
 mod jobs;
 mod kernel;
 mod kv;
+mod netsec;
 mod pim;
 mod plugins;
 mod protocol;

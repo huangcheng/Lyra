@@ -287,6 +287,20 @@ async fn create_account(
         return Err(AccountError::InvalidInput("invalid email address".into()));
     }
 
+    // Security modes are allowlisted: only tls / starttls (plaintext removed).
+    let imap_security = body
+        .imap_security
+        .as_deref()
+        .map(|s| crate::netsec::normalize_security_mode(s).map(str::to_string))
+        .transpose()
+        .map_err(AccountError::InvalidInput)?;
+    let smtp_security = body
+        .smtp_security
+        .as_deref()
+        .map(|s| crate::netsec::normalize_security_mode(s).map(str::to_string))
+        .transpose()
+        .map_err(AccountError::InvalidInput)?;
+
     // Get user's DEK for encryption
     let dek = AuthState::get_user_dek(state.db(), &user_id).await?;
 
@@ -324,10 +338,10 @@ async fn create_account(
     .bind(&credential_json)
     .bind(&body.imap_host)
     .bind(body.imap_port)
-    .bind(&body.imap_security)
+    .bind(&imap_security)
     .bind(&body.smtp_host)
     .bind(body.smtp_port)
-    .bind(&body.smtp_security)
+    .bind(&smtp_security)
     .bind(&receive_protocol)
     .bind(&send_protocol)
     .execute(pool)
@@ -356,10 +370,10 @@ async fn create_account(
             protocol,
             imap_host: body.imap_host,
             imap_port: body.imap_port,
-            imap_security: body.imap_security,
+            imap_security,
             smtp_host: body.smtp_host,
             smtp_port: body.smtp_port,
-            smtp_security: body.smtp_security,
+            smtp_security,
             carddav_url: None,
             caldav_url: None,
             is_active: true,
@@ -436,16 +450,20 @@ async fn update_account(
             params.push(port.to_string());
         }
         if let Some(security) = &body.imap_security {
+            let normalized = crate::netsec::normalize_security_mode(security)
+                .map_err(AccountError::InvalidInput)?;
             updates.push("imap_security = ?");
-            params.push(security.clone());
+            params.push(normalized.to_string());
         }
     }
 
     if let Some(url) = &body.carddav_url {
+        crate::netsec::validate_server_url(url).map_err(AccountError::InvalidInput)?;
         updates.push("carddav_url = ?");
         params.push(url.clone());
     }
     if let Some(url) = &body.caldav_url {
+        crate::netsec::validate_server_url(url).map_err(AccountError::InvalidInput)?;
         updates.push("caldav_url = ?");
         params.push(url.clone());
     }
@@ -461,8 +479,10 @@ async fn update_account(
             params.push(port.to_string());
         }
         if let Some(security) = &body.smtp_security {
+            let normalized = crate::netsec::normalize_security_mode(security)
+                .map_err(AccountError::InvalidInput)?;
             updates.push("smtp_security = ?");
-            params.push(security.clone());
+            params.push(normalized.to_string());
         }
     }
 
@@ -554,20 +574,24 @@ async fn delete_account(
 /// 1. Mozilla ISPDB (Thunderbird autoconfig)
 /// 2. SRV records
 /// 3. Common server name patterns
+///
+/// Authenticated only: the common-pattern probe makes outbound TCP
+/// connections, so an open probe endpoint would be an internal port-scan
+/// oracle. The domain is validated and resolved addresses are filtered
+/// against private/loopback ranges before connecting.
 async fn probe_server_config(
-    State(_state): State<AuthState>,
+    State(state): State<AuthState>,
+    headers: HeaderMap,
     Json(body): Json<ProbeRequest>,
 ) -> Result<Json<ProbeResult>, AccountError> {
+    let _user_id = get_user_id(&state, &headers).await?;
+
     let domain = body
         .domain
         .clone()
         .unwrap_or_else(|| extract_domain(&body.email_address));
 
-    if domain.is_empty() {
-        return Err(AccountError::InvalidInput(
-            "could not extract domain from email".into(),
-        ));
-    }
+    crate::netsec::validate_domain(&domain).map_err(AccountError::InvalidInput)?;
 
     // Try Mozilla ISPDB first
     if let Some(config) = probe_mozilla_ispdb(&domain).await {
@@ -604,6 +628,8 @@ fn extract_domain(email: &str) -> String {
 
 /// Probe Mozilla ISPDB for autoconfig.
 async fn probe_mozilla_ispdb(domain: &str) -> Option<ProbeResult> {
+    // `domain` is validated by `validate_domain` before we get here, so it
+    // contains only ASCII DNS labels and is safe to interpolate into the path.
     let url = format!("https://autoconfig.thunderbird.net/v1.1/{domain}");
 
     let client = reqwest::Client::builder()
@@ -673,11 +699,15 @@ fn extract_xml_value(xml: &str, tag: &str) -> Option<String> {
 }
 
 /// Normalize security type to our format.
+///
+/// `plain`/`none` socket types map to `None`: plaintext transport is not
+/// supported, so the probe result omits the mode and the UI keeps its
+/// (encrypted) default instead of suggesting an insecure configuration.
 fn normalize_security(security: Option<&str>) -> Option<String> {
     match security {
         Some("SSL" | "TLS") => Some("tls".into()),
         Some("STARTTLS") => Some("starttls".into()),
-        Some("plain" | "none") => Some("none".into()),
+        Some("plain" | "none") => None,
         _ => Some("tls".into()),
     }
 }
@@ -741,8 +771,44 @@ async fn probe_common_patterns(domain: &str) -> Option<ProbeResult> {
 }
 
 /// Try to connect to a TCP port.
+///
+/// Resolves the hostname first and refuses to connect when every resolved
+/// address is loopback/private/link-local/reserved (SSRF guard — wildcard
+/// DNS names like `10.0.0.5.nip.io` must not reach internal hosts). When
+/// resolution yields a mix, only public addresses are tried.
 async fn try_tcp_connect(host: &str, port: u16) -> bool {
-    tokio::net::TcpStream::connect(format!("{host}:{port}"))
-        .await
-        .is_ok()
+    let Ok(addrs) = tokio::net::lookup_host((host, port)).await else {
+        return false;
+    };
+    let public = crate::netsec::filter_public_addrs(addrs.map(|a| a.ip()));
+    for ip in public {
+        if tokio::net::TcpStream::connect(std::net::SocketAddr::new(ip, port))
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_security_allowlist_only() {
+        assert_eq!(normalize_security(Some("SSL")), Some("tls".into()));
+        assert_eq!(normalize_security(Some("TLS")), Some("tls".into()));
+        assert_eq!(
+            normalize_security(Some("STARTTLS")),
+            Some("starttls".into())
+        );
+        // Plaintext is unsupported — never suggest it.
+        assert_eq!(normalize_security(Some("plain")), None);
+        assert_eq!(normalize_security(Some("none")), None);
+        // Unknown → default to TLS (secure default).
+        assert_eq!(normalize_security(Some("weird")), Some("tls".into()));
+        assert_eq!(normalize_security(None), Some("tls".into()));
+    }
 }

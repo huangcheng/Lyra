@@ -36,12 +36,14 @@ pub enum ImapError {
 }
 
 /// Security mode for IMAP connections.
+///
+/// Plaintext (`none`) is intentionally not supported: it sent credentials
+/// over an unencrypted, unauthenticated connection.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ImapSecurity {
     Tls,
     Starttls,
-    None,
 }
 
 /// Connection parameters for an IMAP server.
@@ -125,7 +127,7 @@ pub struct ImapClient {
 impl ImapClient {
     /// Connect to an IMAP server and authenticate.
     ///
-    /// Handles TLS, STARTTLS, and plain connections.
+    /// Handles TLS and STARTTLS connections.
     pub async fn connect(config: &ImapConfig) -> Result<Self, ImapError> {
         let addr = format!("{}:{}", config.host, config.port);
 
@@ -182,35 +184,6 @@ impl ImapClient {
 
                 let tls_client = async_imap::Client::new(tls_stream);
                 let session = tls_client
-                    .login(&config.username, &config.password)
-                    .await
-                    .map_err(|(e, _)| ImapError::Login(e.to_string()))?;
-
-                Ok(Self { session })
-            }
-            ImapSecurity::None => {
-                // For plaintext connections we use a TLS wrapper with a
-                // connector that accepts the connection without verification.
-                // This is a pragmatic choice: the `Session` type is generic
-                // over `TlsStream<TcpStream>` and we need a uniform type.
-                let tcp = TcpStream::connect(&addr)
-                    .await
-                    .map_err(|e| ImapError::Connection(e.to_string()))?;
-
-                let tls_connector = native_tls::TlsConnector::builder()
-                    .danger_accept_invalid_certs(true)
-                    .danger_accept_invalid_hostnames(true)
-                    .build()
-                    .map_err(|e| ImapError::Tls(e.to_string()))?;
-
-                let tokio_tls = tokio_native_tls::TlsConnector::from(tls_connector);
-                let tls_stream = tokio_tls
-                    .connect(&config.host, tcp)
-                    .await
-                    .map_err(|e| ImapError::Tls(e.to_string()))?;
-
-                let client = async_imap::Client::new(tls_stream);
-                let session = client
                     .login(&config.username, &config.password)
                     .await
                     .map_err(|(e, _)| ImapError::Login(e.to_string()))?;

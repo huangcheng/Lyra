@@ -393,9 +393,13 @@ pub(crate) async fn prepare_smtp_send(
         smtp_host.ok_or_else(|| SyncError::InvalidInput("SMTP host not configured".into()))?;
     let port = u16::try_from(smtp_port.unwrap_or(587)).unwrap_or(587);
     let security = match smtp_security.as_deref() {
-        Some("tls") => SmtpSecurity::Tls,
-        Some("none") => SmtpSecurity::None,
-        _ => SmtpSecurity::Starttls,
+        Some(s) => {
+            match crate::netsec::normalize_security_mode(s).map_err(SyncError::InvalidInput)? {
+                "tls" => SmtpSecurity::Tls,
+                _ => SmtpSecurity::Starttls,
+            }
+        }
+        None => SmtpSecurity::Starttls,
     };
 
     let dek = crate::auth::AuthState::get_user_dek(db, &user_id)
@@ -1075,9 +1079,13 @@ async fn connect_imap_for_account(
         imap_host.ok_or_else(|| SyncError::InvalidInput("IMAP host not configured".into()))?;
     let port = u16::try_from(imap_port.unwrap_or(993)).unwrap_or(993);
     let security = match imap_security.as_deref() {
-        Some("starttls") => ImapSecurity::Starttls,
-        Some("none") => ImapSecurity::None,
-        _ => ImapSecurity::Tls,
+        Some(s) => {
+            match crate::netsec::normalize_security_mode(s).map_err(SyncError::InvalidInput)? {
+                "starttls" => ImapSecurity::Starttls,
+                _ => ImapSecurity::Tls,
+            }
+        }
+        None => ImapSecurity::Tls,
     };
 
     let dek = crate::auth::AuthState::get_user_dek(db, user_id)
@@ -1532,9 +1540,13 @@ pub(crate) async fn run_imap_sync(
     let host = imap_host.ok_or_else(|| SyncError::Crypto("IMAP host not configured".into()))?;
     let port = u16::try_from(imap_port.unwrap_or(993)).unwrap_or(993);
     let security = match imap_security.as_deref() {
-        Some("starttls") => ImapSecurity::Starttls,
-        Some("none") => ImapSecurity::None,
-        _ => ImapSecurity::Tls,
+        Some(s) => {
+            match crate::netsec::normalize_security_mode(s).map_err(SyncError::InvalidInput)? {
+                "starttls" => ImapSecurity::Starttls,
+                _ => ImapSecurity::Tls,
+            }
+        }
+        None => ImapSecurity::Tls,
     };
 
     let config = ImapConfig {

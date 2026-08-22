@@ -555,7 +555,8 @@ async fn sync_contacts(
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 
-    let client = crate::dav::DavClient::new(email, password);
+    let client = crate::dav::DavClient::new(email, password, &base_url)
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
     let hrefs = client
         .propfind_hrefs(&base_url)
         .await
@@ -671,7 +672,8 @@ async fn sync_calendars(
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 
-    let client = crate::dav::DavClient::new(email, password);
+    let client = crate::dav::DavClient::new(email, password, &base_url)
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
     let hrefs = client
         .propfind_hrefs(&base_url)
         .await
