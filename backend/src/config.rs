@@ -17,10 +17,6 @@ pub struct Config {
     /// Directory for storing message blobs and attachments.
     #[allow(dead_code)]
     pub data_dir: String,
-    /// Session signing secret (32+ bytes, base64 encoded).
-    /// Loaded from `SESSION_SECRET` env var.
-    #[allow(dead_code)]
-    pub session_secret: Vec<u8>,
     /// Minimum password length (default: 8).
     pub min_password_length: usize,
     /// Max concurrent mailbox syncs (`SYNC_MAX_CONCURRENT`, default 3).
@@ -71,7 +67,6 @@ impl Config {
     ///   - `LISTEN_ADDR` — default `0.0.0.0:3000`
     ///   - `DATABASE_URL` — default `sqlite:./data/lyra.db`
     ///   - `DATA_DIR`    — default `./data`
-    ///   - `SESSION_SECRET` — signing secret for session cookies; ephemeral random if unset
     ///   - `SYNC_MAX_CONCURRENT` — default `3`
     ///   - `SYNC_POLL_SECS` — default `300`
     ///   - `REDIS_URL` — if set, Redis kv (fail boot on connect error); else memory
@@ -79,8 +74,6 @@ impl Config {
     /// # Errors
     /// Returns `ConfigError` if `LYRA_MASTER_KEY` is missing or shorter than 32 bytes.
     pub fn from_env() -> Result<Self, ConfigError> {
-        use rand::RngCore;
-
         let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
 
         let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -89,21 +82,6 @@ impl Config {
         });
 
         let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-
-        let session_secret = env::var("SESSION_SECRET").map_or_else(
-            |_| {
-                tracing::warn!(
-                    "SESSION_SECRET not set; generating ephemeral secret (sessions will not persist across restarts)"
-                );
-                // Generate a random 64-byte secret for dev/testing.
-                // In production this MUST be set via env var.
-                let mut rng = rand::thread_rng();
-                let mut bytes = vec![0u8; 64];
-                rng.fill_bytes(&mut bytes);
-                bytes
-            },
-            String::into_bytes,
-        );
 
         let min_password_length: usize = env::var("MIN_PASSWORD_LENGTH")
             .ok()
@@ -130,7 +108,6 @@ impl Config {
             listen_addr,
             database_url,
             data_dir,
-            session_secret,
             min_password_length,
             sync_max_concurrent,
             sync_poll_secs,
@@ -158,7 +135,6 @@ mod tests {
             env::remove_var("LISTEN_ADDR");
             env::remove_var("DATABASE_URL");
             env::remove_var("DATA_DIR");
-            env::remove_var("SESSION_SECRET");
             env::remove_var("MIN_PASSWORD_LENGTH");
             env::remove_var("SYNC_MAX_CONCURRENT");
             env::remove_var("SYNC_POLL_SECS");
@@ -174,7 +150,6 @@ mod tests {
         assert_eq!(cfg.sync_max_concurrent, 3);
         assert_eq!(cfg.sync_poll_secs, 300);
         assert!(cfg.redis_url.is_none());
-        assert!(cfg.session_secret.len() >= 32);
         assert_eq!(cfg.master_key, b"test-master-key-with-32-bytes-minimum!!");
 
         unsafe {

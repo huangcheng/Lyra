@@ -31,17 +31,23 @@ pub struct Backoff {
 
 impl Default for Backoff {
     fn default() -> Self {
-        Self {
-            delays: HashMap::new(),
-            next_due: HashMap::new(),
-            applied_job: HashMap::new(),
-            base: Duration::from_secs(BASE_POLL_SECS),
-            max: Duration::from_secs(MAX_BACKOFF_SECS),
-        }
+        Self::with_base_secs(BASE_POLL_SECS)
     }
 }
 
 impl Backoff {
+    /// Build a backoff whose base interval matches `SYNC_POLL_SECS`.
+    #[must_use]
+    pub fn with_base_secs(base_secs: u64) -> Self {
+        Self {
+            delays: HashMap::new(),
+            next_due: HashMap::new(),
+            applied_job: HashMap::new(),
+            base: Duration::from_secs(base_secs.max(1)),
+            max: Duration::from_secs(MAX_BACKOFF_SECS),
+        }
+    }
+
     /// Current poll delay for `account_id` (base interval if never failed).
     #[must_use]
     pub fn delay(&self, account_id: &str) -> Duration {
@@ -162,14 +168,14 @@ async fn list_active_accounts(pool: &sqlx::SqlitePool) -> Result<Vec<ActiveAccou
         .collect())
 }
 
-/// True when a sync job for this account is already pending or running.
-pub async fn has_pending_or_running_sync(
+/// Id of a pending/running `sync_account` job for this account, if any.
+pub async fn pending_or_running_sync_job_id(
     pool: &sqlx::SqlitePool,
     account_id: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Option<String>, sqlx::Error> {
     let rows = sqlx::query(
         r"
-        SELECT payload FROM jobs
+        SELECT id, payload FROM jobs
         WHERE kind = 'sync_account' AND status IN ('pending', 'running')
         ",
     )
@@ -184,10 +190,20 @@ pub async fn has_pending_or_running_sync(
         if let JobPayload::SyncAccount { account_id: id, .. } = payload
             && id == account_id
         {
-            return Ok(true);
+            return Ok(Some(row.get("id")));
         }
     }
-    Ok(false)
+    Ok(None)
+}
+
+/// True when a sync job for this account is already pending or running.
+pub async fn has_pending_or_running_sync(
+    pool: &sqlx::SqlitePool,
+    account_id: &str,
+) -> Result<bool, sqlx::Error> {
+    Ok(pending_or_running_sync_job_id(pool, account_id)
+        .await?
+        .is_some())
 }
 
 /// Most recent completed/failed sync job for an account, if any.
@@ -227,7 +243,7 @@ pub fn start_scheduler(db: DbPool, poll_secs: u64) {
         DbPool::Sqlite(pool) => {
             let secs = poll_secs.max(1);
             tokio::spawn(async move {
-                let backoff = Arc::new(Mutex::new(Backoff::default()));
+                let backoff = Arc::new(Mutex::new(Backoff::with_base_secs(secs)));
                 let mut interval = tokio::time::interval(Duration::from_secs(secs));
                 // First tick completes immediately — do not wait poll_secs at startup.
                 loop {
@@ -349,6 +365,16 @@ mod tests {
         assert_eq!(b.delay("a"), Duration::from_secs(600));
         b.ok("a");
         assert_eq!(b.delay("a"), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn backoff_base_follows_configured_poll_secs() {
+        let mut b = Backoff::with_base_secs(60);
+        assert_eq!(b.delay("a"), Duration::from_secs(60));
+        b.fail("a");
+        assert_eq!(b.delay("a"), Duration::from_secs(120));
+        b.ok("a");
+        assert_eq!(b.delay("a"), Duration::from_secs(60));
     }
 
     #[tokio::test]

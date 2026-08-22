@@ -171,7 +171,6 @@ mod tests {
             listen_addr: "127.0.0.1:0".into(),
             database_url: "sqlite::memory:".into(),
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
-            session_secret: b"test-session-secret-0123456789abcdef".to_vec(),
             min_password_length: 8,
             sync_max_concurrent: 3,
             sync_poll_secs: 300,

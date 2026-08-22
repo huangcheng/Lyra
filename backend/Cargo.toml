@@ -2,6 +2,8 @@
 name = "lyra_backend"
 version = "0.1.0"
 edition = "2024"
+# Edition 2024 needs 1.85; let-chains (used in if/while) need 1.88.
+rust-version = "1.88"
 
 [features]
 default = ["sqlite"]
@@ -33,9 +35,8 @@ argon2 = { version = "0.5", features = ["std"] }
 rand = "0.8"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 base32 = "0.5"
-tower-cookies = { version = "0.11", features = ["signed"] }
-cookie = "0.18"
 aes-gcm = "0.10"
+zeroize = "1"
 base64 = "0.22"
 hkdf = "0.12"
 sha2 = "0.10"

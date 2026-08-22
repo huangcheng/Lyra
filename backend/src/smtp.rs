@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::crypto::{self, EncryptedCredential};
+use zeroize::Zeroizing;
 
 /// Errors specific to the SMTP adapter.
 #[derive(Debug, Error)]
@@ -53,7 +54,7 @@ pub struct SmtpConfig {
     pub port: u16,
     pub security: SmtpSecurity,
     pub username: String,
-    pub password: String,
+    pub password: Zeroizing<String>,
 }
 
 /// An outbound email message to be sent.
@@ -95,7 +96,7 @@ impl SmtpAdapter {
     ///
     /// Handles TLS (port 465) and STARTTLS (port 587) connections.
     pub fn connect(config: &SmtpConfig) -> Result<Self, SmtpError> {
-        let creds = Credentials::new(config.username.clone(), config.password.clone());
+        let creds = Credentials::new(config.username.clone(), (*config.password).clone());
 
         let transport = match config.security {
             SmtpSecurity::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)?
@@ -210,6 +211,18 @@ pub fn decrypt_account_password(credential_json: &str, dek: &[u8]) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smtp_config_password_is_zeroizing() {
+        let cfg = SmtpConfig {
+            host: "smtp.example.com".into(),
+            port: 465,
+            security: SmtpSecurity::Tls,
+            username: "user".into(),
+            password: Zeroizing::new("secret".into()),
+        };
+        assert_eq!(&*cfg.password, "secret");
+    }
 
     #[test]
     fn decrypt_roundtrip() {

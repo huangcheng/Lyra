@@ -248,6 +248,20 @@ async fn trigger_sync(
         return Err(SyncError::AccountNotFound);
     }
 
+    // Prefer 202 + existing job id over 409 so the Settings poller can keep
+    // polling the same job instead of treating a duplicate trigger as an error.
+    if let Some(job_id) =
+        crate::scheduler::pending_or_running_sync_job_id(pool, &account_id).await?
+    {
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(EnqueuedSync {
+                job_id,
+                status: "queued".into(),
+            }),
+        ));
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
     let job_id = crate::jobs::enqueue(
         pool,
@@ -425,7 +439,7 @@ pub(crate) async fn prepare_smtp_send(
         port,
         security,
         username: email_address.clone(),
-        password,
+        password: zeroize::Zeroizing::new(password),
     };
 
     let outbound = outbound_from_raw(email_address, raw)?;
@@ -1107,7 +1121,7 @@ async fn connect_imap_for_account(
         port,
         security,
         username: email_address,
-        password,
+        password: zeroize::Zeroizing::new(password),
     })
     .await?;
 
@@ -1561,7 +1575,7 @@ pub(crate) async fn run_imap_sync(
         port,
         security,
         username: email_address,
-        password: password.to_string(),
+        password: zeroize::Zeroizing::new(password.to_string()),
     };
 
     // Connect to IMAP
@@ -2375,6 +2389,59 @@ mod tests {
 
         assert!(user_has_active_sync_job(&pool, &user_id).await.unwrap());
         assert!(!user_has_active_sync_job(&pool, &other_user).await.unwrap());
+    }
+
+    fn test_auth_state(pool: sqlx::SqlitePool) -> AuthState {
+        crate::auth::install_test_master_key();
+        let config = crate::config::Config {
+            listen_addr: "127.0.0.1:0".into(),
+            database_url: "sqlite::memory:".into(),
+            data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            min_password_length: 8,
+            sync_max_concurrent: 3,
+            sync_poll_secs: 300,
+            redis_url: None,
+            master_key: crate::auth::TEST_MASTER_KEY.to_vec(),
+        };
+        AuthState::new(
+            DbPool::Sqlite(pool),
+            &config,
+            std::sync::Arc::new(App::new()),
+            std::sync::Arc::new(crate::kv::MemoryKv::new()),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn trigger_sync_returns_existing_job_when_already_queued() {
+        let pool = test_pool().await;
+        let (user_id, account_id) = seed_user_and_account(&pool).await;
+        let state = test_auth_state(pool.clone());
+
+        let (status1, Json(first)) = trigger_sync(
+            State(state.clone()),
+            Path(account_id.clone()),
+            AuthUser(user_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status1, StatusCode::ACCEPTED);
+
+        let (status2, Json(second)) =
+            trigger_sync(State(state), Path(account_id), AuthUser(user_id))
+                .await
+                .unwrap();
+        // 202 + existing job id (not 409): Settings poller can keep polling.
+        assert_eq!(status2, StatusCode::ACCEPTED);
+        assert_eq!(first.job_id, second.job_id);
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE kind = 'sync_account' AND status IN ('pending', 'running')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "must not enqueue a second in-flight sync");
     }
 
     #[test]

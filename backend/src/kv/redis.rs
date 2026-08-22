@@ -8,6 +8,20 @@ use redis::aio::ConnectionManager;
 
 use super::{KvError, KvStore};
 
+/// Atomic INCRBY + optional EXPIRE when the key is new.
+///
+/// A separate INCR then EXPIRE is not atomic: a crash between them leaves a
+/// lockout counter with no TTL. MemoryKv applies expiry only on first create;
+/// this script does the same in one Redis round-trip (`n == delta` means new).
+const INCR_EXPIRE_SCRIPT: &str = r"
+    local n = redis.call('INCRBY', KEYS[1], ARGV[1])
+    local ttl = tonumber(ARGV[2])
+    if n == tonumber(ARGV[1]) and ttl then
+        redis.call('EXPIRE', KEYS[1], ttl)
+    end
+    return n
+";
+
 /// Redis-backed kv store using a multiplexed connection manager.
 pub struct RedisKv {
     conn: ConnectionManager,
@@ -84,19 +98,14 @@ impl KvStore for RedisKv {
 
     async fn incr(&self, key: &str, delta: i64, ttl_secs: Option<u64>) -> Result<i64, KvError> {
         let mut conn = self.conn.clone();
-        let next: i64 = conn.incr(key, delta).await.map_err(|e| Self::map_err(&e))?;
-        // Fixed window: set the TTL only when the counter was just created
-        // (INCR on a missing key starts at 0, so next == delta means new key).
-        if next == delta
-            && let Some(secs) = ttl_secs
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            let _: () = conn
-                .expire(key, secs as i64)
-                .await
-                .map_err(|e| Self::map_err(&e))?;
-        }
-        Ok(next)
+        let ttl_arg = ttl_secs.map(|s| s.to_string()).unwrap_or_default();
+        redis::Script::new(INCR_EXPIRE_SCRIPT)
+            .key(key)
+            .arg(delta)
+            .arg(ttl_arg)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| Self::map_err(&e))
     }
 }
 

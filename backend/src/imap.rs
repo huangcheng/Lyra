@@ -17,6 +17,7 @@ use tokio_native_tls::TlsStream;
 
 use crate::crypto::{self, EncryptedCredential};
 use crate::sanitize::sanitize_email_html;
+use zeroize::Zeroizing;
 
 /// Errors specific to the IMAP adapter.
 #[derive(Debug, Error)]
@@ -53,7 +54,7 @@ pub struct ImapConfig {
     pub port: u16,
     pub security: ImapSecurity,
     pub username: String,
-    pub password: String,
+    pub password: Zeroizing<String>,
 }
 
 /// Metadata for a single IMAP folder (mailbox).
@@ -819,6 +820,18 @@ mod tests {
     fn decode_quoted_printable_soft_break() {
         let input = "long line=\r\ncontinued";
         assert_eq!(decode_quoted_printable(input), "long linecontinued");
+    }
+
+    #[test]
+    fn imap_config_password_is_zeroizing() {
+        let cfg = ImapConfig {
+            host: "imap.example.com".into(),
+            port: 993,
+            security: ImapSecurity::Tls,
+            username: "user".into(),
+            password: Zeroizing::new("secret".into()),
+        };
+        assert_eq!(&*cfg.password, "secret");
     }
 
     #[test]

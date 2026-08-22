@@ -25,6 +25,7 @@ use crate::kv::KvStore;
 #[cfg(test)]
 use crate::kv::MemoryKv;
 use crate::storage::DbPool;
+use zeroize::Zeroizing;
 
 // ── Public types ────────────────────────────────────────────────────
 
@@ -194,27 +195,43 @@ pub struct ChangePasswordRequest {
 
 // ── Password hashing ────────────────────────────────────────────────
 
-fn hash_password(password: &str) -> Result<String, AuthError> {
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    let hash = argon2
-        .hash_password(password.as_bytes(), &salt)
-        .map_err(|e| {
-            tracing::error!("Password hashing failed: {e}");
-            AuthError::internal("Failed to hash password")
-        })?
-        .to_string();
-    Ok(hash)
+async fn hash_password(password: &str) -> Result<String, AuthError> {
+    let password = Zeroizing::new(password.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        argon2
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|e| {
+                tracing::error!("Password hashing failed: {e}");
+                AuthError::internal("Failed to hash password")
+            })
+            .map(|h| h.to_string())
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!("Password hash task failed: {e}");
+        AuthError::internal("Failed to hash password")
+    })?
 }
 
-fn verify_password(password: &str, hash: &str) -> Result<bool, StatusCode> {
-    let parsed_hash = PasswordHash::new(hash).map_err(|e| {
-        tracing::error!("Invalid password hash format: {e}");
+async fn verify_password(password: &str, hash: &str) -> Result<bool, StatusCode> {
+    let password = Zeroizing::new(password.to_owned());
+    let hash = hash.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let parsed_hash = PasswordHash::new(&hash).map_err(|e| {
+            tracing::error!("Invalid password hash format: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        Ok(Argon2::default()
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .is_ok())
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!("Password verify task failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    Ok(Argon2::default()
-        .verify_password(password.as_bytes(), &parsed_hash)
-        .is_ok())
+    })?
 }
 
 fn validate_password(password: &str, min_length: usize) -> Result<(), String> {
@@ -795,13 +812,13 @@ impl SessionStore {
 // See `docs/specs/2026-08-20-lyra-data-model-spec.md` §3.
 
 /// Process-wide master key, installed once at boot by [`AuthState::new`].
-static MASTER_KEY: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+static MASTER_KEY: std::sync::OnceLock<Zeroizing<Vec<u8>>> = std::sync::OnceLock::new();
 
 /// Install the master key. The first install wins; later calls are no-ops
 /// (tests share one process-wide key). A second install with a *different*
 /// key is suspicious, so it is logged.
 pub(crate) fn install_master_key(key: &[u8]) {
-    if MASTER_KEY.set(key.to_vec()).is_err()
+    if MASTER_KEY.set(Zeroizing::new(key.to_vec())).is_err()
         && let Some(existing) = MASTER_KEY.get()
         && existing.as_slice() != key
     {
@@ -814,7 +831,7 @@ pub(crate) fn install_master_key(key: &[u8]) {
 fn master_key() -> Result<&'static [u8], CryptoError> {
     MASTER_KEY
         .get()
-        .map(Vec::as_slice)
+        .map(|k| k.as_slice())
         .ok_or(CryptoError::MasterKeyNotInitialized)
 }
 
@@ -962,7 +979,7 @@ async fn auth_bootstrap(
         return Err(AuthError::BadRequest(msg));
     }
 
-    let password_hash = hash_password(&req.password)?;
+    let password_hash = hash_password(&req.password).await?;
 
     let user_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
     let locale = req.locale.unwrap_or_else(|| "en".to_string());
@@ -1033,6 +1050,7 @@ async fn auth_login(
             .password_hash
             .ok_or_else(|| AuthError::internal("Password hash not available"))?,
     )
+    .await
     .map_err(|_| AuthError::internal("Authentication failed"))?;
 
     if !valid {
@@ -1140,7 +1158,7 @@ async fn verify_totp_code(
     let dek = AuthState::get_user_dek(&state.db, user_id)
         .await
         .map_err(crypto_err)?;
-    let secret = decrypt_totp_secret(&dek, stored_secret).map_err(crypto_err)?;
+    let secret = Zeroizing::new(decrypt_totp_secret(&dek, stored_secret).map_err(crypto_err)?);
     let totp = build_totp(&secret, &user.username)?;
 
     let Some(step) = matched_totp_step(&totp, code) else {
@@ -1174,10 +1192,8 @@ async fn verify_totp_code(
 
 async fn totp_enroll(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<TotpEnrollResponse>, AuthError> {
-    let user_id = extract_session(&state, &headers).await?;
-
     let user = find_user_by_id(&state.db, &user_id)
         .await?
         .ok_or_else(|| AuthError::internal("User not found"))?;
@@ -1190,10 +1206,11 @@ async fn totp_enroll(
         ));
     }
 
-    let secret_bytes = totp_rs::Secret::generate_secret().to_bytes().map_err(|e| {
-        tracing::error!("Failed to generate TOTP secret: {e}");
-        AuthError::internal("Failed to generate TOTP secret")
-    })?;
+    let secret_bytes =
+        Zeroizing::new(totp_rs::Secret::generate_secret().to_bytes().map_err(|e| {
+            tracing::error!("Failed to generate TOTP secret: {e}");
+            AuthError::internal("Failed to generate TOTP secret")
+        })?);
 
     let secret_base32 = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &secret_bytes);
     // Store the secret encrypted with the user's DEK; enabled only after confirm.
@@ -1215,11 +1232,9 @@ async fn totp_enroll(
 
 async fn totp_enroll_confirm(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Json(req): Json<TotpEnrollConfirmRequest>,
 ) -> Result<Json<AuthStatus>, AuthError> {
-    let user_id = extract_session(&state, &headers).await?;
-
     let user = find_user_by_id(&state.db, &user_id)
         .await?
         .ok_or_else(|| AuthError::internal("User not found"))?;
@@ -1231,7 +1246,7 @@ async fn totp_enroll_confirm(
     let dek = AuthState::get_user_dek(&state.db, &user_id)
         .await
         .map_err(crypto_err)?;
-    let secret = decrypt_totp_secret(&dek, &stored).map_err(crypto_err)?;
+    let secret = Zeroizing::new(decrypt_totp_secret(&dek, &stored).map_err(crypto_err)?);
 
     let totp = build_totp(&secret, &user.username)?;
 
@@ -1254,11 +1269,9 @@ async fn totp_enroll_confirm(
 
 async fn totp_disable(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Json(req): Json<TotpDisableRequest>,
 ) -> Result<Json<AuthStatus>, AuthError> {
-    let user_id = extract_session(&state, &headers).await?;
-
     // Disabling 2FA weakens account security, so it requires re-authentication
     // with the current password, not just a session token. The password check
     // is rate-limited per user so a stolen session is no password oracle.
@@ -1276,6 +1289,7 @@ async fn totp_disable(
             .password_hash
             .ok_or_else(|| AuthError::internal("Password hash not available"))?,
     )
+    .await
     .map_err(|_| AuthError::internal("Verification failed"))?;
     if !valid {
         note_failed_attempt(kv.as_ref(), &rl_key, "Verification failed").await?;
@@ -1295,11 +1309,9 @@ async fn totp_disable(
 
 async fn change_password(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, AuthError> {
-    let user_id = extract_session(&state, &headers).await?;
-
     // The current-password check is rate-limited per user so a stolen session
     // is no offline-speed password oracle.
     let kv = Arc::clone(state.sessions.kv());
@@ -1316,6 +1328,7 @@ async fn change_password(
             .password_hash
             .ok_or_else(|| AuthError::internal("Password hash not available"))?,
     )
+    .await
     .map_err(|_| AuthError::internal("Verification failed"))?;
     if !valid {
         note_failed_attempt(kv.as_ref(), &rl_key, "Verification failed").await?;
@@ -1327,7 +1340,7 @@ async fn change_password(
         return Err(AuthError::BadRequest(msg));
     }
 
-    let new_hash = hash_password(&req.new_password)?;
+    let new_hash = hash_password(&req.new_password).await?;
     update_user_password(&state.db, &user_id, &new_hash)
         .await
         .map_err(|_| AuthError::internal("Failed to update password"))?;
@@ -1358,10 +1371,8 @@ async fn auth_logout(
 
 async fn auth_me(
     State(state): State<AuthState>,
-    headers: HeaderMap,
+    AuthUser(user_id): AuthUser,
 ) -> Result<Json<UserInfo>, AuthError> {
-    let user_id = extract_session(&state, &headers).await?;
-
     let user = find_user_by_id(&state.db, &user_id)
         .await?
         .ok_or_else(|| AuthError::internal("User not found"))?;
@@ -1469,12 +1480,19 @@ mod tests {
         assert!(validate_password("Abcdefg1!@#", 8).is_ok());
     }
 
-    #[test]
-    fn password_hashing_roundtrip() {
+    #[tokio::test]
+    async fn password_hashing_roundtrip() {
         let password = "TestPassw0rd!";
-        let hash = hash_password(password).unwrap();
-        assert!(verify_password(password, &hash).unwrap());
-        assert!(!verify_password("WrongPassw0rd!", &hash).unwrap());
+        let hash = hash_password(password).await.unwrap();
+        assert!(verify_password(password, &hash).await.unwrap());
+        assert!(!verify_password("WrongPassw0rd!", &hash).await.unwrap());
+    }
+
+    #[test]
+    fn install_master_key_first_wins() {
+        install_master_key(TEST_MASTER_KEY);
+        install_master_key(b"different-key-that-is-also-32-bytes!!");
+        assert_eq!(master_key().unwrap(), TEST_MASTER_KEY);
     }
 
     #[test]
@@ -1575,7 +1593,6 @@ mod tests {
             listen_addr: "127.0.0.1:0".into(),
             database_url: "sqlite::memory:".into(),
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
-            session_secret: b"test-session-secret-0123456789abcdef".to_vec(),
             min_password_length: 8,
             sync_max_concurrent: 3,
             sync_poll_secs: 300,
@@ -1617,15 +1634,6 @@ mod tests {
             .await
             .unwrap();
         dek.to_vec()
-    }
-
-    fn bearer_headers(token: &str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
-        headers
     }
 
     #[tokio::test]
@@ -1778,10 +1786,9 @@ mod tests {
             .fetch_one(sqlite_pool(&db))
             .await
             .unwrap();
-        let token = state.sessions.create_session(&user_id).await.unwrap();
 
         // Enroll: returns the plaintext secret once, stores only ciphertext.
-        let enroll = totp_enroll(State(state.clone()), bearer_headers(&token))
+        let enroll = totp_enroll(State(state.clone()), AuthUser(user_id.clone()))
             .await
             .unwrap();
         let plaintext_secret = enroll.secret.clone();
@@ -1806,7 +1813,7 @@ mod tests {
         let code = totp.generate_current().unwrap();
         let status = totp_enroll_confirm(
             State(state.clone()),
-            bearer_headers(&token),
+            AuthUser(user_id.clone()),
             Json(TotpEnrollConfirmRequest { code }),
         )
         .await
@@ -1849,7 +1856,7 @@ mod tests {
     /// Returns the plaintext base32 TOTP secret.
     async fn seed_user_with_totp(db: &DbPool, id: &str, username: &str, password: &str) -> String {
         seed_user_with_dek(db, id).await;
-        let hash = hash_password(password).unwrap();
+        let hash = hash_password(password).await.unwrap();
         let secret_bytes = totp_rs::Secret::generate_secret().to_bytes().unwrap();
         let secret_b32 =
             base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &secret_bytes);
@@ -2070,9 +2077,10 @@ mod tests {
         .unwrap();
         let token_b = login_b.token.clone();
 
+        let alice = AuthUser(state.sessions.get_session(&token_a).await.unwrap());
         let status = change_password(
             State(state.clone()),
-            bearer_headers(&token_a),
+            alice,
             Json(ChangePasswordRequest {
                 current_password: "Str0ngPass1".into(),
                 new_password: "N3wPassword!x".into(),
@@ -2113,9 +2121,10 @@ mod tests {
         let state = test_state(db);
         let token = bootstrap_alice(&state).await;
 
+        let alice = AuthUser(state.sessions.get_session(&token).await.unwrap());
         let err = change_password(
             State(state.clone()),
-            bearer_headers(&token),
+            alice,
             Json(ChangePasswordRequest {
                 current_password: "Wr0ngPass1".into(),
                 new_password: "N3wPassword!x".into(),
@@ -2145,9 +2154,10 @@ mod tests {
         let state = test_state(db);
         let token = bootstrap_alice(&state).await;
 
+        let alice = AuthUser(state.sessions.get_session(&token).await.unwrap());
         let err = change_password(
             State(state.clone()),
-            bearer_headers(&token),
+            alice,
             Json(ChangePasswordRequest {
                 current_password: "Str0ngPass1".into(),
                 new_password: "weak".into(),
@@ -2166,10 +2176,11 @@ mod tests {
         let state = test_state(db);
         let token = state.sessions.create_session("user-1").await.unwrap();
 
+        let alice = AuthUser(state.sessions.get_session(&token).await.unwrap());
         // Wrong password → rejected, TOTP stays enabled.
         let err = totp_disable(
             State(state.clone()),
-            bearer_headers(&token),
+            AuthUser(alice.0.clone()),
             Json(TotpDisableRequest {
                 password: "Wr0ngPass1".into(),
             }),
@@ -2187,7 +2198,7 @@ mod tests {
         // Correct password → disabled.
         let status = totp_disable(
             State(state.clone()),
-            bearer_headers(&token),
+            alice,
             Json(TotpDisableRequest {
                 password: "Str0ngPass1".into(),
             }),
@@ -2204,9 +2215,12 @@ mod tests {
         let state = test_state(db);
         let token = state.sessions.create_session("user-1").await.unwrap();
 
-        let err = totp_enroll(State(state.clone()), bearer_headers(&token))
-            .await
-            .unwrap_err();
+        let err = totp_enroll(
+            State(state.clone()),
+            AuthUser(state.sessions.get_session(&token).await.unwrap()),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.status(), StatusCode::CONFLICT);
     }
 
@@ -2303,10 +2317,11 @@ mod tests {
         let state = test_state(db);
         let token = bootstrap_alice(&state).await;
 
+        let user_id = state.sessions.get_session(&token).await.unwrap();
         let attempt = |current: &str| {
             change_password(
                 State(state.clone()),
-                bearer_headers(&token),
+                AuthUser(user_id.clone()),
                 Json(ChangePasswordRequest {
                     current_password: current.into(),
                     new_password: "N3wPassword!x".into(),
@@ -2329,10 +2344,11 @@ mod tests {
         let state = test_state(db);
         let token = state.sessions.create_session("user-1").await.unwrap();
 
+        let user_id = state.sessions.get_session(&token).await.unwrap();
         let attempt = |password: &str| {
             totp_disable(
                 State(state.clone()),
-                bearer_headers(&token),
+                AuthUser(user_id.clone()),
                 Json(TotpDisableRequest {
                     password: password.into(),
                 }),
@@ -2377,7 +2393,7 @@ mod tests {
         // The legit user (valid session) changes their password...
         change_password(
             State(state.clone()),
-            bearer_headers(&token),
+            AuthUser(state.sessions.get_session(&token).await.unwrap()),
             Json(ChangePasswordRequest {
                 current_password: "Str0ngPass1".into(),
                 new_password: "N3wPassword!x".into(),

@@ -85,8 +85,7 @@ pub async fn enqueue(
 ) -> Result<String, sqlx::Error> {
     let id = uuid::Uuid::now_v7().to_string();
     let kind = payload_kind(payload);
-    let json = serde_json::to_string(payload)
-        .unwrap_or_else(|_| r#"{"kind":"sync_account","account_id":"","user_id":""}"#.into());
+    let json = serde_json::to_string(payload).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
     sqlx::query(
         r"
         INSERT INTO jobs (id, kind, run_at, payload, status)
