@@ -65,7 +65,10 @@
     "syncNow": "立即同步",
     "syncing": "同步中…",
     "syncDone": "同步完成",
-    "syncError": "同步失败"
+    "syncError": "同步失败",
+    "remoteContentHidden": "远程内容已隐藏，以保护你的隐私。",
+    "showRemoteContent": "显示远程内容",
+    "alwaysShowFromSender": "始终显示来自 {{sender}} 的远程内容"
   },
   "auth": {
     "login": "登录",

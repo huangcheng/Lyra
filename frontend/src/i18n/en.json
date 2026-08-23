@@ -65,7 +65,10 @@
     "syncNow": "Sync Now",
     "syncing": "Syncing…",
     "syncDone": "Sync complete",
-    "syncError": "Sync failed"
+    "syncError": "Sync failed",
+    "remoteContentHidden": "Remote content was hidden to protect your privacy.",
+    "showRemoteContent": "Show remote content",
+    "alwaysShowFromSender": "Always show remote content from {{sender}}"
   },
   "auth": {
     "login": "Log In",

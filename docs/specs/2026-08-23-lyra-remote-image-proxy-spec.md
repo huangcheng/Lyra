@@ -1,7 +1,7 @@
 # Lyra Remote-Image Proxy (Anti-Tracking) — Phase Spec
 
 **Date:** 2026-08-23
-**Status:** Planned (separate track from the [OpenPGP spec](./2026-08-23-lyra-openpgp-spec.md))
+**Status:** Planned (separate track from the [OpenGPG spec](./2026-08-23-lyra-opengpg-spec.md))
 **Scope:** Stop email tracking pixels and sender-side fingerprinting by controlling how remote images in HTML mail are loaded.
 
 ---
@@ -32,10 +32,19 @@ HTML mail routinely embeds 1×1 tracking pixels and remote images. Loading them 
 
 | Mode | Behavior |
 |------|----------|
-| `block` | Every remote `http(s)` image src replaced with a neutral placeholder (`<span data-lyra-blocked-img>` with alt text). Message header shows "Remote images blocked — Load". Load click re-requests that message with `?remote_content=allow`, which applies `proxy` rewriting for that response only. |
+| `block` | Every remote `http(s)` image src replaced with a neutral placeholder (`<span data-lyra-blocked-img>` with alt text). Banner above the message: **“Remote content was hidden”** with two actions — **“Show remote content”** (this message only, via `?remote_content=allow`) and **“Always show remote content from {sender}”** (adds the sender to the allow-list). |
 | `proxy` | Remote srcs rewritten to `/api/v1/proxy/<original-url>`; first render triggers a backend fetch, cached afterwards. |
 
-Setting stored via the existing kv/settings seam; API: `GET/PATCH /api/v1/settings/privacy` → `{ "remote_images": "block" | "proxy" }`.
+Setting stored via the existing kv/settings seam; API: `GET/PATCH /api/v1/settings/privacy` → `{ "remote_images": "block" | "proxy", "remote_content_allowlist": ["sales.cn@jetbrains.com", …] }`.
+
+### Per-sender allow-list
+
+- “Always show remote content from {sender}” stores the message’s primary `From` email address (lowercased, exact match) in the kv/settings seam alongside the mode.
+- Allow-listed senders **skip blocking only — they do not skip the privacy layer**: once M2 exists their images still load via `/api/v1/proxy/…` in `proxy` mode (server IP/UA only); in M1 (no proxy yet) they load directly, matching Thunderbird’s behavior.
+- API: `POST /api/v1/settings/privacy/allow-sender { "sender": "…" }` and `DELETE /api/v1/settings/privacy/allow-sender/{sender}`; both are idempotent and reflected in `GET /api/v1/settings/privacy`.
+- Serve-time rewriting resolves allow-list membership from the message row’s `from` address before choosing placeholder vs load.
+- Manage/delete entries: Settings → Privacy list (M3).
+- i18n (en/zh): banner title, “Show remote content”, “Always show remote content from {sender}”, settings labels.
 
 ### Serve-time rewriting
 
@@ -76,7 +85,8 @@ During rewrite, flag images with explicit dimensions ≤ 4×4 px or 1-byte-class
 
 ### M1 — Block by default + manual load (no proxy yet)
 - `rewrite_remote_images` placeholder mode; `?remote_content=allow` bypass on message endpoints.
-- Frontend: blocked-content banner in `mail-display.tsx` (per-message, not per-app prompt spam); i18n en/zh.
+- Per-sender allow-list: kv persistence, allow/forbid API, `From`-match in the rewriter.
+- Frontend: blocked-content banner in `mail-display.tsx` with the two actions (Thunderbird-style, per-message, not per-app prompt spam); i18n en/zh.
 - Optional but cheap here: rewrite `cid:` inline images to the existing attachment download endpoint so inline attachments render (flagged as future work in `sanitize.rs` today).
 - CSP tightened: rendered mail iframe/container `img-src 'self' blob: cid:`.
 
@@ -88,7 +98,7 @@ During rewrite, flag images with explicit dimensions ≤ 4×4 px or 1-byte-class
 
 ### M3 — Refinements
 - Pixel heuristics + UI badge.
-- Per-sender allow-list ("always load from this sender") stored in settings/kv.
+- Allow-list management UI: Settings → Privacy shows stored senders with remove buttons; optional domain-level entries (`@jetbrains.com`) — decide here.
 - Cache stats in settings page (size, clear-cache button).
 
 ## Schema / storage
@@ -101,6 +111,7 @@ During rewrite, flag images with explicit dimensions ≤ 4×4 px or 1-byte-class
 - Proxy endpoint must never become an open relay: `sig` required (no valid signature → 404), image content-type enforced on response, SSRF filter on all hops, size/timeout caps, no request header forwarding.
 - No logging of full proxy URLs (log cache-key hash only); media secret rotates on credential reset.
 - Upstream fetch errors return a static placeholder image — no error text that oracles upstream state.
+- The allow-list matches `From`, which is **spoofable**: it is a convenience control, not a security boundary. Allow-listed content still passes sanitization, and (from M2) still loads via the proxy.
 
 ## Resolved decisions
 
@@ -110,7 +121,7 @@ During rewrite, flag images with explicit dimensions ≤ 4×4 px or 1-byte-class
 
 1. Should `proxy` mode also apply to links' favicons/previews later, or stay images-only forever? (Leaning: images-only.)
 2. Strip known tracking query params (`utm_*`, `mc_*`, …) before hashing the cache key — small win, mild cache-coherence risk; decide in M2.
-3. Interaction with PGP-encrypted mail: decrypted bodies (OpenPGP spec P2) must pass through the same rewrite — single choke point makes this automatic if rewrite lives in the message-response builder.
+3. Interaction with OpenGPG-encrypted mail: decrypted bodies (OpenGPG spec P2) must pass through the same rewrite — single choke point makes this automatic if rewrite lives in the message-response builder.
 
 ## Verification
 

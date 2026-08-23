@@ -25,6 +25,7 @@ use crate::db_row::{
 };
 use crate::imap::{ImapClient, ImapConfig, ImapSecurity};
 use crate::kernel::AppEvent;
+use crate::privacy::{rewrite_remote_images, sender_email_from_json, should_allow_remote, load_settings};
 use crate::sanitize::persist_body_html;
 use crate::storage::DbPool;
 
@@ -237,6 +238,8 @@ pub struct MessageResponse {
     pub is_read: bool,
     pub is_starred: bool,
     pub has_attachments: bool,
+    /// True when remote images were replaced with placeholders in this response.
+    pub remote_content_blocked: bool,
 }
 
 macro_rules! message_response_from_sql {
@@ -256,6 +259,7 @@ macro_rules! message_response_from_sql {
             is_read: $row.get::<bool, _>("is_read"),
             is_starred: $row.get::<bool, _>("is_starred"),
             has_attachments: $row.get::<bool, _>("has_attachments"),
+            remote_content_blocked: false,
         }
     }};
 }
@@ -671,7 +675,33 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         is_read: row.is_read,
         is_starred: row.is_starred,
         has_attachments: row.has_attachments,
+        remote_content_blocked: false,
     }
+}
+
+/// Apply remote-image policy at serve time (after storage sanitization).
+pub(crate) async fn finalize_message_response(
+    state: &AuthState,
+    user_id: &str,
+    row: &MessageRow,
+    remote_content_allow: bool,
+) -> Result<MessageResponse, SyncError> {
+    let mut response = message_response_from_row(row);
+    if response.body_html.is_none() {
+        return Ok(response);
+    }
+
+    let settings = load_settings(state.kv(), user_id).await?;
+    let sender = sender_email_from_json(row.from_address.as_deref());
+    let allow = should_allow_remote(&settings, sender.as_deref(), remote_content_allow);
+
+    if let Some(html) = response.body_html.as_mut() {
+        let rewritten = rewrite_remote_images(html, allow);
+        response.remote_content_blocked = rewritten.blocked;
+        *html = rewritten.html;
+    }
+
+    Ok(response)
 }
 
 pub(crate) async fn load_message_row(
@@ -797,10 +827,17 @@ pub(crate) fn parse_imap_uid(external_id: Option<&str>) -> Result<u32, SyncError
 }
 
 /// GET /api/v1/messages/{id} — return one message; lazily fetch IMAP body if missing.
+#[derive(Debug, Deserialize)]
+pub(crate) struct GetMessageQuery {
+    #[serde(rename = "remote_content")]
+    remote_content: Option<String>,
+}
+
 pub(crate) async fn get_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
     AuthUser(user_id): AuthUser,
+    Query(query): Query<GetMessageQuery>,
 ) -> Result<Json<MessageResponse>, SyncError> {
     let db = state.db();
     let mut row = load_message_row(db, &user_id, &message_id).await?;
@@ -887,7 +924,9 @@ pub(crate) async fn get_message(
         }
     }
 
-    Ok(Json(message_response_from_row(&row)))
+    let allow_remote = query.remote_content.as_deref() == Some("allow");
+    let response = finalize_message_response(&state, &user_id, &row, allow_remote).await?;
+    Ok(Json(response))
 }
 
 /// PATCH /api/v1/messages/{id} — update read/starred flags (IMAP STORE when possible).
@@ -948,7 +987,9 @@ pub(crate) async fn patch_message(
     // Keep folder unread counts roughly consistent.
     update_folder_counts(db, &row.folder_id).await?;
 
-    Ok(Json(message_response_from_row(&row)))
+    Ok(Json(
+        finalize_message_response(&state, &user_id, &row, false).await?,
+    ))
 }
 
 /// POST /api/v1/messages/{id}/trash — move to Trash (IMAP) or soft-delete locally.

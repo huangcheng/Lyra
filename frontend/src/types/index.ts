@@ -28,6 +28,7 @@ export interface MailMessage {
   isStarred: boolean;
   isDraft: boolean;
   hasAttachments: boolean;
+  remoteContentBlocked?: boolean;
   /** Thread was replied to (list status glyph). */
   isReplied?: boolean;
   labels?: string[];

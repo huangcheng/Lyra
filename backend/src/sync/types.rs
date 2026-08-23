@@ -59,6 +59,8 @@ pub enum SyncError {
     Crypto(String),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("internal error: {0}")]
+    Internal(String),
     #[error("protocol error: {0}")]
     Protocol(String),
 }
@@ -83,6 +85,10 @@ impl IntoResponse for SyncError {
             }
             // Crypto messages carry deliberate operator guidance, no secrets.
             SyncError::Crypto(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            SyncError::Internal(msg) => {
+                tracing::error!(error = %msg, "sync request failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+            }
             masked @ (SyncError::Database(_)
             | SyncError::Imap(_)
             | SyncError::Jmap(_)

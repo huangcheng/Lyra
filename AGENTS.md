@@ -62,7 +62,7 @@ Detail lives in specs; this file stays short and accurate.
 | Data model, dual-DB schema, migrations | `docs/specs/2026-08-20-lyra-data-model-spec.md` |
 | Sync engine, protocols, auto-config | `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md` |
 | Plugin kernel, workers, jobs/snooze, Redis kv | `docs/specs/2026-08-22-lyra-plugin-kernel-spec.md` |
-| OpenPGP keys, decrypt/verify, sign/encrypt (phased) | `docs/specs/2026-08-23-lyra-openpgp-spec.md` |
+| OpenGPG keys, decrypt/verify, sign/encrypt (phased; OpenPGP wire format, GnuPG interop) | `docs/specs/2026-08-23-lyra-opengpg-spec.md` |
 | Remote-image proxy / anti-tracking (phased) | `docs/specs/2026-08-23-lyra-remote-image-proxy-spec.md` |
 | Other design/tech decisions | `docs/specs/YYYY-MM-DD-<topic>-spec.md` as added |
 | Product UI (shadcn mail + login-01 + unified inbox) | `docs/specs/2026-08-21-lyra-shadcn-mail-ui.md` |

@@ -29,6 +29,7 @@ export interface ApiMessage {
   isRead: boolean;
   isStarred: boolean;
   hasAttachments: boolean;
+  remoteContentBlocked?: boolean;
 }
 
 export function parseAddress(json?: string): MailAddress {
@@ -111,6 +112,7 @@ export function mapApiMessage(msg: ApiMessage | Record<string, unknown>): MailMe
     isStarred: Boolean(row.isStarred),
     isDraft: false,
     hasAttachments: Boolean(row.hasAttachments),
+    remoteContentBlocked: Boolean(row.remoteContentBlocked),
   };
 }
 

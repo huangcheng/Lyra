@@ -36,6 +36,7 @@ import { api } from '@/lib/api-client';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
+import { allowSenderPrivacy } from '@/lib/privacy-api';
 import { getInitials } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
@@ -54,6 +55,16 @@ function sanitizeEmailHtml(html: string): string {
   return DOMPurify.sanitize(html, {
     FORBID_TAGS: ['iframe', 'object', 'embed', 'form', 'meta', 'link', 'base', 'style'],
   });
+}
+
+/** Sandboxed iframe document with strict CSP for mail HTML (M1 remote-image privacy). */
+function mailHtmlSrcDoc(bodyHtml: string, allowRemoteImages: boolean): string {
+  const imgSrc = allowRemoteImages
+    ? "'self' blob: cid: data: https: http:"
+    : "'self' blob: cid: data:";
+  const csp = `default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'`;
+  const safe = sanitizeEmailHtml(bodyHtml);
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"></head><body style="margin:0;font:inherit;color:inherit;background:transparent">${safe}</body></html>`;
 }
 
 function quoteBody(message: {
@@ -93,12 +104,14 @@ export function MailDisplay() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [replyText, setReplyText] = useState('');
+  const [allowRemoteContent, setAllowRemoteContent] = useState(false);
   const today = new Date();
   const bodyScrollRef = useRef<HTMLDivElement>(null);
   const autoMarkedIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     autoMarkedIdRef.current = null;
+    setAllowRemoteContent(false);
   }, [selectedMessageId]);
 
   const tryAutoMarkRead = useCallback(async () => {
@@ -119,7 +132,8 @@ export function MailDisplay() {
     const load = async () => {
       setLoadError(null);
       try {
-        const msg = await api<ApiMessage>(`/messages/${selectedMessageId}`);
+        const qs = allowRemoteContent ? '?remote_content=allow' : '';
+        const msg = await api<ApiMessage>(`/messages/${selectedMessageId}${qs}`);
         if (cancelled) return;
         upsertMessage(mapApiMessage(msg));
       } catch (err: unknown) {
@@ -133,7 +147,7 @@ export function MailDisplay() {
     return () => {
       cancelled = true;
     };
-  }, [selectedMessageId, token, upsertMessage]);
+  }, [selectedMessageId, token, upsertMessage, allowRemoteContent]);
 
   const mail = cached ?? null;
 
@@ -258,6 +272,21 @@ export function MailDisplay() {
   const fromLabel = mail ? (mail.from.name ?? mail.from.email) : '';
   const disabled = !mail || busy;
   const toolbarIconClass = 'text-foreground disabled:opacity-100';
+  const showRemoteBanner = Boolean(mail?.remoteContentBlocked);
+
+  const handleShowRemoteContent = () => {
+    setAllowRemoteContent(true);
+  };
+
+  const handleAlwaysShowFromSender = async () => {
+    if (!mail) return;
+    try {
+      await allowSenderPrivacy(mail.from.email);
+      setAllowRemoteContent(true);
+    } catch {
+      /* retry */
+    }
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -483,6 +512,22 @@ export function MailDisplay() {
             ) : null}
           </div>
           <Separator />
+          {showRemoteBanner ? (
+            <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-2 text-xs">
+              <span className="text-muted-foreground">{t(locale, 'mail.remoteContentHidden')}</span>
+              <Button variant="link" size="sm" className="h-auto p-0" onClick={handleShowRemoteContent}>
+                {t(locale, 'mail.showRemoteContent')}
+              </Button>
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto p-0"
+                onClick={() => void handleAlwaysShowFromSender()}
+              >
+                {t(locale, 'mail.alwaysShowFromSender', { sender: mail.from.email })}
+              </Button>
+            </div>
+          ) : null}
           <div
             ref={bodyScrollRef}
             className="flex-1 overflow-auto p-4 text-sm whitespace-pre-wrap"
@@ -490,7 +535,12 @@ export function MailDisplay() {
             {loadError ? (
               <p className="text-destructive">{loadError}</p>
             ) : mail.bodyHtml ? (
-              <div dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(mail.bodyHtml) }} />
+              <iframe
+                title={mail.subject}
+                sandbox=""
+                className="w-full min-h-[12rem] border-0 bg-transparent"
+                srcDoc={mailHtmlSrcDoc(mail.bodyHtml, !mail.remoteContentBlocked)}
+              />
             ) : (
               (mail.bodyText ?? mail.snippet)
             )}

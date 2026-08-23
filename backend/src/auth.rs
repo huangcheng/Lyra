@@ -1075,6 +1075,11 @@ impl AuthState {
         &self.db
     }
 
+    /// Kv store for sessions and user settings (privacy allow-list, etc.).
+    pub fn kv(&self) -> &Arc<dyn KvStore> {
+        self.sessions.kv()
+    }
+
     /// Get the user's data encryption key (DEK) for credential encryption.
     ///
     /// The DEK is a random 256-bit key generated at bootstrap, wrapped with
