@@ -12,6 +12,7 @@ import { useMachine } from '@xstate/react';
 import { useEffect, useRef } from 'react';
 
 import { t } from '@/i18n';
+import { api, userFromMe, type AuthMeResponse } from '@/lib/api-client';
 import { authMachine } from '../machines/auth';
 import { useAuthStore } from '../stores/auth';
 import { useUIStore } from '../stores/ui';
@@ -37,21 +38,9 @@ export function AuthPage() {
       const token = state.context.token;
       authStore.setToken(token);
 
-      fetch('/api/v1/auth/me', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-        .then((res) => {
-          if (!res.ok) throw new Error('Failed to fetch user');
-          return res.json();
-        })
+      void api<AuthMeResponse>('/auth/me')
         .then((user) => {
-          authStore.setUser({
-            id: user.id,
-            username: user.username,
-            displayName: user.display_name,
-            locale: user.locale,
-            totpEnabled: user.totp_enabled,
-          });
+          authStore.setUser(userFromMe(user));
         })
         .catch(() => {
           localStorage.removeItem('lyra_token');

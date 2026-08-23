@@ -8,6 +8,7 @@
  */
 
 import { setup, assign, fromPromise } from 'xstate';
+import { api } from '../lib/api-client';
 import type { User } from '../stores/auth';
 
 interface AuthContext {
@@ -38,29 +39,20 @@ interface StatusResponse {
   totp_enabled: boolean;
 }
 
-const API_BASE = '/api/v1/auth';
-
 function persistToken(token: string) {
   localStorage.setItem('lyra_token', token);
 }
 
 async function fetchStatus(): Promise<StatusResponse> {
-  const res = await fetch(`${API_BASE}/status`);
-  if (!res.ok) throw new Error('Failed to check status');
-  return res.json();
+  return api<StatusResponse>('/auth/status', { auth: false });
 }
 
 async function login(username: string, password: string): Promise<LoginResponse> {
-  const res = await fetch(`${API_BASE}/login`, {
+  return api<LoginResponse>('/auth/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    auth: false,
     body: JSON.stringify({ username, password }),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || 'Invalid credentials');
-  }
-  return res.json();
 }
 
 async function bootstrap(
@@ -69,29 +61,19 @@ async function bootstrap(
   displayName?: string,
   locale?: string,
 ): Promise<LoginResponse> {
-  const res = await fetch(`${API_BASE}/bootstrap`, {
+  return api<LoginResponse>('/auth/bootstrap', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    auth: false,
     body: JSON.stringify({ username, password, display_name: displayName, locale }),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || 'Bootstrap failed');
-  }
-  return res.json();
 }
 
 async function verifyTotp(pendingToken: string, code: string): Promise<LoginResponse> {
-  const res = await fetch(`${API_BASE}/totp/verify`, {
+  return api<LoginResponse>('/auth/totp/verify', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    auth: false,
     body: JSON.stringify({ pending_token: pendingToken, code }),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || 'Invalid TOTP code');
-  }
-  return res.json();
 }
 
 export const authMachine = setup({

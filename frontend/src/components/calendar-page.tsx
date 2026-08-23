@@ -6,9 +6,9 @@
 
 import { useState, useEffect } from 'react';
 import { t } from '../i18n';
+import { api } from '../lib/api-client';
 import { SecondaryPage } from './secondary-page';
 import { useUIStore } from '../stores/ui';
-import { useAuthStore } from '../stores/auth';
 
 interface Calendar {
   id: string;
@@ -39,7 +39,6 @@ interface CalendarEvent {
 
 export function CalendarPage() {
   const locale = useUIStore((s) => s.locale);
-  const token = useAuthStore((s) => s.token);
   const [calendars, setCalendars] = useState<Calendar[]>([]);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,11 +60,7 @@ export function CalendarPage() {
   async function fetchCalendars() {
     try {
       setLoading(true);
-      const res = await fetch('/api/v1/calendars', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error('Failed to fetch calendars');
-      const data = await res.json();
+      const data = await api<Calendar[]>('/calendars');
       setCalendars(data);
       if (data.length > 0) {
         setSelectedCalendar(data[0]);
@@ -79,11 +74,7 @@ export function CalendarPage() {
 
   async function fetchEvents(calendarId: string) {
     try {
-      const res = await fetch(`/api/v1/calendars/${calendarId}/events`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error('Failed to fetch events');
-      const data = await res.json();
+      const data = await api<CalendarEvent[]>(`/calendars/${calendarId}/events`);
       setEvents(data);
     } catch (err: any) {
       setError(err.message);

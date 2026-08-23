@@ -32,6 +32,7 @@ import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
+import { api } from '@/lib/api-client';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { getInitials } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
@@ -96,23 +97,15 @@ export function MailDisplay() {
     const load = async () => {
       setLoadError(null);
       try {
-        const res = await fetch(`/api/v1/messages/${selectedMessageId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) throw new Error('Failed to load message');
-        const msg = (await res.json()) as ApiMessage;
+        const msg = await api<ApiMessage>(`/messages/${selectedMessageId}`);
         if (cancelled) return;
         upsertMessage(mapApiMessage(msg));
         if (!msg.isRead) {
-          const patch = await fetch(`/api/v1/messages/${selectedMessageId}`, {
+          await api(`/messages/${selectedMessageId}`, {
             method: 'PATCH',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
             body: JSON.stringify({ isRead: true }),
           });
-          if (patch.ok) markMessageRead(selectedMessageId);
+          markMessageRead(selectedMessageId);
         }
       } catch (err: unknown) {
         if (!cancelled) {
@@ -156,11 +149,7 @@ export function MailDisplay() {
     if (!token || !mail || busy) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/v1/messages/${mail.id}/${action}`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error(`${action} failed`);
+      await api(`/messages/${mail.id}/${action}`, { method: 'POST' });
       removeMessage(mail.id);
       setSelectedMessage(null);
     } catch {
@@ -174,15 +163,10 @@ export function MailDisplay() {
     if (!token || !mail || busy) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/v1/messages/${mail.id}/snooze`, {
+      await api(`/messages/${mail.id}/snooze`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({ until: until.toISOString() }),
       });
-      if (!res.ok) throw new Error('snooze failed');
       removeMessage(mail.id);
       setSelectedMessage(null);
     } catch {
@@ -194,15 +178,14 @@ export function MailDisplay() {
 
   const handlePatch = async (body: { isRead?: boolean; isStarred?: boolean }) => {
     if (!token || !mail) return;
-    const res = await fetch(`/api/v1/messages/${mail.id}`, {
-      method: 'PATCH',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) return;
+    try {
+      await api(`/messages/${mail.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+    } catch {
+      return;
+    }
     if (body.isRead === false) {
       upsertMessage({ ...mail, isRead: false });
     }

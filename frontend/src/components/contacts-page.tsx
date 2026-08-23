@@ -6,9 +6,9 @@
 
 import { useState, useEffect } from 'react';
 import { t } from '../i18n';
+import { api } from '../lib/api-client';
 import { SecondaryPage } from './secondary-page';
 import { useUIStore } from '../stores/ui';
-import { useAuthStore } from '../stores/auth';
 
 interface Contact {
   id: string;
@@ -24,7 +24,6 @@ interface Contact {
 
 export function ContactsPage() {
   const locale = useUIStore((s) => s.locale);
-  const token = useAuthStore((s) => s.token);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -40,11 +39,7 @@ export function ContactsPage() {
       setLoading(true);
       const params = new URLSearchParams();
       if (query) params.set('q', query);
-      const res = await fetch(`/api/v1/contacts?${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error('Failed to fetch contacts');
-      const data = await res.json();
+      const data = await api<Contact[]>(`/contacts?${params}`);
       setContacts(data);
     } catch (err: any) {
       setError(err.message);

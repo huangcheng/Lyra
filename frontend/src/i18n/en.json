@@ -120,7 +120,10 @@
       "disableTotpDescription": "Enter your current password to disable two-factor authentication.",
       "disableTotp": "Disable 2FA",
       "disableTotpSuccess": "Two-factor authentication disabled",
-      "disableTotpError": "Failed to disable two-factor authentication"
+      "disableTotpError": "Failed to disable two-factor authentication",
+      "enableTotpTitle": "Two-Factor Authentication",
+      "enableTotpDescription": "Add an authenticator app to require a code at sign-in.",
+      "enableTotp": "Enable 2FA"
     },
     "accounts": {
       "title": "Mail Accounts",

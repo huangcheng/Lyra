@@ -8,8 +8,11 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { t } from '../i18n';
 import { SecondaryPage } from './secondary-page';
+import { TotpEnroll } from './totp-enroll';
 import { useUIStore } from '../stores/ui';
 import { useAuthStore } from '../stores/auth';
+import { api, type AuthMeResponse } from '@/lib/api-client';
+import { syncEvents$ } from '@/rxjs/sync-events';
 import { Button } from '@/components/ui/button';
 
 interface MailAccount {
@@ -82,28 +85,31 @@ export function SettingsPage() {
   const [totpPassword, setTotpPassword] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
   const [disablingTotp, setDisablingTotp] = useState(false);
+  const [enrollingTotp, setEnrollingTotp] = useState(false);
 
   useEffect(() => {
-    fetchAccounts();
-    fetch('/api/v1/auth/me', { headers: { Authorization: `Bearer ${token}` } })
-      .then((res) => (res.ok ? res.json() : null))
+    void fetchAccounts();
+    void api<AuthMeResponse>('/auth/me')
       .then((me) => {
-        if (me) setTotpEnabled(Boolean(me.totp_enabled));
+        setTotpEnabled(Boolean(me.totp_enabled));
       })
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const sub = syncEvents$.subscribe((ev) => {
+      if (ev.type === 'sync_complete') void fetchAccounts();
+    });
+    return () => sub.unsubscribe();
   }, []);
 
   async function fetchAccounts() {
     try {
       setLoading(true);
-      const res = await fetch('/api/v1/accounts', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error('Failed to fetch accounts');
-      const data = await res.json();
+      const data = await api<MailAccount[]>('/accounts');
       setAccounts(data);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -112,11 +118,7 @@ export function SettingsPage() {
   async function pollUntilSyncIdle() {
     for (;;) {
       await new Promise((r) => setTimeout(r, 2000));
-      const res = await fetch('/api/v1/sync/status', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error(t(locale, 'sync.syncError'));
-      const status: { syncing: boolean } = await res.json();
+      const status = await api<{ syncing: boolean }>('/sync/status');
       if (!status.syncing) return;
     }
   }
@@ -126,19 +128,13 @@ export function SettingsPage() {
       setError(null);
       setSyncing(true);
       setSyncMessage(null);
-      const res = await fetch(`/api/v1/accounts/${id}/sync`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      // 202 Accepted is success (res.ok)
-      if (!res.ok) throw new Error(t(locale, 'mail.syncError'));
+      await api(`/accounts/${id}/sync`, { method: 'POST' });
       setSyncMessage(t(locale, 'settings.syncQueued'));
       await pollUntilSyncIdle();
       await fetchAccounts();
-      window.dispatchEvent(new Event('lyra:sync-complete'));
       setSyncMessage(t(locale, 'sync.syncComplete'));
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
       setSyncMessage(null);
     } finally {
       setSyncing(false);
@@ -159,16 +155,10 @@ export function SettingsPage() {
     try {
       setProbing(true);
       setProbeResult(null);
-      const res = await fetch('/api/v1/accounts/probe', {
+      const data = await api<ProbeResult>('/accounts/probe', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({ emailAddress: formData.emailAddress }),
       });
-      if (!res.ok) throw new Error('Probe failed');
-      const data = await res.json();
       setProbeResult(data);
       if (data.found) {
         setFormData((prev) => ({
@@ -192,7 +182,7 @@ export function SettingsPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     try {
-      const url = editingAccount ? `/api/v1/accounts/${editingAccount.id}` : '/api/v1/accounts';
+      const url = editingAccount ? `/accounts/${editingAccount.id}` : '/accounts';
       const method = editingAccount ? 'PUT' : 'POST';
       const body: any = {
         displayName: formData.displayName,
@@ -208,15 +198,10 @@ export function SettingsPage() {
       if (formData.password) {
         body.password = formData.password;
       }
-      const res = await fetch(url, {
+      await api(url, {
         method,
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error('Failed to save account');
       setShowAddForm(false);
       setEditingAccount(null);
       resetForm();
@@ -229,11 +214,7 @@ export function SettingsPage() {
   async function handleDelete(id: string) {
     if (!confirm(t(locale, 'settings.accounts.confirmDelete'))) return;
     try {
-      const res = await fetch(`/api/v1/accounts/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error('Failed to delete account');
+      await api(`/accounts/${id}`, { method: 'DELETE' });
       fetchAccounts();
     } catch (err: any) {
       setError(err.message);
@@ -246,21 +227,13 @@ export function SettingsPage() {
       setChangingPassword(true);
       setSecurityError(null);
       setSecurityMessage(null);
-      const res = await fetch('/api/v1/auth/change-password', {
+      await api('/auth/change-password', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({
           current_password: currentPassword,
           new_password: newPassword,
         }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || t(locale, 'settings.security.changePasswordError'));
-      }
       // The backend invalidates every session on password change; log out
       // locally and send the user back to the login page.
       localStorage.removeItem('lyra_token');
@@ -278,18 +251,10 @@ export function SettingsPage() {
       setDisablingTotp(true);
       setSecurityError(null);
       setSecurityMessage(null);
-      const res = await fetch('/api/v1/auth/totp/disable', {
+      await api('/auth/totp/disable', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({ password: totpPassword }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || t(locale, 'settings.security.disableTotpError'));
-      }
       setTotpEnabled(false);
       setTotpPassword('');
       setSecurityMessage(t(locale, 'settings.security.disableTotpSuccess'));
@@ -312,9 +277,7 @@ export function SettingsPage() {
       // Legacy 'none' values (removed insecure mode) coerce to 'tls' so the
       // select never shows a blank value and saving doesn't 400.
       imapSecurity:
-        !account.imapSecurity || account.imapSecurity === 'none'
-          ? 'tls'
-          : account.imapSecurity,
+        !account.imapSecurity || account.imapSecurity === 'none' ? 'tls' : account.imapSecurity,
       smtpHost: account.smtpHost || '',
       smtpPort: account.smtpPort || 587,
       smtpSecurity:
@@ -367,10 +330,7 @@ export function SettingsPage() {
               className="ml-auto"
               onClick={() => {
                 if (token) {
-                  fetch('/api/v1/auth/logout', {
-                    method: 'POST',
-                    headers: { Authorization: `Bearer ${token}` },
-                  }).catch(() => {});
+                  void api('/auth/logout', { method: 'POST' }).catch(() => {});
                 }
                 localStorage.removeItem('lyra_token');
                 clearSession();
@@ -456,6 +416,45 @@ export function SettingsPage() {
                   : t(locale, 'settings.security.disableTotp')}
               </Button>
             </form>
+          )}
+          {!totpEnabled && (
+            <div className="space-y-3 border-t pt-4">
+              {enrollingTotp ? (
+                <TotpEnroll
+                  onComplete={() => {
+                    setEnrollingTotp(false);
+                    setTotpEnabled(true);
+                    const user = useAuthStore.getState().user;
+                    if (user) {
+                      useAuthStore.getState().setUser({ ...user, totpEnabled: true });
+                    }
+                    setSecurityMessage(t(locale, 'auth.totpEnabled'));
+                  }}
+                  onCancel={() => setEnrollingTotp(false)}
+                />
+              ) : (
+                <>
+                  <h3 className="text-sm font-medium">
+                    {t(locale, 'settings.security.enableTotpTitle')}
+                  </h3>
+                  <p className="text-sm text-muted-foreground">
+                    {t(locale, 'settings.security.enableTotpDescription')}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setSecurityError(null);
+                      setSecurityMessage(null);
+                      setEnrollingTotp(true);
+                    }}
+                  >
+                    {t(locale, 'settings.security.enableTotp')}
+                  </Button>
+                </>
+              )}
+            </div>
           )}
         </section>
 

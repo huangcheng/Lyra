@@ -4,7 +4,9 @@
 
 import { useCallback, useEffect } from 'react';
 
+import { api } from '@/lib/api-client';
 import { mapApiFolder, mapApiMessage, type ApiFolder, type ApiMessage } from '@/lib/mail-api';
+import { syncEvents$ } from '@/rxjs/sync-events';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import type { MailAccount } from '@/types';
@@ -28,11 +30,7 @@ export function useMailData() {
   const fetchAccounts = useCallback(async () => {
     if (!token) return;
     try {
-      const res = await fetch('/api/v1/accounts', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) return;
-      const data: ApiAccount[] = await res.json();
+      const data = await api<ApiAccount[]>('/accounts');
       const accounts: MailAccount[] = data.map((a) => ({
         id: a.id,
         displayName: a.displayName,
@@ -44,21 +42,17 @@ export function useMailData() {
       }));
       setAccounts(accounts);
     } catch {
-      /* network error */
+      /* network or HTTP error — keep last good snapshot */
     }
   }, [token, setAccounts]);
 
   const fetchFolders = useCallback(async () => {
     if (!token) return;
     try {
-      const res = await fetch('/api/v1/folders', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) return;
-      const data: ApiFolder[] = await res.json();
+      const data = await api<ApiFolder[]>('/folders');
       setFolders(data.map(mapApiFolder));
     } catch {
-      /* network error */
+      /* keep last good snapshot */
     }
   }, [token, setFolders]);
 
@@ -66,14 +60,10 @@ export function useMailData() {
     async (folderId: string) => {
       if (!token || !folderId) return;
       try {
-        const res = await fetch(`/api/v1/folders/${folderId}/messages`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) return;
-        const data: ApiMessage[] = await res.json();
+        const data = await api<ApiMessage[]>(`/folders/${folderId}/messages`);
         for (const msg of data) upsertMessage(mapApiMessage(msg));
       } catch {
-        /* network error */
+        /* keep last good snapshot */
       }
     },
     [token, upsertMessage],
@@ -85,12 +75,13 @@ export function useMailData() {
   }, [fetchAccounts, fetchFolders]);
 
   useEffect(() => {
-    const handler = () => {
-      void fetchAccounts();
-      void fetchFolders();
-    };
-    window.addEventListener('lyra:sync-complete', handler);
-    return () => window.removeEventListener('lyra:sync-complete', handler);
+    const sub = syncEvents$.subscribe((ev) => {
+      if (ev.type === 'sync_complete' || ev.type === 'sync_error') {
+        void fetchAccounts();
+        void fetchFolders();
+      }
+    });
+    return () => sub.unsubscribe();
   }, [fetchAccounts, fetchFolders]);
 
   return { fetchAccounts, fetchFolders, fetchMessages };

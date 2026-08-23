@@ -16,8 +16,8 @@ import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { t } from '@/i18n';
+import { api } from '@/lib/api-client';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
-import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 
@@ -37,7 +37,6 @@ export function ComposeDialog() {
   const clearComposeDraft = useUIStore((s) => s.clearComposeDraft);
   const selectedAccountId = useUIStore((s) => s.selectedAccountId);
   const accounts = useMailStore((s) => s.accounts);
-  const token = useAuthStore((s) => s.token);
 
   const [fromAccountId, setFromAccountId] = useState('');
   const [form, setForm] = useState<ComposeForm>({
@@ -107,12 +106,8 @@ export function ComposeDialog() {
           .filter(Boolean)
           .map((email) => ({ email }));
 
-      const res = await fetch('/api/v1/messages/send', {
+      await api('/messages/send', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({
           accountId: fromAccountId,
           to: split(form.to),
@@ -123,11 +118,6 @@ export function ComposeDialog() {
           bodyHtml: null,
         }),
       });
-
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(data.error || t(locale, 'mail.sendError'));
-      }
 
       setSuccess(true);
       window.setTimeout(() => handleClose(), 1500);

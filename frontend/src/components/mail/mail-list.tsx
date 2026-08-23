@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { t } from '@/i18n';
+import { api } from '@/lib/api-client';
 import { ALL_ACCOUNTS, mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
@@ -84,11 +85,7 @@ export function MailList() {
             const params = new URLSearchParams({ q });
             if (selectedAccountId !== ALL_ACCOUNTS) params.set('accountId', selectedAccountId);
             if (selectedFolderId) params.set('folderId', selectedFolderId);
-            const res = await fetch(`/api/v1/messages/search?${params}`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
-            if (!res.ok) throw new Error('Search failed');
-            const data = (await res.json()) as ApiMessage[];
+            const data = await api<ApiMessage[]>(`/messages/search?${params}`);
             const mapped = data.map(mapApiMessage);
             for (const msg of mapped) upsertMessage(msg);
             setSearchHits(mapped);
@@ -107,16 +104,14 @@ export function MailList() {
       try {
         let url: string | null = null;
         if (selectedFolderId) {
-          url = `/api/v1/folders/${selectedFolderId}/messages`;
+          url = `/folders/${selectedFolderId}/messages`;
         } else if (selectedFolderRole) {
           const params = new URLSearchParams({ role: selectedFolderRole });
           if (selectedAccountId !== ALL_ACCOUNTS) params.set('accountId', selectedAccountId);
-          url = `/api/v1/messages?${params}`;
+          url = `/messages?${params}`;
         }
         if (!url) return;
-        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-        if (!res.ok) throw new Error('Failed to fetch messages');
-        const data = (await res.json()) as ApiMessage[];
+        const data = await api<ApiMessage[]>(url);
         for (const msg of data) upsertMessage(mapApiMessage(msg));
       } catch {
         /* keep existing */

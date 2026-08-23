@@ -6,6 +6,7 @@
 
 import { useState } from 'react';
 import { t } from '../i18n';
+import { api } from '../lib/api-client';
 import { useUIStore } from '../stores/ui';
 
 interface TotpEnrollProps {
@@ -27,20 +28,9 @@ export function TotpEnroll({ onComplete, onCancel }: TotpEnrollProps) {
     setError(null);
 
     try {
-      const token = localStorage.getItem('lyra_token');
-      const res = await fetch('/api/v1/auth/totp/enroll', {
+      const data = await api<{ secret: string; otpauth_uri: string }>('/auth/totp/enroll', {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
       });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to start enrollment');
-      }
-
-      const data = await res.json();
       setSecret(data.secret);
       setOtpauthUri(data.otpauth_uri);
       setStep('verify');
@@ -57,20 +47,10 @@ export function TotpEnroll({ onComplete, onCancel }: TotpEnrollProps) {
     setError(null);
 
     try {
-      const token = localStorage.getItem('lyra_token');
-      const res = await fetch('/api/v1/auth/totp/confirm', {
+      await api('/auth/totp/confirm', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({ code }),
       });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Invalid code');
-      }
 
       onComplete();
     } catch (err) {

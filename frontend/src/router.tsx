@@ -18,6 +18,7 @@ import { SettingsPage } from './components/settings-page';
 import { ContactsPage } from './components/contacts-page';
 import { CalendarPage } from './components/calendar-page';
 import { useAuthStore } from './stores/auth';
+import { useSyncEventSource } from './lib/use-sync-event-source';
 
 // ── Routes ─────────────────────────────────────────────────────
 
@@ -26,6 +27,7 @@ const rootRoute = createRootRoute({
 });
 
 function RootLayout() {
+  useSyncEventSource();
   return (
     <div className="app-root">
       <Outlet />
