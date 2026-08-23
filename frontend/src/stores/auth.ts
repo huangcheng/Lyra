@@ -14,6 +14,7 @@ export interface User {
   displayName?: string;
   locale: string;
   totpEnabled: boolean;
+  markReadPolicy?: string;
 }
 
 interface AuthState {

@@ -13,6 +13,7 @@ import { useEffect, useRef } from 'react';
 
 import { t } from '@/i18n';
 import { api, userFromMe, type AuthMeResponse } from '@/lib/api-client';
+import { applyMarkReadPolicy } from '@/lib/user-preferences';
 import { authMachine } from '../machines/auth';
 import { useAuthStore } from '../stores/auth';
 import { useUIStore } from '../stores/ui';
@@ -45,6 +46,7 @@ export function AuthPage() {
           if (user.locale === 'en' || user.locale === 'zh') {
             setLocale(user.locale);
           }
+          applyMarkReadPolicy(user.mark_read_policy);
         })
         .catch(() => {
           localStorage.removeItem('lyra_token');
@@ -78,6 +80,10 @@ export function AuthPage() {
     send({ type: 'TOTP_SUBMIT', code });
   };
 
+  const handleRetry = () => {
+    send({ type: 'RETRY' });
+  };
+
   if (state.matches('authenticated')) {
     return (
       <div className="flex min-h-svh items-center justify-center p-6 text-sm text-muted-foreground">
@@ -93,9 +99,14 @@ export function AuthPage() {
           onLogin={handleLogin}
           onBootstrap={handleBootstrap}
           onTotpVerify={handleTotpVerify}
-          error={state.context.error}
+          onRetry={handleRetry}
+          error={state.matches('error') ? t(locale, 'auth.statusCheckError') : state.context.error}
           hasUser={
-            state.matches('bootstrap') ? false : state.matches('checkingStatus') ? null : true
+            state.matches('bootstrap') || state.matches('bootstrapping')
+              ? false
+              : state.matches('checkingStatus') || state.matches('error')
+                ? null
+                : true
           }
           requiresTotp={state.matches('totpChallenge') || state.matches('verifyingTotp')}
         />

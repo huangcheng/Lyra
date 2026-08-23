@@ -92,7 +92,8 @@
     "totpDisable": "Disable 2FA",
     "totpEnabled": "Two-factor authentication is enabled",
     "totpDisabled": "Two-factor authentication is disabled",
-    "backToLogin": "Back to login"
+    "backToLogin": "Back to login",
+    "statusCheckError": "Couldn't reach the Lyra server. Make sure the backend is running."
   },
   "sync": {
     "syncing": "Syncing…",
@@ -107,6 +108,16 @@
     "chinese": "中文",
     "theme": "Theme",
     "session": "Session",
+    "preferences": {
+      "title": "Personal preferences",
+      "readingStatus": "Reading status",
+      "markRead": "Mark as read",
+      "markReadPolicy": {
+        "on_open": "When opening to read",
+        "on_scroll_end": "When scrolled to bottom",
+        "manual": "Manual only"
+      }
+    },
     "syncNow": "Sync now",
     "syncQueued": "Sync queued",
     "security": {

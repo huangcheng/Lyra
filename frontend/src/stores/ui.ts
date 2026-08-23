@@ -5,7 +5,7 @@
 import { create } from 'zustand';
 
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
-import type { SupportedLocale } from '@/types';
+import type { MarkReadPolicy, SupportedLocale } from '@/types';
 
 export interface ComposeDraft {
   to: string;
@@ -26,6 +26,7 @@ interface UIState {
   composeOpen: boolean;
   composeDraft: ComposeDraft | null;
   locale: SupportedLocale;
+  markReadPolicy: MarkReadPolicy;
 
   setSelectedAccount: (id: string) => void;
   setSelectedFolder: (id: string | null) => void;
@@ -37,6 +38,7 @@ interface UIState {
   openCompose: (draft?: Partial<ComposeDraft>) => void;
   clearComposeDraft: () => void;
   setLocale: (locale: SupportedLocale) => void;
+  setMarkReadPolicy: (policy: MarkReadPolicy) => void;
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -49,6 +51,7 @@ export const useUIStore = create<UIState>((set) => ({
   composeOpen: false,
   composeDraft: null,
   locale: 'en',
+  markReadPolicy: 'on_open' as MarkReadPolicy,
 
   setSelectedAccount: (id) =>
     set({
@@ -87,4 +90,6 @@ export const useUIStore = create<UIState>((set) => ({
   clearComposeDraft: () => set({ composeDraft: null }),
 
   setLocale: (locale) => set({ locale }),
+
+  setMarkReadPolicy: (policy) => set({ markReadPolicy: policy }),
 }));

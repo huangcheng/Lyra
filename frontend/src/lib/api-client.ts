@@ -31,6 +31,7 @@ export interface AuthMeResponse {
   display_name?: string;
   locale: string;
   totp_enabled: boolean;
+  mark_read_policy: string;
 }
 
 export function userFromMe(me: AuthMeResponse): User {
@@ -40,6 +41,7 @@ export function userFromMe(me: AuthMeResponse): User {
     displayName: me.display_name,
     locale: me.locale,
     totpEnabled: me.totp_enabled,
+    markReadPolicy: me.mark_read_policy,
   };
 }
 

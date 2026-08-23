@@ -17,6 +17,7 @@ interface LoginFormProps {
   onLogin: (username: string, password: string) => void;
   onBootstrap: (username: string, password: string, displayName?: string, locale?: string) => void;
   onTotpVerify: (code: string) => void;
+  onRetry?: () => void;
   error: string | null;
   hasUser: boolean | null;
   requiresTotp: boolean;
@@ -27,6 +28,7 @@ export function LoginForm({
   onLogin,
   onBootstrap,
   onTotpVerify,
+  onRetry,
   error,
   hasUser,
   requiresTotp,
@@ -91,12 +93,31 @@ export function LoginForm({
     <div className={cn('flex flex-col gap-6', className)} {...props}>
       <Card>
         <CardHeader>
-          <CardTitle>{hasUser === null ? t(locale, 'common.loading') : title}</CardTitle>
+          <CardTitle>
+            {hasUser === null
+              ? formError
+                ? t(locale, 'common.error')
+                : t(locale, 'common.loading')
+              : title}
+          </CardTitle>
           {hasUser !== null ? <CardDescription>{description}</CardDescription> : null}
         </CardHeader>
         <CardContent>
           {hasUser === null ? (
-            <p className="text-sm text-muted-foreground">{t(locale, 'common.loading')}</p>
+            <FieldGroup>
+              {formError ? (
+                <FieldError>{formError}</FieldError>
+              ) : (
+                <p className="text-sm text-muted-foreground">{t(locale, 'common.loading')}</p>
+              )}
+              {formError && onRetry ? (
+                <Field>
+                  <Button type="button" onClick={onRetry}>
+                    {t(locale, 'common.retry')}
+                  </Button>
+                </Field>
+              ) : null}
+            </FieldGroup>
           ) : requiresTotp ? (
             <form onSubmit={handleTotpSubmit}>
               <FieldGroup>

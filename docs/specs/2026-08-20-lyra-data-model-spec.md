@@ -237,7 +237,7 @@ Mail-account credentials (`credential`, `smtp_credential`) are stored as **encry
 
 This means account credentials are never encrypted directly under the master key, and each user's data is cryptographically separated.
 
-**Breaking change (pre-release):** databases written before this hierarchy existed hold ciphertext under the old padded-master-key scheme (or plaintext TOTP secrets). There is no rotation/migration path; decryption failures surface as typed errors instructing the operator to re-add accounts or reset the database.
+**Pre-release databases** written before this hierarchy used the first 32 bytes of `LYRA_MASTER_KEY` (or a hardcoded dev default) as the AES key and left `encrypted_dek` NULL. The first `get_user_dek` for such a user mints a DEK and re-encrypts account passwords / TOTP secrets that still decrypt under that padded-key scheme. If decryption fails, re-enter the mailbox password in Settings (or reset the database).
 
 ### 3.2 Non-goals
 

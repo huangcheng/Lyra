@@ -12,7 +12,7 @@ use axum::{
     extract::{FromRequestParts, State},
     http::{HeaderMap, StatusCode, header, request::Parts},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -62,6 +62,13 @@ pub struct UserInfo {
     pub display_name: Option<String>,
     pub locale: String,
     pub totp_enabled: bool,
+    pub mark_read_policy: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PreferencesRequest {
+    #[serde(rename = "markReadPolicy")]
+    pub mark_read_policy: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -276,6 +283,35 @@ struct UserData {
     totp_secret: Option<String>,
     display_name: Option<String>,
     locale: String,
+    mark_read_policy: String,
+}
+
+fn parse_mark_read_policy(raw: &str) -> Result<String, AuthError> {
+    match raw {
+        "on_open" | "on_scroll_end" | "manual" => Ok(raw.to_string()),
+        _ => Err(AuthError::BadRequest(
+            "markReadPolicy must be on_open, on_scroll_end, or manual".into(),
+        )),
+    }
+}
+
+fn parse_stored_mark_read_policy(raw: String) -> String {
+    if matches!(raw.as_str(), "on_open" | "on_scroll_end" | "manual") {
+        raw
+    } else {
+        "on_open".to_string()
+    }
+}
+
+fn user_info_from(user: &UserData) -> UserInfo {
+    UserInfo {
+        id: user.id.clone(),
+        username: user.username.clone(),
+        display_name: user.display_name.clone(),
+        locale: user.locale.clone(),
+        totp_enabled: user.totp_enabled,
+        mark_read_policy: user.mark_read_policy.clone(),
+    }
 }
 
 // ── Database operations ─────────────────────────────────────────────
@@ -382,7 +418,7 @@ async fn find_user_by_username(db: &DbPool, username: &str) -> Result<Option<Use
     match db {
         DbPool::Sqlite(pool) => {
             let row = sqlx::query(
-                "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale FROM lyra_user WHERE username = ?",
+                "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale, mark_read_policy FROM lyra_user WHERE username = ?",
             )
             .bind(username)
             .fetch_optional(pool)
@@ -399,12 +435,13 @@ async fn find_user_by_username(db: &DbPool, username: &str) -> Result<Option<Use
                 totp_secret: r.get("totp_secret"),
                 display_name: r.get("display_name"),
                 locale: r.get("locale"),
+                mark_read_policy: parse_stored_mark_read_policy(r.get("mark_read_policy")),
             }))
         }
         #[cfg(feature = "postgres")]
         DbPool::Postgres(pool) => {
             let row = sqlx::query(
-                "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale FROM lyra_user WHERE username = $1",
+                "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale, mark_read_policy FROM lyra_user WHERE username = $1",
             )
             .bind(username)
             .fetch_optional(pool)
@@ -421,6 +458,7 @@ async fn find_user_by_username(db: &DbPool, username: &str) -> Result<Option<Use
                 totp_secret: r.get("totp_secret"),
                 display_name: r.get("display_name"),
                 locale: r.get("locale"),
+                mark_read_policy: parse_stored_mark_read_policy(r.get("mark_read_policy")),
             }))
         }
     }
@@ -433,7 +471,7 @@ async fn find_user_by_id(db: &DbPool, user_id: &str) -> Result<Option<UserData>,
     match db {
         DbPool::Sqlite(pool) => {
             let row = sqlx::query(
-                "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale FROM lyra_user WHERE id = ?",
+                "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale, mark_read_policy FROM lyra_user WHERE id = ?",
             )
             .bind(&id)
             .fetch_optional(pool)
@@ -450,12 +488,13 @@ async fn find_user_by_id(db: &DbPool, user_id: &str) -> Result<Option<UserData>,
                 totp_secret: r.get("totp_secret"),
                 display_name: r.get("display_name"),
                 locale: r.get("locale"),
+                mark_read_policy: parse_stored_mark_read_policy(r.get("mark_read_policy")),
             }))
         }
         #[cfg(feature = "postgres")]
         DbPool::Postgres(pool) => {
             let row = sqlx::query(
-                "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale FROM lyra_user WHERE id = $1",
+                "SELECT id, username, password_hash, totp_enabled, totp_secret, display_name, locale, mark_read_policy FROM lyra_user WHERE id = $1",
             )
             .bind(&id)
             .fetch_optional(pool)
@@ -472,6 +511,7 @@ async fn find_user_by_id(db: &DbPool, user_id: &str) -> Result<Option<UserData>,
                 totp_secret: r.get("totp_secret"),
                 display_name: r.get("display_name"),
                 locale: r.get("locale"),
+                mark_read_policy: parse_stored_mark_read_policy(r.get("mark_read_policy")),
             }))
         }
     }
@@ -870,6 +910,130 @@ async fn fetch_encrypted_dek(db: &DbPool, user_id: &str) -> Result<String, Crypt
     wrapped.ok_or(CryptoError::MissingDek)
 }
 
+/// Persist a wrapped DEK only when the user exists and has none yet.
+async fn store_wrapped_dek_if_missing(
+    db: &DbPool,
+    user_id: &str,
+    wrapped: &str,
+) -> Result<u64, CryptoError> {
+    let id = id_param(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
+    db_execute!(
+        db,
+        "UPDATE lyra_user SET encrypted_dek = ?, updated_at = datetime('now') \
+         WHERE id = ? AND encrypted_dek IS NULL",
+        wrapped,
+        &id
+    )
+    .map_err(|e| CryptoError::Storage(e.to_string()))
+}
+
+/// Mint a DEK for a pre-hierarchy user and re-encrypt secrets that still use
+/// the padded-master-key scheme.
+async fn provision_and_rotate_legacy_dek(
+    db: &DbPool,
+    user_id: &str,
+    kek: &[u8; 32],
+) -> Result<Vec<u8>, CryptoError> {
+    let dek = crypto::generate_key();
+    let wrapped = crypto::wrap_dek(kek, &dek)?;
+    let wrote = store_wrapped_dek_if_missing(db, user_id, &wrapped).await?;
+    if wrote == 0 {
+        // Unknown user, or another caller stored a DEK first.
+        let existing = fetch_encrypted_dek(db, user_id).await?;
+        return crypto::unwrap_dek(kek, &existing);
+    }
+    if let Err(e) = rotate_legacy_secrets(db, user_id, &dek).await {
+        tracing::error!(error = %e, %user_id, "failed to rotate legacy secrets onto the new DEK");
+        return Err(e);
+    }
+    Ok(dek.to_vec())
+}
+
+async fn rotate_legacy_secrets(db: &DbPool, user_id: &str, dek: &[u8]) -> Result<(), CryptoError> {
+    let master = master_key()?;
+    let accounts = fetch_account_credentials(db, user_id).await?;
+    for (account_id, credential) in accounts {
+        let Ok(blob) = serde_json::from_str::<crypto::EncryptedCredential>(&credential) else {
+            continue;
+        };
+        let Some(plaintext) = crypto::try_decrypt_with_legacy_keys(&blob, master) else {
+            continue;
+        };
+        let plaintext = Zeroizing::new(plaintext);
+        let rotated = crypto::encrypt(dek, &plaintext)?;
+        let json = serde_json::to_string(&rotated).map_err(|e| CryptoError::Encrypt(e.to_string()))?;
+        update_account_credential(db, &account_id, &json).await?;
+    }
+    rotate_legacy_totp_secret(db, user_id, dek, master).await?;
+    Ok(())
+}
+
+async fn fetch_account_credentials(
+    db: &DbPool,
+    user_id: &str,
+) -> Result<Vec<(String, String)>, CryptoError> {
+    let id = id_param(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
+    db_fetch_all!(
+        db,
+        "SELECT id, credential FROM mail_account WHERE user_id = ?",
+        |row| (id_from_row(row, "id"), row.get::<String, _>("credential")),
+        &id
+    )
+    .map_err(|e| CryptoError::Storage(e.to_string()))
+}
+
+async fn update_account_credential(
+    db: &DbPool,
+    account_id: &str,
+    credential: &str,
+) -> Result<(), CryptoError> {
+    let id = id_param(db, account_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
+    db_execute!(
+        db,
+        "UPDATE mail_account SET credential = ?, updated_at = datetime('now') WHERE id = ?",
+        credential,
+        &id
+    )
+    .map_err(|e| CryptoError::Storage(e.to_string()))?;
+    Ok(())
+}
+
+async fn rotate_legacy_totp_secret(
+    db: &DbPool,
+    user_id: &str,
+    dek: &[u8],
+    master: &[u8],
+) -> Result<(), CryptoError> {
+    let id = id_param(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
+    let stored: Option<Option<String>> = db_scalar_optional!(
+        db,
+        Option<String>,
+        "SELECT totp_secret FROM lyra_user WHERE id = ?",
+        &id
+    )
+    .map_err(|e| CryptoError::Storage(e.to_string()))?;
+    let Some(stored) = stored.flatten() else {
+        return Ok(());
+    };
+    let plaintext = if let Ok(blob) = serde_json::from_str::<crypto::EncryptedCredential>(&stored) {
+        let Some(pt) = crypto::try_decrypt_with_legacy_keys(&blob, master) else {
+            return Ok(());
+        };
+        Zeroizing::new(String::from_utf8_lossy(&pt).into_owned())
+    } else {
+        Zeroizing::new(stored)
+    };
+    let rotated = encrypt_totp_secret(dek, &plaintext)?;
+    db_execute!(
+        db,
+        "UPDATE lyra_user SET totp_secret = ? WHERE id = ?",
+        &rotated,
+        &id
+    )
+    .map_err(|e| CryptoError::Storage(e.to_string()))?;
+    Ok(())
+}
+
 /// Map a crypto failure to a 500. The error text carries deliberate operator
 /// guidance (never key material or plaintext).
 fn crypto_err(e: CryptoError) -> AuthError {
@@ -917,15 +1081,49 @@ impl AuthState {
     /// the per-user KEK (HKDF-SHA256 from the master key, bound to the user
     /// id) and stored in `lyra_user.encrypted_dek`. This unwraps it on demand.
     ///
+    /// Users created before the DEK hierarchy have a NULL `encrypted_dek`.
+    /// The first lookup mints a DEK and re-encrypts account passwords that
+    /// still use the old padded-`LYRA_MASTER_KEY` scheme.
+    ///
     /// # Errors
     /// Fails with a typed [`CryptoError`] if the master key was never
-    /// installed, the user has no stored DEK, or unwrapping fails (e.g. the
+    /// installed, the user row is missing, or unwrapping fails (e.g. the
     /// DEK was wrapped under a different master key — re-add accounts or
     /// reset the database).
     pub async fn get_user_dek(db: &DbPool, user_id: &str) -> Result<Vec<u8>, CryptoError> {
         let kek = crypto::derive_user_kek(master_key()?, user_id);
-        let wrapped = fetch_encrypted_dek(db, user_id).await?;
-        crypto::unwrap_dek(&kek, &wrapped)
+        match fetch_encrypted_dek(db, user_id).await {
+            Ok(wrapped) => crypto::unwrap_dek(&kek, &wrapped),
+            Err(CryptoError::MissingDek) => {
+                provision_and_rotate_legacy_dek(db, user_id, &kek).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Unwrap the user DEK (minting/rotating legacy credentials if needed),
+    /// then reload the account password blob so callers never decrypt a
+    /// pre-rotation snapshot.
+    pub async fn get_user_dek_and_credential(
+        db: &DbPool,
+        user_id: &str,
+        account_id: &str,
+    ) -> Result<(Vec<u8>, String), CryptoError> {
+        let dek = Self::get_user_dek(db, user_id).await?;
+        let account = id_param(db, account_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
+        let user = id_param(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
+        let credential: Option<String> = db_scalar_optional!(
+            db,
+            String,
+            "SELECT credential FROM mail_account WHERE id = ? AND user_id = ?",
+            &account,
+            &user
+        )
+        .map_err(|e| CryptoError::Storage(e.to_string()))?;
+        let credential = credential.ok_or_else(|| {
+            CryptoError::Storage("mail account not found while loading credentials".into())
+        })?;
+        Ok((dek, credential))
     }
 }
 
@@ -939,6 +1137,7 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/v1/auth/login", post(auth_login))
         .route("/api/v1/auth/logout", post(auth_logout))
         .route("/api/v1/auth/me", get(auth_me))
+        .route("/api/v1/auth/preferences", patch(patch_preferences))
         .route("/api/v1/auth/change-password", post(change_password))
         .route("/api/v1/auth/totp/enroll", post(totp_enroll))
         .route("/api/v1/auth/totp/confirm", post(totp_enroll_confirm))
@@ -1028,6 +1227,7 @@ async fn auth_bootstrap(
                 display_name: req.display_name,
                 locale,
                 totp_enabled: false,
+                mark_read_policy: "on_open".to_string(),
             },
             requires_totp: false,
         }),
@@ -1049,8 +1249,8 @@ async fn auth_login(
 
     let valid = verify_password(
         &req.password,
-        &user
-            .password_hash
+        user.password_hash
+            .as_deref()
             .ok_or_else(|| AuthError::internal("Password hash not available"))?,
     )
     .await
@@ -1072,13 +1272,7 @@ async fn auth_login(
             .map_err(|_| AuthError::internal("Failed to create pending session"))?;
         return Ok(Json(LoginResponse {
             token: pending_token,
-            user: UserInfo {
-                id: user.id,
-                username: user.username,
-                display_name: user.display_name,
-                locale: user.locale,
-                totp_enabled: true,
-            },
+            user: user_info_from(&user),
             requires_totp: true,
         }));
     }
@@ -1091,13 +1285,7 @@ async fn auth_login(
 
     Ok(Json(LoginResponse {
         token,
-        user: UserInfo {
-            id: user.id,
-            username: user.username,
-            display_name: user.display_name,
-            locale: user.locale,
-            totp_enabled: false,
-        },
+        user: user_info_from(&user),
         requires_totp: false,
     }))
 }
@@ -1133,13 +1321,7 @@ async fn totp_verify(
 
     Ok(Json(LoginResponse {
         token,
-        user: UserInfo {
-            id: user_id,
-            username: user.username,
-            display_name: user.display_name,
-            locale: user.locale,
-            totp_enabled: true,
-        },
+        user: user_info_from(&user),
         requires_totp: false,
     }))
 }
@@ -1380,13 +1562,42 @@ async fn auth_me(
         .await?
         .ok_or_else(|| AuthError::internal("User not found"))?;
 
-    Ok(Json(UserInfo {
-        id: user.id,
-        username: user.username,
-        display_name: user.display_name,
-        locale: user.locale,
-        totp_enabled: user.totp_enabled,
-    }))
+    Ok(Json(user_info_from(&user)))
+}
+
+async fn patch_preferences(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+    Json(req): Json<PreferencesRequest>,
+) -> Result<Json<UserInfo>, AuthError> {
+    let Some(raw) = req.mark_read_policy else {
+        return Err(AuthError::BadRequest("provide markReadPolicy".into()));
+    };
+    let policy = parse_mark_read_policy(&raw)?;
+    update_mark_read_policy(&state.db, &user_id, &policy).await?;
+    let user = find_user_by_id(&state.db, &user_id)
+        .await?
+        .ok_or_else(|| AuthError::internal("User not found"))?;
+    Ok(Json(user_info_from(&user)))
+}
+
+async fn update_mark_read_policy(
+    db: &DbPool,
+    user_id: &str,
+    policy: &str,
+) -> Result<(), AuthError> {
+    let id = id_param(db, user_id).map_err(|_| AuthError::internal("Failed to look up user"))?;
+    db_execute!(
+        db,
+        "UPDATE lyra_user SET mark_read_policy = ?, updated_at = datetime('now') WHERE id = ?",
+        policy,
+        &id
+    )
+    .map_err(|e| {
+        tracing::error!("DB error updating mark_read_policy: {e}");
+        AuthError::internal("Failed to update preferences")
+    })?;
+    Ok(())
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -1759,16 +1970,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_dek_is_a_typed_error() {
+    async fn unknown_user_dek_is_a_typed_error() {
+        let db = test_pool().await;
+        install_test_master_key();
+        let err = AuthState::get_user_dek(&db, "no-such-user")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CryptoError::MissingDek));
+    }
+
+    #[tokio::test]
+    async fn legacy_user_without_dek_rotates_padded_master_key_credentials() {
         let db = test_pool().await;
         install_test_master_key();
         seed_user(&db, "user-legacy").await;
 
-        let err = AuthState::get_user_dek(&db, "user-legacy")
+        // Pre-DEK accounts were encrypted with the first 32 bytes of
+        // LYRA_MASTER_KEY (or the old hardcoded default).
+        let mut legacy_key = [0u8; 32];
+        let default = b"lyra-default-master-key-for-dev-only";
+        legacy_key[..32].copy_from_slice(&default[..32]);
+        let encrypted = crypto::encrypt(&legacy_key, b"imap-secret-pass").unwrap();
+        let credential_json = serde_json::to_string(&encrypted).unwrap();
+        sqlx::query(
+            r"
+            INSERT INTO mail_account (
+                id, user_id, display_name, email_address, protocol, auth_type,
+                credential, imap_host, imap_port, imap_security,
+                is_active, sync_enabled
+            ) VALUES ('acct-1', 'user-legacy', 'Test', 'test@example.com',
+                      'imap', 'password', ?, 'imap.example.com', 993, 'tls', 1, 1)
+            ",
+        )
+        .bind(&credential_json)
+        .execute(sqlite_pool(&db))
+        .await
+        .unwrap();
+
+        let dek = AuthState::get_user_dek(&db, "user-legacy").await.unwrap();
+        assert_eq!(dek.len(), 32);
+
+        // In-memory blobs loaded *before* get_user_dek are stale.
+        let stale: crypto::EncryptedCredential = serde_json::from_str(&credential_json).unwrap();
+        assert!(
+            crypto::decrypt(&dek, &stale).is_err(),
+            "decrypting a pre-rotation blob with the new DEK must fail"
+        );
+
+        let (dek2, reloaded) = AuthState::get_user_dek_and_credential(&db, "user-legacy", "acct-1")
             .await
-            .unwrap_err();
-        assert!(matches!(err, CryptoError::MissingDek));
-        assert!(err.to_string().contains("reset the database"));
+            .unwrap();
+        assert_eq!(dek2, dek);
+
+        let stored: String = sqlx::query_scalar(
+            "SELECT encrypted_dek FROM lyra_user WHERE id = 'user-legacy'",
+        )
+        .fetch_one(sqlite_pool(&db))
+        .await
+        .unwrap();
+        assert!(!stored.is_empty());
+
+        let blob: crypto::EncryptedCredential = serde_json::from_str(&reloaded).unwrap();
+        assert_eq!(crypto::decrypt(&dek, &blob).unwrap(), b"imap-secret-pass");
+        assert!(
+            crypto::decrypt(&legacy_key, &blob).is_err(),
+            "credentials must not remain under the legacy padded key"
+        );
     }
 
     #[tokio::test]

@@ -89,3 +89,6 @@ export type SyncEvent =
 // ── UI state ───────────────────────────────────────────────────────
 
 export type SupportedLocale = 'en' | 'zh';
+
+/** When to mark a message read (Settings → Reading status). */
+export type MarkReadPolicy = 'on_open' | 'on_scroll_end' | 'manual';

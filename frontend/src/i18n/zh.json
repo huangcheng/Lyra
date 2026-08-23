@@ -92,7 +92,8 @@
     "totpDisable": "关闭两步验证",
     "totpEnabled": "两步验证已启用",
     "totpDisabled": "两步验证已关闭",
-    "backToLogin": "返回登录"
+    "backToLogin": "返回登录",
+    "statusCheckError": "无法连接 Lyra 服务器，请确认后端已启动。"
   },
   "sync": {
     "syncing": "同步中…",
@@ -107,6 +108,16 @@
     "chinese": "中文",
     "theme": "主题",
     "session": "会话",
+    "preferences": {
+      "title": "个性偏好",
+      "readingStatus": "阅读状态",
+      "markRead": "标记为已读",
+      "markReadPolicy": {
+        "on_open": "打开阅读时",
+        "on_scroll_end": "滚动到底部时",
+        "manual": "仅手动标记"
+      }
+    },
     "syncNow": "立即同步",
     "syncQueued": "已加入同步队列",
     "security": {

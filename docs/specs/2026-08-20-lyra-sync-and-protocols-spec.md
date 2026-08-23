@@ -245,8 +245,12 @@ JMAP servers may support `EventSource` push. The JMAP adapter listens for push e
 3. Compare `UIDVALIDITY` with stored value.
    - If changed: full re-sync of that folder.
 4. `UID SEARCH` for UIDs > last known UID (or `HIGHESTMODSEQ` if supported).
-5. `FETCH` headers + flags for new UIDs.
-6. `FETCH BODY[]` on demand (lazy body download for large messages).
+5. `UID FETCH uidset (UID FLAGS RFC822.SIZE ENVELOPE)` for new UIDs. The
+   fetch-att list **must** be parenthesized (`async-imap` sends the query as-is;
+   a bare `UID FLAGS ENVELOPE` is parsed as fetch-att `UID` only).
+6. `UID FETCH uidset (UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[])` on demand
+   (lazy body download). Opening a message also backfills subject/from when
+   those columns were empty from an earlier broken FETCH.
 7. Store updated cursor: `(uidvalidity, highest_uid_or_modseq)`.
 
 ### 7.3 IDLE

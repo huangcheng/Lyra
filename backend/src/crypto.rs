@@ -6,8 +6,8 @@
 //!
 //! See `docs/specs/2026-08-20-lyra-data-model-spec.md` §3.
 
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
-use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use hkdf::Hkdf;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,9 @@ pub enum CryptoError {
     Base64(#[from] base64::DecodeError),
     #[error("master key not initialized; set LYRA_MASTER_KEY at startup")]
     MasterKeyNotInitialized,
-    #[error("no encrypted DEK stored for this user; re-run bootstrap or reset the database")]
+    #[error(
+        "no encrypted DEK stored for this user; re-add the mail account or reset the database"
+    )]
     MissingDek,
     #[error("database error while loading the user DEK: {0}")]
     Storage(String),
@@ -105,6 +107,42 @@ pub fn generate_key() -> [u8; 32] {
 
 /// HKDF-SHA256 info-string prefix binding a KEK to one user.
 const KEK_INFO_PREFIX: &str = "lyra-user-kek:v1:";
+
+/// Default `LYRA_MASTER_KEY` used by the pre-DEK `get_user_dek` when the env
+/// var was unset. First 32 bytes were the AES key for account passwords.
+pub(crate) const LEGACY_DEFAULT_MASTER_KEY: &[u8] = b"lyra-default-master-key-for-dev-only";
+
+/// Pad/truncate a master key the way pre-DEK code derived the AES key.
+pub(crate) fn pad_master_key_to_dek(master: &[u8]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    let n = master.len().min(32);
+    key[..n].copy_from_slice(&master[..n]);
+    key
+}
+
+/// AES keys that may decrypt credentials written before per-user DEKs.
+fn legacy_dek_candidates(master_key: &[u8]) -> Vec<[u8; 32]> {
+    let current = pad_master_key_to_dek(master_key);
+    let default = pad_master_key_to_dek(LEGACY_DEFAULT_MASTER_KEY);
+    if current == default {
+        vec![current]
+    } else {
+        vec![current, default]
+    }
+}
+
+/// Try the pre-DEK padded-master-key scheme. Never logs plaintext.
+pub(crate) fn try_decrypt_with_legacy_keys(
+    blob: &EncryptedCredential,
+    master_key: &[u8],
+) -> Option<Vec<u8>> {
+    for key in legacy_dek_candidates(master_key) {
+        if let Ok(pt) = decrypt(&key, blob) {
+            return Some(pt);
+        }
+    }
+    None
+}
 
 /// Derive the per-user key-encryption-key (KEK) from the master key.
 ///
@@ -194,5 +232,37 @@ mod tests {
         // Another user's KEK cannot unwrap it.
         let other_kek = derive_user_kek(&master, "user-b");
         assert!(unwrap_dek(&other_kek, &wrapped).is_err());
+    }
+
+    #[test]
+    fn pad_master_key_uses_first_32_bytes() {
+        let padded = pad_master_key_to_dek(LEGACY_DEFAULT_MASTER_KEY);
+        assert_eq!(&padded, &LEGACY_DEFAULT_MASTER_KEY[..32]);
+        let short = pad_master_key_to_dek(b"abc");
+        assert_eq!(&short[..3], b"abc");
+        assert_eq!(&short[3..], &[0u8; 29]);
+    }
+
+    #[test]
+    fn legacy_padded_key_decrypts_pre_dek_ciphertext() {
+        let master = LEGACY_DEFAULT_MASTER_KEY;
+        let key = pad_master_key_to_dek(master);
+        let blob = encrypt(&key, b"secret-pass").unwrap();
+        assert_eq!(
+            try_decrypt_with_legacy_keys(&blob, b"some-other-master-key-32-bytes-ok!!").unwrap(),
+            b"secret-pass"
+        );
+        assert!(
+            try_decrypt_with_legacy_keys(&blob, b"unrelated-key-also-32-bytes-long!").is_some()
+        );
+        // Unrelated + not the default → fail.
+        let other = encrypt(
+            &pad_master_key_to_dek(b"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"),
+            b"x",
+        )
+        .unwrap();
+        assert!(
+            try_decrypt_with_legacy_keys(&other, b"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy").is_none()
+        );
     }
 }

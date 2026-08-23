@@ -20,7 +20,8 @@ use super::store::update_folder_counts;
 use super::types::{EnqueuedSync, SyncError, SyncStatus};
 use crate::auth::{AuthState, AuthUser};
 use crate::db_row::{
-    TsParam, id_from_row, id_param, json_text_from_row, opt_id_param, opt_ts_from_row,
+    TsParam, id_from_row, id_param, json_text_from_row, message_date_param, opt_id_param,
+    opt_json_param, opt_ts_from_row,
 };
 use crate::imap::{ImapClient, ImapConfig, ImapSecurity};
 use crate::kernel::AppEvent;
@@ -723,10 +724,14 @@ pub(crate) async fn connect_imap_for_account(
     user_id: &str,
     account_id: &str,
 ) -> Result<(ImapClient, String), SyncError> {
+    let (dek, credential_json) =
+        crate::auth::AuthState::get_user_dek_and_credential(db, user_id, account_id)
+            .await
+            .map_err(|e| SyncError::Crypto(e.to_string()))?;
     let row = db_fetch_optional!(
         db,
         r"
-        SELECT email_address, credential, imap_host, imap_port, imap_security, protocol
+        SELECT email_address, imap_host, imap_port, imap_security, protocol
         FROM mail_account
         WHERE id = ? AND user_id = ? AND is_active = ?
         ",
@@ -736,14 +741,12 @@ pub(crate) async fn connect_imap_for_account(
             let imap_port: Option<i32> = row.get("imap_port");
             let imap_security: Option<String> = row.get("imap_security");
             let email_address: String = row.get("email_address");
-            let credential_json: String = row.get("credential");
             (
                 protocol,
                 imap_host,
                 imap_port,
                 imap_security,
                 email_address,
-                credential_json,
             )
         },
         &id_param(db, account_id)?,
@@ -752,7 +755,7 @@ pub(crate) async fn connect_imap_for_account(
     )?
     .ok_or(SyncError::AccountNotFound)?;
 
-    let (protocol, imap_host, imap_port, imap_security, email_address, credential_json) = row;
+    let (protocol, imap_host, imap_port, imap_security, email_address) = row;
     if protocol != "imap" {
         return Err(SyncError::InvalidInput(
             "remote flag/move ops require an IMAP account in v1".into(),
@@ -772,9 +775,6 @@ pub(crate) async fn connect_imap_for_account(
         None => ImapSecurity::Tls,
     };
 
-    let dek = crate::auth::AuthState::get_user_dek(db, user_id)
-        .await
-        .map_err(|e| SyncError::Crypto(e.to_string()))?;
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| SyncError::Crypto(e.to_string()))?;
 
@@ -814,28 +814,75 @@ pub(crate) async fn get_message(
         client.select(&row.folder_name).await?;
         let bodies = client.fetch_bodies(&[uid]).await?;
         if let Some(fetched) = bodies.into_iter().next() {
+            let from_json = fetched
+                .from
+                .as_ref()
+                .map(|f| serde_json::json!({ "raw": f }).to_string());
+            let to_json = fetched
+                .to
+                .as_ref()
+                .map(|t| serde_json::json!(vec![t]).to_string());
+            let snippet = fetched
+                .subject
+                .as_deref()
+                .map(|s| {
+                    if s.len() > 120 {
+                        format!("{}...", &s[..117])
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .or_else(|| {
+                    fetched
+                        .body_text
+                        .as_deref()
+                        .map(|t| t.chars().take(120).collect())
+                });
+            let body_html = persist_body_html(fetched.body_html.as_deref());
             db_execute!(
                 db,
                 r"
                     UPDATE message
                     SET body_text = ?, body_html = ?, has_attachments = ?,
-                        snippet = COALESCE(snippet, ?),
+                        snippet = COALESCE(NULLIF(snippet, ''), ?),
+                        subject = COALESCE(NULLIF(subject, ''), ?),
+                        from_address = COALESCE(from_address, ?),
+                        to_addresses = COALESCE(to_addresses, ?),
+                        date = COALESCE(date, ?),
+                        message_id_header = COALESCE(message_id_header, ?),
                         updated_at = datetime('now')
                     WHERE id = ?
                     ",
                 &fetched.body_text,
-                persist_body_html(fetched.body_html.as_deref()),
+                &body_html,
                 fetched.has_attachments,
-                fetched
-                    .body_text
-                    .as_deref()
-                    .map(|t| t.chars().take(120).collect::<String>()),
+                &snippet,
+                &fetched.subject,
+                opt_json_param(db, from_json.as_deref()),
+                opt_json_param(db, to_json.as_deref()),
+                message_date_param(db, fetched.date.as_deref()),
+                &fetched.message_id,
                 &id_param(db, &row.id)?
             )?;
 
             row.body_text = fetched.body_text;
-            row.body_html = persist_body_html(fetched.body_html.as_deref());
+            row.body_html = body_html;
             row.has_attachments = fetched.has_attachments || !fetched.attachments.is_empty();
+            if row.subject.as_deref().unwrap_or("").is_empty() {
+                row.subject = fetched.subject.clone();
+            }
+            if row.from_address.is_none() {
+                row.from_address = from_json;
+            }
+            if row.to_addresses.is_none() {
+                row.to_addresses = to_json;
+            }
+            if row.date.is_none() {
+                row.date = fetched.date.clone();
+            }
+            if row.snippet.as_deref().unwrap_or("").is_empty() {
+                row.snippet = snippet;
+            }
             persist_attachments(db, &state.data_dir, &row.id, &fetched.attachments).await?;
         }
     }

@@ -18,13 +18,13 @@ pub(crate) async fn jmap_sync_account(
     user_id: &str,
     account_id: &str,
 ) -> Result<SyncOutcome, SyncError> {
+    let dek = crate::auth::AuthState::get_user_dek(db, user_id)
+        .await
+        .map_err(|e| SyncError::Crypto(e.to_string()))?;
     let row = load_account_sync_row(db, user_id, account_id).await?;
     let credential_json = row.credential.clone();
     let email_address = row.email_address.clone();
     let jmap_base_url = row.jmap_base_url.clone();
-    let dek = crate::auth::AuthState::get_user_dek(db, user_id)
-        .await
-        .map_err(|e| SyncError::Crypto(e.to_string()))?;
 
     let result = if let Some(ref base_url) = jmap_base_url {
         let password = crate::jmap::decrypt_account_password(&credential_json, &dek)?;

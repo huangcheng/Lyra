@@ -426,6 +426,13 @@ pub(crate) async fn upsert_message_in_tx(
             is_read = excluded.is_read,
             is_starred = excluded.is_starred,
             flags = excluded.flags,
+            subject = COALESCE(NULLIF(subject, ''), excluded.subject),
+            from_address = COALESCE(from_address, excluded.from_address),
+            to_addresses = COALESCE(to_addresses, excluded.to_addresses),
+            cc_addresses = COALESCE(cc_addresses, excluded.cc_addresses),
+            date = COALESCE(date, excluded.date),
+            snippet = COALESCE(NULLIF(snippet, ''), excluded.snippet),
+            message_id_header = COALESCE(message_id_header, excluded.message_id_header),
             updated_at = datetime('now')
         ",
         &id_param(db, &id)?,

@@ -14,7 +14,7 @@ import {
   ReplyAll,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -33,6 +33,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
 import { api } from '@/lib/api-client';
+import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
+import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { getInitials } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
@@ -67,8 +69,15 @@ function quoteBody(message: {
   return `\n\nOn ${message.date}, ${message.from.email} wrote:\n${quoted}`;
 }
 
+const SCROLL_END_THRESHOLD_PX = 32;
+
+function isScrolledToBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_END_THRESHOLD_PX;
+}
+
 export function MailDisplay() {
   const locale = useUIStore((s) => s.locale);
+  const markReadPolicy = useUIStore((s) => s.markReadPolicy);
   const selectedMessageId = useUIStore((s) => s.selectedMessageId);
   const setSelectedMessage = useUIStore((s) => s.setSelectedMessage);
   const openCompose = useUIStore((s) => s.openCompose);
@@ -85,6 +94,19 @@ export function MailDisplay() {
   const [busy, setBusy] = useState(false);
   const [replyText, setReplyText] = useState('');
   const today = new Date();
+  const bodyScrollRef = useRef<HTMLDivElement>(null);
+  const autoMarkedIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    autoMarkedIdRef.current = null;
+  }, [selectedMessageId]);
+
+  const tryAutoMarkRead = useCallback(async () => {
+    if (!selectedMessageId || !token || markReadPolicy === 'manual') return;
+    if (autoMarkedIdRef.current === selectedMessageId) return;
+    const ok = await markMessageReadOnServer(selectedMessageId);
+    if (ok) autoMarkedIdRef.current = selectedMessageId;
+  }, [selectedMessageId, token, markReadPolicy]);
 
   useEffect(() => {
     setReplyText('');
@@ -100,13 +122,6 @@ export function MailDisplay() {
         const msg = await api<ApiMessage>(`/messages/${selectedMessageId}`);
         if (cancelled) return;
         upsertMessage(mapApiMessage(msg));
-        if (!msg.isRead) {
-          await api(`/messages/${selectedMessageId}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ isRead: true }),
-          });
-          markMessageRead(selectedMessageId);
-        }
       } catch (err: unknown) {
         if (!cancelled) {
           setLoadError(err instanceof Error ? err.message : 'Failed to load message');
@@ -118,9 +133,52 @@ export function MailDisplay() {
     return () => {
       cancelled = true;
     };
-  }, [selectedMessageId, token, upsertMessage, markMessageRead]);
+  }, [selectedMessageId, token, upsertMessage]);
 
   const mail = cached ?? null;
+
+  useEffect(() => {
+    if (markReadPolicy !== 'on_open' || !mail || mail.isRead || loadError) return;
+    const timer = window.setTimeout(() => {
+      void tryAutoMarkRead();
+    }, MARK_READ_OPEN_DWELL_MS);
+    return () => window.clearTimeout(timer);
+  }, [
+    markReadPolicy,
+    selectedMessageId,
+    mail?.id,
+    mail?.isRead,
+    loadError,
+    tryAutoMarkRead,
+  ]);
+
+  useEffect(() => {
+    if (markReadPolicy !== 'on_scroll_end' || !mail || mail.isRead) return;
+    const el = bodyScrollRef.current;
+    if (!el) return;
+
+    const onScroll = () => {
+      if (isScrolledToBottom(el)) void tryAutoMarkRead();
+    };
+
+    const raf = requestAnimationFrame(() => {
+      if (isScrolledToBottom(el)) void tryAutoMarkRead();
+    });
+
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      cancelAnimationFrame(raf);
+      el.removeEventListener('scroll', onScroll);
+    };
+  }, [
+    markReadPolicy,
+    mail?.id,
+    mail?.isRead,
+    mail?.bodyHtml,
+    mail?.bodyText,
+    mail?.snippet,
+    tryAutoMarkRead,
+  ]);
 
   const handleReply = (all = false) => {
     if (!mail) return;
@@ -188,6 +246,9 @@ export function MailDisplay() {
     }
     if (body.isRead === false) {
       upsertMessage({ ...mail, isRead: false });
+    }
+    if (body.isRead === true) {
+      markMessageRead(mail.id);
     }
     if (body.isStarred !== undefined) {
       toggleStar(mail.id);
@@ -381,6 +442,11 @@ export function MailDisplay() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            {mail && !mail.isRead ? (
+              <DropdownMenuItem onClick={() => void handlePatch({ isRead: true })}>
+                {t(locale, 'mail.markRead')}
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem onClick={() => void handlePatch({ isRead: false })}>
               {t(locale, 'mail.markUnread')}
             </DropdownMenuItem>
@@ -417,9 +483,12 @@ export function MailDisplay() {
             ) : null}
           </div>
           <Separator />
-          <div className="flex-1 overflow-auto p-4 text-sm whitespace-pre-wrap">
+          <div
+            ref={bodyScrollRef}
+            className="flex-1 overflow-auto p-4 text-sm whitespace-pre-wrap"
+          >
             {loadError ? (
-              <p className="text-muted-foreground">{loadError}</p>
+              <p className="text-destructive">{loadError}</p>
             ) : mail.bodyHtml ? (
               <div dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(mail.bodyHtml) }} />
             ) : (

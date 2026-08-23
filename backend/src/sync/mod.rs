@@ -494,6 +494,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upsert_message_fills_empty_envelope_on_resync() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+
+        let blank = ImapMessage {
+            uid: 7,
+            message_id: None,
+            subject: None,
+            from: None,
+            to: None,
+            cc: None,
+            date: None,
+            in_reply_to: None,
+            references: None,
+            flags: vec![],
+            size: None,
+            body: None,
+            body_text: None,
+            body_html: None,
+            has_attachments: false,
+            attachments: vec![],
+        };
+        upsert_message(&as_db(&pool), &account_id, &folder_id, &blank)
+            .await
+            .unwrap();
+
+        let filled = ImapMessage {
+            subject: Some("Welcome".into()),
+            from: Some("hello@example.com".into()),
+            to: Some("you@example.com".into()),
+            date: Some("2026-08-23T10:00:00Z".into()),
+            flags: vec!["\\Seen".into()],
+            ..blank
+        };
+        let was_new = upsert_message(&as_db(&pool), &account_id, &folder_id, &filled)
+            .await
+            .unwrap();
+        assert!(!was_new);
+
+        let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT subject, from_address, snippet FROM message \
+             WHERE account_id = ? AND external_id = '7'",
+        )
+        .bind(&account_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some("Welcome"));
+        assert!(
+            row.1.as_deref().is_some_and(|f| f.contains("hello@example.com")),
+            "from_address={:?}",
+            row.1
+        );
+        assert_eq!(row.2.as_deref(), Some("Welcome"));
+    }
+
+    #[tokio::test]
     async fn folder_sync_batch_commits_messages_cursor_and_counts() {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;

@@ -157,7 +157,7 @@ pub(crate) async fn prepare_smtp_send(
     let row = db_fetch_optional!(
         db,
         r"
-        SELECT email_address, credential, user_id,
+        SELECT email_address, user_id,
                smtp_host, smtp_port, smtp_security, is_active
         FROM mail_account
         WHERE id = ?
@@ -167,7 +167,6 @@ pub(crate) async fn prepare_smtp_send(
             let smtp_host: Option<String> = row.get("smtp_host");
             let smtp_port: Option<i32> = row.get("smtp_port");
             let smtp_security: Option<String> = row.get("smtp_security");
-            let credential_json: String = row.get("credential");
             let email_address: String = row.get("email_address");
             let user_id = id_from_row(&row, "user_id");
             (
@@ -175,7 +174,6 @@ pub(crate) async fn prepare_smtp_send(
                 smtp_host,
                 smtp_port,
                 smtp_security,
-                credential_json,
                 email_address,
                 user_id,
             )
@@ -184,7 +182,7 @@ pub(crate) async fn prepare_smtp_send(
     )?
     .ok_or(SyncError::AccountNotFound)?;
 
-    let (is_active, smtp_host, smtp_port, smtp_security, credential_json, email_address, user_id) =
+    let (is_active, smtp_host, smtp_port, smtp_security, email_address, user_id) =
         row;
     if !is_active {
         return Err(SyncError::AccountDisabled);
@@ -203,9 +201,10 @@ pub(crate) async fn prepare_smtp_send(
         None => SmtpSecurity::Starttls,
     };
 
-    let dek = crate::auth::AuthState::get_user_dek(db, &user_id)
-        .await
-        .map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let (dek, credential_json) =
+        crate::auth::AuthState::get_user_dek_and_credential(db, &user_id, account_id)
+            .await
+            .map_err(|e| SyncError::Crypto(e.to_string()))?;
     let password = crate::smtp::decrypt_account_password(&credential_json, &dek)?;
 
     let config = SmtpConfig {

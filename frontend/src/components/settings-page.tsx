@@ -12,8 +12,18 @@ import { TotpEnroll } from './totp-enroll';
 import { useUIStore } from '../stores/ui';
 import { useAuthStore } from '../stores/auth';
 import { api, type AuthMeResponse } from '@/lib/api-client';
+import { MARK_READ_POLICIES } from '@/lib/mark-read-policy';
+import { saveMarkReadPolicy, applyMarkReadPolicy } from '@/lib/user-preferences';
 import { syncEvents$ } from '@/rxjs/sync-events';
 import { Button } from '@/components/ui/button';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import type { MarkReadPolicy } from '@/types';
 
 interface MailAccount {
   id: string;
@@ -48,6 +58,7 @@ interface ProbeResult {
 export function SettingsPage() {
   const locale = useUIStore((s) => s.locale);
   const setLocale = useUIStore((s) => s.setLocale);
+  const markReadPolicy = useUIStore((s) => s.markReadPolicy);
   const token = useAuthStore((s) => s.token);
   const clearSession = useAuthStore((s) => s.clearSession);
   const navigate = useNavigate();
@@ -86,12 +97,15 @@ export function SettingsPage() {
   const [changingPassword, setChangingPassword] = useState(false);
   const [disablingTotp, setDisablingTotp] = useState(false);
   const [enrollingTotp, setEnrollingTotp] = useState(false);
+  const [prefsError, setPrefsError] = useState<string | null>(null);
+  const [prefsSaving, setPrefsSaving] = useState(false);
 
   useEffect(() => {
     void fetchAccounts();
     void api<AuthMeResponse>('/auth/me')
       .then((me) => {
         setTotpEnabled(Boolean(me.totp_enabled));
+        applyMarkReadPolicy(me.mark_read_policy);
       })
       .catch(() => {});
   }, []);
@@ -308,6 +322,19 @@ export function SettingsPage() {
     setProbeResult(null);
   }
 
+  async function handleMarkReadPolicyChange(value: string) {
+    if (!MARK_READ_POLICIES.includes(value as MarkReadPolicy)) return;
+    setPrefsError(null);
+    setPrefsSaving(true);
+    try {
+      await saveMarkReadPolicy(value as MarkReadPolicy);
+    } catch (err: unknown) {
+      setPrefsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPrefsSaving(false);
+    }
+  }
+
   return (
     <SecondaryPage title={t(locale, 'settings.title')}>
       <div className="mx-auto max-w-2xl space-y-6">
@@ -343,6 +370,35 @@ export function SettingsPage() {
             >
               {t(locale, 'auth.logout')}
             </Button>
+          </div>
+        </section>
+
+        <section className="space-y-4 rounded-lg border p-4">
+          <h2 className="text-base font-semibold">{t(locale, 'settings.preferences.title')}</h2>
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium">{t(locale, 'settings.preferences.readingStatus')}</h3>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <span className="text-sm text-muted-foreground">
+                {t(locale, 'settings.preferences.markRead')}
+              </span>
+              <Select
+                value={markReadPolicy}
+                onValueChange={(value) => void handleMarkReadPolicyChange(value)}
+                disabled={prefsSaving}
+              >
+                <SelectTrigger size="sm" className="min-w-[200px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {MARK_READ_POLICIES.map((policy) => (
+                    <SelectItem key={policy} value={policy}>
+                      {t(locale, `settings.preferences.markReadPolicy.${policy}`)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {prefsError ? <div className="error-message">{prefsError}</div> : null}
           </div>
         </section>
 

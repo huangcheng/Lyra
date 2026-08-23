@@ -260,7 +260,7 @@ impl ImapClient {
         }
 
         let uid_set = format_uid_set(uids);
-        let fetch_items = "UID FLAGS RFC822.SIZE ENVELOPE";
+        let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE");
 
         let stream = self
             .session
@@ -280,14 +280,16 @@ impl ImapClient {
 
     /// Fetch full message bodies for the given UIDs.
     ///
-    /// Uses `BODY[]` to retrieve the complete RFC 822 message.
+    /// Uses `BODY.PEEK[]` to retrieve the complete RFC 822 message without
+    /// implicitly setting `\Seen`.
     pub async fn fetch_bodies(&mut self, uids: &[u32]) -> Result<Vec<ImapMessage>, ImapError> {
         if uids.is_empty() {
             return Ok(Vec::new());
         }
 
         let uid_set = format_uid_set(uids);
-        let fetch_items = "UID FLAGS RFC822.SIZE ENVELOPE BODY[]";
+        let fetch_items =
+            parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[]");
 
         let stream = self
             .session
@@ -423,6 +425,21 @@ fn parse_fetch_to_message(fetch: &async_imap::types::Fetch, include_body: bool) 
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
+/// Wrap FETCH data items in parentheses when the caller passed a bare list.
+///
+/// RFC 3501 `fetch` is `sequence-set SP (ALL / FULL / FAST / fetch-att /
+/// "(" fetch-att *(SP fetch-att) ")")`. `async-imap` interpolates the query
+/// as-is, so `UID FLAGS ENVELOPE` is parsed as a single `fetch-att` (`UID`)
+/// and the rest is ignored. Parenthesized lists fetch every item.
+fn parenthesize_fetch_atts(atts: &str) -> String {
+    let trimmed = atts.trim();
+    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+        trimmed.to_string()
+    } else {
+        format!("({trimmed})")
+    }
+}
+
 /// Format a list of UIDs into an IMAP UID set string (e.g. "1,3,5:10").
 fn format_uid_set(uids: &[u32]) -> String {
     let mut sorted = uids.to_vec();
@@ -546,6 +563,25 @@ pub fn decrypt_account_password(credential_json: &str, dek: &[u8]) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_atts_must_be_parenthesized() {
+        // RFC 3501: a fetch-att list is one atom or a parenthesized list.
+        // Without parens, servers treat the first atom (`UID`) as the only item
+        // and drop ENVELOPE / BODY[] — blank subjects and empty reading panes.
+        assert_eq!(
+            parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE"),
+            "(UID FLAGS RFC822.SIZE ENVELOPE)"
+        );
+        assert_eq!(
+            parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[]"),
+            "(UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[])"
+        );
+        assert_eq!(
+            parenthesize_fetch_atts("(UID FLAGS)"),
+            "(UID FLAGS)"
+        );
+    }
 
     #[test]
     fn format_uid_set_contiguous() {

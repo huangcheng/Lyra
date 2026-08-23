@@ -208,8 +208,8 @@ export const authMachine = setup({
           },
         ],
         onError: {
-          target: 'idle',
-          actions: assign({ error: 'Failed to check status' }),
+          target: 'error',
+          actions: assign({ error: 'status_check' }),
         },
       },
     },
@@ -310,12 +310,8 @@ export const authMachine = setup({
     error: {
       on: {
         RETRY: {
-          target: 'idle',
+          target: 'checkingStatus',
           actions: 'clearError',
-        },
-        RESET: {
-          target: 'idle',
-          actions: 'clearSession',
         },
       },
     },

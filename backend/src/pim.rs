@@ -495,22 +495,21 @@ async fn sync_contacts(
     let row = db_fetch_optional!(
         db,
         r"
-        SELECT id, email_address, credential, carddav_url
+        SELECT id, email_address, carddav_url
         FROM mail_account
         WHERE id = ? AND user_id = ?
         ",
         |row| {
             let carddav_url: Option<String> = row.get("carddav_url");
             let email: String = row.get("email_address");
-            let credential_json: String = row.get("credential");
-            (carddav_url, email, credential_json)
+            (carddav_url, email)
         },
         &account_bind,
         &user_bind
     )?
     .ok_or(PimError::AccountNotFound)?;
 
-    let (carddav_url, email, credential_json) = row;
+    let (carddav_url, email) = row;
     let Some(base_url) = carddav_url.filter(|s| !s.is_empty()) else {
         return Ok(Json(serde_json::json!({
             "status": "skipped",
@@ -518,9 +517,13 @@ async fn sync_contacts(
         })));
     };
 
-    let dek = crate::auth::AuthState::get_user_dek(state.db(), &user_id)
-        .await
-        .map_err(|e| PimError::SyncError(e.to_string()))?;
+    let (dek, credential_json) = crate::auth::AuthState::get_user_dek_and_credential(
+        state.db(),
+        &user_id,
+        &account_id,
+    )
+    .await
+    .map_err(|e| PimError::SyncError(e.to_string()))?;
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 
@@ -614,22 +617,21 @@ async fn sync_calendars(
     let row = db_fetch_optional!(
         db,
         r"
-        SELECT id, email_address, credential, caldav_url
+        SELECT id, email_address, caldav_url
         FROM mail_account
         WHERE id = ? AND user_id = ?
         ",
         |row| {
             let caldav_url: Option<String> = row.get("caldav_url");
             let email: String = row.get("email_address");
-            let credential_json: String = row.get("credential");
-            (caldav_url, email, credential_json)
+            (caldav_url, email)
         },
         &account_bind,
         &user_bind
     )?
     .ok_or(PimError::AccountNotFound)?;
 
-    let (caldav_url, email, credential_json) = row;
+    let (caldav_url, email) = row;
     let Some(base_url) = caldav_url.filter(|s| !s.is_empty()) else {
         return Ok(Json(serde_json::json!({
             "status": "skipped",
@@ -637,9 +639,13 @@ async fn sync_calendars(
         })));
     };
 
-    let dek = crate::auth::AuthState::get_user_dek(state.db(), &user_id)
-        .await
-        .map_err(|e| PimError::SyncError(e.to_string()))?;
+    let (dek, credential_json) = crate::auth::AuthState::get_user_dek_and_credential(
+        state.db(),
+        &user_id,
+        &account_id,
+    )
+    .await
+    .map_err(|e| PimError::SyncError(e.to_string()))?;
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 

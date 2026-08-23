@@ -34,16 +34,33 @@ export interface ApiMessage {
 export function parseAddress(json?: string): MailAddress {
   if (!json) return { email: 'unknown' };
   try {
-    const parsed = JSON.parse(json) as { raw?: string };
-    if (parsed.raw) {
-      const match = parsed.raw.match(/^(.+?)\s*<(.+?)>$/);
-      if (match) return { name: match[1].trim(), email: match[2].trim() };
-      return { email: parsed.raw };
+    const parsed = JSON.parse(json) as unknown;
+    if (typeof parsed === 'string') {
+      return parseOneAddress(parsed);
+    }
+    if (parsed && typeof parsed === 'object') {
+      const obj = parsed as {
+        raw?: string;
+        email?: string;
+        name?: string;
+      };
+      const raw = obj.raw ?? obj.email;
+      if (raw) {
+        const addr = parseOneAddress(raw);
+        if (obj.name && !addr.name) return { name: obj.name, email: addr.email };
+        return addr;
+      }
     }
     return { email: 'unknown' };
   } catch {
     return { email: 'unknown' };
   }
+}
+
+function parseOneAddress(raw: string): MailAddress {
+  const match = raw.match(/^(.+?)\s*<(.+?)>$/);
+  if (match) return { name: match[1].trim(), email: match[2].trim() };
+  return { email: raw };
 }
 
 export function parseAddresses(json?: string): MailAddress[] {
