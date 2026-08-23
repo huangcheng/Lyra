@@ -1,0 +1,15 @@
+.git
+.superpowers
+.env
+.env.*
+!.env.example
+**/*.log
+frontend/node_modules
+frontend/dist
+frontend/-s
+backend/target
+backend/data
+kimi-export-session_*.md
+tmp/
+tmp-visual/
+.orch/

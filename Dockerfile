@@ -27,7 +27,11 @@ COPY --from=backend-build /app/migrations /lyra/migrations
 COPY --from=frontend-build /app/dist /lyra/frontend/dist
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
-  && mkdir -p /data
+  && mkdir -p /data \
+  && groupadd --system --gid 10001 lyra \
+  && useradd --system --uid 10001 --gid lyra --home-dir /lyra --shell /usr/sbin/nologin lyra \
+  && chown -R lyra:lyra /lyra /data
+USER lyra
 ENV LISTEN_ADDR=0.0.0.0:3000 \
     DATABASE_URL=sqlite:/data/lyra.db \
     DATA_DIR=/data \

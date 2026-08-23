@@ -33,3 +33,8 @@ coverage/
 # Local DB (created by cargo run with default sqlite:./data/lyra.db)
 /data/
 backend/data/
+
+# Local agent / export scratch (never commit)
+.superpowers/
+kimi-export-session_*.md
+frontend/-s

@@ -2,6 +2,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   lyra:
     build:
@@ -18,14 +23,14 @@ services:
       DATA_DIR: /data
       RUST_LOG: info
       REDIS_URL: redis://redis:6379
-      # Required secrets — set them in .env (see .env.example). Compose
-      # refuses to start while either is unset.
-      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env (openssl rand -base64 48)}
+      # Required secret — set it in .env (see .env.example). Compose
+      # refuses to start while it is unset.
       LYRA_MASTER_KEY: ${LYRA_MASTER_KEY:?set LYRA_MASTER_KEY in .env (openssl rand -base64 32)}
     volumes:
       - lyra-data:/data
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health"]

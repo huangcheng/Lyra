@@ -2,20 +2,17 @@
 
 ## Recommended: Docker Compose
 
-Lyra refuses to start without two secrets. Create `.env` at the repo root
+Lyra refuses to start without a master key. Create `.env` at the repo root
 (see `.env.example`; the file is gitignored):
 
 ```bash
 cp .env.example .env
-# Fill in both values:
 printf 'LYRA_MASTER_KEY=%s\n' "$(openssl rand -base64 32)" >> .env
-printf 'SESSION_SECRET=%s\n'  "$(openssl rand -base64 48)" >> .env
 ```
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `LYRA_MASTER_KEY` | **yes** (32+ bytes) | Master key for the per-user DEK hierarchy; all stored mail-account passwords and TOTP secrets are encrypted under it. Loss = unrecoverable credentials (re-add accounts). |
-| `SESSION_SECRET` | **yes** in Compose (32+ bytes) | Session cookie signing; sessions survive restarts only if stable. |
 
 Then:
 
@@ -38,7 +35,7 @@ The same migrations run on both backends.
 
 Terminate TLS at a reverse proxy (Caddy, Traefik, or nginx) in front of port 3000. Do not expose the app plain-HTTP on the public internet.
 
-Set a stable `SESSION_SECRET` (32+ random bytes) in production so sessions survive restarts.
+Sessions are bearer tokens in kv (memory or Redis). They are not cookie-signed; `SESSION_SECRET` is unused.
 
 ## Alternative: install script (Linux + systemd)
 
