@@ -24,6 +24,7 @@ mod kv;
 mod netsec;
 mod pim;
 mod plugins;
+mod media;
 mod privacy;
 mod protocol;
 mod sanitize;
@@ -126,6 +127,7 @@ fn api_router(auth_state: auth::AuthState) -> Router {
         .merge(pim::routes())
         .merge(sync::routes())
         .merge(privacy::routes())
+        .merge(media::routes())
         .merge(auth::routes())
         .with_state(auth_state)
 }

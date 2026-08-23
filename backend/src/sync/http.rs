@@ -696,7 +696,12 @@ pub(crate) async fn finalize_message_response(
     let allow = should_allow_remote(&settings, sender.as_deref(), remote_content_allow);
 
     if let Some(html) = response.body_html.as_mut() {
-        let rewritten = rewrite_remote_images(html, allow);
+        let proxy_signer = if settings.remote_images == "proxy" && allow {
+            Some(crate::media::ProxySigner::new(state.kv(), user_id).await?)
+        } else {
+            None
+        };
+        let rewritten = rewrite_remote_images(html, allow, proxy_signer.as_ref());
         response.remote_content_blocked = rewritten.blocked;
         *html = rewritten.html;
     }

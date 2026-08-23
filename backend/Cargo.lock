@@ -1400,6 +1400,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "hkdf",
+ "hmac",
  "imap-proto",
  "lettre",
  "mail-parser",

@@ -141,15 +141,34 @@ fn is_remote_http_url(url: &str) -> bool {
     u.starts_with("http://") || u.starts_with("https://")
 }
 
-/// Replace remote `img` tags with placeholders unless loading is allowed.
-pub fn rewrite_remote_images(html: &str, allow_remote: bool) -> RewriteResult {
-    if allow_remote || html.is_empty() {
+/// Replace remote `img` tags per privacy policy.
+pub fn rewrite_remote_images(
+    html: &str,
+    allow_remote: bool,
+    proxy_signer: Option<&crate::media::ProxySigner>,
+) -> RewriteResult {
+    if html.is_empty() {
         return RewriteResult {
             html: html.to_string(),
             blocked: false,
         };
     }
 
+    if !allow_remote {
+        return rewrite_blocked(html);
+    }
+
+    if let Some(signer) = proxy_signer {
+        return rewrite_proxy(html, signer);
+    }
+
+    RewriteResult {
+        html: html.to_string(),
+        blocked: false,
+    }
+}
+
+fn rewrite_blocked(html: &str) -> RewriteResult {
     let mut blocked = false;
     let mut out = String::with_capacity(html.len());
     let mut last = 0;
@@ -184,6 +203,39 @@ pub fn rewrite_remote_images(html: &str, allow_remote: bool) -> RewriteResult {
     RewriteResult {
         html: out,
         blocked,
+    }
+}
+
+fn rewrite_proxy(html: &str, signer: &crate::media::ProxySigner) -> RewriteResult {
+    let mut out = String::with_capacity(html.len());
+    let mut last = 0;
+
+    for caps in IMG_TAG_RE.captures_iter(html) {
+        let full = caps.get(0).expect("full match");
+        let attrs = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        out.push_str(&html[last..full.start()]);
+
+        let src = SRC_ATTR_RE
+            .captures(attrs)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str());
+
+        if src.is_some_and(is_remote_http_url) {
+            let proxy_url = signer.sign_url(src.unwrap_or_default());
+            let new_attrs = SRC_ATTR_RE.replace(attrs, format!("src=\"{proxy_url}\""));
+            out.push_str(&format!("<img{new_attrs}>"));
+        } else {
+            out.push_str(full.as_str());
+        }
+
+        last = full.end();
+    }
+
+    out.push_str(&html[last..]);
+
+    RewriteResult {
+        html: out,
+        blocked: false,
     }
 }
 
@@ -303,11 +355,12 @@ async fn remove_allow_sender(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::ProxySigner;
 
     #[test]
     fn blocks_remote_img_src() {
         let html = r#"<p>Hi <img src="https://evil.com/pixel.gif" alt="track">!</p>"#;
-        let r = rewrite_remote_images(html, false);
+        let r = rewrite_remote_images(html, false, None);
         assert!(r.blocked);
         assert!(!r.html.contains("evil.com"));
         assert!(r.html.contains("data-lyra-blocked-img"));
@@ -316,15 +369,29 @@ mod tests {
     #[test]
     fn allows_when_requested() {
         let html = r#"<img src="https://evil.com/pixel.gif">"#;
-        let r = rewrite_remote_images(html, true);
+        let r = rewrite_remote_images(html, true, None);
         assert!(!r.blocked);
         assert!(r.html.contains("evil.com"));
     }
 
     #[test]
+    fn rewrites_remote_to_proxy_url() {
+        let signer = ProxySigner {
+            user_id: "user-1".to_string(),
+            secret: b"test-secret-key-32-bytes-long!!!".to_vec(),
+        };
+        let html = r#"<img src="https://evil.com/pixel.gif" alt="x">"#;
+        let r = rewrite_remote_images(html, true, Some(&signer));
+        assert!(!r.blocked);
+        assert!(r.html.contains("/api/v1/proxy/"));
+        assert!(r.html.contains("sig="));
+        assert!(!r.html.contains("src=\"https://evil.com"));
+    }
+
+    #[test]
     fn keeps_cid_and_relative() {
         let html = r#"<img src="cid:part1"><img src="/local">"#;
-        let r = rewrite_remote_images(html, false);
+        let r = rewrite_remote_images(html, false, None);
         assert!(!r.blocked);
         assert!(r.html.contains("cid:part1"));
     }
