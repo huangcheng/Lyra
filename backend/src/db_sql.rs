@@ -489,6 +489,76 @@ macro_rules! db_execute_binds {
     }};
 }
 
+/// `execute` against an open [`crate::storage::DbTxn`].
+#[macro_export]
+macro_rules! db_txn_execute {
+    ($tx:expr, $sql:expr $(, $bind:expr)* $(,)?) => {{
+        match $tx {
+            $crate::storage::DbTxn::Sqlite(tx) => sqlx::query($sql)
+                $(.bind($bind))*
+                .execute(&mut **tx)
+                .await
+                .map(|r| r.rows_affected()),
+            #[cfg(feature = "postgres")]
+            $crate::storage::DbTxn::Postgres(tx) => {
+                let __sql = $crate::db_sql::to_postgres($sql);
+                sqlx::query(&__sql)
+                    $(.bind($bind))*
+                    .execute(&mut **tx)
+                    .await
+                    .map(|r| r.rows_affected())
+            }
+        }
+    }};
+}
+
+/// `query_scalar` + `fetch_optional` on a transaction.
+#[macro_export]
+macro_rules! db_txn_id_optional {
+    ($tx:expr, $sql:expr $(, $bind:expr)* $(,)?) => {{
+        match $tx {
+            $crate::storage::DbTxn::Sqlite(tx) => {
+                sqlx::query_scalar::<_, String>($sql)
+                    $(.bind($bind))*
+                    .fetch_optional(&mut **tx)
+                    .await
+            }
+            #[cfg(feature = "postgres")]
+            $crate::storage::DbTxn::Postgres(tx) => {
+                let __sql = $crate::db_sql::to_postgres($sql);
+                sqlx::query_scalar::<_, ::uuid::Uuid>(&__sql)
+                    $(.bind($bind))*
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map(|opt| opt.map(|u| u.to_string()))
+            }
+        }
+    }};
+}
+
+/// `query_scalar` + `fetch_one` on a transaction.
+#[macro_export]
+macro_rules! db_txn_scalar {
+    ($tx:expr, $ty:ty, $sql:expr $(, $bind:expr)* $(,)?) => {{
+        match $tx {
+            $crate::storage::DbTxn::Sqlite(tx) => {
+                sqlx::query_scalar::<_, $ty>($sql)
+                    $(.bind($bind))*
+                    .fetch_one(&mut **tx)
+                    .await
+            }
+            #[cfg(feature = "postgres")]
+            $crate::storage::DbTxn::Postgres(tx) => {
+                let __sql = $crate::db_sql::to_postgres($sql);
+                sqlx::query_scalar::<_, $ty>(&__sql)
+                    $(.bind($bind))*
+                    .fetch_one(&mut **tx)
+                    .await
+            }
+        }
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::to_postgres;

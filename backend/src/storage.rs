@@ -36,6 +36,43 @@ impl DbPool {
     pub fn is_sqlite(&self) -> bool {
         matches!(self, DbPool::Sqlite(_))
     }
+
+    /// Start a transaction. Uncommitted work is rolled back on drop.
+    pub async fn begin(&self) -> Result<DbTxn, sqlx::Error> {
+        match self {
+            Self::Sqlite(pool) => Ok(DbTxn::Sqlite(pool.begin().await?)),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(pool) => Ok(DbTxn::Postgres(pool.begin().await?)),
+        }
+    }
+}
+
+/// Open transaction on [`DbPool`]. Commit explicitly; drop rolls back.
+pub enum DbTxn {
+    Sqlite(sqlx::Transaction<'static, Sqlite>),
+    #[cfg(feature = "postgres")]
+    Postgres(sqlx::Transaction<'static, sqlx::Postgres>),
+}
+
+impl DbTxn {
+    /// Commit this transaction.
+    pub async fn commit(self) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Sqlite(tx) => tx.commit().await,
+            #[cfg(feature = "postgres")]
+            Self::Postgres(tx) => tx.commit().await,
+        }
+    }
+
+    /// Roll back this transaction. Drop also rolls back; this is for explicit abort.
+    #[allow(dead_code)]
+    pub async fn rollback(self) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Sqlite(tx) => tx.rollback().await,
+            #[cfg(feature = "postgres")]
+            Self::Postgres(tx) => tx.rollback().await,
+        }
+    }
 }
 
 /// Shared application state containing the database pool.

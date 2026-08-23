@@ -33,7 +33,7 @@ use crate::kernel::{App, AppEvent};
 use crate::protocol::{SendHandle, SyncCtx, SyncOutcome};
 use crate::sanitize::persist_body_html;
 use crate::smtp::{OutboundMessage, SmtpAdapter, SmtpConfig, SmtpError, SmtpSecurity};
-use crate::storage::DbPool;
+use crate::storage::{DbPool, DbTxn};
 
 /// Look up a send plugin by `send_protocol`. Unknown ids map to HTTP 400.
 fn resolve_send_plugin(app: &App, send_protocol: &str) -> Result<SendHandle, SyncError> {
@@ -1660,55 +1660,51 @@ pub(crate) async fn run_imap_sync(
 
         // Load existing cursor
         let cursor = load_cursor(db, account_id, &folder_id).await?;
-
-        // Check if UIDVALIDITY changed — if so, we need a full resync
-        let after_uid = if let Some(ref c) = cursor {
-            if c.uid_validity == uid_validity {
-                Some(c.last_uid)
-            } else {
-                // UIDVALIDITY changed: clear old messages for this folder and resync
-                clear_folder_messages(db, &folder_id).await?;
-                None
-            }
-        } else {
+        let uidvalidity_changed = cursor
+            .as_ref()
+            .is_some_and(|c| c.uid_validity != uid_validity);
+        let after_uid = if uidvalidity_changed {
             None
+        } else {
+            cursor.as_ref().map(|c| c.last_uid)
         };
 
-        // Fetch UIDs after the cursor
         let uids = client.search_uids(after_uid).await?;
-
         if uids.is_empty() {
+            if uidvalidity_changed {
+                persist_imap_folder_batch(
+                    db,
+                    account_id,
+                    &folder_id,
+                    &[],
+                    uid_validity,
+                    0,
+                    true,
+                )
+                .await?;
+            }
             continue;
         }
 
-        // Fetch metadata for all new/updated UIDs
         let messages = client.fetch_metadata(&uids).await?;
-
-        // Upsert each message
-        for msg in &messages {
-            let was_new = upsert_message(db, account_id, &folder_id, msg).await?;
-            if was_new {
-                total_new += 1;
-            } else {
-                total_updated += 1;
-            }
-        }
-
-        // Update cursor to the highest UID we've seen
         let max_uid = messages.iter().map(|m| m.uid).max().unwrap_or(0);
-        let new_cursor_uid = std::cmp::max(max_uid, cursor.map_or(0, |c| c.last_uid));
-        save_cursor(
+        let new_cursor_uid = if uidvalidity_changed {
+            max_uid
+        } else {
+            std::cmp::max(max_uid, cursor.map_or(0, |c| c.last_uid))
+        };
+        let (n, u) = persist_imap_folder_batch(
             db,
             account_id,
             &folder_id,
-            "imap",
+            &messages,
             uid_validity,
             new_cursor_uid,
+            uidvalidity_changed,
         )
         .await?;
-
-        // Update folder counts
-        update_folder_counts(db, &folder_id).await?;
+        total_new += n;
+        total_updated += u;
     }
 
     // Clean logout
@@ -1779,30 +1775,23 @@ pub(crate) async fn run_jmap_sync(
         };
 
         if ids.is_empty() {
-            if let Some(ref qs) = query_state {
-                save_jmap_cursor(db, account_id, &folder_id, qs).await?;
-            }
+            persist_jmap_folder_batch(
+                db,
+                account_id,
+                &folder_id,
+                &[],
+                query_state.as_deref(),
+            )
+            .await?;
             continue;
         }
 
         let emails = client.get_emails(&ids).await?;
-
-        // Upsert each email
-        for email_obj in &emails {
-            let was_new = upsert_jmap_message(db, account_id, &folder_id, email_obj).await?;
-            if was_new {
-                total_new += 1;
-            } else {
-                total_updated += 1;
-            }
-        }
-
-        // Save JMAP cursor: store the raw queryState / newQueryState token verbatim
-        if let Some(ref qs) = query_state {
-            save_jmap_cursor(db, account_id, &folder_id, qs).await?;
-        }
-
-        update_folder_counts(db, &folder_id).await?;
+        let (n, u) =
+            persist_jmap_folder_batch(db, account_id, &folder_id, &emails, query_state.as_deref())
+                .await?;
+        total_new += n;
+        total_updated += u;
     }
 
     Ok(SyncResponse {
@@ -1813,120 +1802,6 @@ pub(crate) async fn run_jmap_sync(
         messages_updated: total_updated,
         messages_deleted: 0,
     })
-}
-
-/// Upsert a message from JMAP email data.
-///
-/// Returns `true` if the message was newly inserted, `false` if updated.
-async fn upsert_jmap_message(
-    db: &DbPool,
-    account_id: &str,
-    folder_id: &str,
-    email: &crate::jmap::JmapEmail,
-) -> Result<bool, SyncError> {
-    let external_id = &email.id;
-    let account_bind = id_param(db, account_id)?;
-    let folder_bind = id_param(db, folder_id)?;
-
-    let existing: Option<String> = db_id_optional!(
-        db,
-        "SELECT id FROM message WHERE account_id = ? AND external_id = ?",
-        &account_bind,
-        external_id
-    )?;
-
-    let is_read = email.is_seen();
-    let is_starred = email.is_flagged();
-    let snippet = email.preview.clone().or_else(|| {
-        email.subject.as_ref().map(|s| {
-            if s.len() > 120 {
-                format!("{}...", &s[..117])
-            } else {
-                s.clone()
-            }
-        })
-    });
-
-    let from_json = email
-        .format_from()
-        .map(|f| serde_json::json!({ "raw": f }).to_string());
-    let to_json = email
-        .to_string_list()
-        .map(|t| serde_json::json!(vec![t]).to_string());
-    let cc_json = email.cc.as_ref().map(|addrs| {
-        let formatted: Vec<String> = addrs
-            .iter()
-            .map(|a| match (&a.name, &a.email) {
-                (Some(name), Some(email)) => format!("{name} <{email}>"),
-                (None, Some(email)) => email.clone(),
-                _ => String::new(),
-            })
-            .collect();
-        serde_json::json!(formatted).to_string()
-    });
-
-    let flags_json = serde_json::to_string(&email.keywords).unwrap_or_else(|_| "{}".into());
-
-    if let Some(id) = existing {
-        db_execute!(
-            db,
-            r"
-            UPDATE message SET
-                is_read = ?,
-                is_starred = ?,
-                flags = ?,
-                updated_at = datetime('now')
-            WHERE id = ?
-            ",
-            is_read,
-            is_starred,
-            &opt_json_param(db, Some(flags_json.as_str())),
-            &id_param(db, &id)?
-        )?;
-
-        Ok(false)
-    } else {
-        let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-
-        db_execute!(
-            db,
-            r"
-            INSERT INTO message (
-                id, account_id, folder_id, external_id,
-                message_id_header, subject, from_address, to_addresses,
-                cc_addresses, date, is_read, is_starred,
-                flags, size_bytes, in_reply_to, references_headers,
-                snippet, has_attachments, body_text, body_html
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ",
-            &id_param(db, &id)?,
-            &account_bind,
-            &folder_bind,
-            external_id,
-            email.message_id_header(),
-            &email.subject,
-            opt_json_param(db, from_json.as_deref()),
-            opt_json_param(db, to_json.as_deref()),
-            opt_json_param(db, cc_json.as_deref()),
-            message_date_param(db, email.received_at.as_deref()),
-            is_read,
-            is_starred,
-            opt_json_param(db, Some(flags_json.as_str())),
-            email.size.map(|s| i32::try_from(s).unwrap_or(i32::MAX)),
-            email
-                .in_reply_to
-                .as_ref()
-                .and_then(|ids| ids.first())
-                .cloned(),
-            email.references.as_ref().map(|refs| refs.join(" ")),
-            &snippet,
-            email.has_attachment.unwrap_or(false),
-            email.body_text(),
-            persist_body_html(email.body_html().as_deref())
-        )?;
-
-        Ok(true)
-    }
 }
 
 // ── Database helpers ────────────────────────────────────────────────
@@ -2041,6 +1916,7 @@ async fn load_cursor(
 /// Save the sync cursor for a folder.
 ///
 /// Cursor format: `{uid_validity}:{last_uid}` for the `uidvalidity_uid` type.
+#[cfg(test)]
 async fn save_cursor(
     db: &DbPool,
     account_id: &str,
@@ -2049,25 +1925,18 @@ async fn save_cursor(
     uid_validity: u32,
     last_uid: u32,
 ) -> Result<(), SyncError> {
-    let cursor_value = format!("{uid_validity}:{last_uid}");
-    // PK is UUID on Postgres; uniqueness is (account_id, folder_id, cursor_type).
-    let cursor_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-
-    db_execute!(
+    let mut tx = db.begin().await?;
+    save_cursor_in_tx(
+        &mut tx,
         db,
-        r"
-        INSERT INTO sync_cursor (id, account_id, folder_id, protocol, cursor_type, cursor_value, updated_at)
-        VALUES (?, ?, ?, ?, 'uidvalidity_uid', ?, datetime('now'))
-        ON CONFLICT(account_id, folder_id, cursor_type)
-        DO UPDATE SET cursor_value = excluded.cursor_value, updated_at = excluded.updated_at
-        ",
-        &id_param(db, &cursor_id)?,
-        &id_param(db, account_id)?,
-        &id_param(db, folder_id)?,
+        account_id,
+        folder_id,
         protocol,
-        &cursor_value
-    )?;
-
+        uid_validity,
+        last_uid,
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -2113,28 +1982,16 @@ async fn load_jmap_cursor(
 ///
 /// The token is an opaque server string and is stored verbatim — never hashed —
 /// so it can be sent back as `sinceQueryState` on the next sync.
+#[cfg(test)]
 async fn save_jmap_cursor(
     db: &DbPool,
     account_id: &str,
     folder_id: &str,
     query_state: &str,
 ) -> Result<(), SyncError> {
-    let cursor_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-
-    db_execute!(
-        db,
-        r"
-        INSERT INTO sync_cursor (id, account_id, folder_id, protocol, cursor_type, cursor_value, updated_at)
-        VALUES (?, ?, ?, 'jmap', 'state_token', ?, datetime('now'))
-        ON CONFLICT(account_id, folder_id, cursor_type)
-        DO UPDATE SET cursor_value = excluded.cursor_value, updated_at = excluded.updated_at
-        ",
-        &id_param(db, &cursor_id)?,
-        &id_param(db, account_id)?,
-        &id_param(db, folder_id)?,
-        query_state
-    )?;
-
+    let mut tx = db.begin().await?;
+    save_jmap_cursor_in_tx(&mut tx, db, account_id, folder_id, query_state).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -2160,7 +2017,104 @@ async fn clear_jmap_cursor(
 /// Upsert a message from IMAP metadata.
 ///
 /// Returns `true` if the message was newly inserted, `false` if updated.
+#[cfg(test)]
 async fn upsert_message(
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    msg: &ImapMessage,
+) -> Result<bool, SyncError> {
+    let mut tx = db.begin().await?;
+    let was_new = upsert_message_in_tx(&mut tx, db, account_id, folder_id, msg).await?;
+    tx.commit().await?;
+    Ok(was_new)
+}
+
+/// Delete all messages in a folder (used when UIDVALIDITY changes).
+#[cfg(test)]
+async fn clear_folder_messages(db: &DbPool, folder_id: &str) -> Result<(), SyncError> {
+    let mut tx = db.begin().await?;
+    clear_folder_messages_in_tx(&mut tx, db, folder_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Update folder message counts from the message table.
+async fn update_folder_counts(db: &DbPool, folder_id: &str) -> Result<(), SyncError> {
+    let mut tx = db.begin().await?;
+    update_folder_counts_in_tx(&mut tx, db, folder_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Persist one IMAP folder page: optional wipe, upserts, cursor, counts — one transaction.
+///
+/// Returns `(messages_new, messages_updated)`.
+async fn persist_imap_folder_batch(
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    messages: &[ImapMessage],
+    uid_validity: u32,
+    last_uid: u32,
+    clear_first: bool,
+) -> Result<(usize, usize), SyncError> {
+    let mut tx = db.begin().await?;
+    if clear_first {
+        clear_folder_messages_in_tx(&mut tx, db, folder_id).await?;
+    }
+    let mut new = 0usize;
+    let mut updated = 0usize;
+    for msg in messages {
+        if upsert_message_in_tx(&mut tx, db, account_id, folder_id, msg).await? {
+            new += 1;
+        } else {
+            updated += 1;
+        }
+    }
+    save_cursor_in_tx(
+        &mut tx,
+        db,
+        account_id,
+        folder_id,
+        "imap",
+        uid_validity,
+        last_uid,
+    )
+    .await?;
+    update_folder_counts_in_tx(&mut tx, db, folder_id).await?;
+    tx.commit().await?;
+    Ok((new, updated))
+}
+
+/// Persist one JMAP mailbox page: upserts, cursor, counts — one transaction.
+async fn persist_jmap_folder_batch(
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    emails: &[crate::jmap::JmapEmail],
+    query_state: Option<&str>,
+) -> Result<(usize, usize), SyncError> {
+    let mut tx = db.begin().await?;
+    let mut new = 0usize;
+    let mut updated = 0usize;
+    for email in emails {
+        if upsert_jmap_message_in_tx(&mut tx, db, account_id, folder_id, email).await? {
+            new += 1;
+        } else {
+            updated += 1;
+        }
+    }
+    if let Some(qs) = query_state {
+        save_jmap_cursor_in_tx(&mut tx, db, account_id, folder_id, qs).await?;
+    }
+    update_folder_counts_in_tx(&mut tx, db, folder_id).await?;
+    tx.commit().await?;
+    Ok((new, updated))
+}
+
+async fn upsert_message_in_tx(
+    tx: &mut DbTxn,
     db: &DbPool,
     account_id: &str,
     folder_id: &str,
@@ -2170,9 +2124,8 @@ async fn upsert_message(
     let account_bind = id_param(db, account_id)?;
     let folder_bind = id_param(db, folder_id)?;
 
-    // Check if message already exists
-    let existing: Option<String> = db_id_optional!(
-        db,
+    let existing: Option<String> = db_txn_id_optional!(
+        tx,
         "SELECT id FROM message WHERE account_id = ? AND external_id = ?",
         &account_bind,
         &external_id
@@ -2208,9 +2161,8 @@ async fn upsert_message(
     let id =
         existing.unwrap_or_else(|| Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string());
 
-    // INSERT snoozed_until as NULL; ON CONFLICT must not overwrite an existing snooze.
-    db_execute!(
-        db,
+    db_txn_execute!(
+        tx,
         r"
         INSERT INTO message (
             id, account_id, folder_id, external_id,
@@ -2250,46 +2202,210 @@ async fn upsert_message(
     Ok(was_new)
 }
 
-/// Delete all messages in a folder (used when UIDVALIDITY changes).
-async fn clear_folder_messages(db: &DbPool, folder_id: &str) -> Result<(), SyncError> {
+async fn upsert_jmap_message_in_tx(
+    tx: &mut DbTxn,
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    email: &crate::jmap::JmapEmail,
+) -> Result<bool, SyncError> {
+    let external_id = &email.id;
+    let account_bind = id_param(db, account_id)?;
     let folder_bind = id_param(db, folder_id)?;
-    db_execute!(db, "DELETE FROM message WHERE folder_id = ?", &folder_bind)?;
-    db_execute!(
-        db,
+
+    let existing: Option<String> = db_txn_id_optional!(
+        tx,
+        "SELECT id FROM message WHERE account_id = ? AND external_id = ?",
+        &account_bind,
+        external_id
+    )?;
+
+    let is_read = email.is_seen();
+    let is_starred = email.is_flagged();
+    let snippet = email.preview.clone().or_else(|| {
+        email.subject.as_ref().map(|s| {
+            if s.len() > 120 {
+                format!("{}...", &s[..117])
+            } else {
+                s.clone()
+            }
+        })
+    });
+
+    let from_json = email
+        .format_from()
+        .map(|f| serde_json::json!({ "raw": f }).to_string());
+    let to_json = email
+        .to_string_list()
+        .map(|t| serde_json::json!(vec![t]).to_string());
+    let cc_json = email.cc.as_ref().map(|addrs| {
+        let formatted: Vec<String> = addrs
+            .iter()
+            .map(|a| match (&a.name, &a.email) {
+                (Some(name), Some(email)) => format!("{name} <{email}>"),
+                (None, Some(email)) => email.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        serde_json::json!(formatted).to_string()
+    });
+
+    let flags_json = serde_json::to_string(&email.keywords).unwrap_or_else(|_| "{}".into());
+
+    if let Some(id) = existing {
+        db_txn_execute!(
+            tx,
+            r"
+            UPDATE message SET
+                is_read = ?,
+                is_starred = ?,
+                flags = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+            ",
+            is_read,
+            is_starred,
+            &opt_json_param(db, Some(flags_json.as_str())),
+            &id_param(db, &id)?
+        )?;
+        Ok(false)
+    } else {
+        let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        db_txn_execute!(
+            tx,
+            r"
+            INSERT INTO message (
+                id, account_id, folder_id, external_id,
+                message_id_header, subject, from_address, to_addresses,
+                cc_addresses, date, is_read, is_starred,
+                flags, size_bytes, in_reply_to, references_headers,
+                snippet, has_attachments, body_text, body_html
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ",
+            &id_param(db, &id)?,
+            &account_bind,
+            &folder_bind,
+            external_id,
+            email.message_id_header(),
+            &email.subject,
+            opt_json_param(db, from_json.as_deref()),
+            opt_json_param(db, to_json.as_deref()),
+            opt_json_param(db, cc_json.as_deref()),
+            message_date_param(db, email.received_at.as_deref()),
+            is_read,
+            is_starred,
+            opt_json_param(db, Some(flags_json.as_str())),
+            email.size.map(|s| i32::try_from(s).unwrap_or(i32::MAX)),
+            email
+                .in_reply_to
+                .as_ref()
+                .and_then(|ids| ids.first())
+                .cloned(),
+            email.references.as_ref().map(|refs| refs.join(" ")),
+            &snippet,
+            email.has_attachment.unwrap_or(false),
+            email.body_text(),
+            persist_body_html(email.body_html().as_deref())
+        )?;
+        Ok(true)
+    }
+}
+
+async fn save_cursor_in_tx(
+    tx: &mut DbTxn,
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    protocol: &str,
+    uid_validity: u32,
+    last_uid: u32,
+) -> Result<(), SyncError> {
+    let cursor_value = format!("{uid_validity}:{last_uid}");
+    let cursor_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+    db_txn_execute!(
+        tx,
+        r"
+        INSERT INTO sync_cursor (id, account_id, folder_id, protocol, cursor_type, cursor_value, updated_at)
+        VALUES (?, ?, ?, ?, 'uidvalidity_uid', ?, datetime('now'))
+        ON CONFLICT(account_id, folder_id, cursor_type)
+        DO UPDATE SET cursor_value = excluded.cursor_value, updated_at = excluded.updated_at
+        ",
+        &id_param(db, &cursor_id)?,
+        &id_param(db, account_id)?,
+        &id_param(db, folder_id)?,
+        protocol,
+        &cursor_value
+    )?;
+    Ok(())
+}
+
+async fn save_jmap_cursor_in_tx(
+    tx: &mut DbTxn,
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    query_state: &str,
+) -> Result<(), SyncError> {
+    let cursor_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+    db_txn_execute!(
+        tx,
+        r"
+        INSERT INTO sync_cursor (id, account_id, folder_id, protocol, cursor_type, cursor_value, updated_at)
+        VALUES (?, ?, ?, 'jmap', 'state_token', ?, datetime('now'))
+        ON CONFLICT(account_id, folder_id, cursor_type)
+        DO UPDATE SET cursor_value = excluded.cursor_value, updated_at = excluded.updated_at
+        ",
+        &id_param(db, &cursor_id)?,
+        &id_param(db, account_id)?,
+        &id_param(db, folder_id)?,
+        query_state
+    )?;
+    Ok(())
+}
+
+async fn clear_folder_messages_in_tx(
+    tx: &mut DbTxn,
+    db: &DbPool,
+    folder_id: &str,
+) -> Result<(), SyncError> {
+    let folder_bind = id_param(db, folder_id)?;
+    db_txn_execute!(tx, "DELETE FROM message WHERE folder_id = ?", &folder_bind)?;
+    db_txn_execute!(
+        tx,
         "DELETE FROM sync_cursor WHERE folder_id = ?",
         &folder_bind
     )?;
     Ok(())
 }
 
-/// Update folder message counts from the message table.
-async fn update_folder_counts(db: &DbPool, folder_id: &str) -> Result<(), SyncError> {
+async fn update_folder_counts_in_tx(
+    tx: &mut DbTxn,
+    db: &DbPool,
+    folder_id: &str,
+) -> Result<(), SyncError> {
     let folder_bind = id_param(db, folder_id)?;
-    let total: i64 = db_scalar!(
-        db,
+    let total: i64 = db_txn_scalar!(
+        tx,
         i64,
         "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = ?",
         &folder_bind,
         false
     )?;
-
-    let unread: i64 = db_scalar!(
-        db,
+    let unread: i64 = db_txn_scalar!(
+        tx,
         i64,
         "SELECT COUNT(*) FROM message WHERE folder_id = ? AND is_deleted = ? AND is_read = ?",
         &folder_bind,
         false,
         false
     )?;
-
-    db_execute!(
-        db,
+    db_txn_execute!(
+        tx,
         "UPDATE folder SET total_messages = ?, unread_messages = ?, updated_at = datetime('now') WHERE id = ?",
         i32::try_from(total).unwrap_or(i32::MAX),
         i32::try_from(unread).unwrap_or(i32::MAX),
         &folder_bind
     )?;
-
     Ok(())
 }
 
@@ -2664,6 +2780,90 @@ mod tests {
         .await
         .unwrap();
         assert!(flags.contains("Flagged"), "flags should be updated");
+    }
+
+    #[tokio::test]
+    async fn folder_sync_batch_commits_messages_cursor_and_counts() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+
+        let (new, updated) = persist_imap_folder_batch(
+            &as_db(&pool),
+            &account_id,
+            &folder_id,
+            &[sample_imap_message(1), sample_imap_message(2)],
+            99,
+            2,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(new, 2);
+        assert_eq!(updated, 0);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message WHERE account_id = ?")
+            .bind(&account_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let cursor = load_cursor(&as_db(&pool), &account_id, &folder_id)
+            .await
+            .unwrap()
+            .expect("cursor");
+        assert_eq!(cursor.uid_validity, 99);
+        assert_eq!(cursor.last_uid, 2);
+
+        let total: i64 = sqlx::query_scalar("SELECT total_messages FROM folder WHERE id = ?")
+            .bind(&folder_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 2);
+    }
+
+    #[tokio::test]
+    async fn folder_sync_transaction_rolls_back_messages_and_cursor() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+
+        let db = as_db(&pool);
+        let mut tx = db.begin().await.unwrap();
+        upsert_message_in_tx(
+            &mut tx,
+            &db,
+            &account_id,
+            &folder_id,
+            &sample_imap_message(7),
+        )
+        .await
+        .unwrap();
+        save_cursor_in_tx(&mut tx, &db, &account_id, &folder_id, "imap", 1, 7)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message WHERE account_id = ?")
+            .bind(&account_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "rolled-back upsert must not be visible");
+        let cursor = load_cursor(&db, &account_id, &folder_id).await.unwrap();
+        assert!(cursor.is_none(), "rolled-back cursor must not be visible");
     }
 
     #[tokio::test]
