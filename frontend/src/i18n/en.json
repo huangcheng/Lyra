@@ -121,6 +121,19 @@
         "manual": "Manual only"
       }
     },
+    "privacy": {
+      "title": "Privacy",
+      "remoteImages": "Remote images in email",
+      "remoteImagesHint": "Controls how HTML mail loads images from the internet.",
+      "remoteImagesMode": {
+        "block": "Block by default",
+        "proxy": "Load via Lyra proxy"
+      },
+      "remoteImagesModeHelp": {
+        "block": "Remote images are hidden until you choose to show them for a message or sender.",
+        "proxy": "Images load through your Lyra server so senders see its address, not your device."
+      }
+    },
     "syncNow": "Sync now",
     "syncQueued": "Sync queued",
     "security": {

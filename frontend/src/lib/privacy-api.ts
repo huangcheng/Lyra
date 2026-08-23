@@ -9,6 +9,15 @@ export async function fetchPrivacySettings(): Promise<PrivacySettings> {
   return api<PrivacySettings>('/settings/privacy');
 }
 
+export async function updatePrivacySettings(
+  patch: Pick<PrivacySettings, 'remoteImages'>,
+): Promise<PrivacySettings> {
+  return api<PrivacySettings>('/settings/privacy', {
+    method: 'PATCH',
+    body: JSON.stringify({ remoteImages: patch.remoteImages }),
+  });
+}
+
 export async function allowSenderPrivacy(sender: string): Promise<PrivacySettings> {
   return api<PrivacySettings>('/settings/privacy/allow-sender', {
     method: 'POST',

@@ -14,6 +14,11 @@ import { useAuthStore } from '../stores/auth';
 import { api, type AuthMeResponse } from '@/lib/api-client';
 import { MARK_READ_POLICIES } from '@/lib/mark-read-policy';
 import { saveMarkReadPolicy, applyMarkReadPolicy } from '@/lib/user-preferences';
+import {
+  fetchPrivacySettings,
+  updatePrivacySettings,
+  type PrivacySettings,
+} from '@/lib/privacy-api';
 import { syncEvents$ } from '@/rxjs/sync-events';
 import { Button } from '@/components/ui/button';
 import {
@@ -24,6 +29,9 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import type { MarkReadPolicy } from '@/types';
+
+const REMOTE_IMAGE_MODES = ['block', 'proxy'] as const;
+type RemoteImageMode = (typeof REMOTE_IMAGE_MODES)[number];
 
 interface MailAccount {
   id: string;
@@ -99,9 +107,15 @@ export function SettingsPage() {
   const [enrollingTotp, setEnrollingTotp] = useState(false);
   const [prefsError, setPrefsError] = useState<string | null>(null);
   const [prefsSaving, setPrefsSaving] = useState(false);
+  const [privacySettings, setPrivacySettings] = useState<PrivacySettings | null>(null);
+  const [privacySaving, setPrivacySaving] = useState(false);
+  const [privacyError, setPrivacyError] = useState<string | null>(null);
 
   useEffect(() => {
     void fetchAccounts();
+    void fetchPrivacySettings()
+      .then(setPrivacySettings)
+      .catch(() => {});
     void api<AuthMeResponse>('/auth/me')
       .then((me) => {
         setTotpEnabled(Boolean(me.totp_enabled));
@@ -335,6 +349,24 @@ export function SettingsPage() {
     }
   }
 
+  async function handleRemoteImagesModeChange(value: string) {
+    if (!REMOTE_IMAGE_MODES.includes(value as RemoteImageMode)) return;
+    setPrivacyError(null);
+    setPrivacySaving(true);
+    try {
+      const updated = await updatePrivacySettings({
+        remoteImages: value as RemoteImageMode,
+      });
+      setPrivacySettings(updated);
+    } catch (err: unknown) {
+      setPrivacyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPrivacySaving(false);
+    }
+  }
+
+  const remoteImagesMode = privacySettings?.remoteImages ?? 'block';
+
   return (
     <SecondaryPage title={t(locale, 'settings.title')}>
       <div className="mx-auto max-w-2xl space-y-6">
@@ -399,6 +431,40 @@ export function SettingsPage() {
               </Select>
             </div>
             {prefsError ? <div className="error-message">{prefsError}</div> : null}
+          </div>
+        </section>
+
+        <section className="space-y-4 rounded-lg border p-4">
+          <h2 className="text-base font-semibold">{t(locale, 'settings.privacy.title')}</h2>
+          <p className="text-sm text-muted-foreground">
+            {t(locale, 'settings.privacy.remoteImagesHint')}
+          </p>
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <span className="text-sm text-muted-foreground">
+                {t(locale, 'settings.privacy.remoteImages')}
+              </span>
+              <Select
+                value={remoteImagesMode}
+                onValueChange={(value) => void handleRemoteImagesModeChange(value)}
+                disabled={privacySaving || !privacySettings}
+              >
+                <SelectTrigger size="sm" className="min-w-[200px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {REMOTE_IMAGE_MODES.map((mode) => (
+                    <SelectItem key={mode} value={mode}>
+                      {t(locale, `settings.privacy.remoteImagesMode.${mode}`)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t(locale, `settings.privacy.remoteImagesModeHelp.${remoteImagesMode}`)}
+            </p>
+            {privacyError ? <div className="error-message">{privacyError}</div> : null}
           </div>
         </section>
 

@@ -121,6 +121,19 @@
         "manual": "仅手动标记"
       }
     },
+    "privacy": {
+      "title": "隐私",
+      "remoteImages": "邮件中的远程图片",
+      "remoteImagesHint": "控制 HTML 邮件如何加载互联网上的图片。",
+      "remoteImagesMode": {
+        "block": "默认阻止",
+        "proxy": "通过 Lyra 代理加载"
+      },
+      "remoteImagesModeHelp": {
+        "block": "远程图片默认隐藏，你可选择为单封邮件或发件人显示。",
+        "proxy": "图片经 Lyra 服务器加载，发件人看到的是服务器地址，而非你的设备。"
+      }
+    },
     "syncNow": "立即同步",
     "syncQueued": "已加入同步队列",
     "security": {
