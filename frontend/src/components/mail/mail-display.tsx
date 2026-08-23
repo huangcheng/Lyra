@@ -274,7 +274,7 @@ export function MailDisplay() {
                     >
                       {t(locale, 'mail.laterToday')}{' '}
                       <span className="ml-auto text-muted-foreground">
-                        {format(addHours(today, 4), 'E, h:m b')}
+                        {format(addHours(today, 4), 'h:mm a')}
                       </span>
                     </Button>
                     <Button
@@ -284,7 +284,7 @@ export function MailDisplay() {
                     >
                       {t(locale, 'mail.tomorrow')}
                       <span className="ml-auto text-muted-foreground">
-                        {format(addDays(today, 1), 'E, h:m b')}
+                        {format(addDays(today, 1), 'h:mm a')}
                       </span>
                     </Button>
                     <Button
@@ -294,7 +294,7 @@ export function MailDisplay() {
                     >
                       {t(locale, 'mail.thisWeekend')}
                       <span className="ml-auto text-muted-foreground">
-                        {format(nextSaturday(today), 'E, h:m b')}
+                        {format(nextSaturday(today), 'h:mm a')}
                       </span>
                     </Button>
                     <Button
@@ -304,7 +304,7 @@ export function MailDisplay() {
                     >
                       {t(locale, 'mail.nextWeek')}
                       <span className="ml-auto text-muted-foreground">
-                        {format(addDays(today, 7), 'E, h:m b')}
+                        {format(addDays(today, 7), 'h:mm a')}
                       </span>
                     </Button>
                   </div>

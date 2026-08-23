@@ -53,7 +53,7 @@ export function t(
   // Apply interpolation if params provided
   if (params) {
     for (const [k, v] of Object.entries(params)) {
-      result = result.replace(`{{${k}}}`, String(v));
+      result = result.replaceAll(`{{${k}}}`, String(v));
     }
   }
 

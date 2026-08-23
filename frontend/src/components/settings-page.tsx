@@ -116,7 +116,11 @@ export function SettingsPage() {
   }
 
   async function pollUntilSyncIdle() {
+    const deadline = Date.now() + 90_000;
     for (;;) {
+      if (Date.now() >= deadline) {
+        throw new Error(t(locale, 'sync.syncError'));
+      }
       await new Promise((r) => setTimeout(r, 2000));
       const status = await api<{ syncing: boolean }>('/sync/status');
       if (!status.syncing) return;

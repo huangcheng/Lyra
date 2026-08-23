@@ -4,6 +4,14 @@
 
 import { api, userFromMe, type AuthMeResponse } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth';
+import { useUIStore } from '@/stores/ui';
+import type { SupportedLocale } from '@/types';
+
+function applyLocale(locale: string): void {
+  if (locale === 'en' || locale === 'zh') {
+    useUIStore.getState().setLocale(locale as SupportedLocale);
+  }
+}
 
 export async function restoreSession(): Promise<void> {
   const token = localStorage.getItem('lyra_token');
@@ -14,6 +22,7 @@ export async function restoreSession(): Promise<void> {
     const auth = useAuthStore.getState();
     auth.setToken(token);
     auth.setUser(userFromMe(me));
+    applyLocale(me.locale);
   } catch {
     localStorage.removeItem('lyra_token');
     useAuthStore.getState().clearSession();

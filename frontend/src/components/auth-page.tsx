@@ -22,6 +22,7 @@ export function AuthPage() {
   const [state, send] = useMachine(authMachine);
   const navigate = useNavigate();
   const locale = useUIStore((s) => s.locale);
+  const setLocale = useUIStore((s) => s.setLocale);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const authStore = useAuthStore();
   const syncedRef = useRef(false);
@@ -41,6 +42,9 @@ export function AuthPage() {
       void api<AuthMeResponse>('/auth/me')
         .then((user) => {
           authStore.setUser(userFromMe(user));
+          if (user.locale === 'en' || user.locale === 'zh') {
+            setLocale(user.locale);
+          }
         })
         .catch(() => {
           localStorage.removeItem('lyra_token');
@@ -49,7 +53,7 @@ export function AuthPage() {
           send({ type: 'LOGOUT' });
         });
     }
-  }, [state, state.context.token, authStore, send]);
+  }, [state, state.context.token, authStore, send, setLocale]);
 
   useEffect(() => {
     if (!state.matches('authenticated')) {
