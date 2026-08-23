@@ -40,8 +40,8 @@ Every commit is automatically scanned. CI should also run `make secretscan` on t
 
 Update `AGENTS.md` (and the linked spec if needed) when any of these land:
 
-- [ ] New top-level packages / crates / apps, or a renamed layout  
-- [ ] Locked stack choice added, replaced, or version-pinned in practice  
+- [x] New top-level packages / crates / apps, or a renamed layout  
+- [x] Locked stack choice added, replaced, or version-pinned in practice  
 - [x] Standard scripts: `make fmt`, `make lint`, `make check`, `make secretscan`  
 - [x] Secret-scan tooling: `.gitleaks.toml`, `.pre-commit-config.yaml`, `scripts/secretscan.sh`, `Makefile`  
 - [x] New doc under `docs/product/` or `docs/specs/` that agents must read for common tasks  
@@ -82,16 +82,19 @@ Lyra/
     src/
       components/               ← shadcn/ui + mail example (unified inbox)
       stores/                   ← Zustand (mail data, UI state)
-      machines/                 ← XState (auth, account-setup flows)
-      rxjs/                     ← RxJS (sync event streams)
+      machines/                 ← XState (auth flow)
+      lib/                      ← `/api/v1` client, session restore, mappers
+      rxjs/                     ← RxJS (SSE sync event stream)
       i18n/                     ← en + zh translations
   backend/                      ← Rust + Axum
     src/
-      main.rs                   ← health + version routes, entry point
-      config.rs                 ← env-based configuration
-      auth.rs                   ← authentication stub
+      main.rs                   ← health + version routes, SPA, entry point
+      config.rs                 ← env-based configuration (`LYRA_MASTER_KEY` required)
+      auth.rs                   ← username/password + optional TOTP, bearer sessions
       storage.rs                ← storage seam (SQLite + PostgreSQL, migrations)
-      sync.rs                   ← sync engine stub (JMAP/IMAP/SMTP)
+      sync/                     ← sync HTTP, IMAP/JMAP loops, persist transactions
+      imap.rs / jmap.rs / smtp.rs
+      jobs.rs / scheduler.rs / kernel/
     migrations/
       sqlite/                   ← SQLite migration SQL files
       postgres/                 ← PostgreSQL migration SQL files
@@ -102,8 +105,9 @@ Lyra/
 
 | Area | Path | Notes |
 |------|------|--------|
-| Web UI | `frontend/` | React, TanStack Router, Tailwind + shadcn mail, en/zh i18n |
-| API + sync | `backend/` | Rust + Axum; health + version routes, storage seam |
+| Web UI | `frontend/` | React, TanStack Router, Tailwind + shadcn mail, en/zh i18n; typed `api()` client |
+| API + sync | `backend/` | Rust + Axum; `/api/v1`; health + version unversioned |
+| Tests | `backend/` | Binary crate: `cargo test --bin lyra_backend` (not `--lib`) |
 | DB | `backend/migrations/` | sqlx; SQLite + PostgreSQL; auto-migrate on startup |
 
 ### Lint & format
@@ -114,7 +118,8 @@ Lyra/
 | `make lint` | oxlint + tsc (frontend) + clippy `-D warnings` (backend) |
 | `make check` | format check + lint + secret scan |
 | `cd frontend && npm run check` | frontend only |
-| `cd backend && cargo clippy -- -D warnings` | backend only |
+| `cd backend && cargo clippy --all-targets --all-features -- -D warnings` | backend only |
+| `cd backend && cargo test --bin lyra_backend` | backend unit tests |
 
 ---
 

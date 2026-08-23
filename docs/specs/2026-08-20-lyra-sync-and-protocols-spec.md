@@ -288,12 +288,12 @@ The frontend never calls the sync engine directly. Instead, it observes state vi
 | Layer | Library | Owns | Example |
 |-------|---------|------|---------|
 | **Data** | **Zustand** | Normalised mail data (messages, folders, threads, accounts) | `useMailStore.getState().messages` |
-| **Flows** | **XState** | Multi-step UI flows (account setup wizard, login, compose lifecycle) | `accountSetupMachine` |
+| **Flows** | **XState** | Multi-step UI flows (login + TOTP) | `authMachine` |
 | **Async / recovery** | **RxJS** | Long-lived subscriptions to sync events, retry logic, backpressure | `syncEvent$.pipe(retry(3))` |
 
 ### 9.2 Sync events → frontend
 
-The backend emits `SyncEvent` via Server-Sent Events (SSE) at `/api/sync/events`:
+The backend emits `SyncEvent` via Server-Sent Events (SSE) at `/api/v1/sync/events` (bearer auth; `EventSource` cannot set Authorization — the web client uses `fetch`):
 
 ```typescript
 type SyncEvent =
@@ -309,16 +309,13 @@ type SyncEvent =
 
 1. Retries on connection drop (exponential backoff).
 2. Buffers rapid events (backpressure).
-3. Pushes normalised data into **Zustand** store slices.
-4. Notifies **XState** machines of state transitions (e.g., `accountSetupMachine` moves to `syncing` → `complete`).
+3. Pushes normalised data into **Zustand** store slices on `sync_complete` / `sync_error` (folder + account refresh).
 
 ### 9.3 XState machines (v1)
 
 | Machine | States | Purpose |
 |---------|--------|---------|
-| `authMachine` | `idle → authenticating → authenticated / error` | Lyra login + optional TOTP |
-| `accountSetupMachine` | `enter_email → probing → credentials → verifying → syncing → complete / error` | Adding a mail account |
-| `syncLifecycleMachine` | `idle → syncing → complete → idle` (per account) | Tracks overall sync status |
+| `authMachine` | `checkingStatus → idle/bootstrap/login/totpChallenge → authenticated` | Lyra login + optional TOTP |
 
 ### 9.4 Zustand slices (v1)
 
@@ -367,6 +364,24 @@ Every failure mode produces a typed error at the module boundary. No `catch` blo
 | Server-side search delegation | Local search only in v1; server search can be added later |
 | Partial message fetch with on-demand download in v1 | Full fetch on sync; lazy body download is a v2 optimisation |
 | Sync across multiple instances | Single-instance v1; database is the lock |
+
+---
+
+## Implementation notes (as of 2026-08-23)
+
+These match the running tree; older bullets above that still mention stubs are historical.
+
+| Topic | Implementation |
+|-------|----------------|
+| HTTP surface | Product API is **`/api/v1/...`**. `/health` and `/version` are unversioned. |
+| Credentials | `LYRA_MASTER_KEY` (32+ bytes) → per-user KEK (HKDF) → wrapped DEK in `lyra_user.encrypted_dek`. Account passwords and TOTP secrets encrypt under the DEK. No `SESSION_SECRET`; sessions are bearer tokens in kv. |
+| MIME / HTML | IMAP bodies parsed with **mail-parser**; HTML sanitized with **ammonia** at persist (`persist_body_html`). |
+| Sync writes | Per folder page: upserts, folder counts, and cursor commit in **one DB transaction**. Cursor advances only after commit. |
+| JMAP cursor | Stored `queryState` is sent as `sinceQueryState` on `Email/queryChanges`; `cannotCalculateChanges` clears the cursor and falls back to a full `Email/query`. |
+| Postgres | Dual-DB query macros rewrite SQLite SQL; UUID / timestamptz / jsonb bound natively. |
+| Sync module | `backend/src/sync/` (`http`, `store`, `imap_loop`, `jmap_loop`, `send`, `types`) — not a single `sync.rs`. |
+| Account setup | Settings page probe + form. There is no `accountSetupMachine`. |
+| Frontend client | `frontend/src/lib/api-client.ts` injects the bearer token and maps session-expiry 401s to login. |
 
 ---
 

@@ -29,10 +29,12 @@ All config via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LYRA_MASTER_KEY` | *(required)* | Master key (32+ bytes) for the per-user DEK hierarchy that encrypts stored account credentials and TOTP secrets. Boot fails without it. Generate: `openssl rand -base64 32` |
-| `SESSION_SECRET` | ephemeral random | Session cookie signing secret (32+ bytes); sessions do not survive restarts if unset |
 | `LISTEN_ADDR` | `0.0.0.0:3000` | Address and port to listen on |
 | `DATABASE_URL` | `sqlite:./data/lyra.db` | Database connection string |
 | `DATA_DIR` | `./data` | Directory for message blobs and attachments |
+| `REDIS_URL` | unset (in-memory kv) | Redis for sessions/jobs; omit for process-local memory |
+| `FRONTEND_DIR` | `frontend/dist` | Built SPA; missing dir → API-only |
+| `MIGRATIONS_DIR` | auto | Override path to `migrations/{sqlite,postgres}` |
 | `RUST_LOG` | `info` | Log level filter (tracing-subscriber) |
 
 ### Database URLs
@@ -123,21 +125,25 @@ docker rm -f lyra-pg
 
 ```
 src/
-  main.rs       ← Axum app, health + version routes, entry point
+  main.rs       ← Axum app, health + version + SPA, entry point
   config.rs     ← Environment-based configuration
-  auth.rs       ← Authentication stub (username/password + TOTP)
-  storage.rs    ← Storage seam (SQLite + PostgreSQL, migrations)
-  sync.rs       ← Sync engine stub (JMAP/IMAP/SMTP)
+  auth.rs       ← Username/password + optional TOTP; bearer sessions in kv
+  storage.rs    ← Storage seam (SQLite + PostgreSQL, transactions)
+  sync/         ← HTTP, IMAP/JMAP loops, persist batches, SMTP send
+  imap.rs / jmap.rs / smtp.rs
+  jobs.rs / scheduler.rs / kernel/
 ```
 
-Each module exposes a `routes()` function that returns an Axum `Router<AppState>`. The main router merges them all.
+This is a **binary crate**. Run tests with `cargo test --bin lyra_backend` (not `--lib`).
+
+Each of `auth`, `accounts`, `sync`, and `pim` exposes a `routes()` function. The main router merges them under `/api/v1` (`/health` and `/version` stay unversioned).
 
 ## Lint & format
 
 ```bash
 cargo fmt                     # Format
 cargo clippy -- -D warnings   # Lint (warnings as errors)
-cargo test                    # Run tests
+cargo test --bin lyra_backend   # Unit tests (binary crate)
 ```
 
 Or from the repo root: `make backend-fmt` / `make backend-lint`.
