@@ -288,7 +288,7 @@ pub(crate) fn subject_from_raw(raw: &str) -> Option<String> {
         if let Some((name, value)) = line.split_once(':')
             && name.eq_ignore_ascii_case("subject")
         {
-            return Some(value.trim().to_string());
+            return Some(crate::imap::decode_mime_header(value.trim()));
         }
     }
     None

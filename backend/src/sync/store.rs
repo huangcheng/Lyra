@@ -552,12 +552,20 @@ pub(crate) async fn upsert_message_in_tx(
             is_read = excluded.is_read,
             is_starred = excluded.is_starred,
             flags = excluded.flags,
-            subject = COALESCE(NULLIF(subject, ''), excluded.subject),
+            subject = CASE
+                WHEN subject IS NULL OR subject = '' OR subject LIKE '%=?%?=%'
+                THEN excluded.subject
+                ELSE subject
+            END,
             from_address = COALESCE(from_address, excluded.from_address),
             to_addresses = COALESCE(to_addresses, excluded.to_addresses),
             cc_addresses = COALESCE(cc_addresses, excluded.cc_addresses),
             date = COALESCE(date, excluded.date),
-            snippet = COALESCE(NULLIF(snippet, ''), excluded.snippet),
+            snippet = CASE
+                WHEN snippet IS NULL OR snippet = '' OR snippet LIKE '%=?%?=%'
+                THEN excluded.snippet
+                ELSE snippet
+            END,
             message_id_header = COALESCE(message_id_header, excluded.message_id_header),
             updated_at = datetime('now')
         ",

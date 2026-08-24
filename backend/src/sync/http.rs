@@ -255,12 +255,19 @@ macro_rules! message_response_from_sql {
             id: id_from_row(&$row, "id"),
             account_id: id_from_row(&$row, "account_id"),
             folder_id: id_from_row(&$row, "folder_id"),
-            subject: $row.get("subject"),
-            from_address: json_text_from_row(&$row, "from_address"),
-            to_addresses: json_text_from_row(&$row, "to_addresses"),
-            cc_addresses: json_text_from_row(&$row, "cc_addresses"),
+            subject: $row
+                .get::<Option<String>, _>("subject")
+                .map(|s| crate::imap::decode_mime_header(&s)),
+            from_address: json_text_from_row(&$row, "from_address")
+                .map(|s| crate::imap::decode_mime_header(&s)),
+            to_addresses: json_text_from_row(&$row, "to_addresses")
+                .map(|s| crate::imap::decode_mime_header(&s)),
+            cc_addresses: json_text_from_row(&$row, "cc_addresses")
+                .map(|s| crate::imap::decode_mime_header(&s)),
             date: opt_ts_from_row(&$row, "date"),
-            snippet: $row.get("snippet"),
+            snippet: $row
+                .get::<Option<String>, _>("snippet")
+                .map(|s| crate::imap::decode_mime_header(&s)),
             body_text: $row.get("body_text"),
             body_html: $row.get("body_html"),
             is_read: $row.get::<bool, _>("is_read"),
@@ -672,12 +679,27 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         id: row.id.clone(),
         account_id: row.account_id.clone(),
         folder_id: row.folder_id.clone(),
-        subject: row.subject.clone(),
-        from_address: row.from_address.clone(),
-        to_addresses: row.to_addresses.clone(),
-        cc_addresses: row.cc_addresses.clone(),
+        subject: row
+            .subject
+            .as_deref()
+            .map(crate::imap::decode_mime_header),
+        from_address: row
+            .from_address
+            .as_deref()
+            .map(crate::imap::decode_mime_header),
+        to_addresses: row
+            .to_addresses
+            .as_deref()
+            .map(crate::imap::decode_mime_header),
+        cc_addresses: row
+            .cc_addresses
+            .as_deref()
+            .map(crate::imap::decode_mime_header),
         date: row.date.clone(),
-        snippet: row.snippet.clone(),
+        snippet: row
+            .snippet
+            .as_deref()
+            .map(crate::imap::decode_mime_header),
         body_text: row.body_text.clone(),
         body_html: row.body_html.clone(),
         is_read: row.is_read,
@@ -685,6 +707,11 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         has_attachments: row.has_attachments,
         remote_content_blocked: false,
     }
+}
+
+fn header_needs_refresh(existing: Option<&str>) -> bool {
+    let value = existing.unwrap_or("");
+    value.is_empty() || (value.contains("=?") && value.contains("?="))
 }
 
 /// Apply remote-image policy at serve time (after storage sanitization).
@@ -848,92 +875,113 @@ pub(crate) async fn get_message(
 ) -> Result<Json<MessageResponse>, SyncError> {
     let db = state.db();
     let mut row = load_message_row(db, &user_id, &message_id).await?;
-
-    let needs_body = row.body_text.is_none() && row.body_html.is_none();
-    if needs_body
-        && row.protocol == "imap"
-        && let Ok(uid) = parse_imap_uid(row.external_id.as_deref())
-    {
-        let (mut client, _) = connect_imap_for_account(db, &user_id, &row.account_id).await?;
-        client.select(&row.folder_name).await?;
-        let bodies = client.fetch_bodies(&[uid]).await?;
-        if let Some(fetched) = bodies.into_iter().next() {
-            let from_json = fetched
-                .from
-                .as_ref()
-                .map(|f| serde_json::json!({ "raw": f }).to_string());
-            let to_json = fetched
-                .to
-                .as_ref()
-                .map(|t| serde_json::json!(vec![t]).to_string());
-            let snippet = fetched
-                .subject
-                .as_deref()
-                .map(|s| {
-                    if s.len() > 120 {
-                        format!("{}...", &s[..117])
-                    } else {
-                        s.to_string()
-                    }
-                })
-                .or_else(|| {
-                    fetched
-                        .body_text
-                        .as_deref()
-                        .map(|t| t.chars().take(120).collect())
-                });
-            let body_html = persist_body_html(fetched.body_html.as_deref());
-            db_execute!(
-                db,
-                r"
-                    UPDATE message
-                    SET body_text = ?, body_html = ?, has_attachments = ?,
-                        snippet = COALESCE(NULLIF(snippet, ''), ?),
-                        subject = COALESCE(NULLIF(subject, ''), ?),
-                        from_address = COALESCE(from_address, ?),
-                        to_addresses = COALESCE(to_addresses, ?),
-                        date = COALESCE(date, ?),
-                        message_id_header = COALESCE(message_id_header, ?),
-                        updated_at = datetime('now')
-                    WHERE id = ?
-                    ",
-                &fetched.body_text,
-                &body_html,
-                fetched.has_attachments,
-                &snippet,
-                &fetched.subject,
-                opt_json_param(db, from_json.as_deref()),
-                opt_json_param(db, to_json.as_deref()),
-                message_date_param(db, fetched.date.as_deref()),
-                &fetched.message_id,
-                &id_param(db, &row.id)?
-            )?;
-
-            row.body_text = fetched.body_text;
-            row.body_html = body_html;
-            row.has_attachments = fetched.has_attachments || !fetched.attachments.is_empty();
-            if row.subject.as_deref().unwrap_or("").is_empty() {
-                row.subject = fetched.subject.clone();
-            }
-            if row.from_address.is_none() {
-                row.from_address = from_json;
-            }
-            if row.to_addresses.is_none() {
-                row.to_addresses = to_json;
-            }
-            if row.date.is_none() {
-                row.date = fetched.date.clone();
-            }
-            if row.snippet.as_deref().unwrap_or("").is_empty() {
-                row.snippet = snippet;
-            }
-            persist_attachments(db, &state.data_dir, &row.id, &fetched.attachments).await?;
-        }
-    }
+    maybe_fill_imap_body(db, &state.data_dir, &user_id, &mut row).await?;
 
     let allow_remote = query.remote_content.as_deref() == Some("allow");
     let response = finalize_message_response(&state, &user_id, &row, allow_remote).await?;
     Ok(Json(response))
+}
+
+async fn maybe_fill_imap_body(
+    db: &DbPool,
+    data_dir: &std::path::Path,
+    user_id: &str,
+    row: &mut MessageRow,
+) -> Result<(), SyncError> {
+    let needs_body = row.body_text.is_none() && row.body_html.is_none();
+    if !needs_body || row.protocol != "imap" {
+        return Ok(());
+    }
+    let Ok(uid) = parse_imap_uid(row.external_id.as_deref()) else {
+        return Ok(());
+    };
+
+    let (mut client, _) = connect_imap_for_account(db, user_id, &row.account_id).await?;
+    client.select(&row.folder_name).await?;
+    let bodies = client.fetch_bodies(&[uid]).await?;
+    let Some(fetched) = bodies.into_iter().next() else {
+        return Ok(());
+    };
+
+    let from_json = fetched
+        .from
+        .as_ref()
+        .map(|f| serde_json::json!({ "raw": f }).to_string());
+    let to_json = fetched
+        .to
+        .as_ref()
+        .map(|t| serde_json::json!(vec![t]).to_string());
+    let snippet = fetched
+        .subject
+        .as_deref()
+        .map(|s| {
+            if s.len() > 120 {
+                format!("{}...", &s[..117])
+            } else {
+                s.to_string()
+            }
+        })
+        .or_else(|| {
+            fetched
+                .body_text
+                .as_deref()
+                .map(|t| t.chars().take(120).collect())
+        });
+    let body_html = persist_body_html(fetched.body_html.as_deref());
+    db_execute!(
+        db,
+        r"
+            UPDATE message
+            SET body_text = ?, body_html = ?, has_attachments = ?,
+                snippet = CASE
+                    WHEN snippet IS NULL OR snippet = '' OR snippet LIKE '%=?%?=%'
+                    THEN ?
+                    ELSE snippet
+                END,
+                subject = CASE
+                    WHEN subject IS NULL OR subject = '' OR subject LIKE '%=?%?=%'
+                    THEN ?
+                    ELSE subject
+                END,
+                from_address = COALESCE(from_address, ?),
+                to_addresses = COALESCE(to_addresses, ?),
+                date = COALESCE(date, ?),
+                message_id_header = COALESCE(message_id_header, ?),
+                updated_at = datetime('now')
+            WHERE id = ?
+            ",
+        &fetched.body_text,
+        &body_html,
+        fetched.has_attachments,
+        &snippet,
+        &fetched.subject,
+        opt_json_param(db, from_json.as_deref()),
+        opt_json_param(db, to_json.as_deref()),
+        message_date_param(db, fetched.date.as_deref()),
+        &fetched.message_id,
+        &id_param(db, &row.id)?
+    )?;
+
+    row.body_text = fetched.body_text;
+    row.body_html = body_html;
+    row.has_attachments = fetched.has_attachments || !fetched.attachments.is_empty();
+    if header_needs_refresh(row.subject.as_deref()) {
+        row.subject.clone_from(&fetched.subject);
+    }
+    if row.from_address.is_none() {
+        row.from_address = from_json;
+    }
+    if row.to_addresses.is_none() {
+        row.to_addresses = to_json;
+    }
+    if row.date.is_none() {
+        row.date.clone_from(&fetched.date);
+    }
+    if header_needs_refresh(row.snippet.as_deref()) {
+        row.snippet = snippet;
+    }
+    persist_attachments(db, data_dir, &row.id, &fetched.attachments).await?;
+    Ok(())
 }
 
 /// PATCH /api/v1/messages/{id} — update read/starred flags (IMAP STORE when possible).

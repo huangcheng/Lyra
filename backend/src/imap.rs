@@ -365,6 +365,31 @@ impl ImapClient {
 
 // ── Parsing helpers ─────────────────────────────────────────────────
 
+/// Decode RFC 2047 encoded-words in an unstructured header (Subject, display name).
+///
+/// IMAP ENVELOPE often returns subjects still encoded as `=?UTF-8?Q?...?=` /
+/// `=?utf-8?B?...?=`. Plain ASCII is returned unchanged.
+pub fn decode_mime_header(raw: &str) -> String {
+    if !raw.contains("=?") {
+        return raw.to_string();
+    }
+    let mut bytes = Vec::with_capacity(raw.len() + 16);
+    bytes.extend_from_slice(b"Subject: ");
+    bytes.extend_from_slice(raw.as_bytes());
+    if !raw.ends_with('\n') {
+        bytes.extend_from_slice(b"\r\n\r\n");
+    }
+    mail_parser::MessageParser::default()
+        .parse(&bytes)
+        .and_then(|msg| msg.subject().map(str::to_owned))
+        .filter(|decoded| !decoded.is_empty())
+        .unwrap_or_else(|| raw.to_string())
+}
+
+fn decode_opt_mime_header(raw: Option<String>) -> Option<String> {
+    raw.map(|s| decode_mime_header(&s))
+}
+
 /// Parse an `async_imap::types::Fetch` into our `ImapMessage`.
 fn parse_fetch_to_message(fetch: &async_imap::types::Fetch, include_body: bool) -> ImapMessage {
     let uid = fetch.uid.unwrap_or(0);
@@ -379,10 +404,12 @@ fn parse_fetch_to_message(fetch: &async_imap::types::Fetch, include_body: bool) 
                     .message_id
                     .as_ref()
                     .map(|n| String::from_utf8_lossy(n).into_owned()),
-                envelope
-                    .subject
-                    .as_ref()
-                    .map(|n| String::from_utf8_lossy(n).into_owned()),
+                decode_opt_mime_header(
+                    envelope
+                        .subject
+                        .as_ref()
+                        .map(|n| String::from_utf8_lossy(n).into_owned()),
+                ),
                 envelope.from.as_ref().map(|a| format_address_list(a)),
                 envelope.to.as_ref().map(|a| format_address_list(a)),
                 envelope.cc.as_ref().map(|a| format_address_list(a)),
@@ -496,10 +523,9 @@ fn format_address_list(addrs: &[Address]) -> String {
                 .as_ref()
                 .map(|h| String::from_utf8_lossy(h).into_owned())
                 .unwrap_or_default();
-            let name = addr
-                .name
-                .as_ref()
-                .map(|n| String::from_utf8_lossy(n).into_owned());
+            let name = addr.name.as_ref().map(|n| {
+                decode_mime_header(&String::from_utf8_lossy(n))
+            });
 
             if let Some(name) = name {
                 format!("{name} <{mailbox}@{host}>")
@@ -654,6 +680,39 @@ mod tests {
         assert_eq!(text.as_deref(), Some("Café"));
         assert!(atts.is_empty());
         let _ = html;
+    }
+
+    #[test]
+    fn decode_mime_header_ascii_passthrough() {
+        assert_eq!(decode_mime_header("Hello"), "Hello");
+        assert_eq!(decode_mime_header("Re: AccuWeather"), "Re: AccuWeather");
+    }
+
+    #[test]
+    fn decode_mime_header_base64_utf8() {
+        // "Re: 关于自动续费" (utf-8 B)
+        let encoded = "=?utf-8?B?UmU6IOWFs+S6juiHquWKqOe7reiOuQ==?=";
+        let decoded = decode_mime_header(encoded);
+        assert!(!decoded.contains("=?"), "got: {decoded}");
+        assert!(decoded.contains("Re:"), "got: {decoded}");
+        assert!(decoded.contains('关') || decoded.contains('续'), "got: {decoded}");
+    }
+
+    #[test]
+    fn decode_mime_header_quoted_printable_utf8() {
+        let encoded = "=?UTF-8?Q?Re:_=E5=85=B3=E4=BA=8E=E8=87=AA=E5=8A=A8=E7=BB=AD=E8=B4=B9?=";
+        let decoded = decode_mime_header(encoded);
+        assert!(!decoded.contains("=?"), "got: {decoded}");
+        assert!(decoded.starts_with("Re:"), "got: {decoded}");
+        assert!(decoded.contains('关') || decoded.contains('费'), "got: {decoded}");
+    }
+
+    #[test]
+    fn decode_mime_header_mixed_plain_and_encoded() {
+        let encoded = "AS AdGuard Support =?UTF-8?Q?Re:_=E7=BD=91=E7=AB=99?= startpage.ws";
+        let decoded = decode_mime_header(encoded);
+        assert!(!decoded.contains("=?"), "got: {decoded}");
+        assert!(decoded.contains("AdGuard"), "got: {decoded}");
     }
 
     #[test]
