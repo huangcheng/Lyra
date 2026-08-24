@@ -751,7 +751,7 @@ export function SettingsPage() {
 
                   <button
                     type="button"
-                    className="flex w-full flex-col items-center justify-center gap-1.5 rounded-[10px] border border-input bg-secondary px-5 py-6 text-[13px] font-medium text-foreground hover:bg-accent"
+                    className="flex w-full flex-col items-center justify-center gap-1.5 rounded-[10px] border border-border bg-secondary px-5 py-6 text-[13px] font-medium text-foreground hover:bg-accent"
                     onClick={() => {
                       resetForm();
                       setEditingAccount(null);
@@ -772,7 +772,7 @@ export function SettingsPage() {
           )}
 
           {section === 'spam' && (
-            <>
+            <div className="space-y-4 opacity-60">
               <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
                 <div className="flex items-center gap-2">
                   <h2 className="text-[13px] font-medium">
@@ -820,13 +820,13 @@ export function SettingsPage() {
                     {t(locale, 'settings.spam.sensitivityDesc')}
                   </div>
                   <div className="flex h-8 items-center rounded-lg bg-accent p-0.5 text-muted-foreground">
-                    {SPAM_SENSITIVITY.map((level, i) => (
+                    {SPAM_SENSITIVITY.map((level) => (
                       <button
                         key={level}
                         type="button"
                         disabled
                         className={
-                          i === 1
+                          level === 'standard'
                             ? 'h-7 rounded-md bg-card px-3 text-sm font-medium text-foreground'
                             : 'h-7 rounded-md px-3 text-sm font-medium'
                         }
@@ -874,7 +874,7 @@ export function SettingsPage() {
                   </Button>
                 </div>
               </section>
-            </>
+            </div>
           )}
 
           {section === 'privacy' && (
