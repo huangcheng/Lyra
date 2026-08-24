@@ -17,7 +17,7 @@ import { fetchStats } from '@/lib/stats-api';
 import { cn, getInitials } from '@/lib/utils';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
-import type { StatsResponse } from '@/types';
+import type { DailyVolume, StatsResponse } from '@/types';
 
 const RANGES = [7, 30, 90] as const;
 
@@ -27,6 +27,7 @@ export function DashboardPage() {
   const folders = useMailStore((s) => s.folders);
   const [days, setDays] = useState<number>(30);
   const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [daily, setDaily] = useState<DailyVolume[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,7 +38,10 @@ export function DashboardPage() {
         setLoading(true);
         setError(null);
         const data = await fetchStats(days);
-        if (!cancelled) setStats(data);
+        if (!cancelled) {
+          setStats(data);
+          setDaily(fillDailySeries(data.daily, days));
+        }
       } catch (err: unknown) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -49,7 +53,6 @@ export function DashboardPage() {
     };
   }, [days]);
 
-  const daily = stats?.daily ?? [];
   const maxReceived = Math.max(...daily.map((d) => d.received), 1);
   const receivedToday = daily.length > 0 ? daily[daily.length - 1].received : 0;
 
@@ -128,38 +131,29 @@ export function DashboardPage() {
 
             <section className="mx-8 mt-4 rounded-[10px] border border-border bg-card px-5 py-4">
               <h2 className="text-[13.5px] font-semibold">{t(locale, 'dash.volume', { days })}</h2>
-              {daily.length === 0 ? (
-                <EmptyState icon={BarChart3} title={t(locale, 'dash.volume', { days })} />
-              ) : (
-                <>
-                  <div className="mt-3 flex h-[140px] items-end gap-1.5">
-                    {daily.map((d, i) => (
-                      <div key={d.date} className="flex h-full flex-1 items-end">
-                        <div
-                          className={cn(
-                            'w-full rounded-sm',
-                            i === daily.length - 1 ? 'bg-unread' : 'bg-primary',
-                          )}
-                          style={{
-                            height: `${Math.max((d.received / maxReceived) * 100, 1.5)}%`,
-                          }}
-                          title={`${d.date}: ${d.received}`}
-                        />
-                      </div>
-                    ))}
+              <div className="mt-3 flex h-[140px] items-end gap-1.5">
+                {daily.map((d, i) => (
+                  <div key={d.date} className="flex h-full flex-1 items-end">
+                    <div
+                      className={cn(
+                        'w-full rounded-sm',
+                        i === daily.length - 1 ? 'bg-unread' : 'bg-primary',
+                      )}
+                      style={{
+                        height: `${Math.max((d.received / maxReceived) * 100, 1.5)}%`,
+                      }}
+                      title={`${d.date}: ${d.received}`}
+                    />
                   </div>
-                  <div className="mt-1.5 flex gap-1.5">
-                    {daily.map((d) => (
-                      <div
-                        key={d.date}
-                        className="flex-1 text-center text-[10px] text-ter-foreground"
-                      >
-                        {format(parseISO(d.date), 'EEEEE')}
-                      </div>
-                    ))}
+                ))}
+              </div>
+              <div className="mt-1.5 flex gap-1.5">
+                {daily.map((d) => (
+                  <div key={d.date} className="flex-1 text-center text-[10px] text-ter-foreground">
+                    {format(parseISO(d.date), 'EEEEE')}
                   </div>
-                </>
-              )}
+                ))}
+              </div>
             </section>
 
             <div className="grid grid-cols-2 gap-4 px-8 py-4">
@@ -215,6 +209,23 @@ export function DashboardPage() {
       </main>
     </div>
   );
+}
+
+/**
+ * Gap-fill the backend's daily series: zero-mail days are omitted server-side,
+ * so build the full window (today-(days-1) … today) and merge counts onto it.
+ * Dates use the UTC day basis (`toISOString().slice(0, 10)`) to match the
+ * backend's UTC date buckets, so the last entry is "today" as the backend
+ * counts it — honestly 0 when no mail arrived today.
+ */
+function fillDailySeries(daily: DailyVolume[], days: number): DailyVolume[] {
+  const countsByDate = new Map(daily.map((d) => [d.date, d.received]));
+  const series: DailyVolume[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const date = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10);
+    series.push({ date, received: countsByDate.get(date) ?? 0 });
+  }
+  return series;
 }
 
 function KpiCard({ label, value, sub }: { label: string; value: React.ReactNode; sub: string }) {
