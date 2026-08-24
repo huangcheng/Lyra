@@ -523,9 +523,10 @@ fn format_address_list(addrs: &[Address]) -> String {
                 .as_ref()
                 .map(|h| String::from_utf8_lossy(h).into_owned())
                 .unwrap_or_default();
-            let name = addr.name.as_ref().map(|n| {
-                decode_mime_header(&String::from_utf8_lossy(n))
-            });
+            let name = addr
+                .name
+                .as_ref()
+                .map(|n| decode_mime_header(&String::from_utf8_lossy(n)));
 
             if let Some(name) = name {
                 format!("{name} <{mailbox}@{host}>")
@@ -695,7 +696,10 @@ mod tests {
         let decoded = decode_mime_header(encoded);
         assert!(!decoded.contains("=?"), "got: {decoded}");
         assert!(decoded.contains("Re:"), "got: {decoded}");
-        assert!(decoded.contains('关') || decoded.contains('续'), "got: {decoded}");
+        assert!(
+            decoded.contains('关') || decoded.contains('续'),
+            "got: {decoded}"
+        );
     }
 
     #[test]
@@ -704,7 +708,10 @@ mod tests {
         let decoded = decode_mime_header(encoded);
         assert!(!decoded.contains("=?"), "got: {decoded}");
         assert!(decoded.starts_with("Re:"), "got: {decoded}");
-        assert!(decoded.contains('关') || decoded.contains('费'), "got: {decoded}");
+        assert!(
+            decoded.contains('关') || decoded.contains('费'),
+            "got: {decoded}"
+        );
     }
 
     #[test]

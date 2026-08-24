@@ -36,6 +36,14 @@ interface MailState {
   setFolders: (folders: MailFolder[]) => void;
   upsertFolder: (folder: MailFolder) => void;
   upsertMessage: (message: MailMessage) => void;
+  replaceMessagesForView: (
+    opts: {
+      accountId: string | typeof ALL_ACCOUNTS;
+      folderId: string | null;
+      folderRole: string | null;
+    },
+    messages: MailMessage[],
+  ) => void;
   upsertThread: (thread: MailThread) => void;
   markMessageRead: (id: string) => void;
   toggleStar: (id: string) => void;
@@ -102,6 +110,23 @@ export const useMailStore = create<MailState>((set, get) => ({
     set((state) => ({
       messages: { ...state.messages, [message.id]: message },
     })),
+
+  replaceMessagesForView: ({ accountId, folderId, folderRole }, incoming) =>
+    set((state) => {
+      const ids = new Set(incoming.map((m) => m.id));
+      const next = { ...state.messages };
+      for (const [id, msg] of Object.entries(state.messages)) {
+        if (accountId !== ALL_ACCOUNTS && msg.accountId !== accountId) continue;
+        const inView = folderId
+          ? msg.folderId === folderId
+          : folderRole
+            ? state.folders[msg.folderId]?.role === folderRole
+            : false;
+        if (inView && !ids.has(id)) delete next[id];
+      }
+      for (const msg of incoming) next[msg.id] = msg;
+      return { messages: next };
+    }),
 
   upsertThread: (thread) =>
     set((state) => ({

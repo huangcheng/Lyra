@@ -130,10 +130,26 @@ export function SettingsPage() {
 
   useEffect(() => {
     const sub = syncEvents$.subscribe((ev) => {
-      if (ev.type === 'sync_complete') void fetchAccounts();
+      if (ev.type === 'sync_started') {
+        setSyncingId(ev.accountId);
+        setSyncErrors((prev) => {
+          const next = { ...prev };
+          delete next[ev.accountId];
+          return next;
+        });
+      }
+      if (ev.type === 'sync_complete') {
+        setSyncingId((id) => (id === ev.accountId ? null : id));
+        void fetchAccounts();
+        setSyncMessage(t(locale, 'sync.syncComplete'));
+      }
+      if (ev.type === 'sync_error') {
+        setSyncingId((id) => (id === ev.accountId ? null : id));
+        setSyncErrors((prev) => ({ ...prev, [ev.accountId]: ev.error }));
+      }
     });
     return () => sub.unsubscribe();
-  }, []);
+  }, [locale]);
 
   async function fetchAccounts() {
     try {

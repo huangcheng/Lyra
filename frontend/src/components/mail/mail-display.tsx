@@ -105,6 +105,7 @@ export function MailDisplay() {
   const removeMessage = useMailStore((s) => s.removeMessage);
 
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [replyText, setReplyText] = useState('');
   const [allowRemoteContent, setAllowRemoteContent] = useState(false);
@@ -213,15 +214,16 @@ export function MailDisplay() {
     });
   };
 
-  const handleAction = async (action: 'trash' | 'archive') => {
+  const handleAction = async (action: 'trash' | 'archive' | 'spam') => {
     if (!token || !mail || busy) return;
     setBusy(true);
+    setActionError(null);
     try {
       await api(`/messages/${mail.id}/${action}`, { method: 'POST' });
       removeMessage(mail.id);
       setSelectedMessage(null);
-    } catch {
-      /* retry */
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : t(locale, 'common.error'));
     } finally {
       setBusy(false);
     }
@@ -310,7 +312,7 @@ export function MailDisplay() {
                 size="icon"
                 className={toolbarIconClass}
                 disabled={disabled}
-                onClick={() => void handleAction('trash')}
+                onClick={() => void handleAction('spam')}
               >
                 <ArchiveX className="h-4 w-4" />
                 <span className="sr-only">{t(locale, 'mail.moveToJunk')}</span>
@@ -484,6 +486,11 @@ export function MailDisplay() {
         </DropdownMenu>
       </div>
       <Separator />
+      {actionError ? (
+        <div className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">
+          {actionError}
+        </div>
+      ) : null}
       {mail ? (
         <div className="flex flex-1 flex-col">
           <div className="flex items-start p-4">

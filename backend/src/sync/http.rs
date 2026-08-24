@@ -58,6 +58,7 @@ pub fn routes() -> Router<AuthState> {
             "/api/v1/messages/{message_id}/archive",
             post(archive_message),
         )
+        .route("/api/v1/messages/{message_id}/spam", post(spam_message))
         .route("/api/v1/messages/{message_id}/snooze", post(snooze_message))
 }
 
@@ -679,10 +680,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         id: row.id.clone(),
         account_id: row.account_id.clone(),
         folder_id: row.folder_id.clone(),
-        subject: row
-            .subject
-            .as_deref()
-            .map(crate::imap::decode_mime_header),
+        subject: row.subject.as_deref().map(crate::imap::decode_mime_header),
         from_address: row
             .from_address
             .as_deref()
@@ -696,10 +694,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
             .as_deref()
             .map(crate::imap::decode_mime_header),
         date: row.date.clone(),
-        snippet: row
-            .snippet
-            .as_deref()
-            .map(crate::imap::decode_mime_header),
+        snippet: row.snippet.as_deref().map(crate::imap::decode_mime_header),
         body_text: row.body_text.clone(),
         body_html: row.body_html.clone(),
         is_read: row.is_read,
@@ -1063,6 +1058,15 @@ pub(crate) async fn archive_message(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, SyncError> {
     move_message_to_role(state, message_id, user_id, "archive").await
+}
+
+/// POST /api/v1/messages/{id}/spam — move to Spam/Junk when available.
+pub(crate) async fn spam_message(
+    State(state): State<AuthState>,
+    Path(message_id): Path<String>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<serde_json::Value>, SyncError> {
+    move_message_to_role(state, message_id, user_id, "spam").await
 }
 
 /// POST /api/v1/messages/{id}/snooze — hide locally until `until`, then unsnooze via job.
