@@ -45,7 +45,7 @@ Update `AGENTS.md` (and the linked spec if needed) when any of these land:
 - [x] Standard scripts: `make fmt`, `make lint`, `make check`, `make secretscan`  
 - [x] Secret-scan tooling: `.gitleaks.toml`, `.pre-commit-config.yaml`, `scripts/secretscan.sh`, `Makefile`  
 - [x] New doc under `docs/product/` or `docs/specs/` that agents must read for common tasks  
-- [ ] Engineering rule learned from a bug or review (promote into standards, summarize here)
+- [x] Engineering rule learned from a bug or review (promote into standards, summarize here)
 
 Detail lives in specs; this file stays short and accurate.
 
@@ -144,6 +144,7 @@ Lyra/
 Full rules: `docs/specs/2026-08-20-lyra-engineering-standards.md`.
 
 - **Deep modules** at real seams; hide protocols, SQL, and crypto.
+- **Protocol adapters** (IMAP, JMAP, SMTP, POP3) MUST follow their RFC/JMAP specs — wire vs display, capability negotiation, opaque cursors; checklist in sync spec §13.
 - Sync **idempotent** and resumable; typed errors; no secret logging.
 - Handlers thin; schema dual-DB; single-user now, multi-user-ready data shape.
 - **HTTP API is the UI surface** (`/api/v1`); web is a peer client — no web-only backend shortcuts.

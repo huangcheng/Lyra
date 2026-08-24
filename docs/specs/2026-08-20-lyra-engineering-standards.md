@@ -55,6 +55,21 @@ Rules:
 - Migrations and schema must work on both **SQLite** and **PostgreSQL**.
 - Shape data for single-user now, with ownership keys (or equivalent) so multi-user can land later — without building multi-user UX in v1.
 
+## Protocol standards compliance
+
+Mail protocol adapters (**IMAP**, **JMAP**, **SMTP**, and **POP3** when implemented) MUST conform to the relevant IETF / JMAP specifications for wire behavior, negotiated capabilities, opaque state, and error handling.
+
+Rules:
+
+- **Specs are the source of truth** — RFC 3501 (+ extensions), RFC 8620/8621, RFC 5321 (+ MIME), RFC 1939 (POP3). Do not invent wire formats or substitute convenience behavior that diverges from the standard.
+- **Wire vs display** — Keep server wire forms where the spec requires it (e.g. IMAP mailbox names stay Modified UTF-7 in `external_id`; decode only for UI). Decode RFC 2047 / Modified UTF-7 at the adapter boundary, not in HTTP handlers or the UI.
+- **Capability negotiation** — Read `CAPABILITY` / `EHLO` / JMAP session capabilities before emitting commands. Use UID MOVE only when MOVE is advertised; fall back to COPY+EXPUNGE only as an explicit, documented fallback path.
+- **Opaque protocol state** — Cursors and tokens round-trip verbatim (`UIDVALIDITY`+UID, JMAP `queryState`, POP3 `UIDL`). The sync engine stores them; adapters own their meaning. Advance cursors only after the batch transaction commits.
+- **Spec-defined recovery** — Handle standard edge cases explicitly: IMAP `UIDVALIDITY` change → full folder resync; JMAP `cannotCalculateChanges` → full query; SMTP permanent vs transient failures; POP3 `-ERR` vs `+OK`.
+- **Documented exceptions only** — A deliberate deviation from the spec requires a comment in the adapter, an entry in `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md` §13 (compliance checklist), and a test that proves interop with a reference server.
+
+Compliance tracking lives in sync spec §13. `/api/v1` stays protocol-agnostic; standards apply inside `backend/src/imap.rs`, `jmap.rs`, `smtp.rs`, and future `pop3.rs`.
+
 ## HTTP API (client-agnostic)
 
 Lyra’s UI surface is a **versioned HTTP API**. The React app is a peer client, not a privileged front-end. Far-horizon native clients are described in `docs/product/2026-08-20-lyra-multi-client-roadmap.md`; do not build them in v1.
@@ -85,3 +100,4 @@ Update this file **and** the summary bullets / pointers in `AGENTS.md` whenever:
 - A new architectural seam or package layout ships  
 - Testing, lint, or CI commands become the project standard  
 - A robustness rule is added from a real incident  
+- Protocol compliance rules or checklist status changes  
