@@ -1,3 +1,5 @@
+> **Superseded 2026-08-24** by `docs/superpowers/specs/2026-08-24-lyra-redesign-v2-design.md` (Ardot page “Lyra · Redesign v2”). Kept as historical reference.
+
 # Lyra — UI design language
 
 **Date:** 2026-08-21  
