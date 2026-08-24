@@ -183,7 +183,7 @@ export function Mail() {
             className="flex h-full flex-col gap-0"
           >
             <div className="flex items-center px-4 py-2">
-              <h1 className="font-display text-xl">{folderTitle}</h1>
+              <h1 className="font-display text-xl font-medium">{folderTitle}</h1>
               <TabsList className="ml-auto h-8 rounded-lg bg-accent p-0.5 text-muted-foreground">
                 <TabsTrigger
                   value="all"
