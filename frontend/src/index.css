@@ -5,7 +5,9 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Inter Tight Variable', 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-brand: 'Instrument Serif', ui-serif, Georgia, serif;
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -33,60 +35,77 @@
   --color-sidebar-accent: var(--sidebar-accent);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
+  --color-unread: var(--unread);
+  --color-ok: var(--ok);
+  --color-ter-foreground: var(--ter-foreground);
 }
 
 :root {
-  /* Zinc tokens measured from the v3 mail example (rgb 9/9/11, 24/24/27, 228/228/231, 244/244/245). */
   --radius: 0.5rem;
   --background: #ffffff;
-  --foreground: #09090b;
+  --foreground: #1a1b1f;
   --card: #ffffff;
-  --card-foreground: #09090b;
+  --card-foreground: #1a1b1f;
   --popover: #ffffff;
-  --popover-foreground: #09090b;
-  --primary: #4f46e5;
+  --popover-foreground: #1a1b1f;
+  --primary: #1a1b1f; /* ink — used for text emphasis, not paint */
   --primary-foreground: #ffffff;
-  --secondary: #f4f4f5;
-  --secondary-foreground: #18181b;
-  --muted: #f4f4f5;
-  --muted-foreground: #71717a;
-  --accent: #f4f4f5;
-  --accent-foreground: #18181b;
-  --destructive: #ef4444;
-  --border: #e4e4e7;
-  --input: #e4e4e7;
-  --ring: #4f46e5;
-  --sidebar: #fafafa;
-  --sidebar-foreground: #09090b;
-  --sidebar-accent: #f4f4f5;
-  --sidebar-accent-foreground: #18181b;
-  --sidebar-border: #e4e4e7;
+  --secondary: #f6f6f8; /* LIST */
+  --secondary-foreground: #1a1b1f;
+  --muted: #eff0f2; /* PANEL */
+  --muted-foreground: #6b6f76; /* SEC */
+  --accent: #e8e8e9; /* HOV */
+  --accent-foreground: #1a1b1f;
+  --destructive: #b4453c; /* muted red, text/borders only */
+  --destructive-foreground: #ffffff;
+  --border: #e2e2e5; /* HAIR */
+  --input: #e1e2e4; /* BTNB */
+  --ring: #9b9ba3; /* TER */
+  --sidebar: #eff0f2;
+  --sidebar-foreground: #1a1b1f;
+  --sidebar-primary: #1a1b1f;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e8e8e9;
+  --sidebar-accent-foreground: #1a1b1f;
+  --sidebar-border: #e2e2e5;
+  --sidebar-ring: #9b9ba3;
+  /* Lyra v2 extras */
+  --unread: #e2a336; /* amber — unread dots, today bar */
+  --ok: #3d9a5f; /* green — sync dot, toggles on */
+  --ter-foreground: #9b9ba3; /* TER */
 }
 
 .dark {
-  --background: #09090b;
-  --foreground: #fafafa;
-  --card: #09090b;
-  --card-foreground: #fafafa;
-  --popover: #09090b;
-  --popover-foreground: #fafafa;
-  --primary: #a5b4fc;
-  --primary-foreground: #1e1b4b;
-  --secondary: #27272a;
-  --secondary-foreground: #fafafa;
-  --muted: #27272a;
-  --muted-foreground: #a1a1aa;
-  --accent: #27272a;
-  --accent-foreground: #fafafa;
-  --destructive: #ef4444;
-  --border: #27272a;
-  --input: #27272a;
-  --ring: #a5b4fc;
-  --sidebar: #18181b;
-  --sidebar-foreground: #fafafa;
-  --sidebar-accent: #27272a;
-  --sidebar-accent-foreground: #fafafa;
-  --sidebar-border: #27272a;
+  --background: #17181c; /* LIST dark = app canvas */
+  --foreground: #ecedef;
+  --card: #24262b; /* READER dark */
+  --card-foreground: #ecedef;
+  --popover: #24262b;
+  --popover-foreground: #ecedef;
+  --primary: #ecedef;
+  --primary-foreground: #1a1b1f;
+  --secondary: #1a1c20; /* PANEL dark */
+  --secondary-foreground: #ecedef;
+  --muted: #1a1c20;
+  --muted-foreground: #9ba0a8;
+  --accent: #26282e; /* HOV dark */
+  --accent-foreground: #ecedef;
+  --destructive: #d4756b;
+  --destructive-foreground: #1a1b1f;
+  --border: #2e3138;
+  --input: #35383f;
+  --ring: #6e737b;
+  --sidebar: #1a1c20;
+  --sidebar-foreground: #ecedef;
+  --sidebar-primary: #ecedef;
+  --sidebar-primary-foreground: #1a1b1f;
+  --sidebar-accent: #26282e;
+  --sidebar-accent-foreground: #ecedef;
+  --sidebar-border: #2e3138;
+  --sidebar-ring: #6e737b;
+  --unread: #e2a336;
+  --ok: #3d9a5f;
+  --ter-foreground: #6e737b;
 }
 
 @layer base {

@@ -4,7 +4,9 @@ import { RouterProvider } from '@tanstack/react-router';
 import { createRouter } from './router';
 import { restoreSession } from './lib/session';
 import { initTheme } from './lib/theme';
-import '@fontsource-variable/geist';
+import '@fontsource-variable/inter';
+import '@fontsource-variable/inter-tight';
+import '@fontsource/instrument-serif';
 import './index.css';
 
 initTheme();

@@ -172,7 +172,7 @@ export function CalendarPage() {
                     key={event.id}
                     type="button"
                     className="block w-full truncate rounded px-1 py-0.5 text-left text-xs text-white"
-                    style={{ backgroundColor: selectedCalendar?.color || '#4f46e5' }}
+                    style={{ backgroundColor: selectedCalendar?.color || 'var(--unread)' }}
                     onClick={() => setSelectedEvent(event)}
                   >
                     {event.summary || t(locale, 'calendar.noTitle')}
@@ -230,7 +230,7 @@ export function CalendarPage() {
                 >
                   <span
                     className="h-3 w-3 shrink-0 rounded-full"
-                    style={{ backgroundColor: calendar.color || '#4f46e5' }}
+                    style={{ backgroundColor: calendar.color || 'var(--unread)' }}
                   />
                   <span className="truncate">{calendar.name}</span>
                 </button>

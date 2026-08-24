@@ -223,13 +223,13 @@ export function Mail() {
               <TabsList className="ml-auto h-9 rounded-lg bg-muted p-1 text-muted-foreground">
                 <TabsTrigger
                   value="all"
-                  className="h-7 flex-none rounded-md px-3 py-1 text-sm font-medium text-zinc-600 shadow-none data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm dark:text-zinc-200"
+                  className="h-7 flex-none rounded-md px-3 py-1 text-sm font-medium shadow-none data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
                 >
                   {t(locale, 'mail.allMail')}
                 </TabsTrigger>
                 <TabsTrigger
                   value="unread"
-                  className="h-7 flex-none rounded-md px-3 py-1 text-sm font-medium text-zinc-600 shadow-none data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm dark:text-zinc-200"
+                  className="h-7 flex-none rounded-md px-3 py-1 text-sm font-medium shadow-none data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
                 >
                   {t(locale, 'mail.unread')}
                 </TabsTrigger>
