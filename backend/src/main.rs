@@ -30,6 +30,7 @@ mod protocol;
 mod sanitize;
 mod scheduler;
 mod smtp;
+mod stats;
 mod storage;
 mod sync;
 
@@ -126,6 +127,7 @@ fn api_router(auth_state: auth::AuthState) -> Router {
         .merge(accounts::routes())
         .merge(pim::routes())
         .merge(sync::routes())
+        .merge(stats::routes())
         .merge(privacy::routes())
         .merge(media::routes())
         .merge(auth::routes())
@@ -237,6 +239,22 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn messages_stats_is_mounted_and_requires_auth() {
+        let app = test_api_router().await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/messages/stats?days=7")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // 401 (not 404): route is mounted behind the same auth extractor.
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 }
