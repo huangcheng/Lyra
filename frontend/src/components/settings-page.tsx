@@ -14,7 +14,7 @@ import { useAuthStore } from '../stores/auth';
 import { api, type AuthMeResponse } from '@/lib/api-client';
 import { MARK_READ_POLICIES } from '@/lib/mark-read-policy';
 import type { ThemeMode } from '@/lib/theme';
-import { saveMarkReadPolicy, applyMarkReadPolicy } from '@/lib/user-preferences';
+import { saveLocale, saveMarkReadPolicy, applyMarkReadPolicy } from '@/lib/user-preferences';
 import {
   fetchPrivacySettings,
   updatePrivacySettings,
@@ -383,14 +383,14 @@ export function SettingsPage() {
             <Button
               variant={locale === 'en' ? 'secondary' : 'outline'}
               size="sm"
-              onClick={() => setLocale('en')}
+              onClick={() => void saveLocale('en').catch(() => setLocale('en'))}
             >
               {t(locale, 'settings.english')}
             </Button>
             <Button
               variant={locale === 'zh' ? 'secondary' : 'outline'}
               size="sm"
-              onClick={() => setLocale('zh')}
+              onClick={() => void saveLocale('zh').catch(() => setLocale('zh'))}
             >
               {t(locale, 'settings.chinese')}
             </Button>

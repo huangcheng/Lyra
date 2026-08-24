@@ -23,3 +23,17 @@ export async function saveMarkReadPolicy(policy: MarkReadPolicy): Promise<void> 
     auth.setUser({ ...auth.user, markReadPolicy: saved });
   }
 }
+
+/** Persist the UI locale for the signed-in user and apply it locally. */
+export async function saveLocale(locale: 'en' | 'zh'): Promise<void> {
+  const me = await api<AuthMeResponse>('/auth/preferences', {
+    method: 'PATCH',
+    body: JSON.stringify({ locale }),
+  });
+  const saved = me.locale === 'en' || me.locale === 'zh' ? me.locale : locale;
+  useUIStore.getState().setLocale(saved);
+  const auth = useAuthStore.getState();
+  if (auth.user) {
+    auth.setUser({ ...auth.user, locale: saved });
+  }
+}

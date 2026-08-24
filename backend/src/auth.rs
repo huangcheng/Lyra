@@ -69,6 +69,7 @@ pub struct UserInfo {
 pub struct PreferencesRequest {
     #[serde(rename = "markReadPolicy")]
     pub mark_read_policy: Option<String>,
+    pub locale: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1576,15 +1577,40 @@ async fn patch_preferences(
     AuthUser(user_id): AuthUser,
     Json(req): Json<PreferencesRequest>,
 ) -> Result<Json<UserInfo>, AuthError> {
-    let Some(raw) = req.mark_read_policy else {
-        return Err(AuthError::BadRequest("provide markReadPolicy".into()));
-    };
-    let policy = parse_mark_read_policy(&raw)?;
-    update_mark_read_policy(&state.db, &user_id, &policy).await?;
+    if req.mark_read_policy.is_none() && req.locale.is_none() {
+        return Err(AuthError::BadRequest(
+            "provide markReadPolicy and/or locale".into(),
+        ));
+    }
+    if let Some(raw) = req.mark_read_policy {
+        let policy = parse_mark_read_policy(&raw)?;
+        update_mark_read_policy(&state.db, &user_id, &policy).await?;
+    }
+    if let Some(locale) = req.locale {
+        if !matches!(locale.as_str(), "en" | "zh") {
+            return Err(AuthError::BadRequest("unsupported locale".into()));
+        }
+        update_locale(&state.db, &user_id, &locale).await?;
+    }
     let user = find_user_by_id(&state.db, &user_id)
         .await?
         .ok_or_else(|| AuthError::internal("User not found"))?;
     Ok(Json(user_info_from(&user)))
+}
+
+async fn update_locale(db: &DbPool, user_id: &str, locale: &str) -> Result<(), AuthError> {
+    let id = id_param(db, user_id).map_err(|_| AuthError::internal("Failed to look up user"))?;
+    db_execute!(
+        db,
+        "UPDATE lyra_user SET locale = ?, updated_at = datetime('now') WHERE id = ?",
+        locale,
+        &id
+    )
+    .map_err(|e| {
+        tracing::error!("DB error updating locale: {e}");
+        AuthError::internal("Failed to update preferences")
+    })?;
+    Ok(())
 }
 
 async fn update_mark_read_policy(
@@ -2736,5 +2762,65 @@ mod tests {
             .err()
             .expect("invalid token must fail");
         assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn patch_preferences_updates_locale() {
+        let db = test_pool().await;
+        let state = test_state(db.clone());
+        seed_user(&db, "user-1").await;
+
+        let Json(info) = patch_preferences(
+            State(state.clone()),
+            AuthUser("user-1".into()),
+            Json(PreferencesRequest {
+                mark_read_policy: None,
+                locale: Some("zh".into()),
+            }),
+        )
+        .await
+        .expect("locale update must succeed");
+        assert_eq!(info.locale, "zh");
+
+        let user = find_user_by_id(&db, "user-1").await.unwrap().unwrap();
+        assert_eq!(user.locale, "zh");
+    }
+
+    #[tokio::test]
+    async fn patch_preferences_rejects_unsupported_locale() {
+        let db = test_pool().await;
+        seed_user(&db, "user-1").await;
+        let state = test_state(db);
+
+        let err = patch_preferences(
+            State(state),
+            AuthUser("user-1".into()),
+            Json(PreferencesRequest {
+                mark_read_policy: None,
+                locale: Some("fr".into()),
+            }),
+        )
+        .await
+        .expect_err("unsupported locale must fail");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_preferences_rejects_empty_request() {
+        let db = test_pool().await;
+        seed_user(&db, "user-1").await;
+        let state = test_state(db);
+
+        let err = patch_preferences(
+            State(state),
+            AuthUser("user-1".into()),
+            Json(PreferencesRequest {
+                mark_read_policy: None,
+                locale: None,
+            }),
+        )
+        .await
+        .expect_err("empty preferences must fail");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
 }
