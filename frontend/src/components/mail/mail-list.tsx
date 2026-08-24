@@ -169,7 +169,7 @@ export function MailList() {
                   <div className="flex items-center gap-2">
                     <div className="font-semibold">{item.from.name ?? item.from.email}</div>
                     {!item.isRead ? (
-                      <span className="flex h-2 w-2 rounded-full bg-blue-600" />
+                      <span className="flex h-2 w-2 rounded-full bg-primary" />
                     ) : null}
                   </div>
                   <div
