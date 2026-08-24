@@ -389,6 +389,79 @@ These match the running tree; older bullets above that still mention stubs are h
 
 ---
 
+## 13. Protocol standards compliance
+
+**Principle:** Each mail protocol adapter MUST align with its specification. Engineering rules: `docs/specs/2026-08-20-lyra-engineering-standards.md` (Protocol standards compliance).
+
+### 13.1 Normative references
+
+| Protocol | Primary specs | Adapter module |
+|----------|---------------|----------------|
+| **IMAP** | RFC 3501; RFC 6851 (MOVE); RFC 7162 (CONDSTORE); RFC 6154 (SPECIAL-USE); Modified UTF-7 (RFC 3501 §5.1.3); RFC 2047 headers | `backend/src/imap.rs` |
+| **JMAP** | RFC 8620 (core); RFC 8621 (mail) | `backend/src/jmap.rs` |
+| **SMTP** | RFC 5321; RFC 5322 (message format); RFC 6531/6532 (UTF-8 mail) | `backend/src/smtp.rs` |
+| **POP3** | RFC 1939 | *(post-v1; plugin kernel `pop3` receive plugin)* |
+
+MIME parsing and sanitization follow RFC 2045–2049 at the adapter/storage boundary (`mail-parser`, `ammonia`).
+
+### 13.2 Compliance checklist
+
+Status key: **done** = implemented and tested · **partial** = core path works, gaps remain · **gap** = not implemented · **n/a** = out of v1 scope
+
+#### IMAP (RFC 3501 + extensions)
+
+| Requirement | Status | Notes / tracking |
+|-------------|--------|------------------|
+| Modified UTF-7 mailbox names (wire preserved, decoded for display) | **done** | `decode_imap_mailbox_name`; `external_id` stays wire-encoded |
+| RFC 2047 Subject / display-name decode | **done** | `decode_map_header` on ENVELOPE ingest |
+| Parenthesized FETCH att lists (RFC 3501) | **done** | `parenthesize_fetch_atts` |
+| UID + UIDVALIDITY cursor; reset on UIDVALIDITY change | **done** | `imap_loop` + store |
+| SPECIAL-USE folder roles (RFC 6154) | **done** | `special_use_role` (attributes win over name inference) |
+| Hierarchical folders (LIST delimiter paths) | **done** | `split_imap_folder_path`, `parent_id` |
+| UID STORE flags (`\Seen`, `\Flagged`, …) | **done** | `set_flags` / `clear_flags` |
+| UID MOVE (RFC 6851) when MOVE advertised | **partial** | MOVE implemented; verify CAPABILITY gate + COPY+EXPUNGE fallback (CHE-124) |
+| CONDSTORE / HIGHESTMODSEQ incremental sync (RFC 7162) | **gap** | CHE-124 |
+| IMAP IDLE push (RFC 2177) | **gap** | CHE-103 |
+| AUTH PLAIN + XOAUTH2 | **partial** | PLAIN today; XOAUTH2 via CHE-26 |
+| BODY.PEEK[] lazy fetch | **done** | On-demand in HTTP handler |
+
+#### JMAP (RFC 8620 / 8621)
+
+| Requirement | Status | Notes / tracking |
+|-------------|--------|------------------|
+| Session discovery (`/.well-known/jmap`) | **done** | Probe + adapter |
+| Mailbox sync + `parentId` hierarchy | **done** | `upsert_jmap_folder`, `link_jmap_folder_parent` |
+| `Email/queryChanges` + opaque `queryState` | **done** | `cannotCalculateChanges` → full query |
+| Keyword / flag changes | **partial** | Core keywords; audit full set vs RFC 8621 |
+| EventSource push | **gap** | CHE-102 |
+| EmailSubmission send when available | **gap** | CHE-126 |
+| Blob download / large attachments | **gap** | CHE-109 (storage) + JMAP blob fetch |
+
+#### SMTP (RFC 5321)
+
+| Requirement | Status | Notes / tracking |
+|-------------|--------|------------------|
+| EHLO → STARTTLS → AUTH → MAIL/RCPT/DATA | **done** | `lettre` adapter |
+| 8BITMIME when server advertises | **gap** | CHE-125 |
+| SMTPUTF8 / internationalized addresses | **gap** | CHE-125 |
+| AUTH method negotiation (PLAIN, LOGIN, XOAUTH2) | **partial** | PLAIN; XOAUTH2 via CHE-26 |
+| DSN (RFC 3461) when supported | **gap** | CHE-125 (optional) |
+| Permanent vs transient error handling | **partial** | Typed errors; audit retry policy |
+
+#### POP3 (RFC 1939)
+
+| Requirement | Status | Notes / tracking |
+|-------------|--------|------------------|
+| Receive plugin with honest capabilities (no folders) | **n/a** | Post-v1; CHE-127 |
+| UIDL-based opaque cursor | **n/a** | Post-v1; CHE-127 |
+| STLS / APOP / AUTH when supported | **n/a** | Post-v1; CHE-127 |
+
+### 13.3 When checklist changes
+
+Update this section when an adapter lands, a bug reveals spec drift, or a Linear gap issue closes. Keep `AGENTS.md` summary in sync.
+
+---
+
 ## Related docs
 
 - Product spec: `docs/product/2026-08-20-lyra-v1-product-spec.md`

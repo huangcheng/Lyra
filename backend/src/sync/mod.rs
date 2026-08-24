@@ -27,7 +27,7 @@ pub(crate) use send::{outbound_from_raw, resolve_send_plugin};
 pub(crate) use store::{
     clear_folder_messages, clear_jmap_cursor, get_folder_id, imap_folder_depth,
     imap_folder_display_name, infer_folder_role, load_cursor, load_jmap_cursor, parse_cursor_value,
-    persist_imap_folder_batch, save_cursor, save_cursor_in_tx, save_jmap_cursor,
+    persist_imap_folder_batch, save_cursor, save_cursor_in_tx, save_jmap_cursor, special_use_role,
     split_imap_folder_path, update_folder_counts, upsert_folder, upsert_message,
     upsert_message_in_tx,
 };
@@ -380,6 +380,63 @@ mod tests {
     }
 
     #[test]
+    fn special_use_role_maps_rfc6154_attributes() {
+        // async-imap `Attribute` Debug strings
+        assert_eq!(special_use_role(&["Archive".to_string()]), Some("archive"));
+        assert_eq!(special_use_role(&["Drafts".to_string()]), Some("drafts"));
+        assert_eq!(special_use_role(&["Sent".to_string()]), Some("sent"));
+        assert_eq!(special_use_role(&["Trash".to_string()]), Some("trash"));
+        assert_eq!(
+            special_use_role(&["Custom(\"\\\\Junk\")".to_string()]),
+            Some("spam")
+        );
+        assert_eq!(special_use_role(&["All".to_string()]), Some("archive"));
+        // \Flagged is a smart view, not a folder role
+        assert_eq!(special_use_role(&["Flagged".to_string()]), None);
+        assert_eq!(special_use_role(&["HasNoChildren".to_string()]), None);
+        assert_eq!(special_use_role(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn upsert_folder_special_use_attribute_wins_over_name() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+
+        // Server-localized name ("Gesendet") + \Sent attribute → role sent
+        upsert_folder(
+            &as_db(&pool),
+            &account_id,
+            "Gesendet",
+            Some("/"),
+            &["Sent".to_string(), "HasNoChildren".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT role FROM folder WHERE account_id = ? AND external_id = ?")
+                .bind(&account_id)
+                .bind("Gesendet")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0.as_deref(), Some("sent"));
+
+        // Re-upsert without attributes falls back to name inference and clears the role
+        upsert_folder(&as_db(&pool), &account_id, "Gesendet", Some("/"), &[])
+            .await
+            .unwrap();
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT role FROM folder WHERE account_id = ? AND external_id = ?")
+                .bind(&account_id)
+                .bind("Gesendet")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, None);
+    }
+
+    #[test]
     fn split_imap_folder_path_top_level() {
         let (parent, leaf) = split_imap_folder_path("INBOX", Some("/"));
         assert_eq!(parent, None);
@@ -428,7 +485,7 @@ mod tests {
         let (_, account_id) = seed_user_and_account(&pool).await;
 
         // First insert
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
 
@@ -437,7 +494,7 @@ mod tests {
             .unwrap();
 
         // Second upsert (update) — should not create a new row
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
 
@@ -463,7 +520,7 @@ mod tests {
         let (_, account_id) = seed_user_and_account(&pool).await;
         let wire = "Archive/&Xi5SqWUvYwE-";
 
-        upsert_folder(&as_db(&pool), &account_id, wire, Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, wire, Some("/"), &[])
             .await
             .unwrap();
 
@@ -492,7 +549,7 @@ mod tests {
         );
 
         // Re-upsert updates display name without creating a duplicate row
-        upsert_folder(&as_db(&pool), &account_id, wire, Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, wire, Some("/"), &[])
             .await
             .unwrap();
 
@@ -509,10 +566,10 @@ mod tests {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
 
-        upsert_folder(&as_db(&pool), &account_id, "Archive", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "Archive", Some("/"), &[])
             .await
             .unwrap();
-        upsert_folder(&as_db(&pool), &account_id, "Archive/Projects", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "Archive/Projects", Some("/"), &[])
             .await
             .unwrap();
 
@@ -538,7 +595,7 @@ mod tests {
         let (_, account_id) = seed_user_and_account(&pool).await;
 
         // Create a folder first
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
@@ -603,7 +660,7 @@ mod tests {
     async fn upsert_message_fills_empty_envelope_on_resync() {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
@@ -668,7 +725,7 @@ mod tests {
     async fn folder_sync_batch_commits_messages_cursor_and_counts() {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
@@ -715,7 +772,7 @@ mod tests {
     async fn folder_sync_transaction_rolls_back_messages_and_cursor() {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
@@ -753,7 +810,7 @@ mod tests {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
 
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
@@ -801,7 +858,7 @@ mod tests {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
 
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
@@ -884,7 +941,7 @@ mod tests {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
 
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
@@ -945,7 +1002,7 @@ mod tests {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
 
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
@@ -1034,7 +1091,7 @@ mod tests {
     async fn inbox_hides_snoozed_message() {
         let pool = test_pool().await;
         let (user_id, account_id) = seed_user_and_account(&pool).await;
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
@@ -1070,7 +1127,7 @@ mod tests {
     async fn inbox_shows_overdue_same_day_snooze() {
         let pool = test_pool().await;
         let (user_id, account_id) = seed_user_and_account(&pool).await;
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
@@ -1124,7 +1181,7 @@ mod tests {
     async fn unsnooze_job_clears_column() {
         let pool = test_pool().await;
         let (user_id, account_id) = seed_user_and_account(&pool).await;
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
@@ -1190,7 +1247,7 @@ mod tests {
     async fn sync_does_not_clear_snooze() {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
-        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"))
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
             .await
             .unwrap();
         let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")

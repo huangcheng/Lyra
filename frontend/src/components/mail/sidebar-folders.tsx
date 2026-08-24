@@ -22,7 +22,7 @@ import { useState } from 'react';
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
-import { buildCustomFolderTree, type FolderTreeNode } from '@/lib/folder-tree';
+import { buildCustomFolderTree, buildRoleChildren, type FolderTreeNode } from '@/lib/folder-tree';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
 import { cn } from '@/lib/utils';
 import { useMailStore, type UnifiedFolder } from '@/stores/mail';
@@ -219,22 +219,63 @@ function AccountSection({
           {roleFolders.map((folder) => {
             const role = folder.role as StandardFolderRole;
             const Icon = ROLE_ICONS[role] ?? Folder;
+            const children = buildRoleChildren(folder.id, accountFolders);
+            const hasChildren = children.length > 0;
+            const childrenExpanded = expandedIds.has(folder.id);
+            const active = isSelectedAccount && selectedFolderId === folder.id;
             return (
-              <button
-                key={folder.id}
-                type="button"
-                onClick={() => selectAccountFolder(account.id, folder.id)}
-                className={cn(
-                  'flex h-8 w-full items-center gap-2 rounded-[7px] px-2.5 text-left text-[13px]',
-                  isSelectedAccount && selectedFolderId === folder.id
-                    ? 'bg-accent'
-                    : 'hover:bg-accent/60',
-                )}
-              >
-                <Icon className="size-4 shrink-0" />
-                <span className="truncate">{t(locale, `mail.folder.${role}`)}</span>
-                <UnreadCount count={folder.unreadCount} />
-              </button>
+              <div key={folder.id}>
+                <div
+                  className={cn(
+                    'flex items-center rounded-[7px]',
+                    active ? 'bg-accent' : 'hover:bg-accent/60',
+                  )}
+                >
+                  {hasChildren ? (
+                    <button
+                      type="button"
+                      className="flex size-5 shrink-0 items-center justify-center text-ter-foreground"
+                      onClick={() => toggleExpanded(folder.id)}
+                      aria-expanded={childrenExpanded}
+                      aria-label={
+                        childrenExpanded
+                          ? t(locale, 'mail.collapseFolder')
+                          : t(locale, 'mail.expandFolder')
+                      }
+                    >
+                      {childrenExpanded ? (
+                        <ChevronDown className="size-3.5" />
+                      ) : (
+                        <ChevronRight className="size-3.5" />
+                      )}
+                    </button>
+                  ) : (
+                    <span className="inline-block size-5 shrink-0" />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => selectAccountFolder(account.id, folder.id)}
+                    className="flex h-8 min-w-0 flex-1 items-center gap-2 pr-2.5 text-left text-[13px]"
+                  >
+                    <Icon className="size-4 shrink-0" />
+                    <span className="truncate">{t(locale, `mail.folder.${role}`)}</span>
+                    <UnreadCount count={folder.unreadCount} />
+                  </button>
+                </div>
+                {hasChildren && childrenExpanded
+                  ? children.map((child) => (
+                      <CustomFolderBranch
+                        key={child.id}
+                        node={child}
+                        depth={1}
+                        accountId={account.id}
+                        selectedFolderId={isSelectedAccount ? selectedFolderId : null}
+                        expandedIds={expandedIds}
+                        toggleExpanded={toggleExpanded}
+                      />
+                    ))
+                  : null}
+              </div>
             );
           })}
           {customTree.map((node) => (

@@ -113,9 +113,10 @@ pub(crate) async fn upsert_folder(
     account_id: &str,
     wire_name: &str,
     delimiter: Option<&str>,
+    attributes: &[String],
 ) -> Result<(), SyncError> {
     let display_name = imap_folder_display_name(wire_name, delimiter);
-    let role = infer_folder_role(&display_name);
+    let role = special_use_role(attributes).or_else(|| infer_folder_role(&display_name));
     let external_id = wire_name;
     let account_bind = id_param(db, account_id)?;
     let (parent_wire, _) = split_imap_folder_path(wire_name, delimiter);
@@ -137,8 +138,9 @@ pub(crate) async fn upsert_folder(
     if let Some(id) = existing {
         db_execute!(
             db,
-            "UPDATE folder SET name = ?, parent_id = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE folder SET name = ?, role = ?, parent_id = ?, updated_at = datetime('now') WHERE id = ?",
             &display_name,
+            role,
             &parent_bind,
             &id_param(db, &id)?
         )?;
@@ -240,6 +242,31 @@ pub(crate) async fn get_folder_id(
         name
     )?
     .ok_or_else(|| SyncError::Database(sqlx::Error::RowNotFound))
+}
+
+/// RFC 6154 SPECIAL-USE attribute → folder role. Takes precedence over name
+/// matching: servers that send `\Archive` / `\Junk` / etc. know better than
+/// our name guesses. Attributes arrive as async-imap `Attribute` Debug strings
+/// (`Archive`, `Custom("\\Junk")`), so match on the trailing alphanumeric
+/// token. `\All` folds into `archive` (Gmail "All Mail"); `\Flagged` has no
+/// folder role here (flagged is a smart view).
+pub(crate) fn special_use_role(attributes: &[String]) -> Option<&'static str> {
+    for attr in attributes {
+        let token: String = attr.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+        for (suffix, role) in [
+            ("archive", "archive"),
+            ("all", "archive"),
+            ("drafts", "drafts"),
+            ("junk", "spam"),
+            ("sent", "sent"),
+            ("trash", "trash"),
+        ] {
+            if token.ends_with(suffix) {
+                return Some(role);
+            }
+        }
+    }
+    None
 }
 
 /// Infer folder role from name.
