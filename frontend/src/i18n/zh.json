@@ -82,7 +82,9 @@
     "section": {
       "unified": "统一",
       "accounts": "账户"
-    }
+    },
+    "expandFolder": "展开文件夹",
+    "collapseFolder": "收起文件夹"
   },
   "auth": {
     "tagline": "自己托管的邮件。",

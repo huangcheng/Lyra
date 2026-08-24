@@ -100,6 +100,7 @@ function CustomFolderBranch({
   expandedIds: Set<string>;
   toggleExpanded: (id: string) => void;
 }) {
+  const locale = useUIStore((s) => s.locale);
   const hasChildren = node.children.length > 0;
   const expanded = expandedIds.has(node.id);
   const active = selectedFolderId === node.id;
@@ -119,7 +120,9 @@ function CustomFolderBranch({
             className="flex size-5 shrink-0 items-center justify-center text-ter-foreground"
             onClick={() => toggleExpanded(node.id)}
             aria-expanded={expanded}
-            aria-label={expanded ? 'Collapse folder' : 'Expand folder'}
+            aria-label={
+              expanded ? t(locale, 'mail.collapseFolder') : t(locale, 'mail.expandFolder')
+            }
           >
             {expanded ? (
               <ChevronDown className="size-3.5" />

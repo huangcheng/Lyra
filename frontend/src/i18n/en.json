@@ -82,7 +82,9 @@
     "section": {
       "unified": "Unified",
       "accounts": "Accounts"
-    }
+    },
+    "expandFolder": "Expand folder",
+    "collapseFolder": "Collapse folder"
   },
   "auth": {
     "tagline": "Mail you host yourself.",
