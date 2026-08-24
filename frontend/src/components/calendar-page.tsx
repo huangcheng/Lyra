@@ -172,7 +172,11 @@ export function CalendarPage() {
                     key={event.id}
                     type="button"
                     className="block w-full truncate rounded px-1 py-0.5 text-left text-xs text-white"
-                    style={{ backgroundColor: selectedCalendar?.color || 'var(--unread)' }}
+                    style={
+                      selectedCalendar?.color
+                        ? { backgroundColor: selectedCalendar.color }
+                        : { backgroundColor: 'var(--unread)', color: '#1a1b1f' }
+                    }
                     onClick={() => setSelectedEvent(event)}
                   >
                     {event.summary || t(locale, 'calendar.noTitle')}
