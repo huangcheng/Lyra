@@ -1,8 +1,8 @@
 //! IMAP folder fetch loop.
 
 use super::store::{
-    AccountSyncRow, get_folder_id, load_account_sync_row, load_cursor, outcome_from_response,
-    persist_imap_folder_batch, upsert_folder,
+    imap_folder_depth, AccountSyncRow, get_folder_id, load_account_sync_row, load_cursor,
+    outcome_from_response, persist_imap_folder_batch, upsert_folder,
 };
 use super::types::{SyncError, SyncResponse};
 use crate::imap::{ImapClient, ImapConfig, ImapSecurity};
@@ -63,8 +63,9 @@ pub(crate) async fn run_imap_sync(
     // Connect to IMAP
     let mut client = ImapClient::connect(&config).await?;
 
-    // Sync folders
-    let folders = client.list_folders().await?;
+    // Sync folders (shallow mailboxes first so parent_id resolves)
+    let mut folders = client.list_folders().await?;
+    folders.sort_by_key(|f| imap_folder_depth(&f.name, f.delimiter.as_deref()));
     let mut folders_synced = 0;
 
     for folder in &folders {

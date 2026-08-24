@@ -20,8 +20,8 @@ use super::store::update_folder_counts;
 use super::types::{EnqueuedSync, SyncError, SyncStatus};
 use crate::auth::{AuthState, AuthUser};
 use crate::db_row::{
-    TsParam, id_from_row, id_param, json_text_from_row, message_date_param, opt_id_param,
-    opt_json_param, opt_ts_from_row,
+    TsParam, id_from_row, id_param, json_text_from_row, message_date_param, opt_id_from_row,
+    opt_id_param, opt_json_param, opt_ts_from_row,
 };
 use crate::imap::{ImapClient, ImapConfig, ImapSecurity};
 use crate::kernel::AppEvent;
@@ -215,6 +215,7 @@ pub struct FolderResponse {
     pub account_id: String,
     pub name: String,
     pub role: Option<String>,
+    pub parent_id: Option<String>,
     pub sort_order: i32,
     pub total_messages: i32,
     pub unread_messages: i32,
@@ -276,7 +277,7 @@ pub(crate) async fn list_folders(
     let folders = db_fetch_all!(
         db,
         r"
-        SELECT f.id, f.account_id, f.name, f.role, f.sort_order,
+        SELECT f.id, f.account_id, f.name, f.role, f.parent_id, f.sort_order,
                f.total_messages, f.unread_messages
         FROM folder f
         JOIN mail_account a ON f.account_id = a.id
@@ -288,6 +289,7 @@ pub(crate) async fn list_folders(
             account_id: id_from_row(row, "account_id"),
             name: row.get("name"),
             role: row.get("role"),
+            parent_id: opt_id_from_row(row, "parent_id"),
             sort_order: row.get("sort_order"),
             total_messages: row.get("total_messages"),
             unread_messages: row.get("unread_messages"),

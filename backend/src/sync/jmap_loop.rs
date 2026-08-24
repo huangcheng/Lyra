@@ -2,8 +2,8 @@
 
 use super::imap_loop::run_imap_sync;
 use super::store::{
-    get_folder_id, load_account_sync_row, load_jmap_cursor, clear_jmap_cursor,
-    outcome_from_response, persist_jmap_folder_batch, upsert_folder,
+    clear_jmap_cursor, get_folder_id, link_jmap_folder_parent, load_account_sync_row,
+    load_jmap_cursor, outcome_from_response, persist_jmap_folder_batch, upsert_jmap_folder,
 };
 use super::types::{SyncError, SyncResponse};
 use crate::jmap::JmapClient;
@@ -62,8 +62,13 @@ pub(crate) async fn run_jmap_sync(
     let mut folders_synced = 0;
 
     for mb in &mailboxes {
-        upsert_folder(db, account_id, &mb.name, mb.role.as_deref()).await?;
+        upsert_jmap_folder(db, account_id, mb).await?;
         folders_synced += 1;
+    }
+    for mb in &mailboxes {
+        if let Some(ref parent_id) = mb.parent_id {
+            link_jmap_folder_parent(db, account_id, &mb.id, parent_id).await?;
+        }
     }
 
     // 3. Sync emails per mailbox
@@ -71,7 +76,7 @@ pub(crate) async fn run_jmap_sync(
     let mut total_updated = 0;
 
     for mb in &mailboxes {
-        let folder_id = get_folder_id(db, account_id, &mb.name).await?;
+        let folder_id = get_folder_id(db, account_id, &mb.id).await?;
 
         // Load stored JMAP queryState for Email/queryChanges; fall back to a
         // full Email/query when the token is expired or missing.

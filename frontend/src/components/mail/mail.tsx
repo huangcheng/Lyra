@@ -20,6 +20,7 @@ import {
 import { useDefaultLayout } from 'react-resizable-panels';
 
 import { AccountSwitcher } from '@/components/mail/account-switcher';
+import { FolderNavTree } from '@/components/mail/folder-nav-tree';
 import { MailDisplay } from '@/components/mail/mail-display';
 import { MailList } from '@/components/mail/mail-list';
 import { Nav } from '@/components/mail/nav';
@@ -31,6 +32,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
+import { buildCustomFolderTree } from '@/lib/folder-tree';
 import { useMailData } from '@/lib/use-mail-data';
 import { cn } from '@/lib/utils';
 import { useMailStore } from '@/stores/mail';
@@ -115,18 +117,13 @@ export function Mail() {
             onClick: () => setSelectedFolder(folder.id),
           }));
 
-  const customLinks =
-    selectedAccountId === ALL_ACCOUNTS
-      ? []
-      : accountFolders
-          .filter((folder) => !folder.role)
-          .map((folder) => ({
-            title: folder.name,
-            label: folder.unreadCount > 0 ? String(folder.unreadCount) : '',
-            icon: File,
-            variant: (selectedFolderId === folder.id ? 'default' : 'ghost') as 'default' | 'ghost',
-            onClick: () => setSelectedFolder(folder.id),
-          }));
+  const customFolderTree = useMemo(
+    () =>
+      selectedAccountId === ALL_ACCOUNTS
+        ? []
+        : buildCustomFolderTree(accountFolders, folders),
+    [selectedAccountId, accountFolders, folders],
+  );
 
   return (
     <TooltipProvider delayDuration={0}>
@@ -171,10 +168,15 @@ export function Mail() {
           </div>
           <Separator />
           <Nav isCollapsed={isCollapsed} links={primaryLinks} />
-          {customLinks.length > 0 ? (
+          {customFolderTree.length > 0 ? (
             <>
               <Separator />
-              <Nav isCollapsed={isCollapsed} links={customLinks} />
+              <FolderNavTree
+                isCollapsed={isCollapsed}
+                nodes={customFolderTree}
+                selectedFolderId={selectedFolderId}
+                onSelect={setSelectedFolder}
+              />
             </>
           ) : null}
           <Separator />

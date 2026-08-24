@@ -39,6 +39,7 @@ export interface MailFolder {
   accountId: string;
   name: string;
   role?: 'inbox' | 'sent' | 'drafts' | 'trash' | 'spam' | 'archive';
+  parentId?: string;
   unreadCount: number;
   totalCount: number;
   sortOrder: number;

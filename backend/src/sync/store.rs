@@ -57,20 +57,74 @@ pub(crate) fn outcome_from_response(result: &SyncResponse) -> SyncOutcome {
 
 // ── Database helpers ────────────────────────────────────────────────
 
-/// Upsert a folder by `(account_id, wire_name)`.
+/// Split an IMAP wire mailbox path into `(parent_wire, leaf_wire)`.
+pub(crate) fn split_imap_folder_path<'a>(
+    wire_name: &'a str,
+    delimiter: Option<&str>,
+) -> (Option<&'a str>, &'a str) {
+    let Some(delim) = delimiter.filter(|d| !d.is_empty()) else {
+        return (None, wire_name);
+    };
+    wire_name
+        .rsplit_once(delim)
+        .map_or((None, wire_name), |(parent, leaf)| {
+            if parent.is_empty() {
+                (None, leaf)
+            } else {
+                (Some(parent), leaf)
+            }
+        })
+}
+
+/// Leaf display name for an IMAP mailbox (Modified UTF-7 decoded).
+pub(crate) fn imap_folder_display_name(wire_name: &str, delimiter: Option<&str>) -> String {
+    let (_, leaf) = split_imap_folder_path(wire_name, delimiter);
+    crate::imap::decode_imap_mailbox_name(leaf)
+}
+
+/// Depth of an IMAP mailbox path (0 = top-level). Used to upsert parents first.
+pub(crate) fn imap_folder_depth(wire_name: &str, delimiter: Option<&str>) -> usize {
+    delimiter
+        .filter(|d| !d.is_empty())
+        .map_or(0, |d| wire_name.matches(d).count())
+}
+
+async fn resolve_folder_id_by_external_id(
+    db: &DbPool,
+    account_id: &str,
+    external_id: &str,
+) -> Result<Option<String>, SyncError> {
+    db_id_optional!(
+        db,
+        "SELECT id FROM folder WHERE account_id = ? AND external_id = ?",
+        &id_param(db, account_id)?,
+        external_id
+    )
+    .map_err(SyncError::from)
+}
+
+/// Upsert an IMAP folder by `(account_id, wire_name)`.
 ///
 /// `wire_name` is the encoded IMAP mailbox name (Modified UTF-7 on the wire).
-/// It is stored in `external_id` for SELECT/LIST; `name` is decoded for display.
+/// It is stored in `external_id` for SELECT/LIST; `name` is the decoded leaf
+/// segment; `parent_id` links to the parent mailbox when a delimiter is present.
 pub(crate) async fn upsert_folder(
     db: &DbPool,
     account_id: &str,
     wire_name: &str,
-    _delimiter: Option<&str>,
+    delimiter: Option<&str>,
 ) -> Result<(), SyncError> {
-    let display_name = crate::imap::decode_imap_mailbox_name(wire_name);
+    let display_name = imap_folder_display_name(wire_name, delimiter);
     let role = infer_folder_role(&display_name);
     let external_id = wire_name;
     let account_bind = id_param(db, account_id)?;
+    let (parent_wire, _) = split_imap_folder_path(wire_name, delimiter);
+    let parent_id = if let Some(parent_wire) = parent_wire {
+        resolve_folder_id_by_external_id(db, account_id, parent_wire).await?
+    } else {
+        None
+    };
+    let parent_bind = crate::db_row::opt_id_param(db, parent_id.as_deref())?;
 
     // Try to find existing folder
     let existing: Option<String> = db_id_optional!(
@@ -83,8 +137,57 @@ pub(crate) async fn upsert_folder(
     if let Some(id) = existing {
         db_execute!(
             db,
-            "UPDATE folder SET name = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE folder SET name = ?, parent_id = ?, updated_at = datetime('now') WHERE id = ?",
             &display_name,
+            &parent_bind,
+            &id_param(db, &id)?
+        )?;
+    } else {
+        let id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        db_execute!(
+            db,
+            r"
+            INSERT INTO folder (id, account_id, external_id, name, role, parent_id, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, 0)
+            ",
+            &id_param(db, &id)?,
+            &account_bind,
+            external_id,
+            &display_name,
+            role,
+            &parent_bind
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Upsert a JMAP mailbox. Uses mailbox `id` as `external_id`.
+pub(crate) async fn upsert_jmap_folder(
+    db: &DbPool,
+    account_id: &str,
+    mailbox: &crate::jmap::JmapMailbox,
+) -> Result<(), SyncError> {
+    let role = mailbox
+        .role
+        .as_deref()
+        .or_else(|| infer_folder_role(&mailbox.name));
+    let account_bind = id_param(db, account_id)?;
+    let external_id = mailbox.id.as_str();
+
+    let existing: Option<String> = db_id_optional!(
+        db,
+        "SELECT id FROM folder WHERE account_id = ? AND external_id = ?",
+        &account_bind,
+        external_id
+    )?;
+
+    if let Some(id) = existing {
+        db_execute!(
+            db,
+            "UPDATE folder SET name = ?, role = ?, updated_at = datetime('now') WHERE id = ?",
+            &mailbox.name,
+            role,
             &id_param(db, &id)?
         )?;
     } else {
@@ -98,11 +201,29 @@ pub(crate) async fn upsert_folder(
             &id_param(db, &id)?,
             &account_bind,
             external_id,
-            &display_name,
+            &mailbox.name,
             role
         )?;
     }
 
+    Ok(())
+}
+
+/// Wire JMAP `parentId` after all mailboxes exist locally.
+pub(crate) async fn link_jmap_folder_parent(
+    db: &DbPool,
+    account_id: &str,
+    child_external_id: &str,
+    parent_external_id: &str,
+) -> Result<(), SyncError> {
+    let child_id = get_folder_id(db, account_id, child_external_id).await?;
+    let parent_id = get_folder_id(db, account_id, parent_external_id).await?;
+    db_execute!(
+        db,
+        "UPDATE folder SET parent_id = ?, updated_at = datetime('now') WHERE id = ?",
+        &id_param(db, &parent_id)?,
+        &id_param(db, &child_id)?
+    )?;
     Ok(())
 }
 

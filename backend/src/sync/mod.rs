@@ -25,9 +25,11 @@ pub(crate) use send::{deliver_smtp, prepare_smtp_send};
 pub(crate) use send::{outbound_from_raw, resolve_send_plugin};
 #[cfg(test)]
 pub(crate) use store::{
-    clear_folder_messages, clear_jmap_cursor, get_folder_id, infer_folder_role, load_cursor,
-    load_jmap_cursor, parse_cursor_value, persist_imap_folder_batch, save_cursor, save_cursor_in_tx,
-    save_jmap_cursor, update_folder_counts, upsert_folder, upsert_message, upsert_message_in_tx,
+    clear_folder_messages, clear_jmap_cursor, get_folder_id, imap_folder_depth,
+    imap_folder_display_name, infer_folder_role, load_cursor, load_jmap_cursor, parse_cursor_value,
+    persist_imap_folder_batch, save_cursor, save_cursor_in_tx, save_jmap_cursor,
+    split_imap_folder_path, update_folder_counts, upsert_folder, upsert_message,
+    upsert_message_in_tx,
 };
 
 #[cfg(test)]
@@ -378,6 +380,35 @@ mod tests {
     }
 
     #[test]
+    fn split_imap_folder_path_top_level() {
+        let (parent, leaf) = split_imap_folder_path("INBOX", Some("/"));
+        assert_eq!(parent, None);
+        assert_eq!(leaf, "INBOX");
+    }
+
+    #[test]
+    fn split_imap_folder_path_nested() {
+        let (parent, leaf) = split_imap_folder_path("Archive/Projects/Lyra", Some("/"));
+        assert_eq!(parent, Some("Archive/Projects"));
+        assert_eq!(leaf, "Lyra");
+    }
+
+    #[test]
+    fn imap_folder_display_name_uses_leaf_only() {
+        assert_eq!(
+            imap_folder_display_name("Archive/&Xi5SqWUvYwE-", Some("/")),
+            crate::imap::decode_imap_mailbox_name("&Xi5SqWUvYwE-")
+        );
+    }
+
+    #[test]
+    fn imap_folder_depth_counts_delimiters() {
+        assert_eq!(imap_folder_depth("INBOX", Some("/")), 0);
+        assert_eq!(imap_folder_depth("Archive/Projects", Some("/")), 1);
+        assert_eq!(imap_folder_depth("Archive/A/B", Some("/")), 2);
+    }
+
+    #[test]
     fn parse_cursor_value_valid() {
         let cursor = parse_cursor_value("12345:678");
         assert_eq!(cursor.uid_validity, 12345);
@@ -452,8 +483,8 @@ mod tests {
             row.1
         );
         assert!(
-            row.1.contains('档') || row.1.starts_with("Archive/"),
-            "expected decoded folder name, got: {}",
+            row.1.contains('档') || !row.1.contains('/'),
+            "expected decoded leaf folder name, got: {}",
             row.1
         );
 
@@ -468,6 +499,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn upsert_folder_links_imap_parent_id() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+
+        upsert_folder(&as_db(&pool), &account_id, "Archive", Some("/"))
+            .await
+            .unwrap();
+        upsert_folder(&as_db(&pool), &account_id, "Archive/Projects", Some("/"))
+            .await
+            .unwrap();
+
+        let archive_id = get_folder_id(&as_db(&pool), &account_id, "Archive")
+            .await
+            .unwrap();
+        let row: (Option<String>, String) = sqlx::query_as(
+            "SELECT parent_id, name FROM folder WHERE account_id = ? AND external_id = ?",
+        )
+        .bind(&account_id)
+        .bind("Archive/Projects")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.1, "Projects");
+        assert_eq!(row.0.as_deref(), Some(archive_id.as_str()));
     }
 
     #[tokio::test]

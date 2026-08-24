@@ -9,6 +9,7 @@ export interface ApiFolder {
   accountId: string;
   name: string;
   role?: string | null;
+  parentId?: string | null;
   sortOrder: number;
   totalMessages: number;
   unreadMessages: number;
@@ -88,6 +89,7 @@ export function mapApiFolder(folder: ApiFolder): MailFolder {
     accountId: folder.accountId,
     name: folder.name,
     role: role || undefined,
+    parentId: folder.parentId ?? undefined,
     unreadCount: folder.unreadMessages,
     totalCount: folder.totalMessages,
     sortOrder: folder.sortOrder,
