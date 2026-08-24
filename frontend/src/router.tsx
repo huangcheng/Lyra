@@ -17,6 +17,7 @@ import { AuthPage } from './components/auth-page';
 import { SettingsPage } from './components/settings-page';
 import { ContactsPage } from './components/contacts-page';
 import { CalendarPage } from './components/calendar-page';
+import { DashboardPage } from './components/dashboard-page';
 import { useAuthStore } from './stores/auth';
 import { useSyncEventSource } from './lib/use-sync-event-source';
 
@@ -95,6 +96,18 @@ const calendarRoute = createRoute({
   component: CalendarPage,
 });
 
+const dashboardRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dashboard',
+  beforeLoad: () => {
+    const { isAuthenticated } = useAuthStore.getState();
+    if (!isAuthenticated) {
+      throw redirect({ to: '/login' });
+    }
+  },
+  component: DashboardPage,
+});
+
 // ── Route tree ─────────────────────────────────────────────────
 
 const routeTree = rootRoute.addChildren([
@@ -103,6 +116,7 @@ const routeTree = rootRoute.addChildren([
   settingsRoute,
   contactsRoute,
   calendarRoute,
+  dashboardRoute,
 ]);
 
 // ── Router factory ─────────────────────────────────────────────

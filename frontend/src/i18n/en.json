@@ -226,6 +226,22 @@
       "sat": "Sat"
     }
   },
+  "dash": {
+    "section": "Dashboard",
+    "overview": "Overview",
+    "subtitle": "Your email at a glance",
+    "unread": "Unread",
+    "receivedToday": "Received today",
+    "sentThisWeek": "Sent",
+    "storage": "Storage",
+    "storageUnavailable": "Storage info not available yet",
+    "volume": "Volume — last {{days}} days",
+    "topSenders": "Top senders",
+    "byAccount": "By account",
+    "range7": "7 days",
+    "range30": "30 days",
+    "range90": "90 days"
+  },
   "common": {
     "loading": "Loading…",
     "error": "Error",

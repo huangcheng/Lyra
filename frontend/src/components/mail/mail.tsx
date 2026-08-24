@@ -156,7 +156,7 @@ export function Mail() {
                 <button
                   type="button"
                   className="inline-flex size-[26px] items-center justify-center rounded-[7px] text-ter-foreground hover:bg-accent"
-                  onClick={() => void navigate({ href: '/dashboard' })}
+                  onClick={() => void navigate({ to: '/dashboard' })}
                   aria-label={t(locale, 'nav.dashboard')}
                 >
                   <BarChart3 size={14} />

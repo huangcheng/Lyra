@@ -88,6 +88,27 @@ export type SyncEvent =
   | { type: 'sync_error'; accountId: string; error: string }
   | { type: 'sync_complete'; accountId: string };
 
+// ── Dashboard stats ──────────────────────────────────────────────
+
+export interface DailyVolume {
+  date: string;
+  received: number;
+}
+
+export interface TopSender {
+  address: string;
+  name: string | null;
+  count: number;
+}
+
+/** Response for `GET /api/v1/messages/stats?days=`. */
+export interface StatsResponse {
+  days: number;
+  daily: DailyVolume[];
+  topSenders: TopSender[];
+  totals: { received: number; sent: number; unread: number };
+}
+
 // ── UI state ───────────────────────────────────────────────────────
 
 export type SupportedLocale = 'en' | 'zh';

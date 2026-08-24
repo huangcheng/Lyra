@@ -226,6 +226,22 @@
       "sat": "六"
     }
   },
+  "dash": {
+    "section": "仪表盘",
+    "overview": "概览",
+    "subtitle": "邮件一览",
+    "unread": "未读",
+    "receivedToday": "今日收件",
+    "sentThisWeek": "已发送",
+    "storage": "存储",
+    "storageUnavailable": "存储信息暂不可用",
+    "volume": "近 {{days}} 天邮件量",
+    "topSenders": "常见发件人",
+    "byAccount": "按账户",
+    "range7": "7 天",
+    "range30": "30 天",
+    "range90": "90 天"
+  },
   "common": {
     "loading": "加载中…",
     "error": "错误",
