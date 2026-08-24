@@ -27,7 +27,7 @@ export function SlimPageNav({ section, items }: { section: string; items: SlimNa
       >
         <ArrowLeft size={16} /> {t(locale, 'nav.mail')}
       </Link>
-      <div className="px-2.5 pb-1 pt-0.5 text-[10.5px] font-semibold tracking-[0.8px] text-ter-foreground">
+      <div className="px-2.5 pb-1 pt-0.5 text-[10.5px] font-semibold uppercase tracking-[0.8px] text-ter-foreground">
         {section}
       </div>
       {items.map((item) => (

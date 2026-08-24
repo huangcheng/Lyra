@@ -38,19 +38,12 @@ const ROLE_ICONS: Record<StandardFolderRole, LucideIcon> = {
   archive: Archive,
 };
 
-/** UNIFIED display order: core roles first, spam/archive after Trash. */
-const UNIFIED_ROLE_ORDER: StandardFolderRole[] = [
-  'inbox',
-  'drafts',
-  'sent',
-  'trash',
-  'spam',
-  'archive',
-];
+/** UNIFIED display order: core roles only; spam/archive live under each account. */
+const UNIFIED_ROLE_ORDER: StandardFolderRole[] = ['inbox', 'drafts', 'sent', 'trash'];
 
 function SectionLabel({ children }: { children: string }) {
   return (
-    <div className="px-2.5 pb-1 pt-3.5 text-[10.5px] font-semibold tracking-[0.8px] text-ter-foreground">
+    <div className="px-2.5 pb-1 pt-3.5 text-[10.5px] font-semibold uppercase tracking-[0.8px] text-ter-foreground">
       {children}
     </div>
   );
