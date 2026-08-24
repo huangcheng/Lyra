@@ -2,7 +2,9 @@
 //!
 //! See `docs/specs/2026-08-23-lyra-remote-image-proxy-spec.md`.
 
+use std::fmt::Write;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use axum::{
     Json, Router,
@@ -11,7 +13,6 @@ use axum::{
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
 
 use crate::auth::{AuthState, AuthUser};
 use crate::kv::KvStore;
@@ -19,9 +20,8 @@ use crate::sync::SyncError;
 
 const DEFAULT_REMOTE_IMAGES: &str = "block";
 
-static IMG_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<img\b([^>]*?)>"#).expect("img tag regex")
-});
+static IMG_TAG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<img\b([^>]*?)>").expect("img tag regex"));
 
 static SRC_ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?is)\bsrc\s*=\s*['"]([^'"]*)['"]"#).expect("src attr regex")
@@ -76,7 +76,7 @@ pub struct RewriteResult {
 }
 
 fn kv_key(user_id: &str) -> String {
-    format!("user:{}:privacy", user_id)
+    format!("user:{user_id}:privacy")
 }
 
 pub async fn load_settings(kv: &Arc<dyn KvStore>, user_id: &str) -> Result<PrivacySettings, SyncError> {
@@ -175,7 +175,7 @@ fn rewrite_blocked(html: &str) -> RewriteResult {
 
     for caps in IMG_TAG_RE.captures_iter(html) {
         let full = caps.get(0).expect("full match");
-        let attrs = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let attrs = caps.get(1).map_or("", |m| m.as_str());
         out.push_str(&html[last..full.start()]);
 
         let src = SRC_ATTR_RE
@@ -186,11 +186,11 @@ fn rewrite_blocked(html: &str) -> RewriteResult {
         if src.is_some_and(is_remote_http_url) {
             blocked = true;
             let alt = extract_alt(attrs).unwrap_or_else(|| "Image".to_string());
-            out.push_str(&format!(
-                r#"<span data-lyra-blocked-img="1" class="lyra-blocked-img" title="{}" aria-label="{}">[Image]</span>"#,
-                escape_attr(&alt),
-                escape_attr(&alt)
-            ));
+            let title = escape_attr(&alt);
+            let _ = write!(
+                out,
+                r#"<span data-lyra-blocked-img="1" class="lyra-blocked-img" title="{title}" aria-label="{title}">[Image]</span>"#
+            );
         } else {
             out.push_str(full.as_str());
         }
@@ -212,7 +212,7 @@ fn rewrite_proxy(html: &str, signer: &crate::media::ProxySigner) -> RewriteResul
 
     for caps in IMG_TAG_RE.captures_iter(html) {
         let full = caps.get(0).expect("full match");
-        let attrs = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let attrs = caps.get(1).map_or("", |m| m.as_str());
         out.push_str(&html[last..full.start()]);
 
         let src = SRC_ATTR_RE
@@ -223,7 +223,7 @@ fn rewrite_proxy(html: &str, signer: &crate::media::ProxySigner) -> RewriteResul
         if src.is_some_and(is_remote_http_url) {
             let proxy_url = signer.sign_url(src.unwrap_or_default());
             let new_attrs = SRC_ATTR_RE.replace(attrs, format!("src=\"{proxy_url}\""));
-            out.push_str(&format!("<img{new_attrs}>"));
+            let _ = write!(out, "<img{new_attrs}>");
         } else {
             out.push_str(full.as_str());
         }

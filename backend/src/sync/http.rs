@@ -223,6 +223,7 @@ pub struct FolderResponse {
 /// Message response for the API.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)] // API DTO mirrors message flag columns.
 pub struct MessageResponse {
     pub id: String,
     pub account_id: String,

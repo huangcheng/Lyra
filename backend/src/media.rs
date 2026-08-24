@@ -4,7 +4,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// When true, [`validate_outbound_url`] accepts loopback hosts so integration
+/// tests can drive a local mock upstream. Omitted from production builds.
+#[cfg(test)]
+static ALLOW_LOOPBACK_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
@@ -12,10 +19,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use hmac::{Hmac, Mac};
+use rand::RngCore;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use base64::Engine;
 
 use crate::auth::AuthState;
 use crate::kv::KvStore;
@@ -55,7 +64,6 @@ pub async fn load_media_secret(kv: &Arc<dyn KvStore>, user_id: &str) -> Result<V
             .ok_or_else(|| SyncError::Internal("corrupt media secret".into()));
     }
     let mut secret = [0u8; 32];
-    use rand::RngCore;
     rand::thread_rng().fill_bytes(&mut secret);
     let encoded = base64_encode(&secret);
     kv
@@ -66,24 +74,30 @@ pub async fn load_media_secret(kv: &Arc<dyn KvStore>, user_id: &str) -> Result<V
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    use base64::Engine;
     base64::engine::general_purpose::STANDARD.decode(s).ok()
 }
 
 fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs() as i64
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs(),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 fn cache_key_for_url(url: &str) -> String {
@@ -182,6 +196,13 @@ async fn validate_outbound_url(url: &str) -> Result<(), SyncError> {
         .map_err(|_| SyncError::InvalidInput("proxy target host lookup failed".into()))?;
     let public = crate::netsec::filter_public_addrs(addrs.map(|a| a.ip()));
     if public.is_empty() {
+        // Test-only escape hatch for a loopback mock upstream.
+        #[cfg(test)]
+        if ALLOW_LOOPBACK_FOR_TESTS.load(Ordering::SeqCst)
+            && (host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost") || host == "::1")
+        {
+            return Ok(());
+        }
         return Err(SyncError::InvalidInput("proxy target blocked by SSRF policy".into()));
     }
     Ok(())
@@ -215,7 +236,7 @@ async fn fetch_upstream(url: &str) -> Result<FetchedImage, SyncError> {
                 .headers()
                 .get(header::LOCATION)
                 .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+                .map(std::string::ToString::to_string);
             if let Some(next) = loc {
                 current = resp
                     .url()
@@ -247,7 +268,7 @@ async fn fetch_upstream(url: &str) -> Result<FetchedImage, SyncError> {
             .bytes()
             .await
             .map_err(|e| SyncError::Internal(format!("upstream read: {e}")))?;
-        if body.len() > MAX_UPSTREAM_BYTES as usize {
+        if body.len() > usize::try_from(MAX_UPSTREAM_BYTES).unwrap_or(usize::MAX) {
             return Err(SyncError::InvalidInput("upstream image too large".into()));
         }
         bytes.extend_from_slice(&body);
@@ -304,9 +325,8 @@ async fn evict_cache_if_needed(cache_root: &Path, max_bytes: u64) -> Result<(), 
     let mut total = 0u64;
     let mut stack = vec![cache_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let read_dir = match std::fs::read_dir(&dir) {
-            Ok(d) => d,
-            Err(_) => continue,
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            continue;
         };
         for entry in read_dir.flatten() {
             let path = entry.path();
@@ -317,9 +337,8 @@ async fn evict_cache_if_needed(cache_root: &Path, max_bytes: u64) -> Result<(), 
             if path.extension().is_some_and(|e| e == "meta") {
                 continue;
             }
-            let meta = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
+            let Ok(meta) = entry.metadata() else {
+                continue;
             };
             let len = meta.len();
             let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
@@ -355,19 +374,15 @@ fn placeholder_response() -> Response {
     (StatusCode::NOT_FOUND, headers, PLACEHOLDER_GIF).into_response()
 }
 
-fn image_response(bytes: Vec<u8>, content_type: &str, cached: bool) -> Response {
+fn image_response(bytes: Vec<u8>, content_type: &str, _cached: bool) -> Response {
     let mut headers = HeaderMap::new();
     if let Ok(ct) = HeaderValue::from_str(content_type) {
         headers.insert(header::CONTENT_TYPE, ct);
     }
-    let cache_control = if cached {
-        "private, max-age=31536000, immutable"
-    } else {
-        "private, max-age=31536000, immutable"
-    };
-    if let Ok(v) = HeaderValue::from_str(cache_control) {
-        headers.insert(header::CACHE_CONTROL, v);
-    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
     (StatusCode::OK, headers, bytes).into_response()
 }
 
@@ -437,6 +452,20 @@ pub fn routes() -> axum::Router<AuthState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{install_test_master_key, AuthState, TEST_MASTER_KEY};
+    use crate::kernel::App;
+    use crate::kv::MemoryKv;
+    use crate::storage::{DbPool, Storage};
+    use axum::body::to_bytes;
+    use axum::extract::{Path as AxumPath, Query, State};
+    use axum::http::{header, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, MutexGuard};
+
+    /// Serialize tests that touch [`ALLOW_LOOPBACK_FOR_TESTS`].
+    static LOOPBACK_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
     #[test]
     fn proxy_path_roundtrip_query_and_fragment() {
@@ -467,5 +496,354 @@ mod tests {
         let c = cache_key_for_url("https://a.com/y");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    struct LoopbackGuard {
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl LoopbackGuard {
+        async fn enter() -> Self {
+            let lock = LOOPBACK_TEST_LOCK.lock().await;
+            ALLOW_LOOPBACK_FOR_TESTS.store(true, Ordering::SeqCst);
+            Self { _lock: lock }
+        }
+
+        async fn hold_off() -> MutexGuard<'static, ()> {
+            let lock = LOOPBACK_TEST_LOCK.lock().await;
+            ALLOW_LOOPBACK_FOR_TESTS.store(false, Ordering::SeqCst);
+            lock
+        }
+    }
+
+    impl Drop for LoopbackGuard {
+        fn drop(&mut self) {
+            ALLOW_LOOPBACK_FOR_TESTS.store(false, Ordering::SeqCst);
+        }
+    }
+
+    async fn test_pool() -> sqlx::SqlitePool {
+        let storage = Storage::new("sqlite::memory:").await.unwrap();
+        storage.run_migrations().await.unwrap();
+        match storage.pool().clone() {
+            DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "postgres")]
+            DbPool::Postgres(_) => panic!("expected sqlite"),
+        }
+    }
+
+    fn test_auth_state(pool: sqlx::SqlitePool, data_dir: &Path) -> AuthState {
+        install_test_master_key();
+        let config = crate::config::Config {
+            listen_addr: "127.0.0.1:0".into(),
+            database_url: "sqlite::memory:".into(),
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            min_password_length: 8,
+            sync_max_concurrent: 3,
+            sync_poll_secs: 300,
+            redis_url: None,
+            master_key: TEST_MASTER_KEY.to_vec(),
+        };
+        AuthState::new(
+            DbPool::Sqlite(pool),
+            &config,
+            Arc::new(App::new()),
+            Arc::new(MemoryKv::new()),
+        )
+        .unwrap()
+    }
+
+    fn temp_data_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lyra-media-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    async fn signed_proxy_parts(
+        state: &AuthState,
+        user_id: &str,
+        original_url: &str,
+    ) -> (String, ProxyQuery) {
+        let signer = ProxySigner::new(state.kv(), user_id).await.unwrap();
+        let signed_url = signer.sign_url(original_url);
+        let without_prefix = signed_url
+            .strip_prefix("/api/v1/proxy/")
+            .expect("signed URL prefix");
+        let (path, query_str) = without_prefix
+            .split_once('?')
+            .expect("signed URL query");
+        let mut exp = 0i64;
+        let mut sig = String::new();
+        let mut uid = String::new();
+        for part in query_str.split('&') {
+            if let Some((k, v)) = part.split_once('=') {
+                match k {
+                    "exp" => exp = v.parse().unwrap(),
+                    "sig" => sig = v.to_string(),
+                    "uid" => uid = v.to_string(),
+                    _ => {}
+                }
+            }
+        }
+        (path.to_string(), ProxyQuery { exp, sig, uid })
+    }
+
+    async fn call_proxy(state: AuthState, path: String, query: ProxyQuery) -> Response {
+        proxy_image(State(state), AxumPath(path), Query(query)).await
+    }
+
+    async fn response_bytes(resp: Response) -> (StatusCode, Vec<u8>) {
+        let status = resp.status();
+        let limit = usize::try_from(MAX_UPSTREAM_BYTES).unwrap_or(usize::MAX) + 1024;
+        let body = to_bytes(resp.into_body(), limit)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, body)
+    }
+
+    const MOCK_GIF: &[u8] = PLACEHOLDER_GIF;
+
+    #[derive(Clone, Copy)]
+    enum MockMode {
+        Gif,
+        PlainText,
+        RedirectChain { hops: usize },
+    }
+
+    async fn spawn_mock_upstream(
+        hits: Arc<AtomicUsize>,
+        mode: MockMode,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+
+        let app = match mode {
+            MockMode::Gif => {
+                let hits = hits.clone();
+                Router::new().route(
+                    "/img.gif",
+                    get(move || {
+                        let hits = hits.clone();
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            (
+                                [(header::CONTENT_TYPE, "image/gif")],
+                                MOCK_GIF.to_vec(),
+                            )
+                        }
+                    }),
+                )
+            }
+            MockMode::PlainText => Router::new().route(
+                "/not-image",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "text/plain")],
+                        b"not an image".to_vec(),
+                    )
+                }),
+            ),
+            MockMode::RedirectChain { hops } => {
+                let base = base.clone();
+                Router::new().route(
+                    "/r/{n}",
+                    get(move |AxumPath(n): AxumPath<usize>| {
+                        let base = base.clone();
+                        async move {
+                            if n >= hops {
+                                (
+                                    StatusCode::OK,
+                                    [(header::CONTENT_TYPE, "image/gif")],
+                                    MOCK_GIF.to_vec(),
+                                )
+                                    .into_response()
+                            } else {
+                                let loc = format!("{base}/r/{}", n + 1);
+                                (StatusCode::FOUND, [(header::LOCATION, loc)], Vec::new())
+                                    .into_response()
+                            }
+                        }
+                    }),
+                )
+            }
+        };
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        tokio::task::yield_now().await;
+        (base, handle)
+    }
+
+    #[tokio::test]
+    async fn refuse_private_ip_targets() {
+        let _hold = LoopbackGuard::hold_off().await;
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        let (path, query) =
+            signed_proxy_parts(&state, "user-ssrf", "http://10.0.0.1/secret.gif").await;
+        let (status, body) = response_bytes(call_proxy(state, path, query).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, PLACEHOLDER_GIF);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn refuse_loopback_without_test_escape() {
+        let _hold = LoopbackGuard::hold_off().await;
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        let (path, query) =
+            signed_proxy_parts(&state, "user-loop", "http://127.0.0.1:9/x.gif").await;
+        let (status, body) = response_bytes(call_proxy(state, path, query).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, PLACEHOLDER_GIF);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn bad_signature_returns_placeholder() {
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        let (path, mut query) =
+            signed_proxy_parts(&state, "user-sig", "https://example.com/a.gif").await;
+        query.sig = "deadbeef".into();
+        let (status, body) = response_bytes(call_proxy(state, path, query).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, PLACEHOLDER_GIF);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn expired_signature_returns_placeholder() {
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        let user = "user-exp";
+        let url = "https://example.com/a.gif";
+        let signer = ProxySigner::new(state.kv(), user).await.unwrap();
+        let exp = now_unix() - 10;
+        let sig = compute_sig(&signer.secret, user, url, exp);
+        let path = encode_proxy_path(url);
+        let query = ProxyQuery {
+            exp,
+            sig,
+            uid: user.into(),
+        };
+        let (status, body) = response_bytes(call_proxy(state, path, query).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, PLACEHOLDER_GIF);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn reject_non_image_content_type() {
+        let _guard = LoopbackGuard::enter().await;
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (base, handle) = spawn_mock_upstream(hits, MockMode::PlainText).await;
+        let url = format!("{base}/not-image");
+        let (path, query) = signed_proxy_parts(&state, "user-ct", &url).await;
+        let (status, body) = response_bytes(call_proxy(state, path, query).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, PLACEHOLDER_GIF);
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn cache_hit_fetches_upstream_once() {
+        let _guard = LoopbackGuard::enter().await;
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (base, handle) = spawn_mock_upstream(hits.clone(), MockMode::Gif).await;
+        let url = format!("{base}/img.gif");
+        let (path, query) = signed_proxy_parts(&state, "user-cache", &url).await;
+
+        let (status1, body1) = response_bytes(
+            call_proxy(
+                state.clone(),
+                path.clone(),
+                ProxyQuery {
+                    exp: query.exp,
+                    sig: query.sig.clone(),
+                    uid: query.uid.clone(),
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status1, StatusCode::OK);
+        assert_eq!(body1, MOCK_GIF);
+
+        let (status2, body2) = response_bytes(call_proxy(state, path, query).await).await;
+        assert_eq!(status2, StatusCode::OK);
+        assert_eq!(body2, MOCK_GIF);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "second render must be a cache hit"
+        );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn query_string_survives_proxy_roundtrip() {
+        let _guard = LoopbackGuard::enter().await;
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (base, handle) = spawn_mock_upstream(hits.clone(), MockMode::Gif).await;
+        let url = format!("{base}/img.gif?id=abc&utm_source=track");
+        let (path, query) = signed_proxy_parts(&state, "user-qs", &url).await;
+        assert!(path.contains("%3F"), "query must be path-encoded");
+        let (status, body) = response_bytes(call_proxy(state, path, query).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, MOCK_GIF);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn too_many_redirects_returns_placeholder() {
+        let _guard = LoopbackGuard::enter().await;
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (base, handle) =
+            spawn_mock_upstream(hits, MockMode::RedirectChain { hops: 5 }).await;
+        let url = format!("{base}/r/0");
+        let (path, query) = signed_proxy_parts(&state, "user-redir", &url).await;
+        let (status, body) = response_bytes(call_proxy(state, path, query).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, PLACEHOLDER_GIF);
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn within_redirect_cap_succeeds() {
+        let _guard = LoopbackGuard::enter().await;
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (base, handle) =
+            spawn_mock_upstream(hits, MockMode::RedirectChain { hops: 3 }).await;
+        let url = format!("{base}/r/0");
+        let (path, query) = signed_proxy_parts(&state, "user-ok-redir", &url).await;
+        let (status, body) = response_bytes(call_proxy(state, path, query).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, MOCK_GIF);
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
