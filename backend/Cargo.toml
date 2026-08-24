@@ -54,6 +54,7 @@ ammonia = "4.1.4"
 mail-parser = "0.11.8"
 regex = "1"
 hmac = "0.12"
+utf7-imap = "0.3.2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

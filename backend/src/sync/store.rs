@@ -57,18 +57,19 @@ pub(crate) fn outcome_from_response(result: &SyncResponse) -> SyncOutcome {
 
 // ── Database helpers ────────────────────────────────────────────────
 
-/// Upsert a folder by `(account_id, name)`.
+/// Upsert a folder by `(account_id, wire_name)`.
 ///
-/// Returns `Ok(())` on success. Uses the `external_id` field to store
-/// the IMAP folder name for uniqueness.
+/// `wire_name` is the encoded IMAP mailbox name (Modified UTF-7 on the wire).
+/// It is stored in `external_id` for SELECT/LIST; `name` is decoded for display.
 pub(crate) async fn upsert_folder(
     db: &DbPool,
     account_id: &str,
-    name: &str,
+    wire_name: &str,
     _delimiter: Option<&str>,
 ) -> Result<(), SyncError> {
-    let role = infer_folder_role(name);
-    let external_id = name;
+    let display_name = crate::imap::decode_imap_mailbox_name(wire_name);
+    let role = infer_folder_role(&display_name);
+    let external_id = wire_name;
     let account_bind = id_param(db, account_id)?;
 
     // Try to find existing folder
@@ -83,7 +84,7 @@ pub(crate) async fn upsert_folder(
         db_execute!(
             db,
             "UPDATE folder SET name = ?, updated_at = datetime('now') WHERE id = ?",
-            name,
+            &display_name,
             &id_param(db, &id)?
         )?;
     } else {
@@ -97,7 +98,7 @@ pub(crate) async fn upsert_folder(
             &id_param(db, &id)?,
             &account_bind,
             external_id,
-            name,
+            &display_name,
             role
         )?;
     }

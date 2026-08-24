@@ -56,6 +56,16 @@ pub struct ImapConfig {
     pub password: Zeroizing<String>,
 }
 
+/// Decode an IMAP mailbox name (Modified UTF-7, RFC 3501 §5.1.3) for display.
+///
+/// Wire names from LIST/SELECT stay encoded; only UI-facing `folder.name` uses this.
+pub fn decode_imap_mailbox_name(encoded: &str) -> String {
+    if !encoded.contains('&') {
+        return encoded.to_string();
+    }
+    utf7_imap::decode_utf7_imap(encoded.to_string())
+}
+
 /// Metadata for a single IMAP folder (mailbox).
 #[derive(Debug, Clone)]
 pub struct ImapFolder {
@@ -648,6 +658,25 @@ mod tests {
         assert_eq!(text.as_deref(), Some("Café"));
         assert!(atts.is_empty());
         let _ = html;
+    }
+
+    #[test]
+    fn decode_imap_mailbox_name_ascii_passthrough() {
+        assert_eq!(decode_imap_mailbox_name("INBOX"), "INBOX");
+        assert_eq!(decode_imap_mailbox_name("Sent"), "Sent");
+        assert_eq!(decode_imap_mailbox_name("Archive"), "Archive");
+    }
+
+    #[test]
+    fn decode_imap_mailbox_name_modified_utf7() {
+        // Fastmail-style Chinese folder under Archive (Modified UTF-7 on the wire).
+        let wire = "Archive/&Xi5SqWUvYwE-";
+        let decoded = decode_imap_mailbox_name(wire);
+        assert!(
+            decoded.contains('档') || decoded.contains("Archive"),
+            "expected decoded Chinese folder name, got: {decoded}"
+        );
+        assert!(!decoded.contains("&Xi5"), "wire encoding should be decoded: {decoded}");
     }
 
     #[test]

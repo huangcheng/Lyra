@@ -427,6 +427,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upsert_folder_decodes_modified_utf7_display_name() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        let wire = "Archive/&Xi5SqWUvYwE-";
+
+        upsert_folder(&as_db(&pool), &account_id, wire, Some("/"))
+            .await
+            .unwrap();
+
+        let row: (String, String) = sqlx::query_as(
+            "SELECT external_id, name FROM folder WHERE account_id = ? AND external_id = ?",
+        )
+        .bind(&account_id)
+        .bind(wire)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, wire, "external_id must stay wire-encoded for IMAP SELECT");
+        assert!(
+            !row.1.contains("&Xi5"),
+            "display name should be decoded, got: {}",
+            row.1
+        );
+        assert!(
+            row.1.contains('档') || row.1.starts_with("Archive/"),
+            "expected decoded folder name, got: {}",
+            row.1
+        );
+
+        // Re-upsert updates display name without creating a duplicate row
+        upsert_folder(&as_db(&pool), &account_id, wire, Some("/"))
+            .await
+            .unwrap();
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM folder WHERE account_id = ?")
+            .bind(&account_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
     async fn upsert_message_idempotent() {
         let pool = test_pool().await;
         let (_, account_id) = seed_user_and_account(&pool).await;
