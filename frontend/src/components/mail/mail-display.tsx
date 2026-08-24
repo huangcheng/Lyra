@@ -9,12 +9,15 @@ import {
   ArchiveX,
   Clock,
   Forward,
+  MailOpen,
   MoreVertical,
   Reply,
   ReplyAll,
   Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+
+import { EmptyState } from '@/components/empty-state';
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -157,14 +160,7 @@ export function MailDisplay() {
       void tryAutoMarkRead();
     }, MARK_READ_OPEN_DWELL_MS);
     return () => window.clearTimeout(timer);
-  }, [
-    markReadPolicy,
-    selectedMessageId,
-    mail?.id,
-    mail?.isRead,
-    loadError,
-    tryAutoMarkRead,
-  ]);
+  }, [markReadPolicy, selectedMessageId, mail?.id, mail?.isRead, loadError, tryAutoMarkRead]);
 
   useEffect(() => {
     if (markReadPolicy !== 'on_scroll_end' || !mail || mail.isRead) return;
@@ -515,7 +511,12 @@ export function MailDisplay() {
           {showRemoteBanner ? (
             <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-2 text-xs">
               <span className="text-muted-foreground">{t(locale, 'mail.remoteContentHidden')}</span>
-              <Button variant="link" size="sm" className="h-auto p-0" onClick={handleShowRemoteContent}>
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto p-0"
+                onClick={handleShowRemoteContent}
+              >
                 {t(locale, 'mail.showRemoteContent')}
               </Button>
               <Button
@@ -528,10 +529,7 @@ export function MailDisplay() {
               </Button>
             </div>
           ) : null}
-          <div
-            ref={bodyScrollRef}
-            className="flex-1 overflow-auto p-4 text-sm whitespace-pre-wrap"
-          >
+          <div ref={bodyScrollRef} className="flex-1 overflow-auto p-4 text-sm whitespace-pre-wrap">
             {loadError ? (
               <p className="text-destructive">{loadError}</p>
             ) : mail.bodyHtml ? (
@@ -574,9 +572,7 @@ export function MailDisplay() {
           </div>
         </div>
       ) : (
-        <div className="p-8 text-center text-muted-foreground">
-          {t(locale, 'mail.selectMessage')}
-        </div>
+        <EmptyState icon={MailOpen} title={t(locale, 'mail.selectMessage')} />
       )}
     </div>
   );

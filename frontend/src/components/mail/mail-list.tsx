@@ -4,8 +4,10 @@
 
 import type { ComponentProps } from 'react';
 import { formatDistanceToNow } from 'date-fns';
+import { Inbox, SearchX } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
+import { EmptyState } from '@/components/empty-state';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { t } from '@/i18n';
@@ -133,8 +135,13 @@ export function MailList() {
   }
 
   if (filtered.length === 0) {
+    const isSearch = searchHits !== null && searchQuery.trim().length >= 2;
     return (
-      <div className="p-8 text-center text-muted-foreground">{t(locale, 'mail.noMessages')}</div>
+      <EmptyState
+        icon={isSearch ? SearchX : Inbox}
+        title={t(locale, 'mail.noMessages')}
+        hint={isSearch ? undefined : t(locale, 'mail.noMessagesHint')}
+      />
     );
   }
 
