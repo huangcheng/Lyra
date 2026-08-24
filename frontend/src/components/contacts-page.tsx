@@ -5,9 +5,14 @@
  */
 
 import { useState, useEffect } from 'react';
+import { UserRound, Users } from 'lucide-react';
 import { t } from '../i18n';
 import { api } from '../lib/api-client';
+import { EmptyState } from './empty-state';
 import { SecondaryPage } from './secondary-page';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { cn } from '@/lib/utils';
 import { useUIStore } from '../stores/ui';
 
 interface Contact {
@@ -64,95 +69,111 @@ export function ContactsPage() {
     <SecondaryPage title={t(locale, 'contacts.title')}>
       <div className="mx-auto flex max-w-4xl gap-6">
         <div className="w-72 shrink-0 space-y-3">
-          <div className="contacts-header">
-            <h1>{t(locale, 'contacts.title')}</h1>
-            <form onSubmit={handleSearch} className="flex gap-2">
-              <input
-                type="text"
-                className="h-9 flex-1 rounded-md border border-input bg-transparent px-3 text-sm"
-                placeholder={t(locale, 'contacts.search')}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-              <button
-                type="submit"
-                className="rounded-md border px-3 py-1.5 text-sm hover:bg-accent"
-              >
-                {t(locale, 'common.search')}
-              </button>
-            </form>
-          </div>
+          <form onSubmit={handleSearch} className="flex gap-2">
+            <Input
+              placeholder={t(locale, 'contacts.search')}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            <Button type="submit" variant="outline" size="sm">
+              {t(locale, 'common.search')}
+            </Button>
+          </form>
 
           {loading ? (
-            <div className="loading">{t(locale, 'common.loading')}</div>
+            <div className="p-4 text-sm text-muted-foreground">{t(locale, 'common.loading')}</div>
           ) : error ? (
-            <div className="error">{error}</div>
+            <div className="p-4 text-sm text-destructive">{error}</div>
           ) : contacts.length === 0 ? (
-            <div className="empty-state">
-              <p>{t(locale, 'contacts.empty')}</p>
-            </div>
+            <EmptyState
+              icon={Users}
+              title={t(locale, 'contacts.empty')}
+              hint={t(locale, 'contacts.emptyHint')}
+            />
           ) : (
-            <div className="contacts-list">
+            <div className="space-y-1">
               {contacts.map((contact) => (
-                <div
+                <button
                   key={contact.id}
-                  className={`contact-item ${selectedContact?.id === contact.id ? 'selected' : ''}`}
+                  type="button"
+                  className={cn(
+                    'flex w-full items-center gap-3 rounded-lg border p-3 text-left transition-colors hover:bg-accent',
+                    selectedContact?.id === contact.id && 'bg-muted',
+                  )}
                   onClick={() => setSelectedContact(contact)}
                 >
-                  <div className="contact-avatar">{getInitials(contact.displayName)}</div>
-                  <div className="contact-info">
-                    <div className="contact-name">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-medium text-primary">
+                    {getInitials(contact.displayName)}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-medium">
                       {contact.displayName || t(locale, 'contacts.noName')}
-                    </div>
+                    </span>
                     {contact.emailAddresses[0] && (
-                      <div className="contact-email">{contact.emailAddresses[0]}</div>
+                      <span className="block truncate text-xs text-muted-foreground">
+                        {contact.emailAddresses[0]}
+                      </span>
                     )}
-                  </div>
-                </div>
+                  </span>
+                </button>
               ))}
             </div>
           )}
         </div>
 
-        <div className="contacts-detail">
+        <div className="min-w-0 flex-1">
           {selectedContact ? (
-            <div className="contact-detail-card">
-              <div className="contact-avatar large">{getInitials(selectedContact.displayName)}</div>
-              <h2>{selectedContact.displayName || t(locale, 'contacts.noName')}</h2>
+            <div className="space-y-6 rounded-lg border p-6">
+              <div className="flex items-center gap-4">
+                <span className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-xl font-medium text-primary">
+                  {getInitials(selectedContact.displayName)}
+                </span>
+                <h2 className="text-lg font-semibold">
+                  {selectedContact.displayName || t(locale, 'contacts.noName')}
+                </h2>
+              </div>
 
               {selectedContact.emailAddresses.length > 0 && (
-                <div className="detail-section">
-                  <h3>{t(locale, 'contacts.email')}</h3>
+                <div className="space-y-1">
+                  <h3 className="text-sm font-medium text-muted-foreground">
+                    {t(locale, 'contacts.email')}
+                  </h3>
                   {selectedContact.emailAddresses.map((email, i) => (
-                    <div key={i} className="detail-item">
-                      <a href={`mailto:${email}`}>{email}</a>
+                    <div key={i} className="text-sm">
+                      <a href={`mailto:${email}`} className="text-primary hover:underline">
+                        {email}
+                      </a>
                     </div>
                   ))}
                 </div>
               )}
 
               {selectedContact.phoneNumbers.length > 0 && (
-                <div className="detail-section">
-                  <h3>{t(locale, 'contacts.phone')}</h3>
+                <div className="space-y-1">
+                  <h3 className="text-sm font-medium text-muted-foreground">
+                    {t(locale, 'contacts.phone')}
+                  </h3>
                   {selectedContact.phoneNumbers.map((phone, i) => (
-                    <div key={i} className="detail-item">
-                      <a href={`tel:${phone}`}>{phone}</a>
+                    <div key={i} className="text-sm">
+                      <a href={`tel:${phone}`} className="text-primary hover:underline">
+                        {phone}
+                      </a>
                     </div>
                   ))}
                 </div>
               )}
 
               {selectedContact.organisation && (
-                <div className="detail-section">
-                  <h3>{t(locale, 'contacts.organisation')}</h3>
-                  <p>{selectedContact.organisation}</p>
+                <div className="space-y-1">
+                  <h3 className="text-sm font-medium text-muted-foreground">
+                    {t(locale, 'contacts.organisation')}
+                  </h3>
+                  <p className="text-sm">{selectedContact.organisation}</p>
                 </div>
               )}
             </div>
           ) : (
-            <div className="no-selection">
-              <p>{t(locale, 'contacts.selectContact')}</p>
-            </div>
+            <EmptyState icon={UserRound} title={t(locale, 'contacts.selectContact')} />
           )}
         </div>
       </div>
