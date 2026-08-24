@@ -69,9 +69,9 @@
     "syncing": "同步中…",
     "syncDone": "同步完成",
     "syncError": "同步失败",
-    "remoteContentHidden": "远程内容已隐藏，以保护你的隐私。",
-    "showRemoteContent": "显示远程内容",
-    "alwaysShowFromSender": "始终显示来自 {{sender}} 的远程内容",
+    "remoteContentHidden": "已隐藏远程图片以保护您的隐私。",
+    "showRemoteContent": "显示图片",
+    "alwaysShowFromSender": "始终允许此发件人",
     "folder": {
       "inbox": "收件箱",
       "drafts": "草稿",

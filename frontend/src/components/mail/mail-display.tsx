@@ -13,6 +13,7 @@ import {
   MoreVertical,
   Reply,
   ReplyAll,
+  Shield,
   Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -269,7 +270,8 @@ export function MailDisplay() {
 
   const fromLabel = mail ? (mail.from.name ?? mail.from.email) : '';
   const disabled = !mail || busy;
-  const toolbarIconClass = 'text-foreground disabled:opacity-100';
+  const toolbarIconClass =
+    'rounded-[7px] border border-input bg-card text-foreground shadow-xs hover:bg-accent disabled:opacity-50';
   const showRemoteBanner = Boolean(mail?.remoteContentBlocked);
 
   const handleShowRemoteContent = () => {
@@ -289,7 +291,7 @@ export function MailDisplay() {
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center p-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -413,7 +415,7 @@ export function MailDisplay() {
             <TooltipContent>{t(locale, 'mail.snooze')}</TooltipContent>
           </Tooltip>
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-1.5">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -516,24 +518,25 @@ export function MailDisplay() {
           </div>
           <Separator />
           {showRemoteBanner ? (
-            <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-2 text-xs">
-              <span className="text-muted-foreground">{t(locale, 'mail.remoteContentHidden')}</span>
-              <Button
-                variant="link"
-                size="sm"
-                className="h-auto p-0"
-                onClick={handleShowRemoteContent}
-              >
-                {t(locale, 'mail.showRemoteContent')}
-              </Button>
-              <Button
-                variant="link"
-                size="sm"
-                className="h-auto p-0"
-                onClick={() => void handleAlwaysShowFromSender()}
-              >
-                {t(locale, 'mail.alwaysShowFromSender', { sender: mail.from.email })}
-              </Button>
+            <div className="px-4 pt-3">
+              <div className="flex items-center gap-2 rounded-lg border border-border px-3.5 py-2.5 text-[12.5px] text-muted-foreground">
+                <Shield className="size-3.5 shrink-0" aria-hidden />
+                <span className="min-w-0 flex-1">{t(locale, 'mail.remoteContentHidden')}</span>
+                <button
+                  type="button"
+                  className="shrink-0 font-medium text-foreground underline underline-offset-2 hover:text-foreground/80"
+                  onClick={handleShowRemoteContent}
+                >
+                  {t(locale, 'mail.showRemoteContent')}
+                </button>
+                <button
+                  type="button"
+                  className="shrink-0 font-medium text-foreground underline underline-offset-2 hover:text-foreground/80"
+                  onClick={() => void handleAlwaysShowFromSender()}
+                >
+                  {t(locale, 'mail.alwaysShowFromSender')}
+                </button>
+              </div>
             </div>
           ) : null}
           <div ref={bodyScrollRef} className="flex-1 overflow-auto p-4 text-sm whitespace-pre-wrap">
@@ -558,19 +561,22 @@ export function MailDisplay() {
                 handleReply();
               }}
             >
-              <div className="grid gap-4">
-                <Textarea
-                  className="p-4"
-                  placeholder={t(locale, 'mail.replyPlaceholder', { name: fromLabel })}
-                  value={replyText}
-                  onChange={(e) => setReplyText(e.target.value)}
-                />
-                <div className="flex items-center">
+              <div className="rounded-lg border border-input bg-card shadow-xs">
+                <div className="flex items-start gap-2.5 px-3.5 pt-3">
+                  <Reply className="mt-2 size-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <Textarea
+                    className="min-h-12 resize-none border-0 px-0 py-1.5 shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent"
+                    placeholder={t(locale, 'mail.replyPlaceholder', { name: fromLabel })}
+                    value={replyText}
+                    onChange={(e) => setReplyText(e.target.value)}
+                  />
+                </div>
+                <div className="flex items-center px-3.5 pb-2.5">
                   <Label htmlFor="mute" className="flex items-center gap-2 text-xs font-normal">
                     <Switch id="mute" aria-label={t(locale, 'mail.muteThread')} />{' '}
                     {t(locale, 'mail.muteThread')}
                   </Label>
-                  <Button type="submit" size="sm" className="ml-auto">
+                  <Button type="submit" size="sm" className="ml-auto rounded-full px-4">
                     {t(locale, 'mail.send')}
                   </Button>
                 </div>

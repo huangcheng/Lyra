@@ -190,9 +190,8 @@ export function MailList() {
               key={item.id}
               type="button"
               className={cn(
-                'flex w-full gap-3 rounded-lg border p-3 text-left text-sm transition-all hover:bg-accent/60',
-                isSelected && 'border-border bg-card shadow-sm hover:bg-card',
-                !item.isRead && !isSelected && 'bg-card/50',
+                'flex w-full gap-3 rounded-lg border border-transparent p-3 text-left text-sm transition-all hover:bg-accent/60',
+                isSelected && 'border-input bg-card hover:bg-card',
               )}
               onClick={() => setSelectedMessage(item.id)}
             >
@@ -200,7 +199,7 @@ export function MailList() {
                 {item.isReplied ? (
                   <CornerUpLeft className="h-3 w-3 text-muted-foreground" aria-hidden />
                 ) : !item.isRead ? (
-                  <span className="h-2 w-2 rounded-full bg-primary" aria-hidden />
+                  <span className="size-1.5 rounded-full bg-unread" aria-hidden />
                 ) : null}
               </div>
               <Avatar className="h-8 w-8 shrink-0">

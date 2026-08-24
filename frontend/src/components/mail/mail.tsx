@@ -174,8 +174,8 @@ export function Mail() {
             )}
           </div>
         </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel id="list" defaultSize="32%" minSize="30%">
+        <ResizableHandle />
+        <ResizablePanel id="list" defaultSize="32%" minSize="30%" className="bg-secondary">
           <Tabs
             defaultValue="all"
             value={listTab}
@@ -183,24 +183,24 @@ export function Mail() {
             className="flex h-full flex-col gap-0"
           >
             <div className="flex items-center px-4 py-2">
-              <h1 className="text-xl font-bold">{folderTitle}</h1>
-              <TabsList className="ml-auto h-9 rounded-lg bg-muted p-1 text-muted-foreground">
+              <h1 className="font-display text-xl">{folderTitle}</h1>
+              <TabsList className="ml-auto h-8 rounded-lg bg-accent p-0.5 text-muted-foreground">
                 <TabsTrigger
                   value="all"
-                  className="h-7 flex-none rounded-md px-3 py-1 text-sm font-medium shadow-none data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+                  className="h-7 flex-none rounded-md px-3 text-sm font-medium shadow-none data-[state=active]:bg-card data-[state=active]:text-foreground"
                 >
                   {t(locale, 'mail.allMail')}
                 </TabsTrigger>
                 <TabsTrigger
                   value="unread"
-                  className="h-7 flex-none rounded-md px-3 py-1 text-sm font-medium shadow-none data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+                  className="h-7 flex-none rounded-md px-3 text-sm font-medium shadow-none data-[state=active]:bg-card data-[state=active]:text-foreground"
                 >
                   {t(locale, 'mail.unread')}
                 </TabsTrigger>
               </TabsList>
             </div>
             <Separator />
-            <div className="bg-background/95 p-4 backdrop-blur supports-backdrop-filter:bg-background/60">
+            <div className="p-4">
               <form onSubmit={(e) => e.preventDefault()}>
                 <div className="relative">
                   <Search className="absolute top-2.5 left-2 h-4 w-4 text-muted-foreground" />
@@ -221,7 +221,7 @@ export function Mail() {
             </TabsContent>
           </Tabs>
         </ResizablePanel>
-        <ResizableHandle withHandle />
+        <ResizableHandle />
         <ResizablePanel id="view" defaultSize="48%" minSize="30%">
           <MailDisplay />
         </ResizablePanel>
