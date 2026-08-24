@@ -72,6 +72,8 @@
     "alwaysShowFromSender": "始终显示来自 {{sender}} 的远程内容"
   },
   "auth": {
+    "tagline": "自己托管的邮件。",
+    "selfHosted": "自托管",
     "login": "登录",
     "logout": "退出",
     "username": "用户名",

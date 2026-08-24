@@ -72,6 +72,8 @@
     "alwaysShowFromSender": "Always show remote content from {{sender}}"
   },
   "auth": {
+    "tagline": "Mail you host yourself.",
+    "selfHosted": "self-hosted",
     "login": "Log In",
     "logout": "Log Out",
     "username": "Username",
