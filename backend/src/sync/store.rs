@@ -252,7 +252,11 @@ pub(crate) async fn get_folder_id(
 /// folder role here (flagged is a smart view).
 pub(crate) fn special_use_role(attributes: &[String]) -> Option<&'static str> {
     for attr in attributes {
-        let token: String = attr.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+        let token: String = attr
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+            .to_lowercase();
         for (suffix, role) in [
             ("archive", "archive"),
             ("all", "archive"),

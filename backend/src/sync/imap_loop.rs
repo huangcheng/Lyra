@@ -69,7 +69,14 @@ pub(crate) async fn run_imap_sync(
     let mut folders_synced = 0;
 
     for folder in &folders {
-        upsert_folder(db, account_id, &folder.name, folder.delimiter.as_deref(), &folder.attributes).await?;
+        upsert_folder(
+            db,
+            account_id,
+            &folder.name,
+            folder.delimiter.as_deref(),
+            &folder.attributes,
+        )
+        .await?;
         folders_synced += 1;
     }
 

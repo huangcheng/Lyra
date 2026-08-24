@@ -569,9 +569,15 @@ mod tests {
         upsert_folder(&as_db(&pool), &account_id, "Archive", Some("/"), &[])
             .await
             .unwrap();
-        upsert_folder(&as_db(&pool), &account_id, "Archive/Projects", Some("/"), &[])
-            .await
-            .unwrap();
+        upsert_folder(
+            &as_db(&pool),
+            &account_id,
+            "Archive/Projects",
+            Some("/"),
+            &[],
+        )
+        .await
+        .unwrap();
 
         let archive_id = get_folder_id(&as_db(&pool), &account_id, "Archive")
             .await
