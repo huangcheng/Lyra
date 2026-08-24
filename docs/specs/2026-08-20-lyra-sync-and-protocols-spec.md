@@ -419,8 +419,8 @@ Status key: **done** = implemented and tested · **partial** = core path works, 
 | SPECIAL-USE folder roles (RFC 6154) | **done** | `special_use_role` (attributes win over name inference) |
 | Hierarchical folders (LIST delimiter paths) | **done** | `split_imap_folder_path`, `parent_id` |
 | UID STORE flags (`\Seen`, `\Flagged`, …) | **done** | `set_flags` / `clear_flags` |
-| UID MOVE (RFC 6851) when MOVE advertised | **partial** | MOVE implemented; verify CAPABILITY gate + COPY+EXPUNGE fallback (CHE-124) |
-| CONDSTORE / HIGHESTMODSEQ incremental sync (RFC 7162) | **gap** | CHE-124 |
+| UID MOVE (RFC 6851) when MOVE advertised | **done** | CAPABILITY gate; COPY+EXPUNGE fallback when MOVE absent |
+| CONDSTORE / HIGHESTMODSEQ incremental sync (RFC 7162) | **done** | CHANGEDSINCE fetch + `{uid}:{mod}:{modseq}` cursor |
 | IMAP IDLE push (RFC 2177) | **gap** | CHE-103 |
 | AUTH PLAIN + XOAUTH2 | **partial** | PLAIN today; XOAUTH2 via CHE-26 |
 | BODY.PEEK[] lazy fetch | **done** | On-demand in HTTP handler |
