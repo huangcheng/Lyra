@@ -123,8 +123,23 @@ impl Storage {
         } else if database_url.starts_with("postgres") || database_url.starts_with("postgresql") {
             #[cfg(feature = "postgres")]
             {
+                use sqlx::Executor as _;
+
                 let pool = sqlx::postgres::PgPoolOptions::new()
                     .max_connections(10)
+                    // Pin every session to UTC: message dates are normalized to
+                    // UTC at ingest, and `date()` bucketing (stats endpoint)
+                    // casts TIMESTAMPTZ → DATE in the session TimeZone. SQLite
+                    // stores the same instants as UTC text, so a UTC session
+                    // keeps both engines bucketing identically. Absolute
+                    // comparisons and sqlx's DateTime<Utc> decoding are
+                    // unaffected by the session zone.
+                    .after_connect(|conn, _meta| {
+                        Box::pin(async move {
+                            conn.execute("SET TIME ZONE UTC").await?;
+                            Ok(())
+                        })
+                    })
                     .connect(database_url)
                     .await?;
                 DbPool::Postgres(pool)
@@ -542,5 +557,30 @@ mod tests {
         .unwrap();
 
         assert_eq!(count, 1, "lyra_user table should exist");
+    }
+
+    #[cfg(feature = "postgres")]
+    mod postgres_live {
+        use super::*;
+
+        /// Live check: pool sessions are pinned to UTC so `date()` bucketing
+        /// matches SQLite's UTC text dates. Set
+        /// `LYRA_TEST_DATABASE_URL=postgres://…` and run
+        /// `cargo test --features postgres -- --ignored`.
+        #[tokio::test]
+        #[ignore = "needs postgres"]
+        async fn postgres_pool_sessions_use_utc_timezone() {
+            let url = std::env::var("LYRA_TEST_DATABASE_URL")
+                .expect("LYRA_TEST_DATABASE_URL=postgres://…");
+            let storage = Storage::new(&url).await.expect("connect postgres");
+            let DbPool::Postgres(pool) = storage.pool().clone() else {
+                panic!("expected postgres pool");
+            };
+            let tz: String = sqlx::query_scalar("SHOW TIME ZONE")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(tz, "UTC");
+        }
     }
 }

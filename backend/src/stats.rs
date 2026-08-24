@@ -69,6 +69,11 @@ pub(crate) fn clamp_days(days: Option<i64>) -> i64 {
 }
 
 /// GET /api/v1/messages/stats?days=14 — dashboard aggregates for the user.
+///
+/// The window is rolling: `days=14` means "now minus 14 days", not the last
+/// 14 calendar days, so the earliest daily bucket may be partial. Daily
+/// buckets are grouped by UTC date on both engines (Postgres pool sessions
+/// are pinned to `TIME ZONE UTC`; see `storage.rs`).
 pub(crate) async fn message_stats(
     State(state): State<AuthState>,
     AuthUser(user_id): AuthUser,
@@ -103,7 +108,9 @@ pub(crate) async fn query_message_stats(
 /// Per-day received counts over the window, ascending by date.
 ///
 /// CAST to TEXT keeps the date decode identical on both engines
-/// (SQLite `date()` → TEXT; Postgres `date()` → DATE → text).
+/// (SQLite `date()` → TEXT; Postgres `date()` → DATE → text). Bucketing is
+/// UTC on both: SQLite dates are UTC text, and Postgres sessions are pinned
+/// to `TIME ZONE UTC` at connect (see `storage.rs`).
 async fn query_daily(
     db: &DbPool,
     user_bind: &IdParam,
