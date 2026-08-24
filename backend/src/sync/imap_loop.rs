@@ -1,7 +1,7 @@
 //! IMAP folder fetch loop.
 
 use super::store::{
-    imap_folder_depth, AccountSyncRow, get_folder_id, load_account_sync_row, load_cursor,
+    AccountSyncRow, get_folder_id, imap_folder_depth, load_account_sync_row, load_cursor,
     outcome_from_response, persist_imap_folder_batch, upsert_folder,
 };
 use super::types::{SyncError, SyncResponse};
@@ -97,16 +97,8 @@ pub(crate) async fn run_imap_sync(
         let uids = client.search_uids(after_uid).await?;
         if uids.is_empty() {
             if uidvalidity_changed {
-                persist_imap_folder_batch(
-                    db,
-                    account_id,
-                    &folder_id,
-                    &[],
-                    uid_validity,
-                    0,
-                    true,
-                )
-                .await?;
+                persist_imap_folder_batch(db, account_id, &folder_id, &[], uid_validity, 0, true)
+                    .await?;
             }
             continue;
         }

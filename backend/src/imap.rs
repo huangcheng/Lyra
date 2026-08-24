@@ -298,8 +298,7 @@ impl ImapClient {
         }
 
         let uid_set = format_uid_set(uids);
-        let fetch_items =
-            parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[]");
+        let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[]");
 
         let stream = self
             .session
@@ -587,10 +586,7 @@ mod tests {
             parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[]"),
             "(UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[])"
         );
-        assert_eq!(
-            parenthesize_fetch_atts("(UID FLAGS)"),
-            "(UID FLAGS)"
-        );
+        assert_eq!(parenthesize_fetch_atts("(UID FLAGS)"), "(UID FLAGS)");
     }
 
     #[test]
@@ -676,7 +672,10 @@ mod tests {
             decoded.contains('档') || decoded.contains("Archive"),
             "expected decoded Chinese folder name, got: {decoded}"
         );
-        assert!(!decoded.contains("&Xi5"), "wire encoding should be decoded: {decoded}");
+        assert!(
+            !decoded.contains("&Xi5"),
+            "wire encoding should be decoded: {decoded}"
+        );
     }
 
     #[test]

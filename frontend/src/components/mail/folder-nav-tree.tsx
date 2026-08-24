@@ -63,7 +63,9 @@ function FolderTreeRow({
           aria-expanded={expanded}
           aria-label={expanded ? 'Collapse folder' : 'Expand folder'}
         >
-          <ChevronRight className={cn('h-3.5 w-3.5 transition-transform', expanded && 'rotate-90')} />
+          <ChevronRight
+            className={cn('h-3.5 w-3.5 transition-transform', expanded && 'rotate-90')}
+          />
         </button>
       ) : (
         <span className="inline-block w-5 shrink-0" style={{ marginLeft: depth * 12 }} />

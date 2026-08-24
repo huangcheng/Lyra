@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use sqlx::Row;
 use tokio::sync::Mutex;
 
-use crate::jobs::{JobPayload, enqueue};
 use crate::db_row::id_from_row;
+use crate::jobs::{JobPayload, enqueue};
 use crate::storage::DbPool;
 
 const BASE_POLL_SECS: u64 = 300;

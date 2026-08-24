@@ -228,7 +228,11 @@ pub(crate) async fn link_jmap_folder_parent(
 }
 
 /// Get the local folder ID by `external_id`.
-pub(crate) async fn get_folder_id(db: &DbPool, account_id: &str, name: &str) -> Result<String, SyncError> {
+pub(crate) async fn get_folder_id(
+    db: &DbPool,
+    account_id: &str,
+    name: &str,
+) -> Result<String, SyncError> {
     db_id_optional!(
         db,
         "SELECT id FROM folder WHERE account_id = ? AND external_id = ?",

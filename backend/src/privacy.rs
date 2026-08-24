@@ -23,9 +23,8 @@ const DEFAULT_REMOTE_IMAGES: &str = "block";
 static IMG_TAG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)<img\b([^>]*?)>").expect("img tag regex"));
 
-static SRC_ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)\bsrc\s*=\s*['"]([^'"]*)['"]"#).expect("src attr regex")
-});
+static SRC_ATTR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?is)\bsrc\s*=\s*['"]([^'"]*)['"]"#).expect("src attr regex"));
 
 /// Per-user privacy settings stored in kv.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,7 +78,10 @@ fn kv_key(user_id: &str) -> String {
     format!("user:{user_id}:privacy")
 }
 
-pub async fn load_settings(kv: &Arc<dyn KvStore>, user_id: &str) -> Result<PrivacySettings, SyncError> {
+pub async fn load_settings(
+    kv: &Arc<dyn KvStore>,
+    user_id: &str,
+) -> Result<PrivacySettings, SyncError> {
     let key = kv_key(user_id);
     let raw = kv
         .get(&key)
@@ -99,8 +101,7 @@ async fn save_settings(
 ) -> Result<(), SyncError> {
     let json = serde_json::to_string(settings)
         .map_err(|e| SyncError::Internal(format!("privacy settings encode: {e}")))?;
-    kv
-        .set(&kv_key(user_id), &json, None)
+    kv.set(&kv_key(user_id), &json, None)
         .await
         .map_err(|e| SyncError::Internal(e.to_string()))?;
     Ok(())
@@ -200,10 +201,7 @@ fn rewrite_blocked(html: &str) -> RewriteResult {
 
     out.push_str(&html[last..]);
 
-    RewriteResult {
-        html: out,
-        blocked,
-    }
+    RewriteResult { html: out, blocked }
 }
 
 fn rewrite_proxy(html: &str, signer: &crate::media::ProxySigner) -> RewriteResult {
@@ -265,7 +263,11 @@ pub fn should_allow_remote(
     }
     if let Some(email) = sender_email {
         let lower = email.to_lowercase();
-        if settings.remote_content_allowlist.iter().any(|e| e == &lower) {
+        if settings
+            .remote_content_allowlist
+            .iter()
+            .any(|e| e == &lower)
+        {
             return true;
         }
     }
@@ -274,11 +276,11 @@ pub fn should_allow_remote(
 
 pub fn routes() -> Router<AuthState> {
     Router::new()
-        .route("/api/v1/settings/privacy", get(get_privacy).patch(patch_privacy))
         .route(
-            "/api/v1/settings/privacy/allow-sender",
-            post(allow_sender),
+            "/api/v1/settings/privacy",
+            get(get_privacy).patch(patch_privacy),
         )
+        .route("/api/v1/settings/privacy/allow-sender", post(allow_sender))
         .route(
             "/api/v1/settings/privacy/allow-sender/{sender}",
             delete(remove_allow_sender),
@@ -324,7 +326,9 @@ async fn allow_sender(
 ) -> Result<Json<PrivacySettingsResponse>, SyncError> {
     let sender = body.sender.trim().to_lowercase();
     if !sender.contains('@') {
-        return Err(SyncError::InvalidInput("sender must be an email address".into()));
+        return Err(SyncError::InvalidInput(
+            "sender must be an email address".into(),
+        ));
     }
     let mut settings = load_settings(state.kv(), &user_id).await?;
     if !settings.remote_content_allowlist.contains(&sender) {

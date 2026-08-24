@@ -25,7 +25,9 @@ use crate::db_row::{
 };
 use crate::imap::{ImapClient, ImapConfig, ImapSecurity};
 use crate::kernel::AppEvent;
-use crate::privacy::{rewrite_remote_images, sender_email_from_json, should_allow_remote, load_settings};
+use crate::privacy::{
+    load_settings, rewrite_remote_images, sender_email_from_json, should_allow_remote,
+};
 use crate::sanitize::persist_body_html;
 use crate::storage::DbPool;
 
@@ -130,7 +132,10 @@ pub(crate) async fn sync_events(
 }
 
 /// True when any `sync_account` job for `user_id` is pending or running.
-pub(crate) async fn user_has_active_sync_job(db: &DbPool, user_id: &str) -> Result<bool, SyncError> {
+pub(crate) async fn user_has_active_sync_job(
+    db: &DbPool,
+    user_id: &str,
+) -> Result<bool, SyncError> {
     let rows = db_fetch_all!(
         db,
         r"
@@ -779,13 +784,7 @@ pub(crate) async fn connect_imap_for_account(
             let imap_port: Option<i32> = row.get("imap_port");
             let imap_security: Option<String> = row.get("imap_security");
             let email_address: String = row.get("email_address");
-            (
-                protocol,
-                imap_host,
-                imap_port,
-                imap_security,
-                email_address,
-            )
+            (protocol, imap_host, imap_port, imap_security, email_address)
         },
         &id_param(db, account_id)?,
         &id_param(db, user_id)?,
@@ -1148,4 +1147,3 @@ pub(crate) async fn move_message_to_role(
         "folderId": dest_id,
     })))
 }
-

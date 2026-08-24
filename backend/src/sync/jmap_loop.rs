@@ -103,14 +103,8 @@ pub(crate) async fn run_jmap_sync(
         };
 
         if ids.is_empty() {
-            persist_jmap_folder_batch(
-                db,
-                account_id,
-                &folder_id,
-                &[],
-                query_state.as_deref(),
-            )
-            .await?;
+            persist_jmap_folder_batch(db, account_id, &folder_id, &[], query_state.as_deref())
+                .await?;
             continue;
         }
 

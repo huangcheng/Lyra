@@ -21,9 +21,7 @@ use uuid::Uuid;
 
 use crate::auth::{AuthState, AuthUser};
 use crate::crypto;
-use crate::db_row::{
-    InvalidIdError, id_from_row, id_param, opt_ts_from_row, ts_from_row,
-};
+use crate::db_row::{InvalidIdError, id_from_row, id_param, opt_ts_from_row, ts_from_row};
 
 /// Routes for account management.
 pub fn routes() -> Router<AuthState> {

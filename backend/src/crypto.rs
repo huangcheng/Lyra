@@ -6,8 +6,8 @@
 //!
 //! See `docs/specs/2026-08-20-lyra-data-model-spec.md` §3.
 
-use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use hkdf::Hkdf;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -40,9 +40,7 @@ pub enum CryptoError {
     Base64(#[from] base64::DecodeError),
     #[error("master key not initialized; set LYRA_MASTER_KEY at startup")]
     MasterKeyNotInitialized,
-    #[error(
-        "no encrypted DEK stored for this user; re-add the mail account or reset the database"
-    )]
+    #[error("no encrypted DEK stored for this user; re-add the mail account or reset the database")]
     MissingDek,
     #[error("database error while loading the user DEK: {0}")]
     Storage(String),

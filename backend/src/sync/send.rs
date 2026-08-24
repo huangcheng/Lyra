@@ -1,6 +1,6 @@
 //! SMTP send helpers and the compose HTTP handler.
 
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -41,7 +41,6 @@ pub struct SendMessageResponse {
     pub status: String,
     pub message_id: String,
 }
-
 
 /// Send a message through the account's `SendPlugin` (SMTP today).
 ///
@@ -182,8 +181,7 @@ pub(crate) async fn prepare_smtp_send(
     )?
     .ok_or(SyncError::AccountNotFound)?;
 
-    let (is_active, smtp_host, smtp_port, smtp_security, email_address, user_id) =
-        row;
+    let (is_active, smtp_host, smtp_port, smtp_security, email_address, user_id) = row;
     if !is_active {
         return Err(SyncError::AccountDisabled);
     }
@@ -219,7 +217,10 @@ pub(crate) async fn prepare_smtp_send(
     Ok((config, outbound))
 }
 
-pub(crate) fn outbound_from_raw(from_email: String, raw: &str) -> Result<OutboundMessage, SyncError> {
+pub(crate) fn outbound_from_raw(
+    from_email: String,
+    raw: &str,
+) -> Result<OutboundMessage, SyncError> {
     let trimmed = raw.trim_start();
     if trimmed.starts_with('{') {
         let mut outbound: OutboundMessage = serde_json::from_str(trimmed)

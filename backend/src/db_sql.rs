@@ -257,11 +257,7 @@ fn match_jsonb_text_cast(sql: &str, i: usize) -> Option<usize> {
         || after.starts_with(",''")
         || after.starts_with(", \"\"")
         || ilike_or_like_keyword(after);
-    if needs_text {
-        Some(ident_end)
-    } else {
-        None
-    }
+    if needs_text { Some(ident_end) } else { None }
 }
 
 fn ilike_or_like_keyword(sql: &str) -> bool {
@@ -641,9 +637,7 @@ mod tests {
     #[test]
     fn casts_jsonb_coalesce_and_ilike_to_text() {
         assert_eq!(
-            to_postgres(
-                "SELECT id FROM message m WHERE IFNULL(m.from_address, '') LIKE ?"
-            ),
+            to_postgres("SELECT id FROM message m WHERE IFNULL(m.from_address, '') LIKE ?"),
             "SELECT id FROM message m WHERE COALESCE(m.from_address::text, '') ILIKE $1"
         );
         assert_eq!(

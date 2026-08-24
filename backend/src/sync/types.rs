@@ -1,6 +1,6 @@
 //! Sync API types and errors.
 
-use axum::{http::StatusCode, Json, response::IntoResponse};
+use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 
 use crate::db_row::InvalidIdError;
@@ -87,7 +87,10 @@ impl IntoResponse for SyncError {
             SyncError::Crypto(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             SyncError::Internal(msg) => {
                 tracing::error!(error = %msg, "sync request failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error".to_string(),
+                )
             }
             masked @ (SyncError::Database(_)
             | SyncError::Imap(_)

@@ -15,16 +15,16 @@ static ALLOW_LOOPBACK_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use base64::Engine;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
-use base64::Engine;
 
 use crate::auth::AuthState;
 use crate::kv::KvStore;
@@ -41,9 +41,9 @@ const PROXY_USER_AGENT: &str = "Lyra/1.0";
 
 /// 1×1 transparent GIF served on proxy errors (no oracle text).
 const PLACEHOLDER_GIF: &[u8] = &[
-    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xff, 0xff,
-    0xff, 0x00, 0x00, 0x00, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00,
-    0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xff, 0xff, 0xff,
+    0x00, 0x00, 0x00, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
 ];
 
 type HmacSha256 = Hmac<Sha256>;
@@ -66,8 +66,7 @@ pub async fn load_media_secret(kv: &Arc<dyn KvStore>, user_id: &str) -> Result<V
     let mut secret = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut secret);
     let encoded = base64_encode(&secret);
-    kv
-        .set(&key, &encoded, None)
+    kv.set(&key, &encoded, None)
         .await
         .map_err(|e| SyncError::Internal(e.to_string()))?;
     Ok(secret.to_vec())
@@ -152,8 +151,7 @@ impl ProxySigner {
 
 fn compute_sig(secret: &[u8], user_id: &str, url: &str, exp: i64) -> String {
     let payload = format!("{user_id}:{exp}:{url}");
-    let mut mac =
-        HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(payload.as_bytes());
     hex_encode(&mac.finalize().into_bytes())
 }
@@ -185,7 +183,9 @@ async fn validate_outbound_url(url: &str) -> Result<(), SyncError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|_| SyncError::InvalidInput("invalid proxy target URL".into()))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err(SyncError::InvalidInput("proxy target must be http(s)".into()));
+        return Err(SyncError::InvalidInput(
+            "proxy target must be http(s)".into(),
+        ));
     }
     let host = parsed
         .host_str()
@@ -203,7 +203,9 @@ async fn validate_outbound_url(url: &str) -> Result<(), SyncError> {
         {
             return Ok(());
         }
-        return Err(SyncError::InvalidInput("proxy target blocked by SSRF policy".into()));
+        return Err(SyncError::InvalidInput(
+            "proxy target blocked by SSRF policy".into(),
+        ));
     }
     Ok(())
 }
@@ -299,7 +301,12 @@ async fn read_cache(path: &Path) -> Option<(Vec<u8>, String)> {
     Some((bytes, content_type))
 }
 
-async fn write_cache(cache_root: &Path, url: &str, bytes: &[u8], content_type: &str) -> Result<(), SyncError> {
+async fn write_cache(
+    cache_root: &Path,
+    url: &str,
+    bytes: &[u8],
+    content_type: &str,
+) -> Result<(), SyncError> {
     let path = cache_file_path(cache_root, url);
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -363,14 +370,8 @@ async fn evict_cache_if_needed(cache_root: &Path, max_bytes: u64) -> Result<(), 
 
 fn placeholder_response() -> Response {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("image/gif"),
-    );
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/gif"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     (StatusCode::NOT_FOUND, headers, PLACEHOLDER_GIF).into_response()
 }
 
@@ -452,15 +453,15 @@ pub fn routes() -> axum::Router<AuthState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{install_test_master_key, AuthState, TEST_MASTER_KEY};
+    use crate::auth::{AuthState, TEST_MASTER_KEY, install_test_master_key};
     use crate::kernel::App;
     use crate::kv::MemoryKv;
     use crate::storage::{DbPool, Storage};
+    use axum::Router;
     use axum::body::to_bytes;
     use axum::extract::{Path as AxumPath, Query, State};
-    use axum::http::{header, StatusCode};
+    use axum::http::{StatusCode, header};
     use axum::routing::get;
-    use axum::Router;
     use std::sync::Arc;
     use tokio::sync::{Mutex, MutexGuard};
 
@@ -554,10 +555,7 @@ mod tests {
     }
 
     fn temp_data_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "lyra-media-test-{}",
-            uuid::Uuid::now_v7()
-        ));
+        let dir = std::env::temp_dir().join(format!("lyra-media-test-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -572,9 +570,7 @@ mod tests {
         let without_prefix = signed_url
             .strip_prefix("/api/v1/proxy/")
             .expect("signed URL prefix");
-        let (path, query_str) = without_prefix
-            .split_once('?')
-            .expect("signed URL query");
+        let (path, query_str) = without_prefix.split_once('?').expect("signed URL query");
         let mut exp = 0i64;
         let mut sig = String::new();
         let mut uid = String::new();
@@ -598,10 +594,7 @@ mod tests {
     async fn response_bytes(resp: Response) -> (StatusCode, Vec<u8>) {
         let status = resp.status();
         let limit = usize::try_from(MAX_UPSTREAM_BYTES).unwrap_or(usize::MAX) + 1024;
-        let body = to_bytes(resp.into_body(), limit)
-            .await
-            .unwrap()
-            .to_vec();
+        let body = to_bytes(resp.into_body(), limit).await.unwrap().to_vec();
         (status, body)
     }
 
@@ -631,10 +624,7 @@ mod tests {
                         let hits = hits.clone();
                         async move {
                             hits.fetch_add(1, Ordering::SeqCst);
-                            (
-                                [(header::CONTENT_TYPE, "image/gif")],
-                                MOCK_GIF.to_vec(),
-                            )
+                            ([(header::CONTENT_TYPE, "image/gif")], MOCK_GIF.to_vec())
                         }
                     }),
                 )
@@ -819,8 +809,7 @@ mod tests {
         let data_dir = temp_data_dir();
         let state = test_auth_state(test_pool().await, &data_dir);
         let hits = Arc::new(AtomicUsize::new(0));
-        let (base, handle) =
-            spawn_mock_upstream(hits, MockMode::RedirectChain { hops: 5 }).await;
+        let (base, handle) = spawn_mock_upstream(hits, MockMode::RedirectChain { hops: 5 }).await;
         let url = format!("{base}/r/0");
         let (path, query) = signed_proxy_parts(&state, "user-redir", &url).await;
         let (status, body) = response_bytes(call_proxy(state, path, query).await).await;
@@ -836,8 +825,7 @@ mod tests {
         let data_dir = temp_data_dir();
         let state = test_auth_state(test_pool().await, &data_dir);
         let hits = Arc::new(AtomicUsize::new(0));
-        let (base, handle) =
-            spawn_mock_upstream(hits, MockMode::RedirectChain { hops: 3 }).await;
+        let (base, handle) = spawn_mock_upstream(hits, MockMode::RedirectChain { hops: 3 }).await;
         let url = format!("{base}/r/0");
         let (path, query) = signed_proxy_parts(&state, "user-ok-redir", &url).await;
         let (status, body) = response_bytes(call_proxy(state, path, query).await).await;

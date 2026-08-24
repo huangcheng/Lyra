@@ -517,13 +517,10 @@ async fn sync_contacts(
         })));
     };
 
-    let (dek, credential_json) = crate::auth::AuthState::get_user_dek_and_credential(
-        state.db(),
-        &user_id,
-        &account_id,
-    )
-    .await
-    .map_err(|e| PimError::SyncError(e.to_string()))?;
+    let (dek, credential_json) =
+        crate::auth::AuthState::get_user_dek_and_credential(state.db(), &user_id, &account_id)
+            .await
+            .map_err(|e| PimError::SyncError(e.to_string()))?;
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 
@@ -639,13 +636,10 @@ async fn sync_calendars(
         })));
     };
 
-    let (dek, credential_json) = crate::auth::AuthState::get_user_dek_and_credential(
-        state.db(),
-        &user_id,
-        &account_id,
-    )
-    .await
-    .map_err(|e| PimError::SyncError(e.to_string()))?;
+    let (dek, credential_json) =
+        crate::auth::AuthState::get_user_dek_and_credential(state.db(), &user_id, &account_id)
+            .await
+            .map_err(|e| PimError::SyncError(e.to_string()))?;
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 

@@ -476,7 +476,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(row.0, wire, "external_id must stay wire-encoded for IMAP SELECT");
+        assert_eq!(
+            row.0, wire,
+            "external_id must stay wire-encoded for IMAP SELECT"
+        );
         assert!(
             !row.1.contains("&Xi5"),
             "display name should be decoded, got: {}",
@@ -652,7 +655,9 @@ mod tests {
         .unwrap();
         assert_eq!(row.0.as_deref(), Some("Welcome"));
         assert!(
-            row.1.as_deref().is_some_and(|f| f.contains("hello@example.com")),
+            row.1
+                .as_deref()
+                .is_some_and(|f| f.contains("hello@example.com")),
             "from_address={:?}",
             row.1
         );

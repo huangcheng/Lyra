@@ -961,7 +961,8 @@ async fn rotate_legacy_secrets(db: &DbPool, user_id: &str, dek: &[u8]) -> Result
         };
         let plaintext = Zeroizing::new(plaintext);
         let rotated = crypto::encrypt(dek, &plaintext)?;
-        let json = serde_json::to_string(&rotated).map_err(|e| CryptoError::Encrypt(e.to_string()))?;
+        let json =
+            serde_json::to_string(&rotated).map_err(|e| CryptoError::Encrypt(e.to_string()))?;
         update_account_credential(db, &account_id, &json).await?;
     }
     rotate_legacy_totp_secret(db, user_id, dek, master).await?;
@@ -2027,12 +2028,11 @@ mod tests {
             .unwrap();
         assert_eq!(dek2, dek);
 
-        let stored: String = sqlx::query_scalar(
-            "SELECT encrypted_dek FROM lyra_user WHERE id = 'user-legacy'",
-        )
-        .fetch_one(sqlite_pool(&db))
-        .await
-        .unwrap();
+        let stored: String =
+            sqlx::query_scalar("SELECT encrypted_dek FROM lyra_user WHERE id = 'user-legacy'")
+                .fetch_one(sqlite_pool(&db))
+                .await
+                .unwrap();
         assert!(!stored.is_empty());
 
         let blob: crypto::EncryptedCredential = serde_json::from_str(&reloaded).unwrap();
