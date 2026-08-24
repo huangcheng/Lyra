@@ -93,7 +93,7 @@ export function LoginForm({
 
   return (
     <div className={cn('flex flex-col', className)} {...props}>
-      <div className="w-[380px] rounded-xl border border-border bg-card px-9 pb-8 pt-10">
+      <div className="w-full max-w-[380px] rounded-xl border border-border bg-card px-9 pb-8 pt-10">
         <div className="flex items-center justify-center gap-3">
           <StampLogo size={40} className="rounded-[9px]" />
           <span className="font-brand text-[28px]">Lyra</span>
@@ -254,7 +254,7 @@ export function LoginForm({
           <button
             type="button"
             className={cn(
-              'text-xs',
+              'rounded px-1 py-0.5 text-xs hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none',
               locale === 'en' ? 'font-medium text-foreground' : 'text-ter-foreground',
             )}
             onClick={() => setLocale('en')}
@@ -264,7 +264,7 @@ export function LoginForm({
           <button
             type="button"
             className={cn(
-              'text-xs',
+              'rounded px-1 py-0.5 text-xs hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none',
               locale === 'zh' ? 'font-medium text-foreground' : 'text-ter-foreground',
             )}
             onClick={() => setLocale('zh')}
