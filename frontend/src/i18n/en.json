@@ -125,6 +125,32 @@
   },
   "settings": {
     "title": "Settings",
+    "section": "Settings",
+    "general": "General",
+    "generalSubtitle": "Language, appearance, reading, and security",
+    "accountsNav": "Accounts",
+    "accountsSubtitle": "Connected mail accounts and sync",
+    "privacySubtitle": "Remote content, tracking, and your data",
+    "manage": "Manage",
+    "spam": {
+      "title": "Spam & Filters",
+      "subtitle": "Filtering, sensitivity, and blocked senders",
+      "filtering": "Filtering",
+      "enable": "Enable spam filtering",
+      "enableDesc": "Move likely spam out of your inbox automatically.",
+      "learn": "Learn from your actions",
+      "learnDesc": "Improve filtering when you mark mail as spam or not spam.",
+      "autoDelete": "Auto-delete after 30 days",
+      "autoDeleteDesc": "Permanently remove spam older than 30 days.",
+      "sensitivity": "Sensitivity",
+      "sensitivityDesc": "How aggressively Lyra flags suspected spam.",
+      "lenient": "Lenient",
+      "standard": "Standard",
+      "strict": "Strict",
+      "blocked": "Blocked senders",
+      "blockedDesc": "Mail from these addresses always goes to spam.",
+      "addSender": "Add an email address"
+    },
     "language": "Language",
     "english": "English",
     "chinese": "中文",
@@ -149,6 +175,16 @@
       "title": "Privacy",
       "remoteImages": "Remote images in email",
       "remoteImagesHint": "Controls how HTML mail loads images from the internet.",
+      "trackingTitle": "Tracking protection",
+      "stripPixels": "Strip tracking pixels",
+      "stripPixelsDesc": "Remove invisible images senders use to track opens.",
+      "warnLinks": "Warn on rewritten links",
+      "warnLinksDesc": "Show the real destination when a link was rewritten by a tracker.",
+      "dataTitle": "Your data",
+      "exportData": "Export",
+      "exportDataDesc": "Download a copy of your messages and settings.",
+      "deleteData": "Delete…",
+      "deleteDataDesc": "Remove your accounts and all synced data from this server.",
       "remoteImagesMode": {
         "block": "Block by default",
         "proxy": "Load via Lyra proxy"
@@ -253,6 +289,7 @@
     "edit": "Edit",
     "delete": "Delete",
     "add": "Add",
-    "search": "Search"
+    "search": "Search",
+    "soon": "Soon"
   }
 }

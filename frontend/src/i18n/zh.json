@@ -125,6 +125,32 @@
   },
   "settings": {
     "title": "设置",
+    "section": "设置",
+    "general": "通用",
+    "generalSubtitle": "语言、外观、阅读与安全",
+    "accountsNav": "账户",
+    "accountsSubtitle": "已连接的邮箱账户与同步",
+    "privacySubtitle": "远程内容、跟踪防护与您的数据",
+    "manage": "管理",
+    "spam": {
+      "title": "垃圾邮件与过滤",
+      "subtitle": "过滤、敏感度与黑名单发件人",
+      "filtering": "过滤",
+      "enable": "启用垃圾邮件过滤",
+      "enableDesc": "自动将疑似垃圾邮件移出收件箱。",
+      "learn": "从您的操作中学习",
+      "learnDesc": "当您标记垃圾邮件或非垃圾邮件时改进过滤效果。",
+      "autoDelete": "30 天后自动删除",
+      "autoDeleteDesc": "永久删除超过 30 天的垃圾邮件。",
+      "sensitivity": "敏感度",
+      "sensitivityDesc": "Lyra 标记疑似垃圾邮件的严格程度。",
+      "lenient": "宽松",
+      "standard": "标准",
+      "strict": "严格",
+      "blocked": "黑名单发件人",
+      "blockedDesc": "来自这些地址的邮件将始终进入垃圾邮件。",
+      "addSender": "添加邮箱地址"
+    },
     "language": "语言",
     "english": "English",
     "chinese": "中文",
@@ -149,6 +175,16 @@
       "title": "隐私",
       "remoteImages": "邮件中的远程图片",
       "remoteImagesHint": "控制 HTML 邮件如何加载互联网上的图片。",
+      "trackingTitle": "跟踪防护",
+      "stripPixels": "移除跟踪像素",
+      "stripPixelsDesc": "移除发件人用于跟踪打开行为的隐形图片。",
+      "warnLinks": "重写链接提醒",
+      "warnLinksDesc": "当链接被跟踪器重写时，显示真实的目标地址。",
+      "dataTitle": "您的数据",
+      "exportData": "导出",
+      "exportDataDesc": "下载您的邮件与设置副本。",
+      "deleteData": "删除…",
+      "deleteDataDesc": "从此服务器移除您的账户及所有已同步数据。",
       "remoteImagesMode": {
         "block": "默认阻止",
         "proxy": "通过 Lyra 代理加载"
@@ -253,6 +289,7 @@
     "edit": "编辑",
     "delete": "删除",
     "add": "添加",
-    "search": "搜索"
+    "search": "搜索",
+    "soon": "即将推出"
   }
 }

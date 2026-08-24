@@ -1,13 +1,15 @@
 /**
  * Settings page with account management.
  *
- * Provides CRUD operations for mail accounts with i18n support.
+ * Standalone slim-nav shell; sections: General, Accounts, Spam & Filters,
+ * Privacy. Provides CRUD operations for mail accounts with i18n support.
  */
 
 import { useState, useEffect } from 'react';
 import { useNavigate } from '@tanstack/react-router';
+import { Flag, Plus, Shield, SlidersHorizontal, Users, X } from 'lucide-react';
 import { t } from '../i18n';
-import { SecondaryPage } from './secondary-page';
+import { SlimPageNav, type SlimNavItem } from '@/components/slim-page-nav';
 import { TotpEnroll } from './totp-enroll';
 import { useUIStore } from '../stores/ui';
 import { useAuthStore } from '../stores/auth';
@@ -22,6 +24,8 @@ import {
 } from '@/lib/privacy-api';
 import { syncEvents$ } from '@/rxjs/sync-events';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
 import {
   Select,
   SelectContent,
@@ -33,6 +37,8 @@ import type { MarkReadPolicy } from '@/types';
 
 const REMOTE_IMAGE_MODES = ['block', 'proxy'] as const;
 type RemoteImageMode = (typeof REMOTE_IMAGE_MODES)[number];
+
+type SettingsSection = 'general' | 'accounts' | 'spam' | 'privacy';
 
 interface MailAccount {
   id: string;
@@ -64,6 +70,9 @@ interface ProbeResult {
   smtpSecurity?: string;
 }
 
+const SPAM_SENSITIVITY = ['lenient', 'standard', 'strict'] as const;
+const EXAMPLE_BLOCKED_SENDERS = ['newsletter@example.com', 'promo@example.net'];
+
 export function SettingsPage() {
   const locale = useUIStore((s) => s.locale);
   const setLocale = useUIStore((s) => s.setLocale);
@@ -73,6 +82,7 @@ export function SettingsPage() {
   const token = useAuthStore((s) => s.token);
   const clearSession = useAuthStore((s) => s.clearSession);
   const navigate = useNavigate();
+  const [section, setSection] = useState<SettingsSection>('general');
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -390,322 +400,589 @@ export function SettingsPage() {
 
   const remoteImagesMode = privacySettings?.remoteImages ?? 'block';
 
+  const navItems: SlimNavItem[] = [
+    {
+      key: 'general',
+      label: t(locale, 'settings.general'),
+      icon: SlidersHorizontal,
+      active: section === 'general',
+      onClick: () => setSection('general'),
+    },
+    {
+      key: 'accounts',
+      label: t(locale, 'settings.accountsNav'),
+      icon: Users,
+      active: section === 'accounts',
+      onClick: () => setSection('accounts'),
+    },
+    {
+      key: 'spam',
+      label: t(locale, 'settings.spam.title'),
+      icon: Flag,
+      active: section === 'spam',
+      onClick: () => setSection('spam'),
+    },
+    {
+      key: 'privacy',
+      label: t(locale, 'settings.privacy.title'),
+      icon: Shield,
+      active: section === 'privacy',
+      onClick: () => setSection('privacy'),
+    },
+  ];
+
+  const sectionMeta: Record<SettingsSection, { title: string; subtitle: string }> = {
+    general: {
+      title: t(locale, 'settings.general'),
+      subtitle: t(locale, 'settings.generalSubtitle'),
+    },
+    accounts: {
+      title: t(locale, 'settings.accounts.title'),
+      subtitle: t(locale, 'settings.accountsSubtitle'),
+    },
+    spam: {
+      title: t(locale, 'settings.spam.title'),
+      subtitle: t(locale, 'settings.spam.subtitle'),
+    },
+    privacy: {
+      title: t(locale, 'settings.privacy.title'),
+      subtitle: t(locale, 'settings.privacySubtitle'),
+    },
+  };
+
+  const soonBadge = (
+    <Badge variant="outline" className="text-[10.5px] font-normal text-ter-foreground">
+      {t(locale, 'common.soon')}
+    </Badge>
+  );
+
   return (
-    <SecondaryPage title={t(locale, 'settings.title')}>
-      <div className="mx-auto max-w-2xl space-y-6">
-        <section className="space-y-4 rounded-lg border p-4">
-          <h2 className="text-base font-semibold">{t(locale, 'settings.session')}</h2>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant={locale === 'en' ? 'secondary' : 'outline'}
-              size="sm"
-              onClick={() => void saveLocale('en').catch(() => setLocale('en'))}
-            >
-              {t(locale, 'settings.english')}
-            </Button>
-            <Button
-              variant={locale === 'zh' ? 'secondary' : 'outline'}
-              size="sm"
-              onClick={() => void saveLocale('zh').catch(() => setLocale('zh'))}
-            >
-              {t(locale, 'settings.chinese')}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-auto"
-              onClick={() => {
-                if (token) {
-                  void api('/auth/logout', { method: 'POST' }).catch(() => {});
-                }
-                localStorage.removeItem('lyra_token');
-                clearSession();
-                void navigate({ to: '/login' });
-              }}
-            >
-              {t(locale, 'auth.logout')}
-            </Button>
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <span className="text-sm text-muted-foreground">{t(locale, 'settings.theme')}</span>
-            <Select value={theme} onValueChange={(v) => setTheme(v as ThemeMode)}>
-              <SelectTrigger size="sm" className="min-w-[140px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {(['light', 'dark', 'system'] as const).map((mode) => (
-                  <SelectItem key={mode} value={mode}>
-                    {t(locale, `settings.themeMode.${mode}`)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </section>
+    <div className="flex h-svh">
+      <SlimPageNav section={t(locale, 'settings.section')} items={navItems} />
+      <main className="flex-1 overflow-auto bg-background">
+        <header className="border-b border-border px-8 pb-5 pt-7">
+          <h1 className="font-display text-xl font-medium">{sectionMeta[section].title}</h1>
+          <p className="text-[12.5px] text-ter-foreground">{sectionMeta[section].subtitle}</p>
+        </header>
 
-        <section className="space-y-4 rounded-lg border p-4">
-          <h2 className="text-base font-semibold">{t(locale, 'settings.preferences.title')}</h2>
-          <div className="space-y-2">
-            <h3 className="text-sm font-medium">
-              {t(locale, 'settings.preferences.readingStatus')}
-            </h3>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <span className="text-sm text-muted-foreground">
-                {t(locale, 'settings.preferences.markRead')}
-              </span>
-              <Select
-                value={markReadPolicy}
-                onValueChange={(value) => void handleMarkReadPolicyChange(value)}
-                disabled={prefsSaving}
-              >
-                <SelectTrigger size="sm" className="min-w-[200px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {MARK_READ_POLICIES.map((policy) => (
-                    <SelectItem key={policy} value={policy}>
-                      {t(locale, `settings.preferences.markReadPolicy.${policy}`)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {prefsError ? <div className="text-sm text-destructive">{prefsError}</div> : null}
-          </div>
-        </section>
-
-        <section className="space-y-4 rounded-lg border p-4">
-          <h2 className="text-base font-semibold">{t(locale, 'settings.privacy.title')}</h2>
-          <p className="text-sm text-muted-foreground">
-            {t(locale, 'settings.privacy.remoteImagesHint')}
-          </p>
-          <div className="space-y-2">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <span className="text-sm text-muted-foreground">
-                {t(locale, 'settings.privacy.remoteImages')}
-              </span>
-              <Select
-                value={remoteImagesMode}
-                onValueChange={(value) => void handleRemoteImagesModeChange(value)}
-                disabled={privacySaving || !privacySettings}
-              >
-                <SelectTrigger size="sm" className="min-w-[200px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {REMOTE_IMAGE_MODES.map((mode) => (
-                    <SelectItem key={mode} value={mode}>
-                      {t(locale, `settings.privacy.remoteImagesMode.${mode}`)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {t(locale, `settings.privacy.remoteImagesModeHelp.${remoteImagesMode}`)}
-            </p>
-            {privacyError ? <div className="text-sm text-destructive">{privacyError}</div> : null}
-          </div>
-        </section>
-
-        <section className="space-y-4 rounded-lg border p-4">
-          <h2 className="text-base font-semibold">{t(locale, 'settings.security.title')}</h2>
-          {securityError && <div className="text-sm text-destructive">{securityError}</div>}
-          {securityMessage && (
-            <div className="text-sm text-muted-foreground" role="status">
-              {securityMessage}
-            </div>
-          )}
-          <form onSubmit={handleChangePassword} className="space-y-3">
-            <h3 className="text-sm font-medium">
-              {t(locale, 'settings.security.changePasswordTitle')}
-            </h3>
-            <div className="space-y-2">
-              <label className="text-sm" htmlFor="settings-current-password">
-                {t(locale, 'settings.security.currentPassword')}
-              </label>
-              <input
-                id="settings-current-password"
-                type="password"
-                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm" htmlFor="settings-new-password">
-                {t(locale, 'settings.security.newPassword')}
-              </label>
-              <input
-                id="settings-new-password"
-                type="password"
-                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                autoComplete="new-password"
-                required
-              />
-            </div>
-            <Button type="submit" variant="outline" size="sm" disabled={changingPassword}>
-              {changingPassword
-                ? t(locale, 'common.loading')
-                : t(locale, 'settings.security.changePassword')}
-            </Button>
-          </form>
-          {totpEnabled && (
-            <form onSubmit={handleDisableTotp} className="space-y-3 border-t pt-4">
-              <h3 className="text-sm font-medium">
-                {t(locale, 'settings.security.disableTotpTitle')}
-              </h3>
-              <p className="text-sm text-muted-foreground">
-                {t(locale, 'settings.security.disableTotpDescription')}
-              </p>
-              <div className="space-y-2">
-                <label className="text-sm" htmlFor="settings-totp-password">
-                  {t(locale, 'auth.password')}
-                </label>
-                <input
-                  id="settings-totp-password"
-                  type="password"
-                  className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-                  value={totpPassword}
-                  onChange={(e) => setTotpPassword(e.target.value)}
-                  autoComplete="current-password"
-                  required
-                />
-              </div>
-              <Button type="submit" variant="outline" size="sm" disabled={disablingTotp}>
-                {disablingTotp
-                  ? t(locale, 'common.loading')
-                  : t(locale, 'settings.security.disableTotp')}
-              </Button>
-            </form>
-          )}
-          {!totpEnabled && (
-            <div className="space-y-3 border-t pt-4">
-              {enrollingTotp ? (
-                <TotpEnroll
-                  onComplete={() => {
-                    setEnrollingTotp(false);
-                    setTotpEnabled(true);
-                    const user = useAuthStore.getState().user;
-                    if (user) {
-                      useAuthStore.getState().setUser({ ...user, totpEnabled: true });
-                    }
-                    setSecurityMessage(t(locale, 'auth.totpEnabled'));
-                  }}
-                  onCancel={() => setEnrollingTotp(false)}
-                />
-              ) : (
-                <>
-                  <h3 className="text-sm font-medium">
-                    {t(locale, 'settings.security.enableTotpTitle')}
-                  </h3>
-                  <p className="text-sm text-muted-foreground">
-                    {t(locale, 'settings.security.enableTotpDescription')}
-                  </p>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setSecurityError(null);
-                      setSecurityMessage(null);
-                      setEnrollingTotp(true);
-                    }}
-                  >
-                    {t(locale, 'settings.security.enableTotp')}
-                  </Button>
-                </>
-              )}
-            </div>
-          )}
-        </section>
-
-        <section className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold">{t(locale, 'settings.accounts.title')}</h2>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                resetForm();
-                setEditingAccount(null);
-                setShowAddForm(true);
-              }}
-            >
-              {t(locale, 'settings.accounts.add')}
-            </Button>
-          </div>
-
-          {error && <div className="text-sm text-destructive">{error}</div>}
-          {syncMessage && (
-            <div className="text-sm text-muted-foreground" role="status">
-              {syncMessage}
-            </div>
-          )}
-
-          {loading ? (
-            <div>{t(locale, 'common.loading')}</div>
-          ) : accounts.length === 0 ? (
-            <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-              {t(locale, 'settings.accounts.empty')}
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {accounts.map((account) => (
-                <div
-                  key={account.id}
-                  className="flex items-center justify-between rounded-lg border p-4"
-                >
+        <div className="max-w-2xl space-y-4 px-8 py-6">
+          {section === 'general' && (
+            <>
+              <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <h3 className="font-medium">{account.displayName}</h3>
-                    <p className="text-sm text-muted-foreground">{account.emailAddress}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {account.protocol.toUpperCase()}
-                      {account.imapHost && ` • ${account.imapHost}`}
-                    </p>
-                    {account.lastSyncAt && (
-                      <p className="text-xs text-muted-foreground">
-                        {t(locale, 'sync.lastSync')}: {formatLastSync(account.lastSyncAt)}
-                      </p>
-                    )}
-                    {syncErrors[account.id] && (
-                      <p className="text-xs text-destructive">
-                        {t(locale, 'sync.syncFailed')}: {syncErrors[account.id]}
-                      </p>
-                    )}
+                    <div className="text-[13px] font-medium">{t(locale, 'settings.language')}</div>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex items-center gap-2">
                     <Button
-                      variant="outline"
+                      variant={locale === 'en' ? 'secondary' : 'outline'}
                       size="sm"
-                      disabled={syncingId === account.id}
-                      onClick={() => void handleSync(account.id)}
+                      onClick={() => void saveLocale('en').catch(() => setLocale('en'))}
                     >
-                      {syncingId === account.id
-                        ? t(locale, 'sync.syncing')
-                        : t(locale, 'settings.syncNow')}
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => handleEdit(account)}>
-                      {t(locale, 'common.edit')}
+                      {t(locale, 'settings.english')}
                     </Button>
                     <Button
-                      variant="outline"
+                      variant={locale === 'zh' ? 'secondary' : 'outline'}
                       size="sm"
-                      className="text-destructive"
-                      onClick={() => handleDelete(account.id)}
+                      onClick={() => void saveLocale('zh').catch(() => setLocale('zh'))}
                     >
-                      {t(locale, 'common.delete')}
+                      {t(locale, 'settings.chinese')}
                     </Button>
                   </div>
                 </div>
-              ))}
-            </div>
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
+                  <div className="text-[13px] font-medium">{t(locale, 'settings.theme')}</div>
+                  <Select value={theme} onValueChange={(v) => setTheme(v as ThemeMode)}>
+                    <SelectTrigger size="sm" className="min-w-[140px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(['light', 'dark', 'system'] as const).map((mode) => (
+                        <SelectItem key={mode} value={mode}>
+                          {t(locale, `settings.themeMode.${mode}`)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </section>
+
+              <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[13px] font-medium">
+                      {t(locale, 'settings.preferences.markRead')}
+                    </div>
+                    <div className="text-xs text-ter-foreground">
+                      {t(locale, 'settings.preferences.readingStatus')}
+                    </div>
+                  </div>
+                  <Select
+                    value={markReadPolicy}
+                    onValueChange={(value) => void handleMarkReadPolicyChange(value)}
+                    disabled={prefsSaving}
+                  >
+                    <SelectTrigger size="sm" className="min-w-[200px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {MARK_READ_POLICIES.map((policy) => (
+                        <SelectItem key={policy} value={policy}>
+                          {t(locale, `settings.preferences.markReadPolicy.${policy}`)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {prefsError ? <div className="text-sm text-destructive">{prefsError}</div> : null}
+              </section>
+
+              <section className="space-y-4 rounded-[10px] border border-border bg-card px-5 py-4">
+                <h2 className="text-[13px] font-medium">{t(locale, 'settings.security.title')}</h2>
+                {securityError && <div className="text-sm text-destructive">{securityError}</div>}
+                {securityMessage && (
+                  <div className="text-sm text-muted-foreground" role="status">
+                    {securityMessage}
+                  </div>
+                )}
+                <form onSubmit={handleChangePassword} className="space-y-3">
+                  <h3 className="text-[13px] font-medium">
+                    {t(locale, 'settings.security.changePasswordTitle')}
+                  </h3>
+                  <div className="space-y-2">
+                    <label className="text-sm" htmlFor="settings-current-password">
+                      {t(locale, 'settings.security.currentPassword')}
+                    </label>
+                    <input
+                      id="settings-current-password"
+                      type="password"
+                      className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      autoComplete="current-password"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm" htmlFor="settings-new-password">
+                      {t(locale, 'settings.security.newPassword')}
+                    </label>
+                    <input
+                      id="settings-new-password"
+                      type="password"
+                      className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      autoComplete="new-password"
+                      required
+                    />
+                  </div>
+                  <Button type="submit" variant="outline" size="sm" disabled={changingPassword}>
+                    {changingPassword
+                      ? t(locale, 'common.loading')
+                      : t(locale, 'settings.security.changePassword')}
+                  </Button>
+                </form>
+                {totpEnabled && (
+                  <form onSubmit={handleDisableTotp} className="space-y-3 border-t pt-4">
+                    <h3 className="text-[13px] font-medium">
+                      {t(locale, 'settings.security.disableTotpTitle')}
+                    </h3>
+                    <p className="text-xs text-ter-foreground">
+                      {t(locale, 'settings.security.disableTotpDescription')}
+                    </p>
+                    <div className="space-y-2">
+                      <label className="text-sm" htmlFor="settings-totp-password">
+                        {t(locale, 'auth.password')}
+                      </label>
+                      <input
+                        id="settings-totp-password"
+                        type="password"
+                        className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                        value={totpPassword}
+                        onChange={(e) => setTotpPassword(e.target.value)}
+                        autoComplete="current-password"
+                        required
+                      />
+                    </div>
+                    <Button type="submit" variant="outline" size="sm" disabled={disablingTotp}>
+                      {disablingTotp
+                        ? t(locale, 'common.loading')
+                        : t(locale, 'settings.security.disableTotp')}
+                    </Button>
+                  </form>
+                )}
+                {!totpEnabled && (
+                  <div className="space-y-3 border-t pt-4">
+                    {enrollingTotp ? (
+                      <TotpEnroll
+                        onComplete={() => {
+                          setEnrollingTotp(false);
+                          setTotpEnabled(true);
+                          const user = useAuthStore.getState().user;
+                          if (user) {
+                            useAuthStore.getState().setUser({ ...user, totpEnabled: true });
+                          }
+                          setSecurityMessage(t(locale, 'auth.totpEnabled'));
+                        }}
+                        onCancel={() => setEnrollingTotp(false)}
+                      />
+                    ) : (
+                      <>
+                        <h3 className="text-[13px] font-medium">
+                          {t(locale, 'settings.security.enableTotpTitle')}
+                        </h3>
+                        <p className="text-xs text-ter-foreground">
+                          {t(locale, 'settings.security.enableTotpDescription')}
+                        </p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            setSecurityError(null);
+                            setSecurityMessage(null);
+                            setEnrollingTotp(true);
+                          }}
+                        >
+                          {t(locale, 'settings.security.enableTotp')}
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </section>
+
+              <section className="flex items-center justify-between rounded-[10px] border border-border bg-card px-5 py-4">
+                <div className="text-[13px] font-medium">{t(locale, 'settings.session')}</div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    if (token) {
+                      void api('/auth/logout', { method: 'POST' }).catch(() => {});
+                    }
+                    localStorage.removeItem('lyra_token');
+                    clearSession();
+                    void navigate({ to: '/login' });
+                  }}
+                >
+                  {t(locale, 'auth.logout')}
+                </Button>
+              </section>
+            </>
           )}
-        </section>
+
+          {section === 'accounts' && (
+            <>
+              {error && <div className="text-sm text-destructive">{error}</div>}
+              {syncMessage && (
+                <div className="text-sm text-muted-foreground" role="status">
+                  {syncMessage}
+                </div>
+              )}
+
+              {loading ? (
+                <div className="text-sm text-muted-foreground">{t(locale, 'common.loading')}</div>
+              ) : (
+                <>
+                  {accounts.map((account) => (
+                    <div
+                      key={account.id}
+                      className="flex items-center gap-3.5 rounded-[10px] border border-border bg-card px-5 py-4"
+                    >
+                      <div className="flex size-9 shrink-0 items-center justify-center rounded-[9px] bg-muted">
+                        <span className="font-brand text-[15px] text-foreground">
+                          {(account.displayName || account.emailAddress).charAt(0).toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[13.5px] font-medium">
+                          {account.emailAddress}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px] text-muted-foreground">
+                          <span className="size-1.5 rounded-full bg-ok" />
+                          {account.lastSyncAt && (
+                            <span>
+                              {t(locale, 'sync.lastSync')}: {formatLastSync(account.lastSyncAt)}
+                            </span>
+                          )}
+                          <span>{account.protocol.toUpperCase()}</span>
+                          {account.displayName && account.displayName !== account.emailAddress && (
+                            <span>{account.displayName}</span>
+                          )}
+                        </div>
+                        {syncErrors[account.id] && (
+                          <p className="text-xs text-destructive">
+                            {t(locale, 'sync.syncFailed')}: {syncErrors[account.id]}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={syncingId === account.id}
+                          onClick={() => void handleSync(account.id)}
+                        >
+                          {syncingId === account.id
+                            ? t(locale, 'sync.syncing')
+                            : t(locale, 'settings.syncNow')}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="rounded-full"
+                          onClick={() => handleEdit(account)}
+                        >
+                          {t(locale, 'settings.manage')}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-destructive"
+                          onClick={() => handleDelete(account.id)}
+                        >
+                          {t(locale, 'common.delete')}
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+
+                  <button
+                    type="button"
+                    className="flex w-full flex-col items-center justify-center gap-1.5 rounded-[10px] border border-input bg-secondary px-5 py-6 text-[13px] font-medium text-foreground hover:bg-accent"
+                    onClick={() => {
+                      resetForm();
+                      setEditingAccount(null);
+                      setShowAddForm(true);
+                    }}
+                  >
+                    <Plus size={18} className="text-ter-foreground" />
+                    {t(locale, 'settings.accounts.add')}
+                  </button>
+                  {accounts.length === 0 && (
+                    <p className="text-center text-xs text-ter-foreground">
+                      {t(locale, 'settings.accounts.empty')}
+                    </p>
+                  )}
+                </>
+              )}
+            </>
+          )}
+
+          {section === 'spam' && (
+            <>
+              <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-[13px] font-medium">
+                    {t(locale, 'settings.spam.filtering')}
+                  </h2>
+                  {soonBadge}
+                </div>
+                {(
+                  [
+                    ['enable', 'enableDesc'],
+                    ['learn', 'learnDesc'],
+                    ['autoDelete', 'autoDeleteDesc'],
+                  ] as const
+                ).map(([key, descKey], i) => (
+                  <div
+                    key={key}
+                    className={
+                      i > 0
+                        ? 'flex items-center justify-between gap-3 border-t border-border pt-3'
+                        : 'flex items-center justify-between gap-3'
+                    }
+                  >
+                    <div>
+                      <div className="text-[13px] font-medium">
+                        {t(locale, `settings.spam.${key}`)}
+                      </div>
+                      <div className="text-xs text-ter-foreground">
+                        {t(locale, `settings.spam.${descKey}`)}
+                      </div>
+                    </div>
+                    <Switch disabled />
+                  </div>
+                ))}
+              </section>
+
+              <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-[13px] font-medium">
+                    {t(locale, 'settings.spam.sensitivity')}
+                  </h2>
+                  {soonBadge}
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-xs text-ter-foreground">
+                    {t(locale, 'settings.spam.sensitivityDesc')}
+                  </div>
+                  <div className="flex h-8 items-center rounded-lg bg-accent p-0.5 text-muted-foreground">
+                    {SPAM_SENSITIVITY.map((level, i) => (
+                      <button
+                        key={level}
+                        type="button"
+                        disabled
+                        className={
+                          i === 1
+                            ? 'h-7 rounded-md bg-card px-3 text-sm font-medium text-foreground'
+                            : 'h-7 rounded-md px-3 text-sm font-medium'
+                        }
+                      >
+                        {t(locale, `settings.spam.${level}`)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </section>
+
+              <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-[13px] font-medium">{t(locale, 'settings.spam.blocked')}</h2>
+                  {soonBadge}
+                </div>
+                <p className="text-xs text-ter-foreground">
+                  {t(locale, 'settings.spam.blockedDesc')}
+                </p>
+                {EXAMPLE_BLOCKED_SENDERS.map((sender) => (
+                  <div
+                    key={sender}
+                    className="flex items-center justify-between gap-3 border-t border-border pt-3"
+                  >
+                    <span className="text-[13px] text-muted-foreground">{sender}</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled
+                      aria-label={t(locale, 'common.delete')}
+                    >
+                      <X size={14} />
+                    </Button>
+                  </div>
+                ))}
+                <div className="flex items-center gap-2 border-t border-border pt-3">
+                  <input
+                    type="email"
+                    disabled
+                    placeholder={t(locale, 'settings.spam.addSender')}
+                    className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                  />
+                  <Button variant="outline" size="sm" disabled>
+                    {t(locale, 'common.add')}
+                  </Button>
+                </div>
+              </section>
+            </>
+          )}
+
+          {section === 'privacy' && (
+            <>
+              <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
+                <h2 className="text-[13px] font-medium">
+                  {t(locale, 'settings.privacy.remoteImages')}
+                </h2>
+                <p className="text-xs text-ter-foreground">
+                  {t(locale, 'settings.privacy.remoteImagesHint')}
+                </p>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span className="text-xs text-ter-foreground">
+                    {t(locale, `settings.privacy.remoteImagesModeHelp.${remoteImagesMode}`)}
+                  </span>
+                  <Select
+                    value={remoteImagesMode}
+                    onValueChange={(value) => void handleRemoteImagesModeChange(value)}
+                    disabled={privacySaving || !privacySettings}
+                  >
+                    <SelectTrigger size="sm" className="min-w-[200px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {REMOTE_IMAGE_MODES.map((mode) => (
+                        <SelectItem key={mode} value={mode}>
+                          {t(locale, `settings.privacy.remoteImagesMode.${mode}`)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {privacyError ? (
+                  <div className="text-sm text-destructive">{privacyError}</div>
+                ) : null}
+              </section>
+
+              <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-[13px] font-medium">
+                    {t(locale, 'settings.privacy.trackingTitle')}
+                  </h2>
+                  {soonBadge}
+                </div>
+                {(
+                  [
+                    ['stripPixels', 'stripPixelsDesc'],
+                    ['warnLinks', 'warnLinksDesc'],
+                  ] as const
+                ).map(([key, descKey], i) => (
+                  <div
+                    key={key}
+                    className={
+                      i > 0
+                        ? 'flex items-center justify-between gap-3 border-t border-border pt-3'
+                        : 'flex items-center justify-between gap-3'
+                    }
+                  >
+                    <div>
+                      <div className="text-[13px] font-medium">
+                        {t(locale, `settings.privacy.${key}`)}
+                      </div>
+                      <div className="text-xs text-ter-foreground">
+                        {t(locale, `settings.privacy.${descKey}`)}
+                      </div>
+                    </div>
+                    <Switch disabled />
+                  </div>
+                ))}
+              </section>
+
+              <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-[13px] font-medium">
+                    {t(locale, 'settings.privacy.dataTitle')}
+                  </h2>
+                  {soonBadge}
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[13px] font-medium">
+                      {t(locale, 'settings.privacy.exportData')}
+                    </div>
+                    <div className="text-xs text-ter-foreground">
+                      {t(locale, 'settings.privacy.exportDataDesc')}
+                    </div>
+                  </div>
+                  <Button variant="outline" size="sm" disabled>
+                    {t(locale, 'settings.privacy.exportData')}
+                  </Button>
+                </div>
+                <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+                  <div>
+                    <div className="text-[13px] font-medium text-destructive">
+                      {t(locale, 'settings.privacy.deleteData')}
+                    </div>
+                    <div className="text-xs text-ter-foreground">
+                      {t(locale, 'settings.privacy.deleteDataDesc')}
+                    </div>
+                  </div>
+                  <Button variant="outline" size="sm" disabled className="text-destructive">
+                    {t(locale, 'settings.privacy.deleteData')}
+                  </Button>
+                </div>
+              </section>
+            </>
+          )}
+        </div>
 
         {showAddForm && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -891,7 +1168,7 @@ export function SettingsPage() {
             </div>
           </div>
         )}
-      </div>
-    </SecondaryPage>
+      </main>
+    </div>
   );
 }
