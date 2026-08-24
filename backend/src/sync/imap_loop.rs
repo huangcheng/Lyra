@@ -1,5 +1,7 @@
 //! IMAP folder fetch loop.
 
+use std::collections::HashSet;
+
 use super::store::{
     AccountSyncRow, get_folder_id, imap_folder_depth, load_account_sync_row, load_cursor,
     outcome_from_response, persist_imap_folder_batch, upsert_folder,
@@ -27,7 +29,7 @@ pub(crate) async fn imap_sync_account(
 /// Run an IMAP-based sync for an account.
 ///
 /// Connects to the IMAP server, lists folders, and syncs messages
-/// using UIDVALIDITY + UID cursors.
+/// using UIDVALIDITY + UID cursors, and RFC 7162 CONDSTORE when advertised.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn run_imap_sync(
     db: &DbPool,
@@ -88,7 +90,9 @@ pub(crate) async fn run_imap_sync(
     for folder in &folders {
         let folder_id = get_folder_id(db, account_id, &folder.name).await?;
 
-        let (uid_validity, _uid_next, _exists) = client.select(&folder.name).await?;
+        let select = client.select(&folder.name).await?;
+        let uid_validity = select.uid_validity;
+        let highest_modseq = select.highest_modseq.unwrap_or(0);
 
         // Load existing cursor
         let cursor = load_cursor(db, account_id, &folder_id).await?;
@@ -100,17 +104,62 @@ pub(crate) async fn run_imap_sync(
         } else {
             cursor.as_ref().map(|c| c.last_uid)
         };
+        let stored_modseq = if uidvalidity_changed {
+            0
+        } else {
+            cursor.as_ref().map_or(0, |c| c.last_modseq)
+        };
 
-        let uids = client.search_uids(after_uid).await?;
-        if uids.is_empty() {
+        let new_uids = client.search_uids(after_uid).await?;
+        let mut messages = if client.supports_condstore() && stored_modseq > 0 {
+            client.fetch_changed_since(stored_modseq).await?
+        } else {
+            Vec::new()
+        };
+        let changed_uids: HashSet<u32> = messages.iter().map(|m| m.uid).collect();
+        let fetch_uids: Vec<u32> = new_uids
+            .into_iter()
+            .filter(|uid| !changed_uids.contains(uid))
+            .collect();
+        if !fetch_uids.is_empty() {
+            messages.extend(client.fetch_metadata(&fetch_uids).await?);
+        }
+
+        let new_modseq = if client.supports_condstore() && highest_modseq > 0 {
+            highest_modseq
+        } else {
+            0
+        };
+
+        if messages.is_empty() {
             if uidvalidity_changed {
-                persist_imap_folder_batch(db, account_id, &folder_id, &[], uid_validity, 0, true)
-                    .await?;
+                persist_imap_folder_batch(
+                    db,
+                    account_id,
+                    &folder_id,
+                    &[],
+                    uid_validity,
+                    0,
+                    new_modseq,
+                    true,
+                )
+                .await?;
+            } else if new_modseq > stored_modseq {
+                persist_imap_folder_batch(
+                    db,
+                    account_id,
+                    &folder_id,
+                    &[],
+                    uid_validity,
+                    cursor.as_ref().map_or(0, |c| c.last_uid),
+                    new_modseq,
+                    false,
+                )
+                .await?;
             }
             continue;
         }
 
-        let messages = client.fetch_metadata(&uids).await?;
         let max_uid = messages.iter().map(|m| m.uid).max().unwrap_or(0);
         let new_cursor_uid = if uidvalidity_changed {
             max_uid
@@ -124,6 +173,7 @@ pub(crate) async fn run_imap_sync(
             &messages,
             uid_validity,
             new_cursor_uid,
+            new_modseq,
             uidvalidity_changed,
         )
         .await?;

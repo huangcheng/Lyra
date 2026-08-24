@@ -473,10 +473,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_cursor_value_with_modseq() {
+        let cursor = parse_cursor_value("12345:678:999");
+        assert_eq!(cursor.uid_validity, 12345);
+        assert_eq!(cursor.last_uid, 678);
+        assert_eq!(cursor.last_modseq, 999);
+    }
+
+    #[test]
     fn parse_cursor_value_invalid() {
         let cursor = parse_cursor_value("garbage");
         assert_eq!(cursor.uid_validity, 0);
         assert_eq!(cursor.last_uid, 0);
+        assert_eq!(cursor.last_modseq, 0);
     }
 
     #[tokio::test]
@@ -745,6 +754,7 @@ mod tests {
             &[sample_imap_message(1), sample_imap_message(2)],
             99,
             2,
+            0,
             false,
         )
         .await
@@ -796,7 +806,7 @@ mod tests {
         )
         .await
         .unwrap();
-        save_cursor_in_tx(&mut tx, &db, &account_id, &folder_id, "imap", 1, 7)
+        save_cursor_in_tx(&mut tx, &db, &account_id, &folder_id, "imap", 1, 7, 0)
             .await
             .unwrap();
         tx.rollback().await.unwrap();
@@ -824,9 +834,17 @@ mod tests {
             .unwrap();
 
         // Save cursor
-        save_cursor(&as_db(&pool), &account_id, &folder_id, "imap", 12345, 100)
-            .await
-            .unwrap();
+        save_cursor(
+            &as_db(&pool),
+            &account_id,
+            &folder_id,
+            "imap",
+            12345,
+            100,
+            0,
+        )
+        .await
+        .unwrap();
 
         // Load cursor
         let cursor = load_cursor(&as_db(&pool), &account_id, &folder_id)
@@ -838,9 +856,17 @@ mod tests {
         assert_eq!(cursor.last_uid, 100);
 
         // Update cursor (idempotent upsert)
-        save_cursor(&as_db(&pool), &account_id, &folder_id, "imap", 12345, 200)
-            .await
-            .unwrap();
+        save_cursor(
+            &as_db(&pool),
+            &account_id,
+            &folder_id,
+            "imap",
+            12345,
+            200,
+            0,
+        )
+        .await
+        .unwrap();
 
         let cursor2 = load_cursor(&as_db(&pool), &account_id, &folder_id)
             .await
@@ -978,7 +1004,7 @@ mod tests {
             .unwrap();
 
         // Save cursor
-        save_cursor(&as_db(&pool), &account_id, &folder_id, "imap", 100, 1)
+        save_cursor(&as_db(&pool), &account_id, &folder_id, "imap", 100, 1, 0)
             .await
             .unwrap();
 

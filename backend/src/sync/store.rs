@@ -299,6 +299,8 @@ pub(crate) fn infer_folder_role(name: &str) -> Option<&'static str> {
 pub(crate) struct SyncCursorInfo {
     pub(crate) uid_validity: u32,
     pub(crate) last_uid: u32,
+    /// RFC 7162 HIGHESTMODSEQ at last successful sync (0 when unknown / no CONDSTORE).
+    pub(crate) last_modseq: u64,
 }
 
 /// Load the sync cursor for a folder.
@@ -332,6 +334,7 @@ pub(crate) async fn save_cursor(
     protocol: &str,
     uid_validity: u32,
     last_uid: u32,
+    last_modseq: u64,
 ) -> Result<(), SyncError> {
     let mut tx = db.begin().await?;
     save_cursor_in_tx(
@@ -342,25 +345,40 @@ pub(crate) async fn save_cursor(
         protocol,
         uid_validity,
         last_uid,
+        last_modseq,
     )
     .await?;
     tx.commit().await?;
     Ok(())
 }
 
-/// Parse a cursor value string `{uid_validity}:{last_uid}`.
+/// Parse a cursor value string `{uid_validity}:{last_uid}` or `{uid_validity}:{last_uid}:{modseq}`.
 pub(crate) fn parse_cursor_value(value: &str) -> SyncCursorInfo {
-    let parts: Vec<&str> = value.splitn(2, ':').collect();
-    if parts.len() == 2 {
-        SyncCursorInfo {
-            uid_validity: parts[0].parse().unwrap_or(0),
-            last_uid: parts[1].parse().unwrap_or(0),
-        }
-    } else {
-        SyncCursorInfo {
+    let parts: Vec<&str> = value.split(':').collect();
+    match parts.as_slice() {
+        [uv, lu, ms] => SyncCursorInfo {
+            uid_validity: uv.parse().unwrap_or(0),
+            last_uid: lu.parse().unwrap_or(0),
+            last_modseq: ms.parse().unwrap_or(0),
+        },
+        [uv, lu] => SyncCursorInfo {
+            uid_validity: uv.parse().unwrap_or(0),
+            last_uid: lu.parse().unwrap_or(0),
+            last_modseq: 0,
+        },
+        _ => SyncCursorInfo {
             uid_validity: 0,
             last_uid: 0,
-        }
+            last_modseq: 0,
+        },
+    }
+}
+
+pub(crate) fn format_cursor_value(uid_validity: u32, last_uid: u32, last_modseq: u64) -> String {
+    if last_modseq > 0 {
+        format!("{uid_validity}:{last_uid}:{last_modseq}")
+    } else {
+        format!("{uid_validity}:{last_uid}")
     }
 }
 
@@ -458,6 +476,7 @@ pub(crate) async fn update_folder_counts(db: &DbPool, folder_id: &str) -> Result
 /// Persist one IMAP folder page: optional wipe, upserts, cursor, counts — one transaction.
 ///
 /// Returns `(messages_new, messages_updated)`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn persist_imap_folder_batch(
     db: &DbPool,
     account_id: &str,
@@ -465,6 +484,7 @@ pub(crate) async fn persist_imap_folder_batch(
     messages: &[ImapMessage],
     uid_validity: u32,
     last_uid: u32,
+    last_modseq: u64,
     clear_first: bool,
 ) -> Result<(usize, usize), SyncError> {
     let mut tx = db.begin().await?;
@@ -488,6 +508,7 @@ pub(crate) async fn persist_imap_folder_batch(
         "imap",
         uid_validity,
         last_uid,
+        last_modseq,
     )
     .await?;
     update_folder_counts_in_tx(&mut tx, db, folder_id).await?;
@@ -734,6 +755,7 @@ pub(crate) async fn upsert_jmap_message_in_tx(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn save_cursor_in_tx(
     tx: &mut DbTxn,
     db: &DbPool,
@@ -742,8 +764,9 @@ pub(crate) async fn save_cursor_in_tx(
     protocol: &str,
     uid_validity: u32,
     last_uid: u32,
+    last_modseq: u64,
 ) -> Result<(), SyncError> {
-    let cursor_value = format!("{uid_validity}:{last_uid}");
+    let cursor_value = format_cursor_value(uid_validity, last_uid, last_modseq);
     let cursor_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
     db_txn_execute!(
         tx,

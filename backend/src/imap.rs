@@ -8,6 +8,7 @@
 #![allow(clippy::doc_markdown)]
 
 use async_imap::Session;
+use async_imap::types::Capabilities;
 use futures_util::TryStreamExt;
 use imap_proto::types::Address;
 use serde::Deserialize;
@@ -126,12 +127,21 @@ pub struct ImapMessage {
     pub attachments: Vec<ExtractedAttachment>,
 }
 
+/// Result of SELECT / EXAMINE (RFC 3501 + RFC 7162 CONDSTORE).
+#[derive(Debug, Clone, Copy)]
+pub struct ImapSelectResult {
+    pub uid_validity: u32,
+    /// Present when the server advertises CONDSTORE (RFC 7162).
+    pub highest_modseq: Option<u64>,
+}
+
 /// An authenticated IMAP session.
 ///
 /// Wraps `async_imap::Session<TlsStream<TcpStream>>` and provides
 /// high-level operations for the sync engine.
 pub struct ImapClient {
     session: Session<TlsStream<TcpStream>>,
+    capabilities: Capabilities,
 }
 
 impl ImapClient {
@@ -159,12 +169,17 @@ impl ImapClient {
                     .map_err(|e| ImapError::Tls(e.to_string()))?;
 
                 let client = async_imap::Client::new(tls_stream);
-                let session = client
+                let mut session = client
                     .login(&config.username, &config.password)
                     .await
                     .map_err(|(e, _)| ImapError::Login(e.to_string()))?;
 
-                Ok(Self { session })
+                let capabilities = session.capabilities().await.map_err(ImapError::Imap)?;
+
+                Ok(Self {
+                    session,
+                    capabilities,
+                })
             }
             ImapSecurity::Starttls => {
                 // Connect in plain text, then upgrade via STARTTLS
@@ -193,14 +208,29 @@ impl ImapClient {
                     .map_err(|e| ImapError::Tls(e.to_string()))?;
 
                 let tls_client = async_imap::Client::new(tls_stream);
-                let session = tls_client
+                let mut session = tls_client
                     .login(&config.username, &config.password)
                     .await
                     .map_err(|(e, _)| ImapError::Login(e.to_string()))?;
 
-                Ok(Self { session })
+                let capabilities = session.capabilities().await.map_err(ImapError::Imap)?;
+
+                Ok(Self {
+                    session,
+                    capabilities,
+                })
             }
         }
+    }
+
+    /// Whether the server advertises RFC 7162 CONDSTORE (or QRESYNC).
+    pub fn supports_condstore(&self) -> bool {
+        self.capabilities.has_str("CONDSTORE") || self.capabilities.has_str("QRESYNC")
+    }
+
+    /// Whether the server advertises RFC 6851 MOVE.
+    pub fn supports_move(&self) -> bool {
+        self.capabilities.has_str("MOVE")
     }
 
     /// List all folders (mailboxes) on the server.
@@ -227,20 +257,17 @@ impl ImapClient {
     }
 
     /// Select a folder (mailbox) for subsequent operations.
-    ///
-    /// Returns `(uid_validity, uid_next, exists)`.
-    pub async fn select(&mut self, folder_name: &str) -> Result<(u32, u32, u32), ImapError> {
+    pub async fn select(&mut self, folder_name: &str) -> Result<ImapSelectResult, ImapError> {
         let mailbox = self
             .session
             .select(folder_name)
             .await
             .map_err(ImapError::Imap)?;
 
-        let uid_validity = mailbox.uid_validity.unwrap_or(0);
-        let uid_next = mailbox.uid_next.unwrap_or(0);
-        let exists = mailbox.exists;
-
-        Ok((uid_validity, uid_next, exists))
+        Ok(ImapSelectResult {
+            uid_validity: mailbox.uid_validity.unwrap_or(0),
+            highest_modseq: mailbox.highest_modseq,
+        })
     }
 
     /// Fetch message UIDs optionally after a given UID.
@@ -286,6 +313,34 @@ impl ImapClient {
         }
 
         Ok(result)
+    }
+
+    /// Fetch messages whose mod-sequence changed since `modseq` (RFC 7162 CHANGEDSINCE).
+    ///
+    /// No-op when `modseq` is 0 or CONDSTORE is unavailable.
+    pub async fn fetch_changed_since(
+        &mut self,
+        modseq: u64,
+    ) -> Result<Vec<ImapMessage>, ImapError> {
+        if modseq == 0 || !self.supports_condstore() {
+            return Ok(Vec::new());
+        }
+
+        let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE");
+        let query = format!("{fetch_items} (CHANGEDSINCE {modseq})");
+
+        let stream = self
+            .session
+            .uid_fetch("1:*", query)
+            .await
+            .map_err(ImapError::Imap)?;
+
+        let fetches: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+
+        Ok(fetches
+            .iter()
+            .map(|msg| parse_fetch_to_message(msg, false))
+            .collect())
     }
 
     /// Fetch full message bodies for the given UIDs.
@@ -348,11 +403,36 @@ impl ImapClient {
     }
 
     /// Move a message UID into another mailbox (RFC 6851 UID MOVE).
+    ///
+    /// Falls back to UID COPY + STORE \\Deleted + EXPUNGE when MOVE is not advertised.
     pub async fn move_uid(&mut self, uid: u32, destination: &str) -> Result<(), ImapError> {
+        let uid_str = uid.to_string();
+        if self.supports_move() {
+            self.session
+                .uid_mv(&uid_str, destination)
+                .await
+                .map_err(ImapError::Imap)?;
+            return Ok(());
+        }
+
+        // Documented exception: COPY+EXPUNGE when MOVE unavailable (RFC 6851 §3.3).
         self.session
-            .uid_mv(uid.to_string(), destination)
+            .uid_copy(&uid_str, destination)
             .await
-            .map_err(ImapError::Imap)
+            .map_err(ImapError::Imap)?;
+        self.add_flags(uid, &["\\Deleted"]).await?;
+        if self.capabilities.has_str("UIDPLUS") {
+            let stream = self
+                .session
+                .uid_expunge(&uid_str)
+                .await
+                .map_err(ImapError::Imap)?;
+            let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+        } else {
+            let stream = self.session.expunge().await.map_err(ImapError::Imap)?;
+            let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+        }
+        Ok(())
     }
 
     /// Log out and close the connection.
