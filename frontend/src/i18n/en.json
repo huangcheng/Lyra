@@ -1,7 +1,6 @@
 {
   "app": {
-    "name": "Lyra",
-    "tagline": "Mail you host yourself."
+    "name": "Lyra"
   },
   "nav": {
     "inbox": "Inbox",
@@ -91,7 +90,6 @@
     "login": "Log In",
     "logout": "Log Out",
     "username": "Username",
-    "usernamePlaceholder": "your username",
     "password": "Password",
     "totpCode": "TOTP Code",
     "loginTitle": "Login to your account",

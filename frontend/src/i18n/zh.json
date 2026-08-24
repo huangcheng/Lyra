@@ -1,7 +1,6 @@
 {
   "app": {
-    "name": "Lyra",
-    "tagline": "邮件，自己托管。"
+    "name": "Lyra"
   },
   "nav": {
     "inbox": "收件箱",
@@ -91,7 +90,6 @@
     "login": "登录",
     "logout": "退出",
     "username": "用户名",
-    "usernamePlaceholder": "用户名",
     "password": "密码",
     "totpCode": "验证码",
     "loginTitle": "登录你的账户",
