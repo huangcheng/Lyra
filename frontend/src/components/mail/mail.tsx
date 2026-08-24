@@ -4,26 +4,14 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import {
-  Archive,
-  ArchiveX,
-  Calendar,
-  File,
-  Inbox,
-  PenSquare,
-  Search,
-  Send,
-  Settings,
-  Trash2,
-  Users,
-} from 'lucide-react';
+import { BarChart3, PenSquare, Search, Settings } from 'lucide-react';
+import { useNavigate } from '@tanstack/react-router';
 import { useDefaultLayout } from 'react-resizable-panels';
 
 import { AccountSwitcher } from '@/components/mail/account-switcher';
-import { FolderNavTree } from '@/components/mail/folder-nav-tree';
 import { MailDisplay } from '@/components/mail/mail-display';
 import { MailList } from '@/components/mail/mail-list';
-import { Nav } from '@/components/mail/nav';
+import { SidebarFolders } from '@/components/mail/sidebar-folders';
 import { LyraWordmark } from '@/components/lyra-wordmark';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { Button } from '@/components/ui/button';
@@ -33,21 +21,34 @@ import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
-import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
-import { buildCustomFolderTree } from '@/lib/folder-tree';
+import { ALL_ACCOUNTS } from '@/lib/mail-api';
 import { useMailData } from '@/lib/use-mail-data';
 import { cn } from '@/lib/utils';
+import { syncEvents$ } from '@/rxjs/sync-events';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 
-const ROLE_ICONS: Record<StandardFolderRole, typeof Inbox> = {
-  inbox: Inbox,
-  drafts: File,
-  sent: Send,
-  spam: ArchiveX,
-  trash: Trash2,
-  archive: Archive,
-};
+/** Green sync dot; amber pulse while any account is syncing. */
+function SyncStatusDot() {
+  const locale = useUIStore((s) => s.locale);
+  const [syncing, setSyncing] = useState(false);
+
+  useEffect(() => {
+    const sub = syncEvents$.subscribe((ev) => {
+      if (ev.type === 'sync_started') setSyncing(true);
+      if (ev.type === 'sync_complete' || ev.type === 'sync_error') setSyncing(false);
+    });
+    return () => sub.unsubscribe();
+  }, []);
+
+  return (
+    <span
+      className={cn('size-1.5 rounded-full', syncing ? 'animate-pulse bg-unread' : 'bg-ok')}
+      role="status"
+      aria-label={t(locale, syncing ? 'sync.syncing' : 'sync.syncComplete')}
+    />
+  );
+}
 
 export function Mail() {
   const locale = useUIStore((s) => s.locale);
@@ -55,16 +56,14 @@ export function Mail() {
   const selectedFolderId = useUIStore((s) => s.selectedFolderId);
   const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
   const setSelectedFolder = useUIStore((s) => s.setSelectedFolder);
-  const setSelectedFolderRole = useUIStore((s) => s.setSelectedFolderRole);
   const searchQuery = useUIStore((s) => s.searchQuery);
   const setSearchQuery = useUIStore((s) => s.setSearchQuery);
   const listTab = useUIStore((s) => s.listTab);
   const setListTab = useUIStore((s) => s.setListTab);
   const openCompose = useUIStore((s) => s.openCompose);
+  const navigate = useNavigate();
   const folders = useMailStore((s) => s.folders);
-  const getUnifiedFolders = useMailStore((s) => s.getUnifiedFolders);
   const getFoldersForAccount = useMailStore((s) => s.getFoldersForAccount);
-  const unifiedFolders = useMemo(() => getUnifiedFolders(), [folders, getUnifiedFolders]);
   const accountFolders = useMemo(
     () => (selectedAccountId === ALL_ACCOUNTS ? [] : getFoldersForAccount(selectedAccountId)),
     [folders, getFoldersForAccount, selectedAccountId],
@@ -98,32 +97,6 @@ export function Mail() {
     }
     return t(locale, 'nav.inbox');
   })();
-
-  const primaryLinks =
-    selectedAccountId === ALL_ACCOUNTS
-      ? unifiedFolders.map((folder) => ({
-          title: t(locale, `nav.${folder.role}`),
-          label: folder.unreadCount > 0 ? String(folder.unreadCount) : '',
-          icon: ROLE_ICONS[folder.role],
-          variant: (selectedFolderRole === folder.role ? 'default' : 'ghost') as
-            'default' | 'ghost',
-          onClick: () => setSelectedFolderRole(folder.role),
-        }))
-      : accountFolders
-          .filter((folder) => folder.role)
-          .map((folder) => ({
-            title: folder.role ? t(locale, `nav.${folder.role}`) : folder.name,
-            label: folder.unreadCount > 0 ? String(folder.unreadCount) : '',
-            icon: ROLE_ICONS[(folder.role ?? 'inbox') as StandardFolderRole] ?? File,
-            variant: (selectedFolderId === folder.id ? 'default' : 'ghost') as 'default' | 'ghost',
-            onClick: () => setSelectedFolder(folder.id),
-          }));
-
-  const customFolderTree = useMemo(
-    () =>
-      selectedAccountId === ALL_ACCOUNTS ? [] : buildCustomFolderTree(accountFolders, folders),
-    [selectedAccountId, accountFolders, folders],
-  );
 
   return (
     <TooltipProvider delayDuration={0}>
@@ -168,46 +141,37 @@ export function Mail() {
               )}
             </div>
             <Separator />
-            <Nav isCollapsed={isCollapsed} links={primaryLinks} />
-            {customFolderTree.length > 0 ? (
-              <>
-                <Separator />
-                <FolderNavTree
-                  isCollapsed={isCollapsed}
-                  nodes={customFolderTree}
-                  selectedFolderId={selectedFolderId}
-                  onSelect={setSelectedFolder}
-                />
-              </>
-            ) : null}
-            <Separator />
-            <Nav
-              isCollapsed={isCollapsed}
-              links={[
-                {
-                  title: t(locale, 'nav.contacts'),
-                  icon: Users,
-                  variant: 'ghost',
-                  href: '/contacts',
-                },
-                {
-                  title: t(locale, 'nav.calendar'),
-                  icon: Calendar,
-                  variant: 'ghost',
-                  href: '/calendar',
-                },
-                {
-                  title: t(locale, 'nav.settings'),
-                  icon: Settings,
-                  variant: 'ghost',
-                  href: '/settings',
-                },
-              ]}
-            />
-            <div className="mt-auto flex items-center justify-between px-3 py-2">
-              {isCollapsed ? null : <LyraWordmark className="[&>span:last-child]:text-sm" />}
-              <ThemeToggle isCollapsed={isCollapsed} />
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <SidebarFolders isCollapsed={isCollapsed} />
             </div>
+            {isCollapsed ? (
+              <div className="mt-auto flex items-center justify-center px-3 py-2">
+                <ThemeToggle isCollapsed />
+              </div>
+            ) : (
+              <div className="mt-auto flex items-center gap-1.5 px-3 py-2">
+                <LyraWordmark className="[&>span:last-child]:text-sm" />
+                <SyncStatusDot />
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  className="inline-flex size-[26px] items-center justify-center rounded-[7px] text-ter-foreground hover:bg-accent"
+                  onClick={() => void navigate({ href: '/dashboard' })}
+                  aria-label={t(locale, 'nav.dashboard')}
+                >
+                  <BarChart3 size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex size-[26px] items-center justify-center rounded-[7px] text-ter-foreground hover:bg-accent"
+                  onClick={() => void navigate({ to: '/settings' })}
+                  aria-label={t(locale, 'nav.settings')}
+                >
+                  <Settings size={14} />
+                </button>
+                <ThemeToggle />
+              </div>
+            )}
           </div>
         </ResizablePanel>
         <ResizableHandle withHandle />

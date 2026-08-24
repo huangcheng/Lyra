@@ -16,6 +16,7 @@
     "calendar": "Calendar",
     "accounts": "Accounts",
     "settings": "Settings",
+    "dashboard": "Dashboard",
     "mail": "Mail"
   },
   "mail": {
@@ -70,7 +71,19 @@
     "syncError": "Sync failed",
     "remoteContentHidden": "Remote content was hidden to protect your privacy.",
     "showRemoteContent": "Show remote content",
-    "alwaysShowFromSender": "Always show remote content from {{sender}}"
+    "alwaysShowFromSender": "Always show remote content from {{sender}}",
+    "folder": {
+      "inbox": "Inbox",
+      "drafts": "Drafts",
+      "sent": "Sent",
+      "trash": "Trash",
+      "spam": "Spam",
+      "archive": "Archive"
+    },
+    "section": {
+      "unified": "Unified",
+      "accounts": "Accounts"
+    }
   },
   "auth": {
     "tagline": "Mail you host yourself.",

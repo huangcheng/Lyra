@@ -16,6 +16,7 @@
     "calendar": "日历",
     "accounts": "账户",
     "settings": "设置",
+    "dashboard": "仪表盘",
     "mail": "邮件"
   },
   "mail": {
@@ -70,7 +71,19 @@
     "syncError": "同步失败",
     "remoteContentHidden": "远程内容已隐藏，以保护你的隐私。",
     "showRemoteContent": "显示远程内容",
-    "alwaysShowFromSender": "始终显示来自 {{sender}} 的远程内容"
+    "alwaysShowFromSender": "始终显示来自 {{sender}} 的远程内容",
+    "folder": {
+      "inbox": "收件箱",
+      "drafts": "草稿",
+      "sent": "已发送",
+      "trash": "已删除",
+      "spam": "垃圾邮件",
+      "archive": "归档"
+    },
+    "section": {
+      "unified": "统一",
+      "accounts": "账户"
+    }
   },
   "auth": {
     "tagline": "自己托管的邮件。",
