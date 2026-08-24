@@ -25,6 +25,7 @@ import { MailDisplay } from '@/components/mail/mail-display';
 import { MailList } from '@/components/mail/mail-list';
 import { Nav } from '@/components/mail/nav';
 import { LyraWordmark } from '@/components/lyra-wordmark';
+import { ThemeToggle } from '@/components/theme-toggle';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
@@ -205,6 +206,7 @@ export function Mail() {
             />
             <div className="mt-auto flex items-center justify-between px-3 py-2">
               {isCollapsed ? null : <LyraWordmark className="[&>span:last-child]:text-sm" />}
+              <ThemeToggle isCollapsed={isCollapsed} />
             </div>
           </div>
         </ResizablePanel>

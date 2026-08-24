@@ -13,6 +13,7 @@ import { useUIStore } from '../stores/ui';
 import { useAuthStore } from '../stores/auth';
 import { api, type AuthMeResponse } from '@/lib/api-client';
 import { MARK_READ_POLICIES } from '@/lib/mark-read-policy';
+import type { ThemeMode } from '@/lib/theme';
 import { saveMarkReadPolicy, applyMarkReadPolicy } from '@/lib/user-preferences';
 import {
   fetchPrivacySettings,
@@ -66,6 +67,8 @@ interface ProbeResult {
 export function SettingsPage() {
   const locale = useUIStore((s) => s.locale);
   const setLocale = useUIStore((s) => s.setLocale);
+  const theme = useUIStore((s) => s.theme);
+  const setTheme = useUIStore((s) => s.setTheme);
   const markReadPolicy = useUIStore((s) => s.markReadPolicy);
   const token = useAuthStore((s) => s.token);
   const clearSession = useAuthStore((s) => s.clearSession);
@@ -403,12 +406,29 @@ export function SettingsPage() {
               {t(locale, 'auth.logout')}
             </Button>
           </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="text-sm text-muted-foreground">{t(locale, 'settings.theme')}</span>
+            <Select value={theme} onValueChange={(v) => setTheme(v as ThemeMode)}>
+              <SelectTrigger size="sm" className="min-w-[140px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(['light', 'dark', 'system'] as const).map((mode) => (
+                  <SelectItem key={mode} value={mode}>
+                    {t(locale, `settings.themeMode.${mode}`)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </section>
 
         <section className="space-y-4 rounded-lg border p-4">
           <h2 className="text-base font-semibold">{t(locale, 'settings.preferences.title')}</h2>
           <div className="space-y-2">
-            <h3 className="text-sm font-medium">{t(locale, 'settings.preferences.readingStatus')}</h3>
+            <h3 className="text-sm font-medium">
+              {t(locale, 'settings.preferences.readingStatus')}
+            </h3>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <span className="text-sm text-muted-foreground">
                 {t(locale, 'settings.preferences.markRead')}
