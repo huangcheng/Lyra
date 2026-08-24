@@ -15,7 +15,8 @@
     "contacts": "Contacts",
     "calendar": "Calendar",
     "accounts": "Accounts",
-    "settings": "Settings"
+    "settings": "Settings",
+    "mail": "Mail"
   },
   "mail": {
     "compose": "Compose",

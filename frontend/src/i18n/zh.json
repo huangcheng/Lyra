@@ -15,7 +15,8 @@
     "contacts": "通讯录",
     "calendar": "日历",
     "accounts": "账户",
-    "settings": "设置"
+    "settings": "设置",
+    "mail": "邮件"
   },
   "mail": {
     "compose": "写邮件",
