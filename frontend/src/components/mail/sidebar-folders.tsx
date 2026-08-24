@@ -209,8 +209,11 @@ function AccountSection({
         ) : (
           <ChevronRight className="size-3.5 shrink-0 text-ter-foreground" />
         )}
-        <span className="truncate text-[12.5px] font-semibold">
-          {account.displayName} — {account.protocol.toUpperCase()}
+        <span
+          className="truncate text-[12.5px] font-semibold"
+          title={`${account.displayName || account.emailAddress} — ${account.protocol.toUpperCase()}`}
+        >
+          {account.displayName || account.emailAddress}
         </span>
         <UnreadCount count={totalUnread} />
       </button>
