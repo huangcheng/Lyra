@@ -24,6 +24,7 @@ import { FolderNavTree } from '@/components/mail/folder-nav-tree';
 import { MailDisplay } from '@/components/mail/mail-display';
 import { MailList } from '@/components/mail/mail-list';
 import { Nav } from '@/components/mail/nav';
+import { LyraWordmark } from '@/components/lyra-wordmark';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
@@ -119,9 +120,7 @@ export function Mail() {
 
   const customFolderTree = useMemo(
     () =>
-      selectedAccountId === ALL_ACCOUNTS
-        ? []
-        : buildCustomFolderTree(accountFolders, folders),
+      selectedAccountId === ALL_ACCOUNTS ? [] : buildCustomFolderTree(accountFolders, folders),
     [selectedAccountId, accountFolders, folders],
   );
 
@@ -145,64 +144,69 @@ export function Mail() {
           }}
           className={cn(isCollapsed && 'min-w-[50px] transition-all duration-300 ease-in-out')}
         >
-          <div
-            className={cn(
-              'flex h-[52px] items-center justify-center gap-1',
-              isCollapsed ? 'h-[52px]' : 'px-2',
-            )}
-          >
-            <div className={cn('min-w-0', !isCollapsed && 'flex-1')}>
-              <AccountSwitcher isCollapsed={isCollapsed} />
+          <div className="flex h-full flex-col">
+            <div
+              className={cn(
+                'flex h-[52px] items-center justify-center gap-1',
+                isCollapsed ? 'h-[52px]' : 'px-2',
+              )}
+            >
+              <div className={cn('min-w-0', !isCollapsed && 'flex-1')}>
+                <AccountSwitcher isCollapsed={isCollapsed} />
+              </div>
+              {isCollapsed ? null : (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  onClick={() => openCompose()}
+                >
+                  <PenSquare className="h-4 w-4" />
+                  <span className="sr-only">{t(locale, 'mail.compose')}</span>
+                </Button>
+              )}
             </div>
-            {isCollapsed ? null : (
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 shrink-0"
-                onClick={() => openCompose()}
-              >
-                <PenSquare className="h-4 w-4" />
-                <span className="sr-only">{t(locale, 'mail.compose')}</span>
-              </Button>
-            )}
+            <Separator />
+            <Nav isCollapsed={isCollapsed} links={primaryLinks} />
+            {customFolderTree.length > 0 ? (
+              <>
+                <Separator />
+                <FolderNavTree
+                  isCollapsed={isCollapsed}
+                  nodes={customFolderTree}
+                  selectedFolderId={selectedFolderId}
+                  onSelect={setSelectedFolder}
+                />
+              </>
+            ) : null}
+            <Separator />
+            <Nav
+              isCollapsed={isCollapsed}
+              links={[
+                {
+                  title: t(locale, 'nav.contacts'),
+                  icon: Users,
+                  variant: 'ghost',
+                  href: '/contacts',
+                },
+                {
+                  title: t(locale, 'nav.calendar'),
+                  icon: Calendar,
+                  variant: 'ghost',
+                  href: '/calendar',
+                },
+                {
+                  title: t(locale, 'nav.settings'),
+                  icon: Settings,
+                  variant: 'ghost',
+                  href: '/settings',
+                },
+              ]}
+            />
+            <div className="mt-auto flex items-center justify-between px-3 py-2">
+              {isCollapsed ? null : <LyraWordmark className="[&>span:last-child]:text-sm" />}
+            </div>
           </div>
-          <Separator />
-          <Nav isCollapsed={isCollapsed} links={primaryLinks} />
-          {customFolderTree.length > 0 ? (
-            <>
-              <Separator />
-              <FolderNavTree
-                isCollapsed={isCollapsed}
-                nodes={customFolderTree}
-                selectedFolderId={selectedFolderId}
-                onSelect={setSelectedFolder}
-              />
-            </>
-          ) : null}
-          <Separator />
-          <Nav
-            isCollapsed={isCollapsed}
-            links={[
-              {
-                title: t(locale, 'nav.contacts'),
-                icon: Users,
-                variant: 'ghost',
-                href: '/contacts',
-              },
-              {
-                title: t(locale, 'nav.calendar'),
-                icon: Calendar,
-                variant: 'ghost',
-                href: '/calendar',
-              },
-              {
-                title: t(locale, 'nav.settings'),
-                icon: Settings,
-                variant: 'ghost',
-                href: '/settings',
-              },
-            ]}
-          />
         </ResizablePanel>
         <ResizableHandle withHandle />
         <ResizablePanel id="list" defaultSize="32%" minSize="30%">

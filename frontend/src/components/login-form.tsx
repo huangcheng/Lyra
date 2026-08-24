@@ -5,6 +5,7 @@
 import type { ComponentProps, FormEvent } from 'react';
 import { useState } from 'react';
 
+import { LyraWordmark } from '@/components/lyra-wordmark';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field';
@@ -91,6 +92,9 @@ export function LoginForm({
 
   return (
     <div className={cn('flex flex-col gap-6', className)} {...props}>
+      <div className="flex justify-center">
+        <LyraWordmark />
+      </div>
       <Card>
         <CardHeader>
           <CardTitle>
@@ -205,7 +209,7 @@ export function LoginForm({
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     autoComplete="username"
-                    placeholder="admin"
+                    placeholder={t(locale, 'auth.usernamePlaceholder')}
                     autoFocus
                     required
                   />
