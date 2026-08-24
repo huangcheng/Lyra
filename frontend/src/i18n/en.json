@@ -33,7 +33,8 @@
     "unread": "Unread",
     "muteThread": "Mute this thread",
     "noMessages": "No messages",
-    "selectMessage": "No message selected",
+    "noMessagesHint": "New mail will appear here after the next sync.",
+    "selectMessage": "Select a message to read",
     "moveToJunk": "Move to junk",
     "moveToTrash": "Move to trash",
     "snooze": "Snooze",
@@ -74,6 +75,7 @@
     "login": "Log In",
     "logout": "Log Out",
     "username": "Username",
+    "usernamePlaceholder": "your username",
     "password": "Password",
     "totpCode": "TOTP Code",
     "loginTitle": "Login to your account",
@@ -102,6 +104,7 @@
     "syncing": "Syncing…",
     "syncComplete": "Sync complete",
     "syncError": "Sync error",
+    "syncFailed": "Sync failed",
     "lastSync": "Last synced"
   },
   "settings": {
@@ -110,6 +113,11 @@
     "english": "English",
     "chinese": "中文",
     "theme": "Theme",
+    "themeMode": {
+      "light": "Light",
+      "dark": "Dark",
+      "system": "System"
+    },
     "session": "Session",
     "preferences": {
       "title": "Personal preferences",
@@ -175,6 +183,7 @@
     "title": "Contacts",
     "search": "Search contacts...",
     "empty": "No contacts found",
+    "emptyHint": "Contacts from your accounts will appear here after a sync.",
     "noName": "No name",
     "email": "Email",
     "phone": "Phone",
@@ -187,6 +196,10 @@
     "today": "Today",
     "allDay": "All day",
     "noTitle": "No title",
+    "empty": "No calendars yet",
+    "emptyHint": "Calendars from your accounts will appear here after a sync.",
+    "loadError": "Couldn't load calendars.",
+    "moreEvents": "+{{count}} more",
     "days": {
       "sun": "Sun",
       "mon": "Mon",

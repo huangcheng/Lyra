@@ -8,7 +8,7 @@
     "allInboxes": "全部收件箱",
     "sent": "已发送",
     "drafts": "草稿",
-    "trash": "垃圾箱",
+    "trash": "已删除",
     "spam": "垃圾邮件",
     "archive": "归档",
     "starred": "已标星",
@@ -33,7 +33,8 @@
     "unread": "未读",
     "muteThread": "静音此会话",
     "noMessages": "没有邮件",
-    "selectMessage": "未选择邮件",
+    "noMessagesHint": "下次同步后，新邮件会显示在这里。",
+    "selectMessage": "选择一封邮件以阅读",
     "moveToJunk": "移到垃圾邮件",
     "moveToTrash": "移到废纸篓",
     "snooze": "延后",
@@ -74,6 +75,7 @@
     "login": "登录",
     "logout": "退出",
     "username": "用户名",
+    "usernamePlaceholder": "用户名",
     "password": "密码",
     "totpCode": "验证码",
     "loginTitle": "登录你的账户",
@@ -102,6 +104,7 @@
     "syncing": "同步中…",
     "syncComplete": "同步完成",
     "syncError": "同步错误",
+    "syncFailed": "同步失败",
     "lastSync": "上次同步"
   },
   "settings": {
@@ -110,6 +113,11 @@
     "english": "English",
     "chinese": "中文",
     "theme": "主题",
+    "themeMode": {
+      "light": "浅色",
+      "dark": "深色",
+      "system": "跟随系统"
+    },
     "session": "会话",
     "preferences": {
       "title": "个性偏好",
@@ -175,6 +183,7 @@
     "title": "通讯录",
     "search": "搜索联系人...",
     "empty": "暂无联系人",
+    "emptyHint": "同步后，账户中的联系人会显示在这里。",
     "noName": "未命名",
     "email": "邮箱",
     "phone": "电话",
@@ -187,6 +196,10 @@
     "today": "今天",
     "allDay": "全天",
     "noTitle": "无标题",
+    "empty": "暂无日历",
+    "emptyHint": "同步后，账户中的日历会显示在这里。",
+    "loadError": "无法加载日历。",
+    "moreEvents": "还有 {{count}} 项",
     "days": {
       "sun": "日",
       "mon": "一",
