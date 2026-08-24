@@ -95,7 +95,8 @@ export function SettingsPage() {
 
   const [probing, setProbing] = useState(false);
   const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
-  const [syncing, setSyncing] = useState(false);
+  const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
   // Security section state
@@ -160,19 +161,22 @@ export function SettingsPage() {
 
   async function handleSync(id: string) {
     try {
-      setError(null);
-      setSyncing(true);
+      setSyncingId(id);
       setSyncMessage(null);
+      setSyncErrors((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       await api(`/accounts/${id}/sync`, { method: 'POST' });
-      setSyncMessage(t(locale, 'settings.syncQueued'));
       await pollUntilSyncIdle();
       await fetchAccounts();
       setSyncMessage(t(locale, 'sync.syncComplete'));
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
-      setSyncMessage(null);
+      const message = err instanceof Error ? err.message : String(err);
+      setSyncErrors((prev) => ({ ...prev, [id]: message }));
     } finally {
-      setSyncing(false);
+      setSyncingId(null);
     }
   }
 
@@ -450,7 +454,7 @@ export function SettingsPage() {
                 </SelectContent>
               </Select>
             </div>
-            {prefsError ? <div className="error-message">{prefsError}</div> : null}
+            {prefsError ? <div className="text-sm text-destructive">{prefsError}</div> : null}
           </div>
         </section>
 
@@ -484,13 +488,13 @@ export function SettingsPage() {
             <p className="text-xs text-muted-foreground">
               {t(locale, `settings.privacy.remoteImagesModeHelp.${remoteImagesMode}`)}
             </p>
-            {privacyError ? <div className="error-message">{privacyError}</div> : null}
+            {privacyError ? <div className="text-sm text-destructive">{privacyError}</div> : null}
           </div>
         </section>
 
         <section className="space-y-4 rounded-lg border p-4">
           <h2 className="text-base font-semibold">{t(locale, 'settings.security.title')}</h2>
-          {securityError && <div className="error-message">{securityError}</div>}
+          {securityError && <div className="text-sm text-destructive">{securityError}</div>}
           {securityMessage && (
             <div className="text-sm text-muted-foreground" role="status">
               {securityMessage}
@@ -607,9 +611,9 @@ export function SettingsPage() {
         <section className="space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold">{t(locale, 'settings.accounts.title')}</h2>
-            <button
-              type="button"
-              className="rounded-md border bg-background px-3 py-1.5 text-sm hover:bg-accent"
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => {
                 resetForm();
                 setEditingAccount(null);
@@ -617,21 +621,21 @@ export function SettingsPage() {
               }}
             >
               {t(locale, 'settings.accounts.add')}
-            </button>
+            </Button>
           </div>
 
-          {error && <div className="error-message">{error}</div>}
+          {error && <div className="text-sm text-destructive">{error}</div>}
           {syncMessage && (
             <div className="text-sm text-muted-foreground" role="status">
-              {syncing ? t(locale, 'sync.syncing') : syncMessage}
+              {syncMessage}
             </div>
           )}
 
           {loading ? (
             <div>{t(locale, 'common.loading')}</div>
           ) : accounts.length === 0 ? (
-            <div className="empty-state">
-              <p>{t(locale, 'settings.accounts.empty')}</p>
+            <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+              {t(locale, 'settings.accounts.empty')}
             </div>
           ) : (
             <div className="space-y-3">
@@ -652,30 +656,34 @@ export function SettingsPage() {
                         {t(locale, 'sync.lastSync')}: {formatLastSync(account.lastSyncAt)}
                       </p>
                     )}
+                    {syncErrors[account.id] && (
+                      <p className="text-xs text-destructive">
+                        {t(locale, 'sync.syncFailed')}: {syncErrors[account.id]}
+                      </p>
+                    )}
                   </div>
                   <div className="flex gap-2">
-                    <button
-                      type="button"
-                      className="rounded-md border px-3 py-1.5 text-sm hover:bg-accent disabled:opacity-50"
-                      disabled={syncing}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={syncingId === account.id}
                       onClick={() => void handleSync(account.id)}
                     >
-                      {syncing ? t(locale, 'sync.syncing') : t(locale, 'settings.syncNow')}
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded-md border px-3 py-1.5 text-sm hover:bg-accent"
-                      onClick={() => handleEdit(account)}
-                    >
+                      {syncingId === account.id
+                        ? t(locale, 'sync.syncing')
+                        : t(locale, 'settings.syncNow')}
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => handleEdit(account)}>
                       {t(locale, 'common.edit')}
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded-md border px-3 py-1.5 text-sm text-destructive hover:bg-accent"
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive"
                       onClick={() => handleDelete(account.id)}
                     >
                       {t(locale, 'common.delete')}
-                    </button>
+                    </Button>
                   </div>
                 </div>
               ))}
