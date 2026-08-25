@@ -357,6 +357,22 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
     return <CollapsedFolders unifiedFolders={unifiedFolders} />;
   }
 
+  // A specific account is selected in the switcher: show only its tree.
+  const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
+  if (selectedAccount) {
+    return (
+      <div className="flex flex-col px-2 pb-2">
+        <div className="grid gap-0.5 pt-2">
+          <AccountSection
+            account={selectedAccount}
+            selectedAccountId={selectedAccountId}
+            selectedFolderId={selectedFolderId}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col px-2 pb-2">
       <SectionLabel>{t(locale, 'mail.section.unified')}</SectionLabel>
