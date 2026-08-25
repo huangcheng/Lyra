@@ -5,8 +5,10 @@
 
 mod http;
 pub mod keys;
+pub mod read;
 pub mod session;
 pub mod store;
 
 pub use http::routes;
+pub use read::{OpengpgMessageStatus, enrich_message_opengpg};
 pub use session::UnlockRing;

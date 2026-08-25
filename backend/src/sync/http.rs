@@ -255,6 +255,9 @@ pub struct MessageResponse {
     pub has_attachments: bool,
     /// True when remote images were replaced with placeholders in this response.
     pub remote_content_blocked: bool,
+    /// OpenGPG decrypt/verify status when the message looks encrypted or signed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opengpg: Option<crate::opengpg::OpengpgMessageStatus>,
 }
 
 macro_rules! message_response_from_sql {
@@ -282,6 +285,7 @@ macro_rules! message_response_from_sql {
             is_starred: $row.get::<bool, _>("is_starred"),
             has_attachments: $row.get::<bool, _>("has_attachments"),
             remote_content_blocked: false,
+            opengpg: None,
         }
     }};
 }
@@ -872,6 +876,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         is_starred: row.is_starred,
         has_attachments: row.has_attachments,
         remote_content_blocked: false,
+        opengpg: None,
     }
 }
 
@@ -880,14 +885,51 @@ fn header_needs_refresh(existing: Option<&str>) -> bool {
     value.is_empty() || (value.contains("=?") && value.contains("?="))
 }
 
-/// Apply remote-image policy at serve time (after storage sanitization).
-pub(crate) async fn finalize_message_response(
+/// Apply remote-image policy and optional OpenGPG decrypt at serve time.
+pub(crate) async fn finalize_message_response_with_opengpg(
     state: &AuthState,
     user_id: &str,
+    session_token: Option<&str>,
     row: &MessageRow,
     remote_content_allow: bool,
 ) -> Result<MessageResponse, SyncError> {
     let mut response = message_response_from_row(row);
+
+    if let Some(token) = session_token {
+        match crate::opengpg::enrich_message_opengpg(
+            state,
+            user_id,
+            token,
+            &row.id,
+            response.body_text.as_deref(),
+            response.body_html.as_deref(),
+        )
+        .await
+        {
+            Ok(Some(decrypted)) => {
+                if decrypted.status.decrypted || !decrypted.status.encrypted {
+                    if decrypted.body_text.is_some() {
+                        response.body_text = decrypted.body_text;
+                    }
+                    if decrypted.body_html.is_some() {
+                        response.body_html = decrypted.body_html;
+                    }
+                }
+                response.opengpg = Some(decrypted.status);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "opengpg enrich failed");
+                response.opengpg = Some(crate::opengpg::OpengpgMessageStatus {
+                    encrypted: true,
+                    decrypted: false,
+                    signatures: Vec::new(),
+                    error: Some("opengpg error".into()),
+                });
+            }
+        }
+    }
+
     if response.body_html.is_none() {
         return Ok(response);
     }
@@ -1038,15 +1080,22 @@ pub(crate) struct GetMessageQuery {
 pub(crate) async fn get_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
-    AuthUser(user_id): AuthUser,
+    session: crate::auth::AuthSession,
     Query(query): Query<GetMessageQuery>,
 ) -> Result<Json<MessageResponse>, SyncError> {
     let db = state.db();
-    let mut row = load_message_row(db, &user_id, &message_id).await?;
-    maybe_fill_imap_body(db, &state.data_dir, &user_id, &mut row).await?;
+    let mut row = load_message_row(db, &session.user_id, &message_id).await?;
+    maybe_fill_imap_body(db, &state.data_dir, &session.user_id, &mut row).await?;
 
     let allow_remote = query.remote_content.as_deref() == Some("allow");
-    let response = finalize_message_response(&state, &user_id, &row, allow_remote).await?;
+    let response = finalize_message_response_with_opengpg(
+        &state,
+        &session.user_id,
+        Some(&session.token),
+        &row,
+        allow_remote,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1180,10 +1229,11 @@ async fn maybe_fill_imap_body(
 pub(crate) async fn patch_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
-    AuthUser(user_id): AuthUser,
+    session: crate::auth::AuthSession,
     Json(body): Json<PatchMessageRequest>,
 ) -> Result<Json<MessageResponse>, SyncError> {
     let db = state.db();
+    let user_id = session.user_id.clone();
     let mut row = load_message_row(db, &user_id, &message_id).await?;
 
     if body.is_read.is_none() && body.is_starred.is_none() {
@@ -1235,7 +1285,14 @@ pub(crate) async fn patch_message(
     update_folder_counts(db, &row.folder_id).await?;
 
     Ok(Json(
-        finalize_message_response(&state, &user_id, &row, false).await?,
+        finalize_message_response_with_opengpg(
+            &state,
+            &user_id,
+            Some(&session.token),
+            &row,
+            false,
+        )
+        .await?,
     ))
 }
 
