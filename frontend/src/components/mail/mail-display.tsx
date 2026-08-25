@@ -72,10 +72,13 @@ export function MailDisplay() {
   const selectedMessageId = useUIStore((s) => s.selectedMessageId);
   const setSelectedMessage = useUIStore((s) => s.setSelectedMessage);
   const openCompose = useUIStore((s) => s.openCompose);
+  const mutedMessageIds = useUIStore((s) => s.mutedMessageIds);
+  const toggleMuteMessage = useUIStore((s) => s.toggleMuteMessage);
   const token = useAuthStore((s) => s.token);
   const cached = useMailStore((s) =>
     selectedMessageId ? s.messages[selectedMessageId] : undefined,
   );
+  const accounts = useMailStore((s) => s.accounts);
   const upsertMessage = useMailStore((s) => s.upsertMessage);
   const markMessageRead = useMailStore((s) => s.markMessageRead);
   const toggleStar = useMailStore((s) => s.toggleStar);
@@ -246,6 +249,7 @@ export function MailDisplay() {
   const handleSnooze = async (until: Date) => {
     if (!token || !mail || busy) return;
     setBusy(true);
+    setActionError(null);
     try {
       await api(`/messages/${mail.id}/snooze`, {
         method: 'POST',
@@ -253,8 +257,41 @@ export function MailDisplay() {
       });
       removeMessage(mail.id);
       setSelectedMessage(null);
-    } catch {
-      /* retry */
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : t(locale, 'common.error'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleInlineSend = async () => {
+    if (!token || !mail || busy) return;
+    const text = replyText.trim();
+    if (!text) {
+      handleReply();
+      return;
+    }
+    const accountId = mail.accountId || accounts[0]?.id;
+    if (!accountId) {
+      setActionError(t(locale, 'settings.accounts.empty'));
+      return;
+    }
+    setBusy(true);
+    setActionError(null);
+    try {
+      await api('/messages/send', {
+        method: 'POST',
+        body: JSON.stringify({
+          accountId,
+          to: [{ email: mail.from.email }],
+          subject: mail.subject.startsWith('Re:') ? mail.subject : `Re: ${mail.subject}`,
+          bodyText: text,
+          bodyHtml: null,
+        }),
+      });
+      setReplyText('');
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : t(locale, 'mail.sendError'));
     } finally {
       setBusy(false);
     }
@@ -496,7 +533,19 @@ export function MailDisplay() {
               {t(locale, 'mail.starThread')}
             </DropdownMenuItem>
             <DropdownMenuItem disabled>{t(locale, 'mail.addLabel')}</DropdownMenuItem>
-            <DropdownMenuItem disabled>{t(locale, 'mail.muteThread')}</DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                if (!mail) return;
+                toggleMuteMessage(mail.id);
+                if (!mutedMessageIds.includes(mail.id)) {
+                  setSelectedMessage(null);
+                }
+              }}
+            >
+              {mail && mutedMessageIds.includes(mail.id)
+                ? t(locale, 'mail.unmuteThread')
+                : t(locale, 'mail.muteThread')}
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -596,7 +645,7 @@ export function MailDisplay() {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                handleReply();
+                void handleInlineSend();
               }}
             >
               <div className="rounded-lg border border-input bg-card shadow-xs">
@@ -607,15 +656,31 @@ export function MailDisplay() {
                     placeholder={t(locale, 'mail.replyPlaceholder', { name: fromLabel })}
                     value={replyText}
                     onChange={(e) => setReplyText(e.target.value)}
+                    disabled={busy}
                   />
                 </div>
                 <div className="flex items-center px-3.5 pb-2.5">
                   <Label htmlFor="mute" className="flex items-center gap-2 text-xs font-normal">
-                    <Switch id="mute" aria-label={t(locale, 'mail.muteThread')} />{' '}
+                    <Switch
+                      id="mute"
+                      checked={Boolean(mail && mutedMessageIds.includes(mail.id))}
+                      onCheckedChange={() => {
+                        if (!mail) return;
+                        const willMute = !mutedMessageIds.includes(mail.id);
+                        toggleMuteMessage(mail.id);
+                        if (willMute) setSelectedMessage(null);
+                      }}
+                      aria-label={t(locale, 'mail.muteThread')}
+                    />{' '}
                     {t(locale, 'mail.muteThread')}
                   </Label>
-                  <Button type="submit" size="sm" className="ml-auto rounded-full px-4">
-                    {t(locale, 'mail.send')}
+                  <Button
+                    type="submit"
+                    size="sm"
+                    className="ml-auto rounded-full px-4"
+                    disabled={busy}
+                  >
+                    {busy ? t(locale, 'mail.sending') : t(locale, 'mail.send')}
                   </Button>
                 </div>
               </div>

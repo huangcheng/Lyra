@@ -26,6 +26,8 @@ interface UIState {
   listTab: 'all' | 'unread';
   composeOpen: boolean;
   composeDraft: ComposeDraft | null;
+  /** Local mute (session): hide these message ids from the list. */
+  mutedMessageIds: string[];
   locale: SupportedLocale;
   markReadPolicy: MarkReadPolicy;
   theme: ThemeMode;
@@ -39,6 +41,7 @@ interface UIState {
   setComposeOpen: (open: boolean) => void;
   openCompose: (draft?: Partial<ComposeDraft>) => void;
   clearComposeDraft: () => void;
+  toggleMuteMessage: (id: string) => void;
   setLocale: (locale: SupportedLocale) => void;
   setMarkReadPolicy: (policy: MarkReadPolicy) => void;
   setTheme: (theme: ThemeMode) => void;
@@ -53,6 +56,7 @@ export const useUIStore = create<UIState>((set) => ({
   listTab: 'all',
   composeOpen: false,
   composeDraft: null,
+  mutedMessageIds: [],
   locale: 'en',
   markReadPolicy: 'on_open' as MarkReadPolicy,
   theme: getStoredTheme(),
@@ -92,6 +96,13 @@ export const useUIStore = create<UIState>((set) => ({
     }),
 
   clearComposeDraft: () => set({ composeDraft: null }),
+
+  toggleMuteMessage: (id) =>
+    set((s) => ({
+      mutedMessageIds: s.mutedMessageIds.includes(id)
+        ? s.mutedMessageIds.filter((x) => x !== id)
+        : [...s.mutedMessageIds, id],
+    })),
 
   setLocale: (locale) => set({ locale }),
 

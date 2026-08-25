@@ -53,6 +53,7 @@ export function MailList() {
   const setSelectedMessage = useUIStore((s) => s.setSelectedMessage);
   const searchQuery = useUIStore((s) => s.searchQuery);
   const listTab = useUIStore((s) => s.listTab);
+  const mutedMessageIds = useUIStore((s) => s.mutedMessageIds);
   const token = useAuthStore((s) => s.token);
   const upsertMessage = useMailStore((s) => s.upsertMessage);
   const replaceMessagesForView = useMailStore((s) => s.replaceMessagesForView);
@@ -148,7 +149,9 @@ export function MailList() {
   }, [token, searchQuery, selectedAccountId, loadMessages]);
 
   const source = searchHits ?? items;
-  const filtered = listTab === 'unread' ? source.filter((item) => !item.isRead) : source;
+  const filtered = (listTab === 'unread' ? source.filter((item) => !item.isRead) : source).filter(
+    (item) => !mutedMessageIds.includes(item.id),
+  );
 
   if (loading && filtered.length === 0) {
     return (

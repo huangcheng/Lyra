@@ -135,7 +135,7 @@ export function ComposeDialog() {
           <DialogTitle>{t(locale, titleKey)}</DialogTitle>
         </DialogHeader>
         <FieldGroup>
-          {accounts.length > 1 ? (
+          {accounts.length > 1 || selectedAccountId === ALL_ACCOUNTS ? (
             <Field>
               <FieldLabel htmlFor="compose-from">{t(locale, 'mail.from')}</FieldLabel>
               <select
@@ -143,10 +143,17 @@ export function ComposeDialog() {
                 className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
                 value={fromAccountId}
                 onChange={(e) => setFromAccountId(e.target.value)}
+                required={selectedAccountId === ALL_ACCOUNTS}
               >
+                {selectedAccountId === ALL_ACCOUNTS && accounts.length > 1 ? (
+                  <option value="" disabled>
+                    {t(locale, 'mail.fromPick')}
+                  </option>
+                ) : null}
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.displayName || a.emailAddress}
+                    {a.emailAddress}
+                    {a.displayName && a.displayName !== a.emailAddress ? ` (${a.displayName})` : ''}
                   </option>
                 ))}
               </select>
