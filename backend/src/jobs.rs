@@ -222,6 +222,7 @@ pub async fn try_claim_with_permit(
 fn sanitize_error(err: &SyncError) -> &'static str {
     match err {
         SyncError::Imap(crate::imap::ImapError::Login(_)) => "auth error",
+        SyncError::Imap(crate::imap::ImapError::Timeout) => "IMAP timeout",
         SyncError::Imap(_) => "IMAP error",
         SyncError::Jmap(crate::jmap::JmapError::Authentication(_)) => "auth error",
         SyncError::Jmap(_) => "JMAP error",
@@ -756,6 +757,10 @@ mod tests {
         assert_eq!(
             sanitize_error(&SyncError::Imap(crate::imap::ImapError::Login(msg.into()))),
             "auth error"
+        );
+        assert_eq!(
+            sanitize_error(&SyncError::Imap(crate::imap::ImapError::Timeout)),
+            "IMAP timeout"
         );
         assert_eq!(
             sanitize_error(&SyncError::Jmap(crate::jmap::JmapError::SessionDiscovery(

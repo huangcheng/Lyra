@@ -12,12 +12,20 @@ use async_imap::types::Capabilities;
 use futures_util::TryStreamExt;
 use imap_proto::types::Address;
 use serde::Deserialize;
+use std::future::Future;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_native_tls::TlsStream;
 
 use crate::crypto::{self, EncryptedCredential};
 use zeroize::Zeroizing;
+
+/// Bound for TCP connect + TLS + login + initial CAPABILITY (CHE-129).
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound for a single IMAP command / fetch collect (CHE-129).
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Errors specific to the IMAP adapter.
 #[derive(Debug, Error)]
@@ -30,10 +38,23 @@ pub enum ImapError {
     Login(String),
     #[error("protocol error: {0}")]
     Protocol(String),
+    #[error("IMAP operation timed out")]
+    Timeout,
     #[error("crypto error: {0}")]
     Crypto(#[from] crypto::CryptoError),
     #[error("imap error: {0}")]
     Imap(#[from] async_imap::error::Error),
+}
+
+/// Await `fut` or fail with [`ImapError::Timeout`] when `limit` elapses.
+pub(crate) async fn timed<T>(
+    limit: Duration,
+    fut: impl Future<Output = Result<T, ImapError>>,
+) -> Result<T, ImapError> {
+    match tokio::time::timeout(limit, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(ImapError::Timeout),
+    }
 }
 
 /// Security mode for IMAP connections.
@@ -147,8 +168,20 @@ pub struct ImapClient {
 impl ImapClient {
     /// Connect to an IMAP server and authenticate.
     ///
-    /// Handles TLS and STARTTLS connections.
+    /// Handles TLS and STARTTLS connections. Bounded by [`CONNECT_TIMEOUT`].
     pub async fn connect(config: &ImapConfig) -> Result<Self, ImapError> {
+        Self::connect_within(config, CONNECT_TIMEOUT).await
+    }
+
+    /// Connect with an explicit timeout (tests inject a short bound).
+    pub(crate) async fn connect_within(
+        config: &ImapConfig,
+        connect_timeout: Duration,
+    ) -> Result<Self, ImapError> {
+        timed(connect_timeout, Self::connect_inner(config)).await
+    }
+
+    async fn connect_inner(config: &ImapConfig) -> Result<Self, ImapError> {
         let addr = format!("{}:{}", config.host, config.port);
 
         match config.security {
@@ -261,68 +294,79 @@ impl ImapClient {
             None => "NIL".to_string(),
         };
         let cmd = format!("SETMETADATA {mbx} (/private/specialuse {value})");
-        match self.session.run_command_and_check_ok(&cmd).await {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                tracing::debug!(error = %e, mailbox = %mailbox_wire, "SETMETADATA skipped");
-                Ok(())
+        timed(COMMAND_TIMEOUT, async {
+            match self.session.run_command_and_check_ok(&cmd).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    tracing::debug!(error = %e, mailbox = %mailbox_wire, "SETMETADATA skipped");
+                    Ok(())
+                }
             }
-        }
+        })
+        .await
     }
 
     /// List all folders (mailboxes) on the server.
     pub async fn list_folders(&mut self) -> Result<Vec<ImapFolder>, ImapError> {
-        let listing = self
-            .session
-            .list(Some(""), Some("*"))
-            .await
-            .map_err(ImapError::Imap)?;
+        timed(COMMAND_TIMEOUT, async {
+            let listing = self
+                .session
+                .list(Some(""), Some("*"))
+                .await
+                .map_err(ImapError::Imap)?;
 
-        // Collect the stream into a Vec
-        let items: Vec<_> = listing.try_collect().await.map_err(ImapError::Imap)?;
+            let items: Vec<_> = listing.try_collect().await.map_err(ImapError::Imap)?;
 
-        let mut folders = Vec::new();
-        for item in &items {
-            folders.push(ImapFolder {
-                name: item.name().to_string(),
-                delimiter: item.delimiter().map(String::from),
-                attributes: item.attributes().iter().map(|a| format!("{a:?}")).collect(),
-            });
-        }
+            let mut folders = Vec::new();
+            for item in &items {
+                folders.push(ImapFolder {
+                    name: item.name().to_string(),
+                    delimiter: item.delimiter().map(String::from),
+                    attributes: item.attributes().iter().map(|a| format!("{a:?}")).collect(),
+                });
+            }
 
-        Ok(folders)
+            Ok(folders)
+        })
+        .await
     }
 
     /// Select a folder (mailbox) for subsequent operations.
     pub async fn select(&mut self, folder_name: &str) -> Result<ImapSelectResult, ImapError> {
-        let mailbox = self
-            .session
-            .select(folder_name)
-            .await
-            .map_err(ImapError::Imap)?;
+        timed(COMMAND_TIMEOUT, async {
+            let mailbox = self
+                .session
+                .select(folder_name)
+                .await
+                .map_err(ImapError::Imap)?;
 
-        Ok(ImapSelectResult {
-            uid_validity: mailbox.uid_validity.unwrap_or(0),
-            highest_modseq: mailbox.highest_modseq,
+            Ok(ImapSelectResult {
+                uid_validity: mailbox.uid_validity.unwrap_or(0),
+                highest_modseq: mailbox.highest_modseq,
+            })
         })
+        .await
     }
 
     /// Fetch message UIDs optionally after a given UID.
     ///
     /// Uses UID SEARCH to find messages.
     pub async fn search_uids(&mut self, after_uid: Option<u32>) -> Result<Vec<u32>, ImapError> {
-        let query = match after_uid {
-            Some(uid) => format!("{}:*", uid + 1),
-            None => "1:*".to_string(),
-        };
+        timed(COMMAND_TIMEOUT, async {
+            let query = match after_uid {
+                Some(uid) => format!("{}:*", uid + 1),
+                None => "1:*".to_string(),
+            };
 
-        let uids = self
-            .session
-            .uid_search(&query)
-            .await
-            .map_err(ImapError::Imap)?;
+            let uids = self
+                .session
+                .uid_search(&query)
+                .await
+                .map_err(ImapError::Imap)?;
 
-        Ok(uids.into_iter().collect())
+            Ok(uids.into_iter().collect())
+        })
+        .await
     }
 
     /// Fetch message metadata (envelope + flags + size) for the given UIDs.
@@ -333,23 +377,26 @@ impl ImapClient {
             return Ok(Vec::new());
         }
 
-        let uid_set = format_uid_set(uids);
-        let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE");
+        timed(COMMAND_TIMEOUT, async {
+            let uid_set = format_uid_set(uids);
+            let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE");
 
-        let stream = self
-            .session
-            .uid_fetch(&uid_set, fetch_items)
-            .await
-            .map_err(ImapError::Imap)?;
+            let stream = self
+                .session
+                .uid_fetch(&uid_set, fetch_items)
+                .await
+                .map_err(ImapError::Imap)?;
 
-        let fetches: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+            let fetches: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
 
-        let mut result = Vec::new();
-        for msg in &fetches {
-            result.push(parse_fetch_to_message(msg, false));
-        }
+            let mut result = Vec::new();
+            for msg in &fetches {
+                result.push(parse_fetch_to_message(msg, false));
+            }
 
-        Ok(result)
+            Ok(result)
+        })
+        .await
     }
 
     /// Fetch messages whose mod-sequence changed since `modseq` (RFC 7162 CHANGEDSINCE).
@@ -363,21 +410,24 @@ impl ImapClient {
             return Ok(Vec::new());
         }
 
-        let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE");
-        let query = format!("{fetch_items} (CHANGEDSINCE {modseq})");
+        timed(COMMAND_TIMEOUT, async {
+            let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE");
+            let query = format!("{fetch_items} (CHANGEDSINCE {modseq})");
 
-        let stream = self
-            .session
-            .uid_fetch("1:*", query)
-            .await
-            .map_err(ImapError::Imap)?;
+            let stream = self
+                .session
+                .uid_fetch("1:*", query)
+                .await
+                .map_err(ImapError::Imap)?;
 
-        let fetches: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+            let fetches: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
 
-        Ok(fetches
-            .iter()
-            .map(|msg| parse_fetch_to_message(msg, false))
-            .collect())
+            Ok(fetches
+                .iter()
+                .map(|msg| parse_fetch_to_message(msg, false))
+                .collect())
+        })
+        .await
     }
 
     /// Fetch full message bodies for the given UIDs.
@@ -389,23 +439,26 @@ impl ImapClient {
             return Ok(Vec::new());
         }
 
-        let uid_set = format_uid_set(uids);
-        let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[]");
+        timed(COMMAND_TIMEOUT, async {
+            let uid_set = format_uid_set(uids);
+            let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[]");
 
-        let stream = self
-            .session
-            .uid_fetch(&uid_set, fetch_items)
-            .await
-            .map_err(ImapError::Imap)?;
+            let stream = self
+                .session
+                .uid_fetch(&uid_set, fetch_items)
+                .await
+                .map_err(ImapError::Imap)?;
 
-        let fetches: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+            let fetches: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
 
-        let mut result = Vec::new();
-        for msg in &fetches {
-            result.push(parse_fetch_to_message(msg, true));
-        }
+            let mut result = Vec::new();
+            for msg in &fetches {
+                result.push(parse_fetch_to_message(msg, true));
+            }
 
-        Ok(result)
+            Ok(result)
+        })
+        .await
     }
 
     /// Add IMAP flags on a UID (e.g. `\\Seen`, `\\Flagged`).
@@ -427,56 +480,71 @@ impl ImapClient {
         if flags.is_empty() {
             return Ok(());
         }
-        let flag_list = flags.join(" ");
-        let query = format!("{op}FLAGS ({flag_list})");
-        let stream = self
-            .session
-            .uid_store(uid.to_string(), query)
-            .await
-            .map_err(ImapError::Imap)?;
-        // Drain FETCH responses from STORE
-        let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
-        Ok(())
+        timed(COMMAND_TIMEOUT, async {
+            let flag_list = flags.join(" ");
+            let query = format!("{op}FLAGS ({flag_list})");
+            let stream = self
+                .session
+                .uid_store(uid.to_string(), query)
+                .await
+                .map_err(ImapError::Imap)?;
+            // Drain FETCH responses from STORE
+            let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+            Ok(())
+        })
+        .await
     }
 
     /// Move a message UID into another mailbox (RFC 6851 UID MOVE).
     ///
     /// Falls back to UID COPY + STORE \\Deleted + EXPUNGE when MOVE is not advertised.
     pub async fn move_uid(&mut self, uid: u32, destination: &str) -> Result<(), ImapError> {
-        let uid_str = uid.to_string();
-        if self.supports_move() {
+        timed(COMMAND_TIMEOUT, async {
+            let uid_str = uid.to_string();
+            if self.supports_move() {
+                self.session
+                    .uid_mv(&uid_str, destination)
+                    .await
+                    .map_err(ImapError::Imap)?;
+                return Ok(());
+            }
+
+            // Documented exception: COPY+EXPUNGE when MOVE unavailable (RFC 6851 §3.3).
             self.session
-                .uid_mv(&uid_str, destination)
+                .uid_copy(&uid_str, destination)
                 .await
                 .map_err(ImapError::Imap)?;
-            return Ok(());
-        }
-
-        // Documented exception: COPY+EXPUNGE when MOVE unavailable (RFC 6851 §3.3).
-        self.session
-            .uid_copy(&uid_str, destination)
-            .await
-            .map_err(ImapError::Imap)?;
-        self.add_flags(uid, &["\\Deleted"]).await?;
-        if self.capabilities.has_str("UIDPLUS") {
+            let query = "+FLAGS (\\Deleted)".to_string();
             let stream = self
                 .session
-                .uid_expunge(&uid_str)
+                .uid_store(uid_str.clone(), query)
                 .await
                 .map_err(ImapError::Imap)?;
             let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
-        } else {
-            let stream = self.session.expunge().await.map_err(ImapError::Imap)?;
-            let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
-        }
-        Ok(())
+            if self.capabilities.has_str("UIDPLUS") {
+                let stream = self
+                    .session
+                    .uid_expunge(&uid_str)
+                    .await
+                    .map_err(ImapError::Imap)?;
+                let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+            } else {
+                let stream = self.session.expunge().await.map_err(ImapError::Imap)?;
+                let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// Log out and close the connection.
     #[allow(dead_code)]
     pub async fn logout(mut self) -> Result<(), ImapError> {
-        self.session.logout().await.map_err(ImapError::Imap)?;
-        Ok(())
+        timed(COMMAND_TIMEOUT, async {
+            self.session.logout().await.map_err(ImapError::Imap)?;
+            Ok(())
+        })
+        .await
     }
 
     /// Enter IDLE on the currently selected mailbox until a server notify or renew.
@@ -486,7 +554,8 @@ impl ImapClient {
     /// (RFC 2177: re-issue before ~29 minutes).
     ///
     /// Caller must have [`Self::select`]ed a mailbox first and checked
-    /// [`Self::supports_idle`].
+    /// [`Self::supports_idle`]. IDLE wait itself is not bounded by
+    /// [`COMMAND_TIMEOUT`] (intentional long-poll); init/done are.
     pub async fn into_idle_watch(self) -> Result<IdleWatchOutcome, ImapError> {
         if !self.supports_idle() {
             return Ok(IdleWatchOutcome::Unsupported);
@@ -494,23 +563,38 @@ impl ImapClient {
 
         let renew = std::time::Duration::from_secs(25 * 60);
         let mut handle = self.session.idle();
-        handle.init().await.map_err(ImapError::Imap)?;
+        timed(COMMAND_TIMEOUT, async {
+            handle.init().await.map_err(ImapError::Imap)
+        })
+        .await?;
 
         loop {
             let (wait_fut, _interrupt) = handle.wait_with_timeout(renew);
             match wait_fut.await.map_err(ImapError::Imap)? {
                 async_imap::extensions::idle::IdleResponse::NewData(_) => {
                     // Drop DONE + session; next sync opens a fresh connection.
-                    let _ = handle.done().await;
+                    let _ = timed(COMMAND_TIMEOUT, async {
+                        handle.done().await.map_err(ImapError::Imap)
+                    })
+                    .await;
                     return Ok(IdleWatchOutcome::Notified);
                 }
                 async_imap::extensions::idle::IdleResponse::Timeout => {
-                    let session = handle.done().await.map_err(ImapError::Imap)?;
+                    let session = timed(COMMAND_TIMEOUT, async {
+                        handle.done().await.map_err(ImapError::Imap)
+                    })
+                    .await?;
                     handle = session.idle();
-                    handle.init().await.map_err(ImapError::Imap)?;
+                    timed(COMMAND_TIMEOUT, async {
+                        handle.init().await.map_err(ImapError::Imap)
+                    })
+                    .await?;
                 }
                 async_imap::extensions::idle::IdleResponse::ManualInterrupt => {
-                    let _ = handle.done().await;
+                    let _ = timed(COMMAND_TIMEOUT, async {
+                        handle.done().await.map_err(ImapError::Imap)
+                    })
+                    .await;
                     return Ok(IdleWatchOutcome::Interrupted);
                 }
             }
@@ -810,6 +894,60 @@ mod tests {
         assert_eq!(imap_quoted("INBOX"), "\"INBOX\"");
         assert_eq!(imap_quoted("\\Sent"), "\"\\\\Sent\"");
         assert_eq!(imap_quoted("a\"b"), "\"a\\\"b\"");
+    }
+
+    #[tokio::test]
+    async fn timed_pending_future_errors_within_bound() {
+        let started = std::time::Instant::now();
+        let err = timed(Duration::from_millis(50), async {
+            std::future::pending::<Result<(), ImapError>>().await
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ImapError::Timeout));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn connect_to_blackhole_listener_times_out() {
+        // Accept TCP but never speak IMAP — login hangs until CONNECT timeout.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            // Keep the socket open without writing a greeting.
+            let _ = sock;
+            std::future::pending::<()>().await;
+        });
+
+        let cfg = ImapConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            security: ImapSecurity::Tls,
+            username: "user".into(),
+            password: Zeroizing::new("pass".into()),
+        };
+        // Plain TLS will fail handshake quickly on a raw TCP blackhole; use Starttls
+        // so the hang is on the IMAP greeting / STARTTLS command instead.
+        let cfg = ImapConfig {
+            security: ImapSecurity::Starttls,
+            ..cfg
+        };
+
+        let started = std::time::Instant::now();
+        let result = ImapClient::connect_within(&cfg, Duration::from_millis(200)).await;
+        let Err(err) = result else {
+            panic!("expected Timeout from blackhole listener");
+        };
+        assert!(
+            matches!(err, ImapError::Timeout),
+            "expected Timeout, got {err:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

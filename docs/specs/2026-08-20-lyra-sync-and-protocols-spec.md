@@ -418,6 +418,7 @@ Status key: **done** = implemented and tested · **partial** = core path works, 
 | RFC 2047 Subject / display-name decode | **done** | `decode_map_header` on ENVELOPE ingest |
 | Parenthesized FETCH att lists (RFC 3501) | **done** | `parenthesize_fetch_atts` |
 | UID + UIDVALIDITY cursor; reset on UIDVALIDITY change | **done** | `imap_loop` + store |
+| Connect / command timeouts (30s / 60s) | **done** | `CONNECT_TIMEOUT` / `COMMAND_TIMEOUT`; `ImapError::Timeout` fails the job (CHE-129) |
 | SPECIAL-USE folder roles (RFC 6154) | **done** | `special_use_role`; local `role_override` wins; Settings remapping; METADATA `SETMETADATA /private/specialuse` when advertised (CHE-128) |
 | Hierarchical folders (LIST delimiter paths) | **done** | `split_imap_folder_path`, `parent_id` |
 | UID STORE flags (`\Seen`, `\Flagged`, …) | **done** | `set_flags` / `clear_flags` |
