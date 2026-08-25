@@ -340,12 +340,14 @@ type SyncEvent =
 | IMAP UIDVALIDITY change | IMAP adapter | Full re-sync of affected folder; cursor reset |
 | Server returns partial data | Protocol adapter | Adapter retries the failed batch; cursor not advanced |
 | Database write fails | Storage | Transaction rolls back; cursor unchanged; sync retries |
-| Message too large | Protocol adapter | Skip message, log warning, continue; mark message as `fetch_error` in DB |
-| Credential decrypt fails | Auth/storage | Account marked inactive; UI prompts for re-entry |
+| Message too large | Protocol adapter | Skip message, log warning, continue; mark `flags.fetch_error` (`message too large`, 25 MiB soft cap on lazy body) |
+| Credential decrypt fails | Auth/storage | Account marked inactive (`is_active`/`sync_enabled` cleared); UI prompts for re-entry |
 | SSE connection drops | Frontend (RxJS) | Automatic reconnect with exponential backoff (1s → 2s → 4s → … → 60s cap) |
 | XState machine stuck | Frontend | Machine has timeout transitions; `error` state offers retry/reset |
 
-Every failure mode produces a typed error at the module boundary. No `catch` blocks swallow errors silently. No secrets appear in error messages.
+Every failure mode produces a typed error at the module boundary. No `catch` blocks swallow errors silently. No secrets appear in error messages (`jobs.last_error` is a fixed category whitelist via `sanitize_error`).
+
+**Implementation:** `backend/src/sync/recovery.rs` (deactivate + fetch_error); UIDVALIDITY/cursor/`sanitize_error`/backoff already in sync + jobs + scheduler. OAuth token refresh remains CHE-26.
 
 ---
 

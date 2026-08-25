@@ -17,11 +17,13 @@ pub(crate) async fn imap_sync_account(
     user_id: &str,
     account_id: &str,
 ) -> Result<SyncOutcome, SyncError> {
-    let dek = crate::auth::AuthState::get_user_dek(db, user_id)
-        .await
-        .map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let Ok(dek) = crate::auth::AuthState::get_user_dek(db, user_id).await else {
+        return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
+    };
     let row = load_account_sync_row(db, user_id, account_id).await?;
-    let password = crate::imap::decrypt_account_password(&row.credential, &dek)?;
+    let Ok(password) = crate::imap::decrypt_account_password(&row.credential, &dek) else {
+        return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
+    };
     let result = run_imap_sync(db, account_id, &row, &password).await?;
     Ok(outcome_from_response(&result))
 }

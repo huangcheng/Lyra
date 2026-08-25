@@ -18,26 +18,33 @@ pub(crate) async fn jmap_sync_account(
     user_id: &str,
     account_id: &str,
 ) -> Result<SyncOutcome, SyncError> {
-    let dek = crate::auth::AuthState::get_user_dek(db, user_id)
-        .await
-        .map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let Ok(dek) = crate::auth::AuthState::get_user_dek(db, user_id).await else {
+        return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
+    };
     let row = load_account_sync_row(db, user_id, account_id).await?;
     let credential_json = row.credential.clone();
     let email_address = row.email_address.clone();
     let jmap_base_url = row.jmap_base_url.clone();
 
     let result = if let Some(ref base_url) = jmap_base_url {
-        let password = crate::jmap::decrypt_account_password(&credential_json, &dek)?;
+        let Ok(password) = crate::jmap::decrypt_account_password(&credential_json, &dek) else {
+            return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
+        };
         match run_jmap_sync(db, account_id, base_url, &email_address, &password).await {
             Ok(result) => result,
             Err(e) => {
                 tracing::warn!("JMAP sync failed ({e}), falling back to IMAP");
-                let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
+                let Ok(password) = crate::imap::decrypt_account_password(&credential_json, &dek)
+                else {
+                    return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
+                };
                 run_imap_sync(db, account_id, &row, &password).await?
             }
         }
     } else {
-        let password = crate::imap::decrypt_account_password(&credential_json, &dek)?;
+        let Ok(password) = crate::imap::decrypt_account_password(&credential_json, &dek) else {
+            return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
+        };
         run_imap_sync(db, account_id, &row, &password).await?
     };
     Ok(outcome_from_response(&result))

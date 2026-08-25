@@ -10,6 +10,7 @@
 mod http;
 mod imap_loop;
 mod jmap_loop;
+mod recovery;
 mod send;
 mod store;
 mod types;

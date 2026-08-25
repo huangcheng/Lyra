@@ -673,6 +673,7 @@ pub(crate) struct MessageRow {
     date: Option<String>,
     snippet: Option<String>,
     has_attachments: bool,
+    size_bytes: Option<i64>,
 }
 
 pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
@@ -750,7 +751,7 @@ pub(crate) async fn load_message_row(
         SELECT m.id, m.account_id, m.folder_id, m.external_id,
                m.subject, m.from_address, m.to_addresses, m.cc_addresses,
                m.date, m.snippet, m.body_text, m.body_html,
-               m.is_read, m.is_starred, m.has_attachments,
+               m.is_read, m.is_starred, m.has_attachments, m.size_bytes,
                f.external_id AS folder_name,
                a.protocol
         FROM message m
@@ -776,6 +777,7 @@ pub(crate) async fn load_message_row(
             date: opt_ts_from_row(&row, "date"),
             snippet: row.get("snippet"),
             has_attachments: row.get("has_attachments"),
+            size_bytes: row.get("size_bytes"),
         },
         &id_param(db, message_id)?,
         &id_param(db, user_id)?,
@@ -877,6 +879,7 @@ pub(crate) async fn get_message(
     Ok(Json(response))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn maybe_fill_imap_body(
     db: &DbPool,
     data_dir: &std::path::Path,
@@ -887,6 +890,17 @@ async fn maybe_fill_imap_body(
     if !needs_body || row.protocol != "imap" {
         return Ok(());
     }
+
+    if super::recovery::body_exceeds_limit(row.size_bytes) {
+        tracing::warn!(
+            message_id = %row.id,
+            size_bytes = ?row.size_bytes,
+            "skipping oversized message body fetch"
+        );
+        super::recovery::mark_message_fetch_error(db, &row.id, "message too large").await?;
+        return Ok(());
+    }
+
     let Ok(uid) = parse_imap_uid(row.external_id.as_deref()) else {
         return Ok(());
     };
@@ -897,6 +911,18 @@ async fn maybe_fill_imap_body(
     let Some(fetched) = bodies.into_iter().next() else {
         return Ok(());
     };
+
+    if let Some(size) = fetched.size
+        && u64::from(size) > super::recovery::MAX_MESSAGE_BODY_BYTES
+    {
+        tracing::warn!(
+            message_id = %row.id,
+            size,
+            "skipping oversized IMAP body"
+        );
+        super::recovery::mark_message_fetch_error(db, &row.id, "message too large").await?;
+        return Ok(());
+    }
 
     let from_json = fetched
         .from

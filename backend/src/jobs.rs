@@ -221,11 +221,14 @@ pub async fn try_claim_with_permit(
 /// echo credentials, tokens, usernames, or server chatter.
 fn sanitize_error(err: &SyncError) -> &'static str {
     match err {
+        SyncError::Imap(crate::imap::ImapError::Login(_)) => "auth error",
         SyncError::Imap(_) => "IMAP error",
+        SyncError::Jmap(crate::jmap::JmapError::Authentication(_)) => "auth error",
         SyncError::Jmap(_) => "JMAP error",
         SyncError::Smtp(smtp) => smtp.job_category(),
         SyncError::Database(_) => "database error",
         SyncError::Protocol(_) => "protocol error",
+        SyncError::Crypto(_) => "credential error",
         _ => "sync failed",
     }
 }
@@ -752,13 +755,17 @@ mod tests {
         let msg = "535 auth failed for user admin token=t0psecret";
         assert_eq!(
             sanitize_error(&SyncError::Imap(crate::imap::ImapError::Login(msg.into()))),
-            "IMAP error"
+            "auth error"
         );
         assert_eq!(
             sanitize_error(&SyncError::Jmap(crate::jmap::JmapError::SessionDiscovery(
                 msg.into()
             ))),
             "JMAP error"
+        );
+        assert_eq!(
+            sanitize_error(&SyncError::Crypto(msg.into())),
+            "credential error"
         );
         assert_eq!(
             sanitize_error(&SyncError::Smtp(crate::smtp::SmtpError::Credential(
