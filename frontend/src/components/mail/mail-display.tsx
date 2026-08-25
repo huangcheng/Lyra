@@ -136,6 +136,7 @@ export function MailDisplay() {
   const [replyText, setReplyText] = useState('');
   const [allowRemoteContent, setAllowRemoteContent] = useState(false);
   const [frameHeight, setFrameHeight] = useState(192);
+  const [frameLoaded, setFrameLoaded] = useState(false);
   const today = new Date();
   const bodyScrollRef = useRef<HTMLDivElement>(null);
   const autoMarkedIdRef = useRef<string | null>(null);
@@ -144,6 +145,7 @@ export function MailDisplay() {
     autoMarkedIdRef.current = null;
     setAllowRemoteContent(false);
     setFrameHeight(192);
+    setFrameLoaded(false);
   }, [selectedMessageId]);
 
   const tryAutoMarkRead = useCallback(async () => {
@@ -570,22 +572,37 @@ export function MailDisplay() {
             {loadError ? (
               <p className="text-destructive">{loadError}</p>
             ) : mail.bodyHtml ? (
-              <iframe
-                title={mail.subject}
-                sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-                className="w-full border-0 bg-transparent"
-                style={{ height: frameHeight }}
-                onLoad={(e) => {
-                  const doc = e.currentTarget.contentDocument;
-                  if (!doc) return;
-                  const height = Math.max(
-                    192,
-                    Math.min(doc.documentElement.scrollHeight + 2, 100_000),
-                  );
-                  setFrameHeight(height);
-                }}
-                srcDoc={mailHtmlSrcDoc(mail.bodyHtml, !mail.remoteContentBlocked, isDark)}
-              />
+              <div className="relative">
+                {frameLoaded ? null : (
+                  <div className="space-y-3 py-1" aria-hidden>
+                    <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
+                    <div className="h-4 w-full animate-pulse rounded bg-muted" />
+                    <div className="h-4 w-5/6 animate-pulse rounded bg-muted" />
+                    <div className="h-32 w-full animate-pulse rounded bg-muted" />
+                  </div>
+                )}
+                <iframe
+                  title={mail.subject}
+                  sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                  className={
+                    frameLoaded
+                      ? 'w-full border-0 bg-transparent opacity-100 transition-opacity duration-150'
+                      : 'absolute inset-x-0 top-0 w-full border-0 bg-transparent opacity-0'
+                  }
+                  style={{ height: frameHeight }}
+                  onLoad={(e) => {
+                    const doc = e.currentTarget.contentDocument;
+                    if (!doc) return;
+                    const height = Math.max(
+                      192,
+                      Math.min(doc.documentElement.scrollHeight + 2, 100_000),
+                    );
+                    setFrameHeight(height);
+                    setFrameLoaded(true);
+                  }}
+                  srcDoc={mailHtmlSrcDoc(mail.bodyHtml, !mail.remoteContentBlocked, isDark)}
+                />
+              </div>
             ) : (
               (mail.bodyText ?? mail.snippet)
             )}
