@@ -110,35 +110,6 @@ export function MailDisplay() {
   }, [selectedMessageId]);
 
   useEffect(() => {
-    if (!mail?.bodyHtml) {
-      setPixelAdvisory(false);
-      return;
-    }
-    const root = mailBodyRef.current;
-    if (!root) return;
-
-    const markIfPixel = (img: HTMLImageElement) => {
-      if (img.getAttribute('data-lyra-pixel') === '1') {
-        setPixelAdvisory(true);
-        return;
-      }
-      if (img.complete && img.naturalWidth > 0 && img.naturalWidth <= 4 && img.naturalHeight <= 4) {
-        img.setAttribute('data-lyra-pixel', '1');
-        setPixelAdvisory(true);
-      }
-    };
-
-    const onLoad = (ev: Event) => {
-      const t = ev.target;
-      if (t instanceof HTMLImageElement) markIfPixel(t);
-    };
-
-    root.querySelectorAll('img').forEach((img) => markIfPixel(img));
-    root.addEventListener('load', onLoad, true);
-    return () => root.removeEventListener('load', onLoad, true);
-  }, [mail?.id, mail?.bodyHtml, allowRemoteContent]);
-
-  useEffect(() => {
     if (!selectedMessageId || !token) return;
     let cancelled = false;
 
@@ -166,6 +137,35 @@ export function MailDisplay() {
   }, [selectedMessageId, token, upsertMessage, allowRemoteContent]);
 
   const mail = cached ?? null;
+
+  useEffect(() => {
+    if (!mail?.bodyHtml) {
+      setPixelAdvisory(false);
+      return;
+    }
+    const root = mailBodyRef.current;
+    if (!root) return;
+
+    const markIfPixel = (img: HTMLImageElement) => {
+      if (img.getAttribute('data-lyra-pixel') === '1') {
+        setPixelAdvisory(true);
+        return;
+      }
+      if (img.complete && img.naturalWidth > 0 && img.naturalWidth <= 4 && img.naturalHeight <= 4) {
+        img.setAttribute('data-lyra-pixel', '1');
+        setPixelAdvisory(true);
+      }
+    };
+
+    const onLoad = (ev: Event) => {
+      const t = ev.target;
+      if (t instanceof HTMLImageElement) markIfPixel(t);
+    };
+
+    root.querySelectorAll('img').forEach((img) => markIfPixel(img));
+    root.addEventListener('load', onLoad, true);
+    return () => root.removeEventListener('load', onLoad, true);
+  }, [mail?.id, mail?.bodyHtml, allowRemoteContent]);
 
   useEffect(() => {
     if (markReadPolicy !== 'on_open' || !mail || mail.isRead || loadError) return;
