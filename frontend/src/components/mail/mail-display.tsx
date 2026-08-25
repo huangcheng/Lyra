@@ -69,14 +69,27 @@ function sanitizeEmailHtml(html: string): string {
  * it to the content; scripts still cannot run (no `allow-scripts`, and the
  * CSP blocks every load), and links open in a new, unsandboxed tab via
  * `allow-popups(-to-escape-sandbox)`.
+ *
+ * The base stylesheet supplies app-consistent typography for emails that
+ * don't style every element themselves (otherwise they fall back to the
+ * browser's serif defaults). The email's own inline styles always win.
  */
-function mailHtmlSrcDoc(bodyHtml: string, allowRemoteImages: boolean): string {
+function mailHtmlSrcDoc(bodyHtml: string, allowRemoteImages: boolean, dark: boolean): string {
   const imgSrc = allowRemoteImages
     ? "'self' blob: cid: data: https: http:"
     : "'self' blob: cid: data:";
   const csp = `default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'`;
   const safe = sanitizeEmailHtml(bodyHtml);
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"></head><body style="margin:0;font:inherit;color:inherit;background:transparent">${safe}</body></html>`;
+  const baseCss =
+    'body{margin:0;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;' +
+    `color:${dark ? '#e4e4e7' : '#1a1a1a'};word-wrap:break-word;overflow-wrap:break-word}` +
+    'img{max-width:100%;height:auto}table{max-width:100%}' +
+    'pre,code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.92em}' +
+    'pre{white-space:pre-wrap}' +
+    `blockquote{margin:0;padding-left:.8em;border-left:3px solid ${dark ? '#3f3f46' : '#dddddd'};color:${dark ? '#a1a1aa' : '#555555'}}` +
+    'h1,h2,h3,h4{line-height:1.3}' +
+    `hr{border:0;border-top:1px solid ${dark ? '#3f3f46' : '#e5e5e5'}}`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${baseCss}</style></head><body>${safe}</body></html>`;
 }
 
 function quoteBody(message: {
@@ -100,6 +113,10 @@ function isScrolledToBottom(el: HTMLElement): boolean {
 
 export function MailDisplay() {
   const locale = useUIStore((s) => s.locale);
+  const theme = useUIStore((s) => s.theme);
+  const isDark =
+    theme === 'dark' ||
+    (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
   const markReadPolicy = useUIStore((s) => s.markReadPolicy);
   const selectedMessageId = useUIStore((s) => s.selectedMessageId);
   const setSelectedMessage = useUIStore((s) => s.setSelectedMessage);
@@ -513,8 +530,8 @@ export function MailDisplay() {
               </Avatar>
               <div className="grid gap-1">
                 <div className="font-semibold">{fromLabel}</div>
-                <div className="line-clamp-1 text-xs">{mail.subject}</div>
-                <div className="line-clamp-1 text-xs">
+                <div className="line-clamp-1 text-[13px] font-medium">{mail.subject}</div>
+                <div className="line-clamp-1 text-xs text-muted-foreground">
                   <span className="font-medium">{t(locale, 'mail.replyTo')}:</span>{' '}
                   {mail.from.email}
                 </div>
@@ -567,7 +584,7 @@ export function MailDisplay() {
                   );
                   setFrameHeight(height);
                 }}
-                srcDoc={mailHtmlSrcDoc(mail.bodyHtml, !mail.remoteContentBlocked)}
+                srcDoc={mailHtmlSrcDoc(mail.bodyHtml, !mail.remoteContentBlocked, isDark)}
               />
             ) : (
               (mail.bodyText ?? mail.snippet)
