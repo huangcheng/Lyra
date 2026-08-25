@@ -228,7 +228,11 @@
       "smtpSettings": "SMTP Settings",
       "host": "Host",
       "port": "Port",
-      "security": "Security"
+      "security": "Security",
+      "folderRoles": "Folder roles",
+      "folderRolesHint": "Remap which server folder plays Archive, Sent, Drafts, Spam, or Trash. Overrides win over SPECIAL-USE detection.",
+      "folderRolesEmpty": "Sync this account once to load folders before remapping roles.",
+      "folderRoleDetected": "Server / name detection"
     }
   },
   "contacts": {

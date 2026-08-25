@@ -40,7 +40,10 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/v1/messages/search", get(search_messages))
         .route("/api/v1/messages", get(list_messages_query))
         .route("/api/v1/folders", get(list_folders))
-        .route("/api/v1/folders/{folder_id}", axum::routing::patch(patch_folder))
+        .route(
+            "/api/v1/folders/{folder_id}",
+            axum::routing::patch(patch_folder),
+        )
         .route("/api/v1/folders/{folder_id}/messages", get(list_messages))
         .route(
             "/api/v1/messages/{message_id}",
@@ -365,7 +368,7 @@ pub(crate) async fn patch_folder(
         ));
     }
 
-    if body.clear_role_override {
+    let pushed_override: Option<Option<String>> = if body.clear_role_override {
         db_execute!(
             db,
             r"
@@ -374,6 +377,7 @@ pub(crate) async fn patch_folder(
             ",
             &folder_bind
         )?;
+        Some(None)
     } else if let Some(ref role) = body.role_override {
         if !OVERRIDE_ROLES.contains(&role.as_str()) {
             return Err(SyncError::InvalidInput(format!(
@@ -401,6 +405,20 @@ pub(crate) async fn patch_folder(
             role,
             &folder_bind
         )?;
+        Some(Some(role.clone()))
+    } else {
+        None
+    };
+
+    if let Some(override_role) = pushed_override {
+        best_effort_push_specialuse(
+            db,
+            &user_id,
+            &account_id,
+            &folder_id,
+            override_role.as_deref(),
+        )
+        .await;
     }
 
     let folder = db_fetch_optional!(
@@ -431,6 +449,38 @@ pub(crate) async fn patch_folder(
     .ok_or_else(|| SyncError::InvalidInput("folder not found".into()))?;
 
     Ok(Json(folder))
+}
+
+/// Best-effort IMAP METADATA push for a local role override (CHE-128 layer 2).
+///
+/// Never fails the HTTP response: unsupported servers, connect errors, and
+/// `NO [USEATTR]` are all silent.
+async fn best_effort_push_specialuse(
+    db: &DbPool,
+    user_id: &str,
+    account_id: &str,
+    folder_id: &str,
+    role_override: Option<&str>,
+) {
+    let Ok(folder_bind) = id_param(db, folder_id) else {
+        return;
+    };
+    let Ok(Some(external_id)) = (db_fetch_optional!(
+        db,
+        "SELECT external_id FROM folder WHERE id = ?",
+        |row| row.get::<String, _>("external_id"),
+        &folder_bind
+    )) else {
+        return;
+    };
+
+    let Ok((mut client, _)) = connect_imap_for_account(db, user_id, account_id).await else {
+        return;
+    };
+
+    let special = role_override.and_then(crate::imap::role_to_specialuse);
+    let _ = client.set_private_specialuse(&external_id, special).await;
+    let _ = client.logout().await;
 }
 
 /// List messages in a folder.

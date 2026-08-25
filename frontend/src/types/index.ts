@@ -38,7 +38,10 @@ export interface MailFolder {
   id: string;
   accountId: string;
   name: string;
+  /** Effective role: override wins over SPECIAL-USE / name inference. */
   role?: 'inbox' | 'sent' | 'drafts' | 'trash' | 'spam' | 'archive';
+  /** Explicit local override when set. */
+  roleOverride?: 'inbox' | 'sent' | 'drafts' | 'trash' | 'spam' | 'archive';
   parentId?: string;
   unreadCount: number;
   totalCount: number;

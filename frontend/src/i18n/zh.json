@@ -228,7 +228,11 @@
       "smtpSettings": "SMTP 设置",
       "host": "服务器",
       "port": "端口",
-      "security": "加密方式"
+      "security": "加密方式",
+      "folderRoles": "文件夹角色",
+      "folderRolesHint": "将归档 / 已发送 / 草稿 / 垃圾邮件 / 废纸篓映射到任意服务器文件夹。本地覆盖优先于 SPECIAL-USE 检测。",
+      "folderRolesEmpty": "请先同步此账户以加载文件夹，再映射角色。",
+      "folderRoleDetected": "服务器 / 名称检测"
     }
   },
   "contacts": {

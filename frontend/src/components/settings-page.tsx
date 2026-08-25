@@ -10,6 +10,7 @@ import { useNavigate } from '@tanstack/react-router';
 import { Flag, Plus, Shield, SlidersHorizontal, Users, X } from 'lucide-react';
 import { t } from '../i18n';
 import { SlimPageNav, type SlimNavItem } from '@/components/slim-page-nav';
+import { FolderRoleMapping } from './folder-role-mapping';
 import { TotpEnroll } from './totp-enroll';
 import { useUIStore } from '../stores/ui';
 import { useAuthStore } from '../stores/auth';
@@ -1149,6 +1150,10 @@ export function SettingsPage() {
                     </select>
                   </div>
                 </fieldset>
+
+                {editingAccount ? (
+                  <FolderRoleMapping accountId={editingAccount.id} locale={locale} />
+                ) : null}
 
                 <div className="form-actions">
                   <button type="submit">

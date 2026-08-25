@@ -9,6 +9,7 @@ export interface ApiFolder {
   accountId: string;
   name: string;
   role?: string | null;
+  roleOverride?: string | null;
   parentId?: string | null;
   sortOrder: number;
   totalMessages: number;
@@ -84,11 +85,13 @@ export function parseAddresses(json?: string): MailAddress[] {
 
 export function mapApiFolder(folder: ApiFolder): MailFolder {
   const role = folder.role as MailFolder['role'] | undefined;
+  const roleOverride = folder.roleOverride as MailFolder['roleOverride'] | undefined;
   return {
     id: folder.id,
     accountId: folder.accountId,
     name: folder.name,
     role: role || undefined,
+    roleOverride: roleOverride || undefined,
     parentId: folder.parentId ?? undefined,
     unreadCount: folder.unreadMessages,
     totalCount: folder.totalMessages,

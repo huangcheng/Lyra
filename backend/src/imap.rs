@@ -238,6 +238,38 @@ impl ImapClient {
         self.capabilities.has_str("IDLE")
     }
 
+    /// Whether the server advertises RFC 5464 METADATA.
+    pub fn supports_metadata(&self) -> bool {
+        self.capabilities.has_str("METADATA")
+    }
+
+    /// Best-effort `SETMETADATA … (/private/specialuse …)` (RFC 5464 + 6154).
+    ///
+    /// No-op when METADATA is not advertised. Errors (including `NO [USEATTR]`)
+    /// are swallowed so local role overrides still succeed everywhere.
+    pub async fn set_private_specialuse(
+        &mut self,
+        mailbox_wire: &str,
+        special_use: Option<&str>,
+    ) -> Result<(), ImapError> {
+        if !self.supports_metadata() {
+            return Ok(());
+        }
+        let mbx = imap_quoted(mailbox_wire);
+        let value = match special_use {
+            Some(flag) => imap_quoted(flag),
+            None => "NIL".to_string(),
+        };
+        let cmd = format!("SETMETADATA {mbx} (/private/specialuse {value})");
+        match self.session.run_command_and_check_ok(&cmd).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tracing::debug!(error = %e, mailbox = %mailbox_wire, "SETMETADATA skipped");
+                Ok(())
+            }
+        }
+    }
+
     /// List all folders (mailboxes) on the server.
     pub async fn list_folders(&mut self) -> Result<Vec<ImapFolder>, ImapError> {
         let listing = self
@@ -716,6 +748,36 @@ fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, Vec<Extrac
     (body_text, body_html, attachments)
 }
 
+/// Map a Lyra folder role to an RFC 6154 SPECIAL-USE flag string (`\Sent`, …).
+///
+/// `inbox` has no SPECIAL-USE attribute; returns `None`.
+#[must_use]
+pub fn role_to_specialuse(role: &str) -> Option<&'static str> {
+    match role {
+        "sent" => Some("\\Sent"),
+        "drafts" => Some("\\Drafts"),
+        "trash" => Some("\\Trash"),
+        "spam" => Some("\\Junk"),
+        "archive" => Some("\\Archive"),
+        _ => None,
+    }
+}
+
+/// Quote an IMAP string (RFC 3501 quoted-string).
+#[must_use]
+pub(crate) fn imap_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        if c == '\\' || c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
 /// Decrypt the stored credential for an account.
 ///
 /// Takes the encrypted JSON blob from the `credential` column and
@@ -733,6 +795,22 @@ pub fn decrypt_account_password(credential_json: &str, dek: &[u8]) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_to_specialuse_maps_rfc6154() {
+        assert_eq!(role_to_specialuse("sent"), Some("\\Sent"));
+        assert_eq!(role_to_specialuse("spam"), Some("\\Junk"));
+        assert_eq!(role_to_specialuse("archive"), Some("\\Archive"));
+        assert_eq!(role_to_specialuse("inbox"), None);
+        assert_eq!(role_to_specialuse("unknown"), None);
+    }
+
+    #[test]
+    fn imap_quoted_escapes_backslash_and_quote() {
+        assert_eq!(imap_quoted("INBOX"), "\"INBOX\"");
+        assert_eq!(imap_quoted("\\Sent"), "\"\\\\Sent\"");
+        assert_eq!(imap_quoted("a\"b"), "\"a\\\"b\"");
+    }
 
     #[test]
     fn fetch_atts_must_be_parenthesized() {
