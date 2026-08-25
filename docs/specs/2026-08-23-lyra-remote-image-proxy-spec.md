@@ -82,7 +82,7 @@ Cache eviction: LRU by atime, capped at a configurable size (default 512 MB); ev
 
 ### Tracking-pixel heuristics (advisory only)
 
-During rewrite, flag images with explicit dimensions ≤ 4×4 px or 1-byte-class payloads after fetch; mark `data-lyra-pixel="1"`. UI may show a subtle badge. Never auto-decide — user stays in control.
+During rewrite, flag images with explicit dimensions ≤ 4×4 px (`data-lyra-pixel="1"`). After fetch, tiny payloads (≤100 bytes or GIF/PNG ≤4×4) set response header `X-Lyra-Pixel: 1`. Reading pane shows a subtle advisory badge; never auto-blocks.
 
 ## Phases
 
@@ -101,7 +101,7 @@ During rewrite, flag images with explicit dimensions ≤ 4×4 px or 1-byte-class
 - Tests: SSRF refusal (private/loopback resolved hosts), redirect guard, non-image content-type rejection, cache-hit never refetches (mock upstream with hit counter), bad/expired `sig` → 404 placeholder, query-string round-trip (`?`/`#` survive the path encoding).
 
 ### M3 — Refinements
-- Pixel heuristics + UI badge.
+- Pixel heuristics + UI badge. **done** (CHE-60)
 - Allow-list management UI: Settings → Privacy shows stored senders with remove buttons; optional domain-level entries (`@jetbrains.com`) — decide here.
 - Cache stats in settings page (size, clear-cache button).
 

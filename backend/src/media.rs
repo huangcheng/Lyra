@@ -179,6 +179,33 @@ fn looks_like_image(content_type: &str, bytes: &[u8]) -> bool {
         || bytes.starts_with(b"RIFF")
 }
 
+/// Tiny / 1×1-class image payload (CHE-60 advisory tracking-pixel heuristic).
+pub(crate) fn is_tiny_tracking_payload(bytes: &[u8]) -> bool {
+    // Classic 1×1 GIF is ~43 bytes; keep a small ceiling for similar beacons.
+    if bytes.len() <= 100 {
+        return true;
+    }
+    if let Some((w, h)) = sniff_raster_dimensions(bytes) {
+        return w <= 4 && h <= 4;
+    }
+    false
+}
+
+fn sniff_raster_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.starts_with(b"GIF8") && bytes.len() >= 10 {
+        let w = u32::from(u16::from_le_bytes([bytes[6], bytes[7]]));
+        let h = u32::from(u16::from_le_bytes([bytes[8], bytes[9]]));
+        return Some((w, h));
+    }
+    if bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47]) && bytes.len() >= 24 {
+        // IHDR width/height are big-endian at offsets 16..24
+        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        return Some((w, h));
+    }
+    None
+}
+
 async fn validate_outbound_url(url: &str) -> Result<(), SyncError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|_| SyncError::InvalidInput("invalid proxy target URL".into()))?;
@@ -384,6 +411,9 @@ fn image_response(bytes: Vec<u8>, content_type: &str, _cached: bool) -> Response
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, max-age=31536000, immutable"),
     );
+    if is_tiny_tracking_payload(&bytes) {
+        headers.insert("x-lyra-pixel", HeaderValue::from_static("1"));
+    }
     (StatusCode::OK, headers, bytes).into_response()
 }
 
@@ -467,6 +497,21 @@ mod tests {
 
     /// Serialize tests that touch [`ALLOW_LOOPBACK_FOR_TESTS`].
     static LOOPBACK_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+    #[test]
+    fn tiny_tracking_payload_heuristic() {
+        assert!(is_tiny_tracking_payload(PLACEHOLDER_GIF));
+        assert!(is_tiny_tracking_payload(&[0u8; 50]));
+        assert!(!is_tiny_tracking_payload(&[0u8; 200]));
+        // Minimal GIF header with 1×1 dimensions (rest padded).
+        let mut gif = vec![0u8; 120];
+        gif[..6].copy_from_slice(b"GIF89a");
+        gif[6] = 1;
+        gif[7] = 0;
+        gif[8] = 1;
+        gif[9] = 0;
+        assert!(is_tiny_tracking_payload(&gif));
+    }
 
     #[test]
     fn proxy_path_roundtrip_query_and_fragment() {

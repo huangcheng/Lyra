@@ -85,6 +85,8 @@ export function MailDisplay() {
   const [busy, setBusy] = useState(false);
   const [replyText, setReplyText] = useState('');
   const [allowRemoteContent, setAllowRemoteContent] = useState(false);
+  const [pixelAdvisory, setPixelAdvisory] = useState(false);
+  const mailBodyRef = useRef<HTMLDivElement>(null);
   const [bodyLoading, setBodyLoading] = useState(false);
   const today = new Date();
   const bodyScrollRef = useRef<HTMLDivElement>(null);
@@ -104,7 +106,37 @@ export function MailDisplay() {
 
   useEffect(() => {
     setReplyText('');
+    setPixelAdvisory(false);
   }, [selectedMessageId]);
+
+  useEffect(() => {
+    if (!mail?.bodyHtml) {
+      setPixelAdvisory(false);
+      return;
+    }
+    const root = mailBodyRef.current;
+    if (!root) return;
+
+    const markIfPixel = (img: HTMLImageElement) => {
+      if (img.getAttribute('data-lyra-pixel') === '1') {
+        setPixelAdvisory(true);
+        return;
+      }
+      if (img.complete && img.naturalWidth > 0 && img.naturalWidth <= 4 && img.naturalHeight <= 4) {
+        img.setAttribute('data-lyra-pixel', '1');
+        setPixelAdvisory(true);
+      }
+    };
+
+    const onLoad = (ev: Event) => {
+      const t = ev.target;
+      if (t instanceof HTMLImageElement) markIfPixel(t);
+    };
+
+    root.querySelectorAll('img').forEach((img) => markIfPixel(img));
+    root.addEventListener('load', onLoad, true);
+    return () => root.removeEventListener('load', onLoad, true);
+  }, [mail?.id, mail?.bodyHtml, allowRemoteContent]);
 
   useEffect(() => {
     if (!selectedMessageId || !token) return;
@@ -518,6 +550,17 @@ export function MailDisplay() {
               </div>
             </div>
           ) : null}
+          {pixelAdvisory && !showRemoteBanner ? (
+            <div className="px-4 pt-3">
+              <div
+                className="flex items-center gap-2 rounded-lg border border-border/80 bg-muted/40 px-3.5 py-2 text-[12px] text-ter-foreground"
+                role="status"
+              >
+                <Shield className="size-3.5 shrink-0 opacity-70" aria-hidden />
+                <span className="min-w-0 flex-1">{t(locale, 'mail.trackingPixelHint')}</span>
+              </div>
+            </div>
+          ) : null}
           <div ref={bodyScrollRef} className="flex-1 overflow-auto p-4 text-sm">
             {loadError ? (
               <p className="text-destructive whitespace-pre-wrap">{loadError}</p>
@@ -530,6 +573,7 @@ export function MailDisplay() {
               </div>
             ) : mail.bodyHtml ? (
               <div
+                ref={mailBodyRef}
                 className="mail-body animate-in fade-in duration-150"
                 // Sanitized via sanitizeEmailHtml (class/style-tag stripped).
                 dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(mail.bodyHtml) }}

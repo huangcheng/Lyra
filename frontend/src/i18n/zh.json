@@ -71,6 +71,7 @@
     "remoteContentHidden": "已隐藏远程图片以保护您的隐私。",
     "showRemoteContent": "显示图片",
     "alwaysShowFromSender": "始终允许此发件人",
+    "trackingPixelHint": "检测到可能的跟踪像素（仅提示 — 图片仍会加载）。",
     "folder": {
       "inbox": "收件箱",
       "drafts": "草稿",

@@ -220,7 +220,12 @@ fn rewrite_proxy(html: &str, signer: &crate::media::ProxySigner) -> RewriteResul
 
         if src.is_some_and(is_remote_http_url) {
             let proxy_url = signer.sign_url(src.unwrap_or_default());
-            let new_attrs = SRC_ATTR_RE.replace(attrs, format!("src=\"{proxy_url}\""));
+            let mut new_attrs = SRC_ATTR_RE
+                .replace(attrs, format!("src=\"{proxy_url}\""))
+                .into_owned();
+            if attrs_suggest_tracking_pixel(attrs) {
+                new_attrs = mark_tracking_pixel_attr(&new_attrs);
+            }
             let _ = write!(out, "<img{new_attrs}>");
         } else {
             out.push_str(full.as_str());
@@ -234,6 +239,75 @@ fn rewrite_proxy(html: &str, signer: &crate::media::ProxySigner) -> RewriteResul
     RewriteResult {
         html: out,
         blocked: false,
+    }
+}
+
+/// Explicit HTML dimensions ≤ 4×4 → likely tracking pixel (advisory).
+pub(crate) fn attrs_suggest_tracking_pixel(attrs: &str) -> bool {
+    let w = attr_px_dimension(attrs, "width");
+    let h = attr_px_dimension(attrs, "height");
+    match (w, h) {
+        (Some(w), Some(h)) => w <= 4 && h <= 4,
+        (Some(w), None) => w <= 4,
+        (None, Some(h)) => h <= 4,
+        (None, None) => style_suggests_tiny_pixel(attrs),
+    }
+}
+
+fn attr_px_dimension(attrs: &str, name: &str) -> Option<u32> {
+    let re = match name {
+        "width" => {
+            static WIDTH_RE: LazyLock<Regex> = LazyLock::new(|| {
+                Regex::new(r#"(?is)\bwidth\s*=\s*['"]?\s*(\d+)\s*(?:px)?['"]?"#)
+                    .expect("width regex")
+            });
+            &*WIDTH_RE
+        }
+        "height" => {
+            static HEIGHT_RE: LazyLock<Regex> = LazyLock::new(|| {
+                Regex::new(r#"(?is)\bheight\s*=\s*['"]?\s*(\d+)\s*(?:px)?['"]?"#)
+                    .expect("height regex")
+            });
+            &*HEIGHT_RE
+        }
+        _ => return None,
+    };
+    re.captures(attrs)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse().ok())
+}
+
+fn style_suggests_tiny_pixel(attrs: &str) -> bool {
+    static STYLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?is)\bstyle\s*=\s*['"]([^'"]*)['"]"#).expect("style regex")
+    });
+    static W_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)width\s*:\s*(\d+)\s*px").expect("style width"));
+    static H_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)height\s*:\s*(\d+)\s*px").expect("style height"));
+    let Some(style) = STYLE_RE
+        .captures(attrs)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())
+    else {
+        return false;
+    };
+    let w = W_RE
+        .captures(style)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<u32>().ok());
+    let h = H_RE
+        .captures(style)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<u32>().ok());
+    matches!((w, h), (Some(w), Some(h)) if w <= 4 && h <= 4)
+}
+
+fn mark_tracking_pixel_attr(attrs: &str) -> String {
+    if attrs.contains("data-lyra-pixel") {
+        attrs.to_string()
+    } else {
+        format!(r#"{attrs} data-lyra-pixel="1""#)
     }
 }
 
@@ -398,6 +472,28 @@ mod tests {
         let r = rewrite_remote_images(html, false, None);
         assert!(!r.blocked);
         assert!(r.html.contains("cid:part1"));
+    }
+
+    #[test]
+    fn marks_tiny_dimension_pixel_on_proxy_rewrite() {
+        let signer = ProxySigner {
+            user_id: "user-1".to_string(),
+            secret: b"test-secret-key-32-bytes-long!!!".to_vec(),
+        };
+        let html = r#"<img src="https://evil.com/pixel.gif" width="1" height="1" alt="x">"#;
+        let r = rewrite_remote_images(html, true, Some(&signer));
+        assert!(r.html.contains(r#"data-lyra-pixel="1""#));
+        assert!(r.html.contains("/api/v1/proxy/"));
+    }
+
+    #[test]
+    fn attrs_suggest_tracking_pixel_thresholds() {
+        assert!(attrs_suggest_tracking_pixel(r#" width="1" height="1""#));
+        assert!(attrs_suggest_tracking_pixel(r" width='4' height='4'"));
+        assert!(!attrs_suggest_tracking_pixel(r#" width="5" height="5""#));
+        assert!(attrs_suggest_tracking_pixel(
+            r#" style="width:1px;height:1px""#
+        ));
     }
 
     #[test]

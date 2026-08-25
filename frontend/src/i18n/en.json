@@ -71,6 +71,7 @@
     "remoteContentHidden": "Remote images are hidden to protect your privacy.",
     "showRemoteContent": "Show images",
     "alwaysShowFromSender": "Always allow this sender",
+    "trackingPixelHint": "Possible tracking pixel detected (advisory — images still load).",
     "folder": {
       "inbox": "Inbox",
       "drafts": "Drafts",
