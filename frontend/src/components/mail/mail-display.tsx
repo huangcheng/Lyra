@@ -50,18 +50,26 @@ import { useUIStore } from '@/stores/ui';
  * Sanitize attacker-controlled email HTML before rendering.
  * Defense in depth: the backend sanitizes at ingest; this guards the render
  * path against anything stored before that, or from other sources.
- * Strict config: no iframes/forms/embeds, no unknown protocols.
+ * Strict config: no iframes/forms/embeds, no unknown protocols. CSS (`style`
+ * tags and attributes) is allowed: HTML email layout depends on it, and the
+ * sandboxed iframe + CSP confines what CSS can reach.
  */
 function sanitizeEmailHtml(html: string): string {
   // Deliberately looser than the backend ingest policy (e.g. data: images
   // survive here): this layer also guards legacy rows stored before backend
   // sanitization existed, without re-deciding ingest-time trade-offs.
   return DOMPurify.sanitize(html, {
-    FORBID_TAGS: ['iframe', 'object', 'embed', 'form', 'meta', 'link', 'base', 'style'],
+    FORBID_TAGS: ['iframe', 'object', 'embed', 'form', 'meta', 'link', 'base'],
   });
 }
 
-/** Sandboxed iframe document with strict CSP for mail HTML (M1 remote-image privacy). */
+/**
+ * Sandboxed iframe document with strict CSP for mail HTML (M1 remote-image
+ * privacy). The iframe uses `allow-same-origin` so the parent can auto-size
+ * it to the content; scripts still cannot run (no `allow-scripts`, and the
+ * CSP blocks every load), and links open in a new, unsandboxed tab via
+ * `allow-popups(-to-escape-sandbox)`.
+ */
 function mailHtmlSrcDoc(bodyHtml: string, allowRemoteImages: boolean): string {
   const imgSrc = allowRemoteImages
     ? "'self' blob: cid: data: https: http:"
@@ -110,6 +118,7 @@ export function MailDisplay() {
   const [busy, setBusy] = useState(false);
   const [replyText, setReplyText] = useState('');
   const [allowRemoteContent, setAllowRemoteContent] = useState(false);
+  const [frameHeight, setFrameHeight] = useState(192);
   const today = new Date();
   const bodyScrollRef = useRef<HTMLDivElement>(null);
   const autoMarkedIdRef = useRef<string | null>(null);
@@ -117,6 +126,7 @@ export function MailDisplay() {
   useEffect(() => {
     autoMarkedIdRef.current = null;
     setAllowRemoteContent(false);
+    setFrameHeight(192);
   }, [selectedMessageId]);
 
   const tryAutoMarkRead = useCallback(async () => {
@@ -545,8 +555,18 @@ export function MailDisplay() {
             ) : mail.bodyHtml ? (
               <iframe
                 title={mail.subject}
-                sandbox=""
-                className="w-full min-h-[12rem] border-0 bg-transparent"
+                sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                className="w-full border-0 bg-transparent"
+                style={{ height: frameHeight }}
+                onLoad={(e) => {
+                  const doc = e.currentTarget.contentDocument;
+                  if (!doc) return;
+                  const height = Math.max(
+                    192,
+                    Math.min(doc.documentElement.scrollHeight + 2, 100_000),
+                  );
+                  setFrameHeight(height);
+                }}
                 srcDoc={mailHtmlSrcDoc(mail.bodyHtml, !mail.remoteContentBlocked)}
               />
             ) : (

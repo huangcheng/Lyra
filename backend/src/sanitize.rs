@@ -18,9 +18,19 @@ static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| {
     // Start from ammonia's safe defaults: they allow typical email formatting
     // (p, div, span, br, b/i/em/strong, a, img, tables, lists, headings,
     // blockquote, pre, code) and already drop `<script>`, `<iframe>`,
-    // `<object>`, `<embed>`, `<form>`, `<meta>`, `<link>`, `<base>`, event
-    // handler attributes (`on*`), and the `style` attribute.
+    // `<object>`, `<embed>`, `<form>`, `<meta>`, `<link>`, `<base>`, and event
+    // handler attributes (`on*`).
     let mut builder = Builder::default();
+
+    // Keep `<style>` blocks and the `style` attribute: HTML email layout
+    // depends on them (table-based templates, inline colors/sizing). CSS
+    // cannot execute script in modern engines, and rendering happens inside a
+    // sandboxed iframe whose CSP confines network loads (see mail-display),
+    // so presentational CSS is safe to carry through. `style` is in ammonia's
+    // default `clean_content_tags`, so move it to the keep set explicitly.
+    builder.rm_clean_content_tags(["style"]);
+    builder.add_tags(["style"]);
+    builder.add_generic_attributes(["style"]);
 
     // URL scheme whitelist: no `javascript:`/`vbscript:`/`file:`.
     // `data:` is intentionally excluded: ammonia cannot restrict it to
@@ -156,9 +166,17 @@ mod tests {
     }
 
     #[test]
-    fn strips_style_attribute() {
-        let out = sanitize_email_html("<p style=\"background:url(javascript:alert(1))\">x</p>");
-        assert!(!out.contains("style="), "got: {out}");
+    fn keeps_presentational_css_but_strips_active_content() {
+        // HTML email layout relies on inline styles and <style> blocks; they
+        // must survive sanitization (render-side iframe + CSP confines them).
+        let out = sanitize_email_html(
+            "<style>.x{color:red}</style><p style=\"color:red\">x</p>\
+             <script>alert(1)</script>",
+        );
+        assert!(out.contains("<style>.x{color:red}</style>"), "got: {out}");
+        assert!(out.contains("style=\"color:red\""), "got: {out}");
+        assert!(!out.contains("<script"), "got: {out}");
+        assert!(!out.contains("alert(1)"), "got: {out}");
     }
 
     #[test]
