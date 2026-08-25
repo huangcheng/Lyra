@@ -96,6 +96,7 @@ Lyra/
       storage.rs                ← storage seam (SQLite + PostgreSQL, migrations)
       sync/                     ← sync HTTP, IMAP/JMAP loops, persist transactions
       imap.rs / jmap.rs / smtp.rs
+      oauth/ ← Microsoft mail OAuth (PKCE) + XOAUTH2 token resolve
       jobs.rs / scheduler.rs / kernel/
     migrations/
       sqlite/                   ← SQLite migration SQL files
