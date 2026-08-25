@@ -211,7 +211,7 @@ function AccountSection({
         )}
         <span
           className="truncate text-[12.5px] font-semibold"
-          title={`${account.displayName || account.emailAddress} — ${account.protocol.toUpperCase()}`}
+          title={account.displayName || account.emailAddress}
         >
           {account.displayName || account.emailAddress}
         </span>
