@@ -283,7 +283,10 @@ impl JmapClient {
     /// Substitutes RFC 8620 placeholders: `types=*`, `closeafter=no`, `ping=30`.
     #[must_use]
     pub fn event_source_url_expanded(&self) -> Option<String> {
-        self.session.event_source_url.as_ref().map(|t| expand_event_source_url(t))
+        self.session
+            .event_source_url
+            .as_ref()
+            .map(|t| expand_event_source_url(t))
     }
 
     /// Open the session EventSource and wait until a `state` (or similar) push event.
@@ -604,10 +607,7 @@ impl JmapClient {
 
         let identities = self.list_identities().await?;
         let identity = pick_identity(&identities, &outbound.from_email).ok_or_else(|| {
-            JmapError::InvalidResponse(format!(
-                "no JMAP identity for {}",
-                outbound.from_email
-            ))
+            JmapError::InvalidResponse(format!("no JMAP identity for {}", outbound.from_email))
         })?;
 
         let mailboxes = self.list_mailboxes().await?;
@@ -1462,6 +1462,8 @@ mod tests {
             body_html: None,
             in_reply_to: None,
             references: None,
+            mime_content_type: None,
+            mime_body: None,
         };
         let email = build_email_create(&outbound, Some("mb-drafts")).unwrap();
         assert_eq!(email["subject"], "Hi");

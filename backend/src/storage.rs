@@ -1,8 +1,9 @@
-//! Storage module — dual-DB seam for `SQLite` and `PostgreSQL`.
+//! Storage module — dual-DB connection pool and migrations.
 //!
-//! This module hides the database implementation behind a clean interface.
-//! Migrations are loaded from `migrations/sqlite/` or `migrations/postgres/`
-//! based on the `DATABASE_URL` scheme.
+//! Connection management and migration runners live here. Typed query helpers
+//! and domain-specific SQL are in [`crate::repository`] (see that module's table
+//! of seam components). Migrations load from `migrations/sqlite/` or
+//! `migrations/postgres/` based on the `DATABASE_URL` scheme.
 //!
 //! See `docs/specs/2026-08-20-lyra-data-model-spec.md` for the schema.
 

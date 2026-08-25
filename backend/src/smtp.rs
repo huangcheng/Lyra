@@ -136,6 +136,11 @@ pub struct OutboundMessage {
     pub in_reply_to: Option<String>,
     /// References header for threading.
     pub references: Option<String>,
+    /// RFC 3156 / OpenGPG MIME wrapper (replaces body_text/body_html when set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_body: Option<String>,
 }
 
 impl OutboundMessage {
@@ -312,28 +317,34 @@ fn build_message(msg: &OutboundMessage) -> Result<Message, SmtpError> {
         builder = builder.bcc(mailbox);
     }
 
-    // Build body: prefer multipart (text + html), fallback to single
-    let message = match (&msg.body_text, &msg.body_html) {
-        (Some(text), Some(html)) => {
-            let text_part = SinglePart::builder()
+    // Build body: OpenGPG MIME wrapper, multipart text+html, or single part.
+    let message = if let (Some(ct), Some(body)) = (&msg.mime_content_type, &msg.mime_body) {
+        let content_type = ContentType::parse(ct)
+            .map_err(|e| SmtpError::Permanent(format!("invalid Content-Type: {e}")))?;
+        builder.header(content_type).body(body.clone())?
+    } else {
+        match (&msg.body_text, &msg.body_html) {
+            (Some(text), Some(html)) => {
+                let text_part = SinglePart::builder()
+                    .header(ContentType::TEXT_PLAIN)
+                    .body(text.clone());
+
+                let html_part = SinglePart::builder()
+                    .header(ContentType::TEXT_HTML)
+                    .body(html.clone());
+
+                builder.multipart(
+                    MultiPart::alternative()
+                        .singlepart(text_part)
+                        .singlepart(html_part),
+                )?
+            }
+            (Some(text), None) => builder.header(ContentType::TEXT_PLAIN).body(text.clone())?,
+            (None, Some(html)) => builder.header(ContentType::TEXT_HTML).body(html.clone())?,
+            (None, None) => builder
                 .header(ContentType::TEXT_PLAIN)
-                .body(text.clone());
-
-            let html_part = SinglePart::builder()
-                .header(ContentType::TEXT_HTML)
-                .body(html.clone());
-
-            builder.multipart(
-                MultiPart::alternative()
-                    .singlepart(text_part)
-                    .singlepart(html_part),
-            )?
+                .body(String::new())?,
         }
-        (Some(text), None) => builder.header(ContentType::TEXT_PLAIN).body(text.clone())?,
-        (None, Some(html)) => builder.header(ContentType::TEXT_HTML).body(html.clone())?,
-        (None, None) => builder
-            .header(ContentType::TEXT_PLAIN)
-            .body(String::new())?,
     };
 
     Ok(message)
@@ -417,13 +428,16 @@ mod tests {
             body_html: None,
             in_reply_to: None,
             references: None,
+            mime_content_type: None,
+            mime_body: None,
         };
         assert!(caps.allows_message(&msg).is_ok());
     }
 
     #[test]
     fn ehlo_rejects_utf8_envelope_without_smtputf8() {
-        let caps = EhloCapabilities::from_ehlo_lines(["smtp.example.com", "AUTH PLAIN", "8BITMIME"]);
+        let caps =
+            EhloCapabilities::from_ehlo_lines(["smtp.example.com", "AUTH PLAIN", "8BITMIME"]);
         let msg = OutboundMessage {
             from_email: "用户@例子.测试".into(),
             from_name: None,
@@ -435,6 +449,8 @@ mod tests {
             body_html: None,
             in_reply_to: None,
             references: None,
+            mime_content_type: None,
+            mime_body: None,
         };
         assert!(msg.needs_smtputf8());
         assert!(caps.allows_message(&msg).is_err());
@@ -454,6 +470,8 @@ mod tests {
             body_html: None,
             in_reply_to: None,
             references: None,
+            mime_content_type: None,
+            mime_body: None,
         };
         assert!(msg.needs_8bitmime());
         assert!(caps.allows_message(&msg).is_err());
@@ -485,6 +503,8 @@ mod tests {
             body_html: None,
             in_reply_to: None,
             references: None,
+            mime_content_type: None,
+            mime_body: None,
         };
 
         let message = build_message(&msg).unwrap();
@@ -504,6 +524,8 @@ mod tests {
             body_html: Some("<p>Hello</p>".into()),
             in_reply_to: None,
             references: None,
+            mime_content_type: None,
+            mime_body: None,
         };
 
         let message = build_message(&msg).unwrap();
@@ -526,6 +548,8 @@ mod tests {
             body_html: Some("<p>HTML</p>".into()),
             in_reply_to: Some("<original@example.com>".into()),
             references: Some("<original@example.com>".into()),
+            mime_content_type: None,
+            mime_body: None,
         };
 
         let message = build_message(&msg).unwrap();
@@ -547,6 +571,8 @@ mod tests {
             references: Some(
                 "<thread-root@mail.example.com> <original-msg-id@mail.example.com>".into(),
             ),
+            mime_content_type: None,
+            mime_body: None,
         };
 
         let message = build_message(&msg).unwrap();

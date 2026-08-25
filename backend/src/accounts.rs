@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
+use crate::api_error::ApiErrorBody;
 use crate::auth::{AuthState, AuthUser};
 use crate::crypto;
 use crate::db_row::{InvalidIdError, id_from_row, id_param, opt_ts_from_row, ts_from_row};
@@ -140,17 +141,21 @@ impl From<InvalidIdError> for AccountError {
 
 impl IntoResponse for AccountError {
     fn into_response(self) -> axum::response::Response {
-        let (status, message) = match self {
-            AccountError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            AccountError::Database(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
-            }
-            AccountError::Crypto(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "encryption error".into())
-            }
-            AccountError::InvalidInput(msg) => (StatusCode::BAD_REQUEST, msg),
+        let (status, message, code) = match self {
+            AccountError::NotFound => (StatusCode::NOT_FOUND, self.to_string(), Some("not_found")),
+            AccountError::Database(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error".into(),
+                Some("internal_error"),
+            ),
+            AccountError::Crypto(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "encryption error".into(),
+                Some("internal_error"),
+            ),
+            AccountError::InvalidInput(msg) => (StatusCode::BAD_REQUEST, msg, Some("bad_request")),
         };
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        (status, Json(ApiErrorBody::new(message, code))).into_response()
     }
 }
 
@@ -220,6 +225,7 @@ async fn get_account(
 }
 
 /// Create a new mail account.
+#[allow(clippy::too_many_lines)]
 async fn create_account(
     State(state): State<AuthState>,
     AuthUser(user_id): AuthUser,
@@ -261,10 +267,18 @@ async fn create_account(
     } else {
         "imap".to_string()
     };
-    let jmap_base_url = resolve_jmap_base_url(&protocol, body.jmap_base_url.as_deref(), &body.email_address);
-    let send_protocol =
-        choose_send_protocol(&protocol, jmap_base_url.as_deref(), &body.email_address, &body.password)
-            .await;
+    let jmap_base_url = resolve_jmap_base_url(
+        &protocol,
+        body.jmap_base_url.as_deref(),
+        &body.email_address,
+    );
+    let send_protocol = choose_send_protocol(
+        &protocol,
+        jmap_base_url.as_deref(),
+        &body.email_address,
+        &body.password,
+    )
+    .await;
     let auth_type = body.auth_type.unwrap_or_else(|| "password".into());
     let id_bind = id_param(db, &id)?;
     let user_bind = id_param(db, &user_id)?;

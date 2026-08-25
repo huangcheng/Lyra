@@ -117,6 +117,34 @@ export async function updateOpengpgSettings(
   });
 }
 
+export interface RecipientKeyMatch {
+  id: string;
+  fingerprint: string;
+  primaryEmail: string;
+}
+
+export interface RecipientKeyLookup {
+  email: string;
+  keys: RecipientKeyMatch[];
+  ambiguous: boolean;
+  selectedKeyId?: string;
+}
+
+/** Lookup imported public keys for compose-time encrypt indicators. */
+export async function lookupRecipientKeys(emails: string[]): Promise<RecipientKeyLookup[]> {
+  if (emails.length === 0) return [];
+  const q = encodeURIComponent(emails.join(','));
+  return api<RecipientKeyLookup[]>(`/opengpg/recipient-keys?emails=${q}`);
+}
+
+export interface OpengpgSendOptions {
+  sign?: boolean;
+  encrypt?: boolean;
+  attachPublicKey?: boolean;
+  signingKeyId?: string;
+  recipientKeyIds?: Record<string, string>;
+}
+
 /** Download armored text as a file (browser). */
 export function downloadArmored(filename: string, armored: string): void {
   const blob = new Blob([armored], { type: 'application/pgp-keys' });

@@ -158,9 +158,26 @@ Or from the repo root: `make backend-fmt` / `make backend-lint`.
 
 ## Specs
 
+- [HTTP API surface](../docs/specs/2026-08-26-lyra-http-api-surface.md) — `/api/v1` boundary, errors, v2 policy
+- [OpenAPI 3.1 contract](../docs/openapi/api-v1.yaml) — route reference for `/api/v1`
 - [Data model (dual-DB)](../docs/specs/2026-08-20-lyra-data-model-spec.md)
 - [Sync engine & protocols](../docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md)
 - [Engineering standards](../docs/specs/2026-08-20-lyra-engineering-standards.md)
+
+## Authentication (bearer sessions)
+
+Lyra login (`POST /api/v1/auth/login` or first-time `POST /api/v1/auth/bootstrap`) returns a **bearer token**. Protected `/api/v1` routes require:
+
+```http
+Authorization: Bearer <token>
+```
+
+- Sessions live **7 days** from creation (stored in Redis or in-memory kv).
+- Missing, invalid, or expired tokens → **401** with `{ "error": "…", "code": "unauthorized" }`.
+- Wrong password / bad TOTP on login also return **401** but do not invalidate an existing session.
+- Logout: `POST /api/v1/auth/logout` with the same header.
+
+Full route list and schemas: [`docs/openapi/api-v1.yaml`](../docs/openapi/api-v1.yaml). Unversioned probes only: `GET /health`, `GET /version`.
 
 ## Auth API demo
 

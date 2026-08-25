@@ -77,7 +77,7 @@ Lyra’s UI surface is a **versioned HTTP API**. The React app is a peer client,
 - Expose product capability under **`/api/v1/...`**; avoid web-only backend shortcuts.
 - Prefer **OpenAPI** as the public contract as routes land.
 - Use **REST** for list/read/mutate; use an explicit event channel (**SSE**, per sync spec) for live sync — not HTML or ad-hoc web-only streams.
-- Return stable JSON error shapes; keep user-facing copy in clients (i18n), not in API payloads.
+- Return stable JSON error shapes `{ "error", "code"? }`; see `docs/specs/2026-08-26-lyra-http-api-surface.md` and `docs/openapi/api-v1.yaml`.
 - Auth must work for non-browser clients (token-based Lyra login).
 - Breaking changes go to `/api/v2/...`; keep prior versions until clients migrate.
 

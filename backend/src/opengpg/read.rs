@@ -339,7 +339,10 @@ fn bodies_from_decrypted(content: &[u8]) -> (Option<String>, Option<String>) {
         }
     }
     let text = String::from_utf8_lossy(content).into_owned();
-    if text.trim_start().to_ascii_lowercase().starts_with("<!doctype")
+    if text
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("<!doctype")
         || text.trim_start().to_ascii_lowercase().starts_with("<html")
     {
         (None, persist_body_html(Some(&text)))
@@ -466,21 +469,15 @@ async fn load_pgpish_attachments(
         let name = filename.unwrap_or_default().to_ascii_lowercase();
         let interesting = ct.contains("pgp")
             || ct.contains("octet-stream")
-            || std::path::Path::new(&name)
-                .extension()
-                .is_some_and(|ext| {
-                    ext.eq_ignore_ascii_case("asc")
-                        || ext.eq_ignore_ascii_case("pgp")
-                        || ext.eq_ignore_ascii_case("gpg")
-                });
+            || std::path::Path::new(&name).extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("asc")
+                    || ext.eq_ignore_ascii_case("pgp")
+                    || ext.eq_ignore_ascii_case("gpg")
+            });
         if !interesting {
             continue;
         }
-        let path = if std::path::Path::new(&storage_path).is_absolute() {
-            std::path::PathBuf::from(&storage_path)
-        } else {
-            data_dir.join(&storage_path)
-        };
+        let path = crate::blobs::resolve_storage_path(data_dir, &storage_path);
         if let Ok(bytes) = tokio::fs::read(&path).await
             && !bytes.is_empty()
             && bytes.len() < 8 * 1024 * 1024
@@ -496,7 +493,7 @@ mod tests {
     use super::*;
     use crate::opengpg::keys::tests_support::gen_test_secret_armor;
     use crate::opengpg::keys::{parse_armored_key, public_armored_from_stored};
-    use pgp::composed::{MessageBuilder, ArmorOptions};
+    use pgp::composed::{ArmorOptions, MessageBuilder};
     use pgp::crypto::sym::SymmetricKeyAlgorithm;
     use pgp::types::CompressionAlgorithm;
     use rand::SeedableRng;
@@ -560,8 +557,7 @@ mod tests {
     fn locked_when_no_unlocked_secrets() {
         let armor = gen_test_secret_armor(Some("test-pass"));
         let ciphertext = encrypt_for(&armor, "nope");
-        let out = process_message_bodies(Some(&ciphertext), None, &[], &[], &[])
-            .expect("detected");
+        let out = process_message_bodies(Some(&ciphertext), None, &[], &[], &[]).expect("detected");
         assert!(out.status.encrypted);
         assert!(!out.status.decrypted);
         assert_eq!(out.status.error.as_deref(), Some("locked"));

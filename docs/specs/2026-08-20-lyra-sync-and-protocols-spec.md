@@ -425,7 +425,7 @@ Status key: **done** = implemented and tested · **partial** = core path works, 
 | UID MOVE (RFC 6851) when MOVE advertised | **done** | CAPABILITY gate; COPY+EXPUNGE fallback when MOVE absent |
 | CONDSTORE / HIGHESTMODSEQ incremental sync (RFC 7162) | **done** | CHANGEDSINCE fetch + `{uid}:{mod}:{modseq}` cursor |
 | IMAP IDLE push (RFC 2177) | **done** | CAPABILITY gate; INBOX IDLE supervisor enqueues sync on EXISTS |
-| AUTH PLAIN + XOAUTH2 | **partial** | PLAIN today; XOAUTH2 via CHE-26 |
+| AUTH PLAIN + XOAUTH2 | **done** | PLAIN/LOGIN + Microsoft OAuth XOAUTH2 (CHE-26) |
 | BODY.PEEK[] lazy fetch | **done** | On-demand in HTTP handler |
 
 #### JMAP (RFC 8620 / 8621)
@@ -447,7 +447,7 @@ Status key: **done** = implemented and tested · **partial** = core path works, 
 | EHLO → STARTTLS → AUTH → MAIL/RCPT/DATA | **done** | `lettre` adapter |
 | 8BITMIME when server advertises | **done** | lettre negotiates `BODY=8BITMIME`; `EhloCapabilities` + tests |
 | SMTPUTF8 / internationalized addresses | **done** | lettre + `needs_smtputf8` gate; CHE-125 tests |
-| AUTH method negotiation (PLAIN, LOGIN, XOAUTH2) | **partial** | PLAIN→LOGIN→XOAUTH2 preference set; XOAUTH2 tokens via CHE-26 |
+| AUTH method negotiation (PLAIN, LOGIN, XOAUTH2) | **done** | PLAIN→LOGIN→XOAUTH2 preference set; Microsoft OAuth tokens (CHE-26) |
 | DSN (RFC 3461) when supported | **gap** | Optional post-v1 |
 | Permanent vs transient error handling | **done** | 4xx→retry job; 5xx→terminal (`SmtpError::Transient`/`Permanent`) |
 

@@ -84,10 +84,7 @@ pub struct TotpEnrollResponse {
     pub otpauth_uri: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
-}
+use crate::api_error::ApiErrorBody;
 
 /// Typed error for auth endpoints.
 ///
@@ -133,6 +130,16 @@ impl AuthError {
             AuthError::Internal(_) | AuthError::Crypto(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
+
+    fn error_code(&self) -> Option<&'static str> {
+        match self {
+            AuthError::BadRequest(_) => Some("bad_request"),
+            AuthError::Unauthorized(_) => Some("unauthorized"),
+            AuthError::TooManyRequests => Some("too_many_requests"),
+            AuthError::Conflict(_) => Some("conflict"),
+            AuthError::Internal(_) | AuthError::Crypto(_) => Some("internal_error"),
+        }
+    }
 }
 
 impl IntoResponse for AuthError {
@@ -140,9 +147,7 @@ impl IntoResponse for AuthError {
         let status = self.status();
         (
             status,
-            Json(ErrorResponse {
-                error: self.to_string(),
-            }),
+            Json(ApiErrorBody::new(self.to_string(), self.error_code())),
         )
             .into_response()
     }

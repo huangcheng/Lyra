@@ -2,7 +2,7 @@
  * Compose dialog for writing new emails.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -18,6 +18,11 @@ import { Textarea } from '@/components/ui/textarea';
 import { t } from '@/i18n';
 import { api } from '@/lib/api-client';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
+import {
+  lookupRecipientKeys,
+  type RecipientKeyLookup,
+  type OpengpgSendOptions,
+} from '@/lib/opengpg-api';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 
@@ -49,6 +54,20 @@ export function ComposeDialog() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [signMessage, setSignMessage] = useState(false);
+  const [encryptMessage, setEncryptMessage] = useState(false);
+  const [attachPublicKey, setAttachPublicKey] = useState(false);
+  const [recipientKeys, setRecipientKeys] = useState<RecipientKeyLookup[]>([]);
+  const [recipientKeyIds, setRecipientKeyIds] = useState<Record<string, string>>({});
+
+  const recipientEmails = useMemo(() => {
+    const split = (value: string) =>
+      value
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter((e) => e.includes('@'));
+    return [...split(form.to), ...split(form.cc), ...split(form.bcc)];
+  }, [form.to, form.cc, form.bcc]);
 
   useEffect(() => {
     if (!composeOpen) return;
@@ -64,7 +83,40 @@ export function ComposeDialog() {
     );
     setError(null);
     setSuccess(false);
+    setSignMessage(false);
+    setEncryptMessage(false);
+    setAttachPublicKey(false);
+    setRecipientKeys([]);
+    setRecipientKeyIds({});
   }, [composeOpen, composeDraft, selectedAccountId, accounts]);
+
+  useEffect(() => {
+    if (!composeOpen || !encryptMessage || recipientEmails.length === 0) {
+      setRecipientKeys([]);
+      return;
+    }
+    let cancelled = false;
+    void lookupRecipientKeys(recipientEmails)
+      .then((rows) => {
+        if (cancelled) return;
+        setRecipientKeys(rows);
+        setRecipientKeyIds((prev) => {
+          const next = { ...prev };
+          for (const row of rows) {
+            if (row.selectedKeyId && !next[row.email]) {
+              next[row.email] = row.selectedKeyId;
+            }
+          }
+          return next;
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setRecipientKeys([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [composeOpen, encryptMessage, recipientEmails.join(',')]);
 
   const titleKey =
     composeDraft?.mode === 'reply'
@@ -79,6 +131,9 @@ export function ComposeDialog() {
     setForm({ to: '', cc: '', bcc: '', subject: '', body: '' });
     setError(null);
     setSuccess(false);
+    setSignMessage(false);
+    setEncryptMessage(false);
+    setAttachPublicKey(false);
   };
 
   const handleSend = async () => {
@@ -106,6 +161,17 @@ export function ComposeDialog() {
           .filter(Boolean)
           .map((email) => ({ email }));
 
+      const opengpg: OpengpgSendOptions | undefined =
+        signMessage || encryptMessage || attachPublicKey
+          ? {
+              sign: signMessage,
+              encrypt: encryptMessage,
+              attachPublicKey,
+              recipientKeyIds:
+                Object.keys(recipientKeyIds).length > 0 ? recipientKeyIds : undefined,
+            }
+          : undefined;
+
       await api('/messages/send', {
         method: 'POST',
         body: JSON.stringify({
@@ -116,6 +182,7 @@ export function ComposeDialog() {
           subject: form.subject,
           bodyText: form.body,
           bodyHtml: null,
+          opengpg,
         }),
       });
 
@@ -187,6 +254,67 @@ export function ComposeDialog() {
               onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))}
               placeholder={t(locale, 'mail.bodyPlaceholder')}
             />
+          </Field>
+          <Field className="gap-3 rounded-md border border-border/60 p-3">
+            <p className="text-sm font-medium">{t(locale, 'mail.opengpg.composeTitle')}</p>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={signMessage}
+                onChange={(e) => setSignMessage(e.target.checked)}
+              />
+              {t(locale, 'mail.opengpg.sign')}
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={encryptMessage}
+                onChange={(e) => setEncryptMessage(e.target.checked)}
+              />
+              {t(locale, 'mail.opengpg.encrypt')}
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={attachPublicKey}
+                onChange={(e) => setAttachPublicKey(e.target.checked)}
+              />
+              {t(locale, 'mail.opengpg.attachPublicKey')}
+            </label>
+            {encryptMessage && recipientKeys.length > 0 ? (
+              <ul className="space-y-2 text-xs text-muted-foreground">
+                {recipientKeys.map((row) => (
+                  <li key={row.email} className="space-y-1">
+                    <div>{row.email}</div>
+                    {row.keys.length === 0 ? (
+                      <span className="text-destructive">
+                        {t(locale, 'mail.opengpg.noRecipientKey')}
+                      </span>
+                    ) : row.ambiguous ? (
+                      <select
+                        className="h-8 w-full rounded-md border border-input bg-transparent px-2"
+                        value={recipientKeyIds[row.email] ?? ''}
+                        onChange={(e) =>
+                          setRecipientKeyIds((prev) => ({
+                            ...prev,
+                            [row.email]: e.target.value,
+                          }))
+                        }
+                      >
+                        <option value="">{t(locale, 'mail.opengpg.pickRecipientKey')}</option>
+                        {row.keys.map((k) => (
+                          <option key={k.id} value={k.id}>
+                            {k.primaryEmail} ({k.fingerprint.slice(0, 8)}…)
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span>{t(locale, 'mail.opengpg.recipientKeyOk')}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </Field>
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
           {success ? (

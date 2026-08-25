@@ -9,16 +9,15 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::keys::{
-    KeyAlgorithm, OpengpgError, generate_keypair, verify_secret_passphrase,
-};
-use super::session::{
-    CacheMode, DEFAULT_TTL_MINUTES, MAX_TTL_MINUTES,
-};
+use super::keys::{KeyAlgorithm, OpengpgError, generate_keypair, verify_secret_passphrase};
+use super::send::lookup_recipient_keys;
+use super::session::{CacheMode, DEFAULT_TTL_MINUTES, MAX_TTL_MINUTES};
 use super::store::{
     StoredKey, delete_key, export_armored, export_public_armored, get_key, import_armored,
     list_keys, set_primary,
 };
+use crate::api_error;
+use crate::api_error::ApiErrorBody;
 use crate::auth::{AuthError, AuthSession, AuthState, AuthUser, verify_current_password};
 use crate::kv::KvStore;
 use zeroize::Zeroizing;
@@ -170,29 +169,45 @@ const UNLOCK_RL_TTL: u64 = 15 * 60;
 
 impl IntoResponse for OpengpgError {
     fn into_response(self) -> axum::response::Response {
-        let (status, message) = match &self {
-            OpengpgError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            OpengpgError::InvalidKey(_) | OpengpgError::MissingEmail | OpengpgError::InvalidInput(_) => {
-                (StatusCode::BAD_REQUEST, self.to_string())
-            }
-            OpengpgError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
-            OpengpgError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
-            OpengpgError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+        let (status, message, code) = match &self {
+            OpengpgError::NotFound => (StatusCode::NOT_FOUND, self.to_string(), Some("not_found")),
+            OpengpgError::InvalidKey(_)
+            | OpengpgError::MissingEmail
+            | OpengpgError::InvalidInput(_) => (
+                StatusCode::BAD_REQUEST,
+                self.to_string(),
+                Some("bad_request"),
+            ),
+            OpengpgError::Conflict(_) => (StatusCode::CONFLICT, self.to_string(), Some("conflict")),
+            OpengpgError::Unauthorized(_) => (
+                StatusCode::UNAUTHORIZED,
+                self.to_string(),
+                Some("unauthorized"),
+            ),
+            OpengpgError::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                self.to_string(),
+                Some("too_many_requests"),
+            ),
             OpengpgError::Database(e) => {
                 tracing::error!(error = %e, "opengpg database error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal error".to_string(),
+                    Some("internal_error"),
                 )
             }
         };
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        (status, Json(ApiErrorBody::new(message, code))).into_response()
     }
 }
 
 pub fn routes() -> Router<AuthState> {
     Router::new()
-        .route("/api/v1/opengpg/keys", get(list_keys_handler).post(import_key))
+        .route(
+            "/api/v1/opengpg/keys",
+            get(list_keys_handler).post(import_key),
+        )
         .route("/api/v1/opengpg/keys/generate", post(generate_key))
         .route(
             "/api/v1/opengpg/keys/{id}",
@@ -203,6 +218,10 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/v1/opengpg/keys/{id}/export", get(export_key))
         .route("/api/v1/opengpg/unlock", post(unlock_key))
         .route("/api/v1/opengpg/lock", post(lock_keys))
+        .route(
+            "/api/v1/opengpg/recipient-keys",
+            get(recipient_keys_handler),
+        )
         .route(
             "/api/v1/settings/opengpg",
             get(get_opengpg_settings).patch(patch_opengpg_settings),
@@ -215,6 +234,33 @@ async fn list_keys_handler(
 ) -> Result<Json<Vec<KeyResponse>>, OpengpgError> {
     let keys = list_keys(&state.db, &user_id).await?;
     Ok(Json(keys.into_iter().map(KeyResponse::from).collect()))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecipientKeysQuery {
+    /// Comma-separated recipient emails.
+    emails: String,
+}
+
+async fn recipient_keys_handler(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+    Query(query): Query<RecipientKeysQuery>,
+) -> Result<Json<Vec<super::send::RecipientKeyLookup>>, OpengpgError> {
+    let emails: Vec<String> = query
+        .emails
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if emails.is_empty() {
+        return Err(OpengpgError::InvalidInput("emails query required".into()));
+    }
+    Ok(Json(
+        lookup_recipient_keys(&state.db, &user_id, &emails).await?,
+    ))
 }
 
 async fn get_key_handler(
@@ -247,11 +293,10 @@ async fn generate_key(
     let name = body.name.clone();
     let passphrase = body.passphrase.clone();
     // RSA-4096 keygen is CPU-heavy; always off the async runtime.
-    let parsed = tokio::task::spawn_blocking(move || {
-        generate_keypair(&email, &name, &passphrase, algo)
-    })
-    .await
-    .map_err(|e| OpengpgError::InvalidInput(format!("keygen task failed: {e}")))??;
+    let parsed =
+        tokio::task::spawn_blocking(move || generate_keypair(&email, &name, &passphrase, algo))
+            .await
+            .map_err(|e| OpengpgError::InvalidInput(format!("keygen task failed: {e}")))??;
 
     let stored = super::store::insert_key(&state.db, &user_id, &parsed, true).await?;
     Ok((StatusCode::CREATED, Json(KeyResponse::from(stored))))
@@ -305,13 +350,11 @@ async fn export_key(
                 .get("x-lyra-current-password")
                 .and_then(|v| v.to_str().ok())
                 .ok_or_else(|| {
-                    (
+                    api_error::api_error_with_code(
                         StatusCode::UNAUTHORIZED,
-                        Json(serde_json::json!({
-                            "error": "secret export requires X-Lyra-Current-Password"
-                        })),
+                        "secret export requires X-Lyra-Current-Password",
+                        "unauthorized",
                     )
-                        .into_response()
                 })?;
             verify_current_password(&state, &user_id, password)
                 .await
@@ -404,11 +447,10 @@ async fn unlock_key(
 
     let key_data = key.key_data.clone();
     let passphrase = body.passphrase.clone();
-    let verify = tokio::task::spawn_blocking(move || {
-        verify_secret_passphrase(&key_data, &passphrase)
-    })
-    .await
-    .map_err(|e| OpengpgError::InvalidInput(format!("unlock task failed: {e}")))?;
+    let verify =
+        tokio::task::spawn_blocking(move || verify_secret_passphrase(&key_data, &passphrase))
+            .await
+            .map_err(|e| OpengpgError::InvalidInput(format!("unlock task failed: {e}")))?;
 
     if let Err(e) = verify {
         note_unlock_failure(state.kv().as_ref(), &session.token).await?;
@@ -448,9 +490,7 @@ async fn lock_keys(
     body: Option<Json<LockRequest>>,
 ) -> Result<Json<LockResponse>, OpengpgError> {
     let key_id = body.and_then(|Json(b)| b.key_id);
-    state
-        .opengpg_unlock
-        .lock(&session.token, key_id.as_deref());
+    state.opengpg_unlock.lock(&session.token, key_id.as_deref());
     Ok(Json(LockResponse {
         unlocked_ids: state.opengpg_unlock.unlocked_ids(&session.token),
     }))
@@ -491,8 +531,8 @@ async fn patch_opengpg_settings(
         }
         settings.passphrase_cache = cache;
     }
-    let raw = serde_json::to_string(&settings)
-        .map_err(|e| OpengpgError::InvalidInput(e.to_string()))?;
+    let raw =
+        serde_json::to_string(&settings).map_err(|e| OpengpgError::InvalidInput(e.to_string()))?;
     state
         .kv()
         .set(&settings_kv_key(&user_id), &raw, None)

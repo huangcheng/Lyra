@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::db_row::id_from_row;
-use crate::imap::{ImapClient, ImapConfig, ImapSecurity, IdleWatchOutcome};
+use crate::imap::{IdleWatchOutcome, ImapClient, ImapConfig, ImapSecurity};
 use crate::jobs::{JobPayload, enqueue};
 use crate::scheduler::has_pending_or_running_sync;
 use crate::storage::DbPool;
@@ -57,8 +57,7 @@ async fn reconcile_watchers(
     running: &Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 ) -> Result<(), sqlx::Error> {
     let accounts = list_imap_idle_candidates(db).await?;
-    let wanted: std::collections::HashSet<String> =
-        accounts.iter().map(|a| a.id.clone()).collect();
+    let wanted: std::collections::HashSet<String> = accounts.iter().map(|a| a.id.clone()).collect();
 
     {
         let mut map = running.lock().await;
@@ -163,7 +162,10 @@ async fn run_account_idle_loop(db: DbPool, account: IdleAccount) {
     }
 }
 
-async fn watch_once(db: &DbPool, account: &IdleAccount) -> Result<IdleWatchOutcome, crate::imap::ImapError> {
+async fn watch_once(
+    db: &DbPool,
+    account: &IdleAccount,
+) -> Result<IdleWatchOutcome, crate::imap::ImapError> {
     // Avoid racing a full sync on the same account (both open IMAP sessions).
     match has_pending_or_running_sync(db, &account.id).await {
         Ok(true) => {

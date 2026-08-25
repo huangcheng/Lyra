@@ -17,6 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
+use crate::api_error::ApiErrorBody;
 use crate::auth::{AuthState, AuthUser};
 use crate::db_row::{
     InvalidIdError, id_from_row, id_param, json_text_from_row, opt_id_from_row, opt_json_param,
@@ -140,20 +141,25 @@ impl IntoResponse for PimError {
     fn into_response(self) -> axum::response::Response {
         // Internal variants may carry SQL detail or upstream error text: log
         // the full error server-side, answer "internal error" to the client.
-        let (status, message) = match &self {
+        let (status, message, code) = match &self {
             PimError::NotFound | PimError::AccountNotFound => {
-                (StatusCode::NOT_FOUND, self.to_string())
+                (StatusCode::NOT_FOUND, self.to_string(), Some("not_found"))
             }
-            PimError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
+            PimError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                self.to_string(),
+                Some("unauthorized"),
+            ),
             PimError::Database(_) | PimError::SyncError(_) => {
                 tracing::error!(error = %self, "pim request failed");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal error".to_string(),
+                    Some("internal_error"),
                 )
             }
         };
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        (status, Json(ApiErrorBody::new(message, code))).into_response()
     }
 }
 
@@ -781,8 +787,9 @@ mod tests {
         let res = err.into_response();
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
-        let body = std::str::from_utf8(&body).unwrap();
-        assert_eq!(body, r#"{"error":"internal error"}"#);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "internal error");
+        assert_eq!(json["code"], "internal_error");
 
         let err = PimError::SyncError("token=t0psecret user=admin".into());
         let res = err.into_response();

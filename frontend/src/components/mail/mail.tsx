@@ -174,7 +174,7 @@ export function Mail() {
             )}
           </div>
         </ResizablePanel>
-        <ResizableHandle />
+        <ResizableHandle withHandle />
         <ResizablePanel id="list" defaultSize="32%" minSize="30%" className="bg-secondary">
           <Tabs
             defaultValue="all"
@@ -221,7 +221,7 @@ export function Mail() {
             </TabsContent>
           </Tabs>
         </ResizablePanel>
-        <ResizableHandle />
+        <ResizableHandle withHandle />
         <ResizablePanel id="view" defaultSize="48%" minSize="30%">
           <MailDisplay />
         </ResizablePanel>

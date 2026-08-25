@@ -54,8 +54,7 @@ async fn reconcile_watchers(
     running: &Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 ) -> Result<(), sqlx::Error> {
     let accounts = list_jmap_push_candidates(db).await?;
-    let wanted: std::collections::HashSet<String> =
-        accounts.iter().map(|a| a.id.clone()).collect();
+    let wanted: std::collections::HashSet<String> = accounts.iter().map(|a| a.id.clone()).collect();
 
     {
         let mut map = running.lock().await;

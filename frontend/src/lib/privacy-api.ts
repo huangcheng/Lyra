@@ -24,3 +24,9 @@ export async function allowSenderPrivacy(sender: string): Promise<PrivacySetting
     body: JSON.stringify({ sender }),
   });
 }
+
+export async function removeAllowSenderPrivacy(sender: string): Promise<PrivacySettings> {
+  return api<PrivacySettings>(`/settings/privacy/allow-sender/${encodeURIComponent(sender)}`, {
+    method: 'DELETE',
+  });
+}

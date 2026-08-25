@@ -21,6 +21,7 @@ import type { ThemeMode } from '@/lib/theme';
 import { saveLocale, saveMarkReadPolicy, applyMarkReadPolicy } from '@/lib/user-preferences';
 import {
   fetchPrivacySettings,
+  removeAllowSenderPrivacy,
   updatePrivacySettings,
   type PrivacySettings,
 } from '@/lib/privacy-api';
@@ -127,6 +128,7 @@ export function SettingsPage() {
   const [privacySettings, setPrivacySettings] = useState<PrivacySettings | null>(null);
   const [privacySaving, setPrivacySaving] = useState(false);
   const [privacyError, setPrivacyError] = useState<string | null>(null);
+  const [removingAllowSender, setRemovingAllowSender] = useState<string | null>(null);
   const [msOAuthConfigured, setMsOAuthConfigured] = useState(false);
   const [msOAuthStarting, setMsOAuthStarting] = useState(false);
   const [oauthMessage, setOauthMessage] = useState<string | null>(null);
@@ -463,7 +465,21 @@ export function SettingsPage() {
     }
   }
 
+  async function handleRemoveAllowSender(sender: string) {
+    setPrivacyError(null);
+    setRemovingAllowSender(sender);
+    try {
+      const updated = await removeAllowSenderPrivacy(sender);
+      setPrivacySettings(updated);
+    } catch (err: unknown) {
+      setPrivacyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRemovingAllowSender(null);
+    }
+  }
+
   const remoteImagesMode = privacySettings?.remoteImages ?? 'block';
+  const remoteContentAllowlist = privacySettings?.remoteContentAllowlist ?? [];
 
   const navItems: SlimNavItem[] = [
     {
@@ -1010,6 +1026,38 @@ export function SettingsPage() {
                 {privacyError ? (
                   <div className="text-sm text-destructive">{privacyError}</div>
                 ) : null}
+              </section>
+
+              <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
+                <h2 className="text-[13px] font-medium">
+                  {t(locale, 'settings.privacy.allowlistTitle')}
+                </h2>
+                <p className="text-xs text-ter-foreground">
+                  {t(locale, 'settings.privacy.allowlistHint')}
+                </p>
+                {remoteContentAllowlist.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t(locale, 'settings.privacy.allowlistEmpty')}
+                  </p>
+                ) : (
+                  remoteContentAllowlist.map((sender) => (
+                    <div
+                      key={sender}
+                      className="flex items-center justify-between gap-3 border-t border-border pt-3 first:border-t-0 first:pt-0"
+                    >
+                      <span className="min-w-0 truncate text-[13px] text-foreground">{sender}</span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={removingAllowSender === sender}
+                        aria-label={t(locale, 'settings.privacy.removeAllowSender')}
+                        onClick={() => void handleRemoveAllowSender(sender)}
+                      >
+                        <X size={14} />
+                      </Button>
+                    </div>
+                  ))
+                )}
               </section>
 
               <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">

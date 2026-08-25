@@ -1327,16 +1327,18 @@ mod tests {
         let res = err.into_response();
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
-        let body = std::str::from_utf8(&body).unwrap();
-        assert_eq!(body, r#"{"error":"internal error"}"#);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "internal error");
+        assert_eq!(json["code"], "internal_error");
 
         // Upstream protocol chatter (hostnames, usernames) masked as 502.
         let err = SyncError::Protocol("NO auth failed for bob@imap.example.com".into());
         let res = err.into_response();
         assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
         let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
-        let body = std::str::from_utf8(&body).unwrap();
-        assert_eq!(body, r#"{"error":"internal error"}"#);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "internal error");
+        assert_eq!(json["code"], "bad_gateway");
     }
 
     #[tokio::test]

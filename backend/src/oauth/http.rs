@@ -3,7 +3,7 @@
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
     routing::get,
 };
@@ -14,6 +14,7 @@ use super::microsoft::{
     MsOAuthError, build_authorize_url, exchange_code, generate_pkce, generate_state,
 };
 use super::tokens::{OAuthTokenSet, encrypt_oauth_tokens};
+use crate::api_error::ApiErrorBody;
 use crate::auth::{AuthState, AuthUser};
 use crate::db_row::id_param;
 use crate::storage::DbPool;
@@ -48,6 +49,13 @@ struct PendingOAuth {
     pkce_verifier: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OAuthCallbackResponse {
+    status: String,
+    detail: String,
+}
+
 impl IntoResponse for MsOAuthError {
     fn into_response(self) -> Response {
         let status = match &self {
@@ -67,7 +75,13 @@ impl IntoResponse for MsOAuthError {
             }
             other => other.to_string(),
         };
-        (status, Json(serde_json::json!({ "error": msg }))).into_response()
+        let code = match &self {
+            MsOAuthError::NotConfigured => Some("service_unavailable"),
+            MsOAuthError::InvalidState | MsOAuthError::MissingEmail => Some("bad_request"),
+            MsOAuthError::TokenExchange(_) => Some("bad_gateway"),
+            MsOAuthError::Internal(_) => Some("internal_error"),
+        };
+        (status, Json(ApiErrorBody::new(msg, code))).into_response()
     }
 }
 
@@ -75,10 +89,7 @@ pub fn routes() -> Router<AuthState> {
     Router::new()
         .route("/api/v1/oauth/microsoft/status", get(oauth_status))
         .route("/api/v1/oauth/microsoft/start", get(oauth_start))
-        .route(
-            "/api/v1/oauth/microsoft/callback",
-            get(oauth_callback),
-        )
+        .route("/api/v1/oauth/microsoft/callback", get(oauth_callback))
 }
 
 async fn oauth_status(State(state): State<AuthState>) -> Json<StatusResponse> {
@@ -98,15 +109,10 @@ async fn oauth_start(
         user_id,
         pkce_verifier: pkce.verifier.clone(),
     };
-    let raw = serde_json::to_string(&pending)
-        .map_err(|e| MsOAuthError::Internal(e.to_string()))?;
+    let raw = serde_json::to_string(&pending).map_err(|e| MsOAuthError::Internal(e.to_string()))?;
     state
         .kv()
-        .set(
-            &pending_key(&state_token),
-            &raw,
-            Some(PENDING_TTL_SECS),
-        )
+        .set(&pending_key(&state_token), &raw, Some(PENDING_TTL_SECS))
         .await
         .map_err(|e| MsOAuthError::Internal(e.to_string()))?;
 
@@ -116,12 +122,13 @@ async fn oauth_start(
 
 async fn oauth_callback(
     State(state): State<AuthState>,
+    headers: HeaderMap,
     Query(q): Query<CallbackQuery>,
 ) -> Result<Response, MsOAuthError> {
     if let Some(err) = q.error {
         let desc = q.error_description.unwrap_or_default();
         tracing::warn!(error = %err, desc = %desc, "microsoft oauth denied");
-        return Ok(redirect_settings("error", "oauth_denied"));
+        return Ok(oauth_complete_response(&headers, "error", "oauth_denied"));
     }
     let code = q.code.ok_or(MsOAuthError::InvalidState)?;
     let state_token = q.state.ok_or(MsOAuthError::InvalidState)?;
@@ -134,8 +141,8 @@ async fn oauth_callback(
         .map_err(|e| MsOAuthError::Internal(e.to_string()))?
         .ok_or(MsOAuthError::InvalidState)?;
     let _ = state.kv().del(&pending_key(&state_token)).await;
-    let pending: PendingOAuth = serde_json::from_str(&pending_raw)
-        .map_err(|_| MsOAuthError::InvalidState)?;
+    let pending: PendingOAuth =
+        serde_json::from_str(&pending_raw).map_err(|_| MsOAuthError::InvalidState)?;
 
     let exchanged = exchange_code(cfg, &code, &pending.pkce_verifier).await?;
     let email = exchanged
@@ -188,7 +195,7 @@ async fn oauth_callback(
                 .map_err(|_| MsOAuthError::Internal("existing id".into()))?
         )
         .map_err(|e| MsOAuthError::Internal(e.to_string()))?;
-        return Ok(redirect_settings("ok", "reconnected"));
+        return Ok(oauth_complete_response(&headers, "ok", "reconnected"));
     }
 
     let display = email.split('@').next().unwrap_or("Outlook").to_string();
@@ -215,7 +222,34 @@ async fn oauth_callback(
     )
     .map_err(|e| MsOAuthError::Internal(e.to_string()))?;
 
-    Ok(redirect_settings("ok", "connected"))
+    Ok(oauth_complete_response(&headers, "ok", "connected"))
+}
+
+fn wants_json_callback(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| {
+            accept.split(',').any(|part| {
+                part.split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case("application/json")
+            })
+        })
+}
+
+fn oauth_complete_response(headers: &HeaderMap, status: &str, detail: &str) -> Response {
+    if wants_json_callback(headers) {
+        Json(OAuthCallbackResponse {
+            status: status.to_string(),
+            detail: detail.to_string(),
+        })
+        .into_response()
+    } else {
+        redirect_settings(status, detail)
+    }
 }
 
 fn pending_key(state: &str) -> String {
@@ -232,8 +266,7 @@ async fn find_oauth_account(
     user_id: &str,
     email: &str,
 ) -> Result<Option<String>, MsOAuthError> {
-    let user_bind =
-        id_param(db, user_id).map_err(|_| MsOAuthError::Internal("user id".into()))?;
+    let user_bind = id_param(db, user_id).map_err(|_| MsOAuthError::Internal("user id".into()))?;
     let row = db_fetch_optional!(
         db,
         r"

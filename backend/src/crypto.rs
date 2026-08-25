@@ -5,6 +5,15 @@
 //! (which is itself protected by the master key from `LYRA_MASTER_KEY`).
 //!
 //! See `docs/specs/2026-08-20-lyra-data-model-spec.md` §3.
+//!
+//! ### Legacy credential migration + DEK rotation
+//!
+//! Pre-DEK databases encrypted credentials with the first 32 bytes of
+//! `LYRA_MASTER_KEY` (or [`LEGACY_DEFAULT_MASTER_KEY`]). [`try_decrypt_with_legacy_keys`]
+//! probes that scheme at read time. On first [`crate::auth::AuthState::get_user_dek`],
+//! `auth.rs` mints a per-user DEK (`provision_and_rotate_legacy_dek`) and re-encrypts
+//! account credentials and TOTP secrets that still decrypt under the legacy padded key
+//! (`rotate_legacy_secrets`). No separate migration SQL is required.
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};

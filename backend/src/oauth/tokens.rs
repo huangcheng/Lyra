@@ -50,8 +50,8 @@ impl MailAccessSecret {
 pub fn encrypt_oauth_tokens(dek: &[u8], tokens: &OAuthTokenSet) -> Result<String, MsOAuthError> {
     let json = serde_json::to_string(tokens)
         .map_err(|e| MsOAuthError::Internal(format!("serialize tokens: {e}")))?;
-    let encrypted = crypto::encrypt(dek, json.as_bytes())
-        .map_err(|e| MsOAuthError::Internal(e.to_string()))?;
+    let encrypted =
+        crypto::encrypt(dek, json.as_bytes()).map_err(|e| MsOAuthError::Internal(e.to_string()))?;
     serde_json::to_string(&encrypted)
         .map_err(|e| MsOAuthError::Internal(format!("credential blob: {e}")))
 }

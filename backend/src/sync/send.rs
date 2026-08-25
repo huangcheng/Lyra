@@ -5,9 +5,11 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use super::types::SyncError;
-use crate::auth::{AuthState, AuthUser};
+use crate::auth::{AuthSession, AuthState};
 use crate::db_row::{id_from_row, id_param};
 use crate::kernel::App;
+use crate::opengpg::keys::OpengpgError;
+use crate::opengpg::send::{OpengpgSendOptions, collect_recipient_emails, wrap_outbound_opengpg};
 use crate::protocol::SendHandle;
 use crate::smtp::{OutboundMessage, SmtpAdapter, SmtpConfig, SmtpSecurity};
 use crate::storage::DbPool;
@@ -32,6 +34,8 @@ pub struct SendMessageRequest {
     pub bcc: Option<Vec<serde_json::Value>>,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
+    #[serde(default)]
+    pub opengpg: Option<OpengpgSendOptions>,
 }
 
 /// Response for send operation.
@@ -48,10 +52,11 @@ pub struct SendMessageResponse {
 /// so compose can await success without a 202/`jobId` handshake.
 pub(crate) async fn send_message(
     State(state): State<AuthState>,
-    AuthUser(user_id): AuthUser,
+    session: AuthSession,
     Json(body): Json<SendMessageRequest>,
 ) -> Result<Json<SendMessageResponse>, SyncError> {
     let db = state.db();
+    let user_id = session.user_id;
     let account_bind = id_param(db, &body.account_id)?;
     let user_bind = id_param(db, &user_id)?;
 
@@ -81,11 +86,46 @@ pub(crate) async fn send_message(
     let plugin = resolve_send_plugin(state.app.as_ref(), &send_protocol)?;
 
     let to = parse_address_list(&body.to);
-    let cc = parse_address_list(&body.cc.unwrap_or_default());
-    let bcc = parse_address_list(&body.bcc.unwrap_or_default());
+    let cc_values = body.cc.clone().unwrap_or_default();
+    let bcc_values = body.bcc.clone().unwrap_or_default();
+    let cc = parse_address_list(&cc_values);
+    let bcc = parse_address_list(&bcc_values);
 
     if to.is_empty() {
         return Err(SyncError::InvalidInput("No recipients specified".into()));
+    }
+
+    let mut body_text = body.body_text;
+    let mut body_html = body.body_html;
+    let mut mime_content_type = None;
+    let mut mime_body = None;
+
+    if let Some(ref opts) = body.opengpg {
+        let mut recipients = collect_recipient_emails(&body.to);
+        recipients.extend(collect_recipient_emails(&cc_values));
+        recipients.extend(collect_recipient_emails(&bcc_values));
+        if opts.encrypt && recipients.is_empty() {
+            return Err(SyncError::InvalidInput(
+                "encrypt requires at least one recipient".into(),
+            ));
+        }
+        if let Some(wrapped) = wrap_outbound_opengpg(
+            &state,
+            &user_id,
+            &session.token,
+            opts,
+            body_text.as_deref(),
+            body_html.as_deref(),
+            &recipients,
+        )
+        .await
+        .map_err(map_opengpg_send_error)?
+        {
+            mime_content_type = Some(wrapped.content_type);
+            mime_body = Some(wrapped.body);
+            body_text = None;
+            body_html = None;
+        }
     }
 
     let outbound = OutboundMessage {
@@ -95,10 +135,12 @@ pub(crate) async fn send_message(
         cc,
         bcc,
         subject: body.subject,
-        body_text: body.body_text,
-        body_html: body.body_html,
+        body_text,
+        body_html,
         in_reply_to: body.in_reply_to,
         references: body.references,
+        mime_content_type,
+        mime_body,
     };
 
     let raw = serde_json::to_string(&outbound)
@@ -118,6 +160,14 @@ pub(crate) async fn send_message(
         status: "sent".into(),
         message_id,
     }))
+}
+
+fn map_opengpg_send_error(err: OpengpgError) -> SyncError {
+    match err {
+        OpengpgError::InvalidInput(msg) => SyncError::InvalidInput(msg),
+        OpengpgError::NotFound => SyncError::InvalidInput("OpenGPG key not found".into()),
+        other => SyncError::Crypto(other.to_string()),
+    }
 }
 
 pub(crate) fn parse_address_list(values: &[serde_json::Value]) -> Vec<(Option<String>, String)> {
@@ -185,9 +235,8 @@ pub(crate) async fn prepare_jmap_send(
         return Err(SyncError::AccountDisabled);
     }
 
-    let base_url = jmap_base_url.ok_or_else(|| {
-        SyncError::InvalidInput("JMAP base URL not configured".into())
-    })?;
+    let base_url = jmap_base_url
+        .ok_or_else(|| SyncError::InvalidInput("JMAP base URL not configured".into()))?;
 
     let (dek, credential_json) =
         crate::auth::AuthState::get_user_dek_and_credential(db, &user_id, account_id)
@@ -315,6 +364,8 @@ pub(crate) fn outbound_from_raw(
         body_html: None,
         in_reply_to: None,
         references: None,
+        mime_content_type: None,
+        mime_body: None,
     })
 }
 

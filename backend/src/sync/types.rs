@@ -3,6 +3,7 @@
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 
+use crate::api_error::{self, ApiErrorBody};
 use crate::db_row::InvalidIdError;
 use crate::imap::ImapError;
 use crate::jmap::JmapError;
@@ -76,20 +77,27 @@ impl IntoResponse for SyncError {
         // 5xx/upstream variants carry hostnames, SQL detail, and protocol
         // chatter: log the full error server-side, answer "internal error".
         // 4xx variants are deliberate API surface and stay descriptive.
-        let (status, message) = match &self {
+        let (status, message, code) = match &self {
             SyncError::AccountNotFound | SyncError::MessageNotFound => {
-                (StatusCode::NOT_FOUND, self.to_string())
+                (StatusCode::NOT_FOUND, self.to_string(), Some("not_found"))
             }
-            SyncError::AccountDisabled | SyncError::InvalidInput(_) => {
-                (StatusCode::BAD_REQUEST, self.to_string())
-            }
+            SyncError::AccountDisabled | SyncError::InvalidInput(_) => (
+                StatusCode::BAD_REQUEST,
+                self.to_string(),
+                Some("bad_request"),
+            ),
             // Crypto messages carry deliberate operator guidance, no secrets.
-            SyncError::Crypto(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            SyncError::Crypto(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                self.to_string(),
+                Some("internal_error"),
+            ),
             SyncError::Internal(msg) => {
                 tracing::error!(error = %msg, "sync request failed");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal error".to_string(),
+                    Some("internal_error"),
                 )
             }
             masked @ (SyncError::Database(_)
@@ -103,9 +111,13 @@ impl IntoResponse for SyncError {
                 } else {
                     StatusCode::BAD_GATEWAY
                 };
-                (status, "internal error".to_string())
+                (
+                    status,
+                    "internal error".to_string(),
+                    api_error::code_for_status(status),
+                )
             }
         };
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        (status, Json(ApiErrorBody::new(message, code))).into_response()
     }
 }

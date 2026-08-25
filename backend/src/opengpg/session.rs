@@ -98,7 +98,10 @@ impl UnlockRing {
             },
             last_used: now,
         };
-        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ring = guard.entry(session_token.to_string()).or_default();
         ring.insert(key_id.to_string(), entry);
     }
@@ -106,7 +109,10 @@ impl UnlockRing {
     /// Return a cached passphrase if still valid; refreshes idle clock.
     #[must_use]
     pub fn get(&self, session_token: &str, key_id: &str) -> Option<Zeroizing<String>> {
-        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ring = guard.get_mut(session_token)?;
         let now = Instant::now();
         ring.retain(|_, e| entry_alive(e, now));
@@ -123,7 +129,10 @@ impl UnlockRing {
 
     /// Clear one key or the whole session ring.
     pub fn lock(&self, session_token: &str, key_id: Option<&str>) {
-        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match key_id {
             Some(id) => {
                 if let Some(ring) = guard.get_mut(session_token) {
@@ -141,7 +150,10 @@ impl UnlockRing {
 
     /// List key ids still unlocked (after idle/ttl prune).
     pub fn unlocked_ids(&self, session_token: &str) -> Vec<String> {
-        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(ring) = guard.get_mut(session_token) else {
             return Vec::new();
         };
@@ -203,8 +215,7 @@ mod tests {
                 CachedUnlock {
                     passphrase: Zeroizing::new("x".into()),
                     mode: CacheMode::Timed,
-                    expires_at: Instant::now()
-                        .checked_sub(Duration::from_secs(1)),
+                    expires_at: Instant::now().checked_sub(Duration::from_secs(1)),
                     last_used: Instant::now(),
                 },
             );

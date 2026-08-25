@@ -8,11 +8,12 @@ import { CornerUpLeft, Inbox, SearchX } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
+import { ErrorBanner, type ErrorBannerVariant } from '@/components/error-banner';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { t } from '@/i18n';
-import { api } from '@/lib/api-client';
+import { ApiError, api } from '@/lib/api-client';
 import { fetchMessagesForView } from '@/lib/load-mail-messages';
 import { ALL_ACCOUNTS, mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { getInitials, cn } from '@/lib/utils';
@@ -22,9 +23,8 @@ import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 import type { MailMessage } from '@/types';
 
-function messageLabels(item: MailMessage, accountLabel?: string): string[] {
+function messageLabels(item: MailMessage): string[] {
   const labels: string[] = [];
-  if (accountLabel) labels.push(accountLabel);
   if (item.isStarred) labels.push('important');
   if (item.labels) {
     for (const label of item.labels) {
@@ -61,6 +61,7 @@ export function MailList() {
   const messages = useMailStore((s) => s.messages);
   const folders = useMailStore((s) => s.folders);
   const getMessagesForView = useMailStore((s) => s.getMessagesForView);
+  const showAccountBadge = selectedAccountId === ALL_ACCOUNTS;
   const items = useMemo(
     () =>
       getMessagesForView({
@@ -80,6 +81,23 @@ export function MailList() {
 
   const [loading, setLoading] = useState(false);
   const [searchHits, setSearchHits] = useState<MailMessage[] | null>(null);
+  const [fetchError, setFetchError] = useState<{
+    message: string;
+    variant: ErrorBannerVariant;
+  } | null>(null);
+
+  const resolveFetchError = useCallback(
+    (err: unknown): { message: string; variant: ErrorBannerVariant } => {
+      if (err instanceof ApiError && err.code === 'network') {
+        return { message: t(locale, 'common.offline'), variant: 'offline' };
+      }
+      if (err instanceof ApiError) {
+        return { message: err.message, variant: 'error' };
+      }
+      return { message: t(locale, 'common.loadError'), variant: 'error' };
+    },
+    [locale],
+  );
 
   const viewOpts = useMemo(
     () => ({
@@ -96,12 +114,13 @@ export function MailList() {
     try {
       const mapped = await fetchMessagesForView(viewOpts);
       replaceMessagesForView(viewOpts, mapped);
-    } catch {
-      /* keep existing */
+      setFetchError(null);
+    } catch (err) {
+      setFetchError(resolveFetchError(err));
     } finally {
       setLoading(false);
     }
-  }, [token, viewOpts, replaceMessagesForView]);
+  }, [token, viewOpts, replaceMessagesForView, resolveFetchError]);
 
   useEffect(() => {
     if (!token) return;
@@ -118,8 +137,10 @@ export function MailList() {
             const mapped = data.map(mapApiMessage);
             for (const msg of mapped) upsertMessage(msg);
             setSearchHits(mapped);
-          } catch {
+            setFetchError(null);
+          } catch (err) {
             setSearchHits([]);
+            setFetchError(resolveFetchError(err));
           }
         })();
       }, 280);
@@ -136,6 +157,7 @@ export function MailList() {
     selectedFolderRole,
     upsertMessage,
     loadMessages,
+    resolveFetchError,
   ]);
 
   useEffect(() => {
@@ -153,13 +175,13 @@ export function MailList() {
     (item) => !mutedMessageIds.includes(item.id),
   );
 
-  if (loading && filtered.length === 0) {
+  if (loading && filtered.length === 0 && !fetchError) {
     return (
       <div className="p-8 text-center text-muted-foreground">{t(locale, 'common.loading')}</div>
     );
   }
 
-  if (filtered.length === 0) {
+  if (filtered.length === 0 && !fetchError) {
     const isSearch = searchHits !== null && searchQuery.trim().length >= 2;
     return (
       <EmptyState
@@ -171,86 +193,119 @@ export function MailList() {
   }
 
   return (
-    <ScrollArea className="h-full">
-      <div className="flex flex-col gap-2 p-4 pt-0">
-        {filtered.map((item) => {
-          const account = accounts.find((a) => a.id === item.accountId);
-          const accountLabel =
-            selectedAccountId === ALL_ACCOUNTS
-              ? account?.displayName || account?.emailAddress
-              : undefined;
-          const labels = messageLabels(item, accountLabel);
-          const fromLabel = item.from.name ?? item.from.email;
-          const isSelected = selectedMessageId === item.id;
-          let relative = '';
-          try {
-            relative = formatDistanceToNow(new Date(item.date), { addSuffix: true });
-          } catch {
-            relative = item.date;
-          }
-          return (
-            <button
-              key={item.id}
-              type="button"
-              className={cn(
-                'flex w-full gap-3 rounded-lg border border-transparent p-3 text-left text-sm transition-all hover:bg-accent/60',
-                isSelected && 'border-input bg-card hover:bg-card',
-              )}
-              onClick={() => setSelectedMessage(item.id)}
-            >
-              <div className="flex w-3 shrink-0 items-start justify-center pt-1.5">
-                {item.isReplied ? (
-                  <CornerUpLeft className="h-3 w-3 text-muted-foreground" aria-hidden />
-                ) : !item.isRead ? (
-                  <span className="size-1.5 rounded-full bg-unread" aria-hidden />
-                ) : null}
-              </div>
-              <Avatar className="h-8 w-8 shrink-0">
-                <AvatarFallback className="bg-primary/10 text-xs text-primary">
-                  {getInitials(fromLabel)}
-                </AvatarFallback>
-              </Avatar>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-baseline gap-2">
-                  <div className={cn('truncate', !item.isRead && 'font-semibold')}>{fromLabel}</div>
+    <div className="flex h-full flex-col">
+      {fetchError ? (
+        <ErrorBanner
+          message={fetchError.message}
+          variant={fetchError.variant}
+          retryLabel={t(locale, 'common.retry')}
+          onRetry={() => {
+            if (searchQuery.trim().length >= 2) {
+              setSearchHits(null);
+            } else {
+              void loadMessages();
+            }
+          }}
+        />
+      ) : null}
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="flex flex-col px-2 pb-2">
+          {filtered.map((item) => {
+            const account = accounts.find((a) => a.id === item.accountId);
+            const accountLabel = account?.displayName || account?.emailAddress;
+            const labels = messageLabels(item);
+            const fromLabel = item.from.name ?? item.from.email;
+            const isSelected = selectedMessageId === item.id;
+            let relative = '';
+            try {
+              relative = formatDistanceToNow(new Date(item.date), { addSuffix: true });
+            } catch {
+              relative = item.date;
+            }
+            const snippet = (item.snippet || item.bodyText || '').trim();
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={cn(
+                  'flex w-full gap-3 border-b border-border/70 px-2 py-3 text-left text-sm transition-colors hover:bg-accent/60',
+                  isSelected &&
+                    'rounded-lg border border-input bg-card shadow-whisper hover:bg-card',
+                )}
+                onClick={() => setSelectedMessage(item.id)}
+              >
+                <div className="flex w-3 shrink-0 items-start justify-center pt-1.5">
+                  {item.isReplied ? (
+                    <CornerUpLeft
+                      className={cn(
+                        'h-3 w-3',
+                        isSelected ? 'text-muted-foreground' : 'text-ter-foreground',
+                      )}
+                      aria-hidden
+                    />
+                  ) : !item.isRead ? (
+                    <span className="size-1.5 rounded-full bg-unread" aria-hidden />
+                  ) : null}
+                </div>
+                <Avatar className="h-8 w-8 shrink-0">
+                  <AvatarFallback className="bg-accent text-xs text-foreground">
+                    {getInitials(fromLabel)}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <div className={cn('min-w-0 truncate', !item.isRead && 'font-semibold')}>
+                      {fromLabel}
+                    </div>
+                    {showAccountBadge && accountLabel ? (
+                      <Badge
+                        variant="outline"
+                        className="max-w-[8rem] shrink-0 truncate rounded-md px-1.5 py-0 text-[10px] font-normal"
+                      >
+                        {accountLabel}
+                      </Badge>
+                    ) : null}
+                    <div
+                      className={cn(
+                        'ml-auto shrink-0 text-[11px] tabular-nums',
+                        isSelected ? 'text-muted-foreground' : 'text-ter-foreground',
+                      )}
+                    >
+                      {relative}
+                    </div>
+                  </div>
                   <div
                     className={cn(
-                      'ml-auto shrink-0 text-xs tabular-nums',
-                      isSelected ? 'text-foreground' : 'text-muted-foreground',
+                      'mt-0.5 truncate text-[13px] leading-snug',
+                      !item.isRead ? 'font-medium text-foreground' : 'text-foreground/90',
                     )}
                   >
-                    {relative}
+                    {item.subject || '—'}
                   </div>
+                  {snippet ? (
+                    <div className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+                      {snippet.slice(0, 300)}
+                    </div>
+                  ) : null}
+                  {labels.length ? (
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      {labels.map((label) => (
+                        <Badge
+                          key={label}
+                          variant={getBadgeVariantFromLabel(label)}
+                          className="rounded-md"
+                        >
+                          {label}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
-                <div
-                  className={cn(
-                    'truncate text-xs',
-                    !item.isRead ? 'font-medium' : 'text-muted-foreground',
-                  )}
-                >
-                  {item.subject}
-                </div>
-                <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                  {(item.snippet || item.bodyText || '').slice(0, 300)}
-                </div>
-                {labels.length ? (
-                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                    {labels.map((label) => (
-                      <Badge
-                        key={label}
-                        variant={getBadgeVariantFromLabel(label)}
-                        className="rounded-md"
-                      >
-                        {label}
-                      </Badge>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            </button>
-          );
-        })}
-      </div>
-    </ScrollArea>
+              </button>
+            );
+          })}
+        </div>
+      </ScrollArea>
+    </div>
   );
 }

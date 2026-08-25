@@ -82,7 +82,14 @@
       "sigValid": "Signature valid ({{email}}).",
       "sigInvalid": "Signature could not be verified.",
       "present": "OpenGPG message.",
-      "unlock": "Unlock key"
+      "unlock": "Unlock key",
+      "composeTitle": "OpenPGP",
+      "sign": "Sign message",
+      "encrypt": "Encrypt message",
+      "attachPublicKey": "Attach my public key",
+      "noRecipientKey": "No public key imported for this address.",
+      "pickRecipientKey": "Choose key…",
+      "recipientKeyOk": "Public key available."
     },
     "folder": {
       "inbox": "Inbox",
@@ -205,7 +212,11 @@
       "remoteImagesModeHelp": {
         "block": "Remote images are hidden until you choose to show them for a message or sender.",
         "proxy": "Images load through your Lyra server so senders see its address, not your device."
-      }
+      },
+      "allowlistTitle": "Allowed senders",
+      "allowlistHint": "Senders you always allow to load remote images.",
+      "allowlistEmpty": "No senders on the allow list yet. Use “Always allow this sender” in a message to add one.",
+      "removeAllowSender": "Remove sender from allow list"
     },
     "syncNow": "Sync now",
     "syncQueued": "Sync queued",
@@ -369,6 +380,8 @@
   "common": {
     "loading": "Loading…",
     "error": "Error",
+    "loadError": "Couldn't load data. Try again.",
+    "offline": "You're offline. Check your connection and try again.",
     "retry": "Retry",
     "cancel": "Cancel",
     "save": "Save",

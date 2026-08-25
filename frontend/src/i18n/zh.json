@@ -82,7 +82,14 @@
       "sigValid": "签名有效（{{email}}）。",
       "sigInvalid": "无法验证签名。",
       "present": "OpenGPG 邮件。",
-      "unlock": "解锁密钥"
+      "unlock": "解锁密钥",
+      "composeTitle": "OpenPGP",
+      "sign": "签名",
+      "encrypt": "加密",
+      "attachPublicKey": "附加我的公钥",
+      "noRecipientKey": "未导入该地址的公钥。",
+      "pickRecipientKey": "选择密钥…",
+      "recipientKeyOk": "已有可用公钥。"
     },
     "folder": {
       "inbox": "收件箱",
@@ -205,7 +212,11 @@
       "remoteImagesModeHelp": {
         "block": "远程图片默认隐藏，你可选择为单封邮件或发件人显示。",
         "proxy": "图片经 Lyra 服务器加载，发件人看到的是服务器地址，而非你的设备。"
-      }
+      },
+      "allowlistTitle": "允许的发件人",
+      "allowlistHint": "始终允许加载远程图片的发件人。",
+      "allowlistEmpty": "允许列表为空。可在邮件阅读界面使用「始终允许此发件人」添加。",
+      "removeAllowSender": "从允许列表移除发件人"
     },
     "syncNow": "立即同步",
     "syncQueued": "已加入同步队列",
@@ -369,6 +380,8 @@
   "common": {
     "loading": "加载中…",
     "error": "错误",
+    "loadError": "无法加载数据，请重试。",
+    "offline": "网络已断开，请检查连接后重试。",
     "retry": "重试",
     "cancel": "取消",
     "save": "保存",

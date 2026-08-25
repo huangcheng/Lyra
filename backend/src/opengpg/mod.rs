@@ -6,6 +6,7 @@
 mod http;
 pub mod keys;
 pub mod read;
+pub mod send;
 pub mod session;
 pub mod store;
 

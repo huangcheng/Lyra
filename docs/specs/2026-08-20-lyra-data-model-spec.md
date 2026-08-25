@@ -249,16 +249,37 @@ This means account credentials are never encrypted directly under the master key
 
 ## 4. Ownership keys for future multi-user
 
-Every table that contains user data has a `user_id` column (or, for `lyra_user`, the row itself). In v1 there is exactly one user, so this column is always the same value. The FK constraint is enforced from day one.
+Every table that contains user data has a `user_id` column (or, for `lyra_user`, the row itself), or a foreign-key chain that reaches `mail_account.user_id`. In v1 there is exactly one user, so direct `user_id` columns are always the same value. FK constraints are enforced from day one.
+
+### 4.1 Ownership audit (v1 schema)
+
+| Table | Ownership | Notes |
+|-------|-----------|-------|
+| `lyra_user` | row `id` | User root; holds wrapped DEK and TOTP |
+| `mail_account` | `user_id` → `lyra_user.id` | Direct partition key for accounts |
+| `folder` | `account_id` → `mail_account` | |
+| `thread` | `account_id` → `mail_account` | |
+| `message` | `account_id` → `mail_account` | |
+| `attachment` | `message_id` → `message.account_id` → `mail_account` | |
+| `sync_cursor` | `account_id` → `mail_account` | |
+| `contact` | `account_id` → `mail_account` | PIM cache |
+| `calendar` | `account_id` → `mail_account` | PIM cache |
+| `calendar_event` | `account_id` → `mail_account` | PIM cache |
+| `opengpg_key` | `user_id` → `lyra_user.id` | Direct partition key |
+| `jobs` | `payload` JSON (`user_id` in `SyncAccount` etc.) | Kernel queue; no row-level `user_id` column yet |
+| `schema_migrations` | — | System metadata; no user data |
+
+No owned user-data table lacks a path to a user. Indirect chains always join through `mail_account.user_id` in API queries.
 
 When multi-user lands:
 
 - `mail_account.user_id` already partitions accounts.
 - `folder`, `message`, `thread`, `sync_cursor` reach the user through `account_id → mail_account.user_id`.
-- `contact` and `calendar_event` reach the user through `account_id`.
-- No table lacks a path to a user.
+- `contact`, `calendar`, and `calendar_event` reach the user through `account_id`.
+- `opengpg_key.user_id` is already direct.
+- `jobs` may gain an explicit `user_id` column when multi-user job isolation is needed.
 
-API endpoints will add `user_id` extraction from the auth token; the query layer already accepts it.
+API endpoints extract `user_id` from the auth token; the query layer already accepts it.
 
 ---
 

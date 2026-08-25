@@ -1,0 +1,999 @@
+openapi: 3.1.0
+info:
+  title: Lyra API
+  version: 1.0.0
+  description: |
+    Client-agnostic HTTP API for the Lyra self-hosted mail client.
+
+    - Product routes live under `/api/v1`.
+    - Unversioned ops probes: `GET /health` (200, empty body), `GET /version` (JSON).
+    - Errors use `{ "error": string, "code"?: string }`.
+    - See `docs/specs/2026-08-26-lyra-http-api-surface.md` for web client boundary and v2 policy.
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+tags:
+  - name: auth
+    description: Lyra login, sessions, TOTP, preferences
+  - name: accounts
+    description: Mail account CRUD and server probe
+  - name: messages
+    description: Unified inbox, search, send, message actions
+  - name: folders
+    description: Folder list and local role overrides
+  - name: sync
+    description: Sync status, triggers, SSE events
+  - name: opengpg
+    description: OpenPGP keys and passphrase cache settings
+  - name: settings
+    description: Privacy and OpenGPG preferences
+  - name: oauth
+    description: Microsoft mail OAuth (Outlook)
+  - name: stats
+    description: Read-only message analytics
+
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Server is up
+
+  /version:
+    get:
+      summary: Backend version
+      responses:
+        "200":
+          description: Version JSON
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+
+  /api/v1/auth/status:
+    get:
+      tags: [auth]
+      summary: Whether a user exists and TOTP is enabled
+      security: []
+      responses:
+        "200":
+          description: Auth status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthStatus"
+
+  /api/v1/auth/bootstrap:
+    post:
+      tags: [auth]
+      summary: Create the first user (single-user instance)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapRequest"
+      responses:
+        "200":
+          description: Session token and user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Login with username/password (and TOTP when enabled)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Session token (or TOTP pending)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Invalidate current bearer session
+      responses:
+        "204":
+          description: Logged out
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: Current user profile
+      responses:
+        "200":
+          description: User info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserInfo"
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/auth/preferences:
+    patch:
+      tags: [auth]
+      summary: Update locale and mark-read policy
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PreferencesRequest"
+      responses:
+        "200":
+          description: Updated user info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserInfo"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/auth/change-password:
+    post:
+      tags: [auth]
+      summary: Change password for the current user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword:
+                  type: string
+                newPassword:
+                  type: string
+      responses:
+        "204":
+          description: Password changed
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/auth/totp/enroll:
+    post:
+      tags: [auth]
+      summary: Start TOTP enrollment
+      responses:
+        "200":
+          description: Secret and otpauth URI
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/auth/totp/confirm:
+    post:
+      tags: [auth]
+      summary: Confirm TOTP enrollment with a code
+      responses:
+        "204":
+          description: TOTP enabled
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/auth/totp/verify:
+    post:
+      tags: [auth]
+      summary: Complete login with TOTP code
+      security: []
+      responses:
+        "200":
+          description: Session token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+
+  /api/v1/auth/totp/disable:
+    post:
+      tags: [auth]
+      summary: Disable TOTP
+      responses:
+        "204":
+          description: TOTP disabled
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/accounts:
+    get:
+      tags: [accounts]
+      summary: List mail accounts
+      responses:
+        "200":
+          description: Account list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Account"
+        "401":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [accounts]
+      summary: Create a mail account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccountRequest"
+      responses:
+        "201":
+          description: Created account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/accounts/probe:
+    post:
+      tags: [accounts]
+      summary: Probe IMAP/SMTP/JMAP server settings from email domain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [emailAddress]
+              properties:
+                emailAddress:
+                  type: string
+                  format: email
+      responses:
+        "200":
+          description: Suggested server configuration
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/accounts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/AccountId"
+    get:
+      tags: [accounts]
+      summary: Get one account
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "404":
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [accounts]
+      summary: Update account
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAccountRequest"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [accounts]
+      summary: Delete account
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/accounts/{account_id}/sync:
+    parameters:
+      - name: account_id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [sync]
+      summary: Enqueue or run sync for one account
+      responses:
+        "200":
+          description: Sync result
+        "202":
+          description: Sync job enqueued
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/sync/status:
+    get:
+      tags: [sync]
+      summary: Global sync status
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  activeAccounts:
+                    type: integer
+                  syncing:
+                    type: boolean
+
+  /api/v1/sync/events:
+    get:
+      tags: [sync]
+      summary: SSE stream of sync lifecycle events
+      parameters:
+        - name: Accept
+          in: header
+          schema:
+            type: string
+            example: text/event-stream
+      responses:
+        "200":
+          description: Server-Sent Events stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /api/v1/messages:
+    get:
+      tags: [messages]
+      summary: List messages (unified inbox / role filter)
+      parameters:
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [inbox, sent, drafts, trash, archive, spam, snoozed]
+        - name: accountId
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Message list page
+
+  /api/v1/messages/search:
+    get:
+      tags: [messages]
+      summary: Search messages
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Search hits
+
+  /api/v1/messages/stats:
+    get:
+      tags: [stats]
+      summary: Dashboard message statistics
+      parameters:
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 14
+      responses:
+        "200":
+          description: Daily counts and top senders
+
+  /api/v1/messages/send:
+    post:
+      tags: [messages]
+      summary: Send a message via SMTP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Outbound message draft (see sync module)
+      responses:
+        "200":
+          description: Send accepted
+        "400":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/messages/{message_id}:
+    parameters:
+      - $ref: "#/components/parameters/MessageId"
+    get:
+      tags: [messages]
+      summary: Get one message (body fetched lazily when missing)
+      responses:
+        "200":
+          description: Full message
+        "404":
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [messages]
+      summary: Update read/starred flags
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                isRead:
+                  type: boolean
+                isStarred:
+                  type: boolean
+      responses:
+        "200":
+          description: Updated message
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/messages/{message_id}/trash:
+    post:
+      tags: [messages]
+      summary: Move message to trash
+      parameters:
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "204":
+          description: Trashed
+
+  /api/v1/messages/{message_id}/archive:
+    post:
+      tags: [messages]
+      summary: Archive message
+      parameters:
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "204":
+          description: Archived
+
+  /api/v1/messages/{message_id}/spam:
+    post:
+      tags: [messages]
+      summary: Mark as spam
+      parameters:
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "204":
+          description: Marked spam
+
+  /api/v1/messages/{message_id}/snooze:
+    post:
+      tags: [messages]
+      summary: Snooze until RFC3339 timestamp
+      parameters:
+        - $ref: "#/components/parameters/MessageId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                until:
+                  type: string
+                  format: date-time
+      responses:
+        "204":
+          description: Snoozed
+
+  /api/v1/folders:
+    get:
+      tags: [folders]
+      summary: List folders
+      parameters:
+        - name: accountId
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Folder list
+
+  /api/v1/folders/{folder_id}:
+    patch:
+      tags: [folders]
+      summary: Set or clear local role override
+      parameters:
+        - name: folder_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  type: string
+                  nullable: true
+      responses:
+        "200":
+          description: Updated folder
+
+  /api/v1/opengpg/keys:
+    get:
+      tags: [opengpg]
+      summary: List OpenPGP keys
+      responses:
+        "200":
+          description: Key list
+    post:
+      tags: [opengpg]
+      summary: Import armored key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [armored]
+              properties:
+                armored:
+                  type: string
+                isPrimary:
+                  type: boolean
+      responses:
+        "201":
+          description: Imported key
+
+  /api/v1/opengpg/keys/generate:
+    post:
+      tags: [opengpg]
+      summary: Generate a new keypair
+      responses:
+        "201":
+          description: Generated key
+
+  /api/v1/opengpg/keys/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [opengpg]
+      summary: Get key metadata
+      responses:
+        "200":
+          description: Key
+        "404":
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [opengpg]
+      summary: Patch key (e.g. set primary)
+      responses:
+        "200":
+          description: Updated key
+    delete:
+      tags: [opengpg]
+      summary: Delete key
+      responses:
+        "204":
+          description: Deleted
+
+  /api/v1/opengpg/keys/{id}/export:
+    get:
+      tags: [opengpg]
+      summary: Export armored key
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: includeSecret
+          in: query
+          schema:
+            type: boolean
+        - name: X-Lyra-Current-Password
+          in: header
+          description: Required when exporting secret keys
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Armored key material
+
+  /api/v1/opengpg/unlock:
+    post:
+      tags: [opengpg]
+      summary: Unlock secret key (passphrase cache)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keyId, passphrase]
+              properties:
+                keyId:
+                  type: string
+                passphrase:
+                  type: string
+      responses:
+        "204":
+          description: Unlocked
+
+  /api/v1/opengpg/lock:
+    post:
+      tags: [opengpg]
+      summary: Lock all cached secret keys
+      responses:
+        "204":
+          description: Locked
+
+  /api/v1/settings/opengpg:
+    get:
+      tags: [settings, opengpg]
+      summary: OpenGPG settings (passphrase cache preference)
+      responses:
+        "200":
+          description: Settings
+    patch:
+      tags: [settings, opengpg]
+      summary: Update OpenGPG settings
+      responses:
+        "200":
+          description: Updated settings
+
+  /api/v1/settings/privacy:
+    get:
+      tags: [settings]
+      summary: Privacy settings (remote images)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrivacySettings"
+    patch:
+      tags: [settings]
+      summary: Update privacy settings
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                remoteImages:
+                  type: string
+                  enum: [block, allow]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrivacySettings"
+
+  /api/v1/settings/privacy/allow-sender:
+    post:
+      tags: [settings]
+      summary: Allow remote content from a sender
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        "200":
+          description: Updated allowlist
+
+  /api/v1/settings/privacy/allow-sender/{sender}:
+    delete:
+      tags: [settings]
+      summary: Remove sender from allowlist
+      parameters:
+        - name: sender
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated allowlist
+
+  /api/v1/oauth/microsoft/status:
+    get:
+      tags: [oauth]
+      summary: Whether Microsoft OAuth is configured
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  configured:
+                    type: boolean
+
+  /api/v1/oauth/microsoft/start:
+    get:
+      tags: [oauth]
+      summary: Start OAuth (returns authorize URL)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authorizeUrl:
+                    type: string
+                    format: uri
+        "503":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/oauth/microsoft/callback:
+    get:
+      tags: [oauth]
+      summary: OAuth redirect callback
+      description: |
+        Browser flow: 302 to `/settings?section=accounts&oauth=…&detail=…`.
+        When `Accept: application/json`, returns `{ "status", "detail" }` instead.
+      security: []
+      parameters:
+        - name: code
+          in: query
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+        - name: error
+          in: query
+          schema:
+            type: string
+        - name: Accept
+          in: header
+          schema:
+            type: string
+            example: application/json
+      responses:
+        "200":
+          description: JSON outcome when Accept is application/json
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, error]
+                  detail:
+                    type: string
+        "302":
+          description: Redirect to settings (default browser flow)
+        "400":
+          $ref: "#/components/responses/Error"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: session
+      description: |
+        Token from `POST /api/v1/auth/login` or `/api/v1/auth/bootstrap`.
+        Send as `Authorization: Bearer <token>` on protected routes.
+        Invalid or expired sessions return 401 with `{ "error", "code": "unauthorized" }`.
+
+  parameters:
+    AccountId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    MessageId:
+      name: message_id
+      in: path
+      required: true
+      schema:
+        type: string
+
+  responses:
+    Error:
+      description: Error envelope
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+  schemas:
+    ApiError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable message (English)
+        code:
+          type: string
+          description: Optional stable machine code
+          examples:
+            - unauthorized
+            - not_found
+            - bad_request
+            - internal_error
+
+    AuthStatus:
+      type: object
+      properties:
+        has_user:
+          type: boolean
+        totp_enabled:
+          type: boolean
+
+    BootstrapRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+        locale:
+          type: string
+          default: en
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+        totp:
+          type: string
+          description: Six-digit TOTP when enabled
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        requires_totp:
+          type: boolean
+        user:
+          $ref: "#/components/schemas/UserInfo"
+
+    UserInfo:
+      type: object
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        display_name:
+          type: string
+          nullable: true
+        locale:
+          type: string
+        totp_enabled:
+          type: boolean
+        mark_read_policy:
+          type: string
+
+    PreferencesRequest:
+      type: object
+      properties:
+        markReadPolicy:
+          type: string
+        locale:
+          type: string
+
+    Account:
+      type: object
+      properties:
+        id:
+          type: string
+        displayName:
+          type: string
+        emailAddress:
+          type: string
+        protocol:
+          type: string
+        imapHost:
+          type: string
+        smtpHost:
+          type: string
+        isActive:
+          type: boolean
+        syncEnabled:
+          type: boolean
+
+    CreateAccountRequest:
+      type: object
+      required: [displayName, emailAddress, password]
+      properties:
+        displayName:
+          type: string
+        emailAddress:
+          type: string
+        password:
+          type: string
+        protocol:
+          type: string
+          enum: [imap, jmap]
+        imapHost:
+          type: string
+        smtpHost:
+          type: string
+
+    UpdateAccountRequest:
+      type: object
+      properties:
+        displayName:
+          type: string
+        password:
+          type: string
+        syncEnabled:
+          type: boolean
+
+    PrivacySettings:
+      type: object
+      properties:
+        remoteImages:
+          type: string
+        remoteContentAllowlist:
+          type: array
+          items:
+            type: string
+
+security:
+  - bearerAuth: []

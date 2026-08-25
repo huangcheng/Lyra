@@ -134,11 +134,11 @@ Keygen default is **RSA-4096** (signing key + RSA-4096 encryption subkey, AES-25
 - Do **not** persist decrypted content in v-scope; decrypt per request (measure latency; add an in-memory LRU keyed by message id only if needed). **done** (CHE-65)
 
 ### P3 — Sign & encrypt on send
-- Extend send pipeline (`sync/send.rs`): build OpenPGP/MIME (RFC 3156) multipart; inline fallback off by default.
-- Four explicit combinations: **sign-only** (`multipart/signed`), **encrypt-only** (`multipart/encrypted`, unsigned), **sign+encrypt**, **plain** — nothing is implicit beyond the documented defaults.
-- Recipient key resolution: exact-match on `emails` in the keyring; ambiguous → ask in compose UI.
-- Optional "attach my public key" adds an `application/pgp-keys` part.
-- UI: independent compose toggles (encrypt / sign), per-recipient key indicators, error when encrypting without a key; signing with a locked key offers the unlock prompt inline.
+- Extend send pipeline (`sync/send.rs`): build OpenPGP/MIME (RFC 3156) multipart; inline fallback off by default. **done** (CHE-67)
+- Four explicit combinations: **sign-only** (`multipart/signed`), **encrypt-only** (`multipart/encrypted`, unsigned), **sign+encrypt**, **plain** — nothing is implicit beyond the documented defaults. **done** (CHE-67)
+- Recipient key resolution: exact-match on `emails` in the keyring; ambiguous → ask in compose UI. **done** (CHE-67/68; `GET /api/v1/opengpg/recipient-keys`)
+- Optional "attach my public key" adds an `application/pgp-keys` part. **done** (CHE-67)
+- UI: independent compose toggles (encrypt / sign), per-recipient key indicators, error when encrypting without a key; signing with a locked key offers the unlock prompt inline. **done** (CHE-68)
 
 ### P4 — Discovery & polish (optional, after P1–P3 are stable)
 - Web Key Directory (WKD) lookup for unknown recipients (respects `netsec` SSRF guards).

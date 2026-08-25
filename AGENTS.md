@@ -28,9 +28,12 @@ Lyra is intended to be **open source**. Treat the tree as public forever.
 ```bash
 brew install gitleaks          # or: https://github.com/gitleaks/gitleaks#installing
 pip install pre-commit         # or: brew install pre-commit
-pre-commit install             # activate the gitleaks hook
+make pre-commit-install        # activate gitleaks (pre-commit + commit-msg hooks)
+pre-commit run --all-files     # verify hooks without committing
 make secretscan                # run a one-off full-history scan
 ```
+
+Pre-commit runs **gitleaks only**; `make check` covers format, lint, and full-history secret scan.
 
 Every commit is automatically scanned. CI should also run `make secretscan` on the full history.
 
@@ -59,6 +62,8 @@ Detail lives in specs; this file stays short and accurate.
 | Far-horizon multi-client order (API → desktop → mobile) | `docs/product/2026-08-20-lyra-multi-client-roadmap.md` |
 | Post-v1 AI assist (BYOK; draft → categorize → spam → calendar) | `docs/product/2026-08-21-lyra-ai-assist-roadmap.md` |
 | Clean/robust code, deep modules, state roles, verification | `docs/specs/2026-08-20-lyra-engineering-standards.md` |
+| HTTP API surface (`/api/v1`, errors, web client boundary, v2 policy) | `docs/specs/2026-08-26-lyra-http-api-surface.md` |
+| OpenAPI contract for `/api/v1` | `docs/openapi/api-v1.yaml` |
 | Data model, dual-DB schema, migrations | `docs/specs/2026-08-20-lyra-data-model-spec.md` |
 | Sync engine, protocols, auto-config | `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md` |
 | Plugin kernel, workers, jobs/snooze, Redis kv | `docs/specs/2026-08-22-lyra-plugin-kernel-spec.md` |

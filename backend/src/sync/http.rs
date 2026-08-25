@@ -58,6 +58,10 @@ pub fn routes() -> Router<AuthState> {
             "/api/v1/attachments/{attachment_id}",
             get(download_attachment),
         )
+        .route(
+            "/api/v1/attachments/{attachment_id}/download",
+            get(download_attachment),
+        )
         .route("/api/v1/messages/{message_id}/trash", post(trash_message))
         .route(
             "/api/v1/messages/{message_id}/archive",
@@ -790,10 +794,12 @@ pub(crate) async fn download_attachment(
 
     let (storage_path, filename, content_type) = row;
 
-    let bytes = tokio::fs::read(&storage_path).await.map_err(|e| {
-        tracing::error!(error = %e, path = %storage_path, "attachment missing on disk");
-        SyncError::InvalidInput("attachment not available".to_string())
-    })?;
+    let bytes = crate::blobs::read(&state.data_dir, &storage_path)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, path = %storage_path, "attachment missing on disk");
+            SyncError::InvalidInput("attachment not available".to_string())
+        })?;
 
     let mut response = Response::new(Body::from(bytes));
     let ct = content_type.unwrap_or_else(|| "application/octet-stream".into());
@@ -816,6 +822,7 @@ pub(crate) async fn download_attachment(
 pub(crate) async fn persist_attachments(
     db: &DbPool,
     data_dir: &std::path::Path,
+    account_id: &str,
     message_id: &str,
     attachments: &[crate::imap::ExtractedAttachment],
 ) -> Result<(), SyncError> {
@@ -831,17 +838,11 @@ pub(crate) async fn persist_attachments(
         &message_bind
     )?;
 
-    let dir = data_dir.join("attachments").join(message_id);
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| SyncError::InvalidInput(format!("cannot create attachment dir: {e}")))?;
-
     for att in attachments {
         let id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-        let path = dir.join(&id);
-        tokio::fs::write(&path, &att.data)
+        let storage_path = crate::blobs::store(data_dir, account_id, &att.data)
             .await
-            .map_err(|e| SyncError::InvalidInput(format!("cannot write attachment: {e}")))?;
+            .map_err(|e| SyncError::InvalidInput(format!("cannot write attachment blob: {e}")))?;
 
         let size = i64::try_from(att.data.len()).unwrap_or(i64::MAX);
         db_execute!(
@@ -857,7 +858,7 @@ pub(crate) async fn persist_attachments(
             &att.filename,
             &att.content_type,
             size,
-            path.to_string_lossy().as_ref(),
+            &storage_path,
             &att.content_id,
             att.is_inline
         )?;
@@ -1274,7 +1275,7 @@ async fn maybe_fill_imap_body(
     if header_needs_refresh(row.snippet.as_deref()) {
         row.snippet = snippet;
     }
-    persist_attachments(db, data_dir, &row.id, &fetched.attachments).await?;
+    persist_attachments(db, data_dir, &row.account_id, &row.id, &fetched.attachments).await?;
     Ok(())
 }
 

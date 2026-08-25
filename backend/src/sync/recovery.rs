@@ -25,15 +25,15 @@ pub(crate) async fn deactivate_account(db: &DbPool, account_id: &str) -> Result<
         false,
         &id_param(db, account_id)?
     )?;
-    tracing::warn!(account_id, "deactivated mail account after credential failure");
+    tracing::warn!(
+        account_id,
+        "deactivated mail account after credential failure"
+    );
     Ok(())
 }
 
 /// Decrypt failure → deactivate account and return a secret-free [`SyncError::Crypto`].
-pub(crate) async fn fail_credential_decrypt(
-    db: &DbPool,
-    account_id: &str,
-) -> SyncError {
+pub(crate) async fn fail_credential_decrypt(db: &DbPool, account_id: &str) -> SyncError {
     if let Err(error) = deactivate_account(db, account_id).await {
         tracing::error!(account_id, %error, "failed to deactivate account after decrypt error");
     }
@@ -63,7 +63,10 @@ pub(crate) async fn mark_message_fetch_error(
         serde_json::Value::String(reason.to_owned()),
     );
     let flags = serde_json::to_string(&map).unwrap_or_else(|_| {
-        format!(r#"{{"fetch_error":{}}}"#, serde_json::to_string(reason).unwrap_or_default())
+        format!(
+            r#"{{"fetch_error":{}}}"#,
+            serde_json::to_string(reason).unwrap_or_default()
+        )
     });
 
     db_execute!(

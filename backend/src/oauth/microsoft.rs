@@ -204,14 +204,21 @@ pub async fn exchange_code(
             body.error_description.unwrap_or_default()
         )));
     }
-    let refresh = body.refresh_token.filter(|s| !s.is_empty()).ok_or_else(|| {
-        MsOAuthError::TokenExchange("no refresh_token; ensure offline_access scope".into())
-    })?;
+    let refresh = body
+        .refresh_token
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            MsOAuthError::TokenExchange("no refresh_token; ensure offline_access scope".into())
+        })?;
     let email = body
         .id_token
         .as_deref()
         .and_then(email_from_id_token)
-        .or_else(|| body.id_token.as_deref().and_then(preferred_username_from_id_token));
+        .or_else(|| {
+            body.id_token
+                .as_deref()
+                .and_then(preferred_username_from_id_token)
+        });
     Ok(ExchangedTokens {
         access_token: body.access_token,
         refresh_token: Some(refresh),
@@ -267,8 +274,7 @@ fn email_from_id_token(id_token: &str) -> Option<String> {
 }
 
 fn preferred_username_from_id_token(id_token: &str) -> Option<String> {
-    claim_from_jwt(id_token, "preferred_username")
-        .or_else(|| claim_from_jwt(id_token, "upn"))
+    claim_from_jwt(id_token, "preferred_username").or_else(|| claim_from_jwt(id_token, "upn"))
 }
 
 /// Decode JWT payload without signature verification (token already from MS HTTPS).

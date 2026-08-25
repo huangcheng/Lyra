@@ -13,6 +13,7 @@ mod db_sql;
 mod accounts;
 mod api_error;
 mod auth;
+mod blobs;
 mod config;
 mod crypto;
 mod dav;
@@ -32,6 +33,7 @@ mod pim;
 mod plugins;
 mod privacy;
 mod protocol;
+mod repository;
 mod sanitize;
 mod scheduler;
 mod search;
@@ -157,8 +159,45 @@ async fn version() -> Json<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Method;
+    use storage::DbPool;
     use tower::ServiceExt as _;
+    use uuid::Uuid;
+
+    async fn response_json(res: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+        };
+        (status, json)
+    }
+
+    async fn request_json(
+        app: Router,
+        method: Method,
+        uri: &str,
+        body: Option<&serde_json::Value>,
+        token: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        let req = if let Some(body) = body {
+            builder
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        } else {
+            builder.body(Body::empty()).unwrap()
+        };
+        let res = app.oneshot(req).await.unwrap();
+        response_json(res).await
+    }
 
     #[tokio::test]
     async fn security_headers_are_applied() {
@@ -183,9 +222,11 @@ mod tests {
         assert!(csp.contains("default-src 'self'"));
     }
 
-    async fn test_api_router() -> Router {
+    async fn test_app() -> (Router, DbPool) {
+        auth::install_test_master_key();
         let storage = storage::Storage::new("sqlite::memory:").await.unwrap();
         storage.run_migrations().await.unwrap();
+        let db = storage.pool().clone();
         let config = config::Config {
             listen_addr: "127.0.0.1:0".into(),
             database_url: "sqlite::memory:".into(),
@@ -194,17 +235,118 @@ mod tests {
             sync_max_concurrent: 3,
             sync_poll_secs: 300,
             redis_url: None,
-            master_key: vec![0x11; 32],
+            master_key: auth::TEST_MASTER_KEY.to_vec(),
             ms_oauth: None,
         };
         let state = auth::AuthState::new(
-            storage.pool().clone(),
+            db.clone(),
             &config,
             std::sync::Arc::new(kernel::App::new()),
             std::sync::Arc::new(kv::MemoryKv::new()),
         )
         .unwrap();
-        api_router(state)
+        (api_router(state), db)
+    }
+
+    async fn test_api_router() -> Router {
+        test_app().await.0
+    }
+
+    async fn bootstrap_user(app: Router) -> (String, String) {
+        let (status, json) = request_json(
+            app,
+            Method::POST,
+            "/api/v1/auth/bootstrap",
+            Some(&serde_json::json!({
+                "username": "alice",
+                "password": "Str0ngPass1"
+            })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let user_id = json["user"]["id"].as_str().expect("user id").to_string();
+        let token = json["token"].as_str().expect("token").to_string();
+        (user_id, token)
+    }
+
+    fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
+        match db {
+            DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "postgres")]
+            DbPool::Postgres(_) => panic!("expected sqlite in tests"),
+        }
+    }
+
+    async fn seed_account_folder_message(db: &DbPool, user_id: &str) -> (String, String, String) {
+        let account_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let folder_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let message_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let pool = sqlite_pool(db);
+
+        let dek = auth::AuthState::get_user_dek(db, user_id).await.unwrap();
+        let encrypted = crypto::encrypt(&dek, b"password123").unwrap();
+        let credential_json = serde_json::to_string(&encrypted).unwrap();
+
+        sqlx::query(
+            r"
+            INSERT INTO mail_account (
+                id, user_id, display_name, email_address, protocol, auth_type,
+                credential, imap_host, imap_port, imap_security,
+                is_active, sync_enabled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+            ",
+        )
+        .bind(&account_id)
+        .bind(user_id)
+        .bind("Test Account")
+        .bind("alice@example.com")
+        .bind("imap")
+        .bind("password")
+        .bind(&credential_json)
+        .bind("imap.example.com")
+        .bind(993)
+        .bind("tls")
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            r"
+            INSERT INTO folder (
+                id, account_id, external_id, name, role, sort_order
+            ) VALUES (?, ?, ?, ?, ?, 0)
+            ",
+        )
+        .bind(&folder_id)
+        .bind(&account_id)
+        .bind("INBOX")
+        .bind("Inbox")
+        .bind("inbox")
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            r"
+            INSERT INTO message (
+                id, account_id, folder_id, external_id, subject,
+                from_address, date, snippet, is_read
+            ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, 0)
+            ",
+        )
+        .bind(&message_id)
+        .bind(&account_id)
+        .bind(&folder_id)
+        .bind("msg-1")
+        .bind("Hello Lyra")
+        .bind(r#"{"name":"Bob","email":"bob@example.com"}"#)
+        .bind("Snippet text")
+        .execute(pool)
+        .await
+        .unwrap();
+
+        (account_id, folder_id, message_id)
     }
 
     #[tokio::test]
@@ -267,5 +409,72 @@ mod tests {
             .unwrap();
         // 401 (not 404): route is mounted behind the same auth extractor.
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn http_login_returns_session_token() {
+        let app = test_api_router().await;
+        let (_, bootstrap_token) = bootstrap_user(app.clone()).await;
+
+        let (logout_status, _) = request_json(
+            app.clone(),
+            Method::POST,
+            "/api/v1/auth/logout",
+            None,
+            Some(&bootstrap_token),
+        )
+        .await;
+        assert!(logout_status.is_success());
+
+        let (status, json) = request_json(
+            app,
+            Method::POST,
+            "/api/v1/auth/login",
+            Some(&serde_json::json!({
+                "username": "alice",
+                "password": "Str0ngPass1"
+            })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["token"].as_str().is_some());
+        let requires_totp = json["requires_totp"]
+            .as_bool()
+            .or_else(|| json["requiresTotp"].as_bool());
+        assert_eq!(requires_totp, Some(false));
+    }
+
+    #[tokio::test]
+    async fn http_list_folder_messages_returns_seeded_message() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (_, folder_id, message_id) = seed_account_folder_message(&db, &user_id).await;
+
+        let (status, json) = request_json(
+            app,
+            Method::GET,
+            &format!("/api/v1/folders/{folder_id}/messages"),
+            None,
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let messages = json.as_array().expect("message array");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"].as_str(), Some(message_id.as_str()));
+        assert_eq!(messages[0]["subject"].as_str(), Some("Hello Lyra"));
+    }
+
+    #[tokio::test]
+    async fn http_list_opengpg_keys_returns_empty_array() {
+        let app = test_api_router().await;
+        let (_, token) = bootstrap_user(app.clone()).await;
+
+        let (status, json) =
+            request_json(app, Method::GET, "/api/v1/opengpg/keys", None, Some(&token)).await;
+        assert_eq!(status, StatusCode::OK);
+        let keys = json.as_array().expect("key array");
+        assert!(keys.is_empty());
     }
 }
