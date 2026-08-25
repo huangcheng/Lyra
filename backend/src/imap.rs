@@ -15,6 +15,7 @@ use serde::Deserialize;
 use std::future::Future;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_native_tls::TlsStream;
 
@@ -75,7 +76,50 @@ pub struct ImapConfig {
     pub port: u16,
     pub security: ImapSecurity,
     pub username: String,
+    /// Password or OAuth access token (see `xoauth2`).
     pub password: Zeroizing<String>,
+    /// When true, authenticate with SASL XOAUTH2 (password field = access token).
+    pub xoauth2: bool,
+}
+
+/// SASL XOAUTH2 authenticator (RFC 7628 / Google+Microsoft IMAP).
+struct Xoauth2Auth {
+    user: String,
+    access_token: String,
+}
+
+impl async_imap::Authenticator for &Xoauth2Auth {
+    type Response = String;
+    fn process(&mut self, _challenge: &[u8]) -> Self::Response {
+        format!(
+            "user={}\x01auth=Bearer {}\x01\x01",
+            self.user, self.access_token
+        )
+    }
+}
+
+async fn authenticate_client<T>(
+    client: async_imap::Client<T>,
+    config: &ImapConfig,
+) -> Result<Session<T>, ImapError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug + 'static,
+{
+    if config.xoauth2 {
+        let auth = Xoauth2Auth {
+            user: config.username.clone(),
+            access_token: (*config.password).clone(),
+        };
+        client
+            .authenticate("XOAUTH2", &auth)
+            .await
+            .map_err(|(e, _)| ImapError::Login(e.to_string()))
+    } else {
+        client
+            .login(&config.username, &config.password)
+            .await
+            .map_err(|(e, _)| ImapError::Login(e.to_string()))
+    }
 }
 
 /// Decode an IMAP mailbox name (Modified UTF-7, RFC 3501 §5.1.3) for display.
@@ -202,10 +246,7 @@ impl ImapClient {
                     .map_err(|e| ImapError::Tls(e.to_string()))?;
 
                 let client = async_imap::Client::new(tls_stream);
-                let mut session = client
-                    .login(&config.username, &config.password)
-                    .await
-                    .map_err(|(e, _)| ImapError::Login(e.to_string()))?;
+                let mut session = authenticate_client(client, config).await?;
 
                 let capabilities = session.capabilities().await.map_err(ImapError::Imap)?;
 
@@ -241,10 +282,7 @@ impl ImapClient {
                     .map_err(|e| ImapError::Tls(e.to_string()))?;
 
                 let tls_client = async_imap::Client::new(tls_stream);
-                let mut session = tls_client
-                    .login(&config.username, &config.password)
-                    .await
-                    .map_err(|(e, _)| ImapError::Login(e.to_string()))?;
+                let mut session = authenticate_client(tls_client, config).await?;
 
                 let capabilities = session.capabilities().await.map_err(ImapError::Imap)?;
 
@@ -930,6 +968,7 @@ mod tests {
             security: ImapSecurity::Tls,
             username: "user".into(),
             password: Zeroizing::new("pass".into()),
+            xoauth2: false,
         };
         // Plain TLS will fail handshake quickly on a raw TCP blackhole; use Starttls
         // so the hang is on the IMAP greeting / STARTTLS command instead.
@@ -1102,6 +1141,7 @@ mod tests {
             security: ImapSecurity::Tls,
             username: "user".into(),
             password: Zeroizing::new("secret".into()),
+            xoauth2: false,
         };
         assert_eq!(&*cfg.password, "secret");
     }

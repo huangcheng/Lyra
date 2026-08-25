@@ -38,6 +38,12 @@ All config via environment variables:
 | `FRONTEND_DIR` | `frontend/dist` | Built SPA; missing dir → API-only |
 | `MIGRATIONS_DIR` | auto | Override path to `migrations/{sqlite,postgres}` |
 | `RUST_LOG` | `info` | Log level filter (tracing-subscriber) |
+| `LYRA_MS_OAUTH_CLIENT_ID` | unset | Microsoft Entra app client ID (enables Outlook OAuth) |
+| `LYRA_MS_OAUTH_CLIENT_SECRET` | unset | App secret (confidential clients; omit for public+PKCE-only) |
+| `LYRA_MS_OAUTH_REDIRECT_URI` | unset | Must match Entra redirect, e.g. `http://localhost:3000/api/v1/oauth/microsoft/callback` |
+| `LYRA_MS_OAUTH_TENANT` | `common` | Entra tenant (`common`, `organizations`, or tenant GUID) |
+
+When Microsoft OAuth is configured, Settings → Accounts shows **Sign in with Microsoft**. Tokens are encrypted under the user DEK (`auth_type = oauth2`); IMAP/SMTP use SASL XOAUTH2 with automatic refresh.
 
 ### Database URLs
 

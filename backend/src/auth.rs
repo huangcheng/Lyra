@@ -1109,6 +1109,8 @@ pub struct AuthState {
     pub app: Arc<App>,
     /// Per-auth-session OpenGPG unlock cache (passphrases only; never persisted).
     pub opengpg_unlock: Arc<crate::opengpg::UnlockRing>,
+    /// Microsoft mail OAuth app settings (None when not configured).
+    pub ms_oauth: Option<crate::oauth::MsOAuthConfig>,
 }
 
 impl AuthState {
@@ -1127,6 +1129,7 @@ impl AuthState {
             data_dir: std::path::PathBuf::from(&config.data_dir),
             app,
             opengpg_unlock: Arc::new(crate::opengpg::UnlockRing::new()),
+            ms_oauth: config.ms_oauth.clone(),
         })
     }
 
@@ -1906,6 +1909,7 @@ mod tests {
             sync_poll_secs: 300,
             redis_url: None,
             master_key: TEST_MASTER_KEY.to_vec(),
+            ms_oauth: None,
         }
     }
 

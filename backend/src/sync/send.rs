@@ -210,7 +210,7 @@ pub(crate) async fn prepare_smtp_send(
     let row = db_fetch_optional!(
         db,
         r"
-        SELECT email_address, user_id,
+        SELECT email_address, user_id, auth_type,
                smtp_host, smtp_port, smtp_security, is_active
         FROM mail_account
         WHERE id = ?
@@ -221,6 +221,7 @@ pub(crate) async fn prepare_smtp_send(
             let smtp_port: Option<i32> = row.get("smtp_port");
             let smtp_security: Option<String> = row.get("smtp_security");
             let email_address: String = row.get("email_address");
+            let auth_type: String = row.get("auth_type");
             let user_id = id_from_row(&row, "user_id");
             (
                 is_active,
@@ -228,6 +229,7 @@ pub(crate) async fn prepare_smtp_send(
                 smtp_port,
                 smtp_security,
                 email_address,
+                auth_type,
                 user_id,
             )
         },
@@ -235,7 +237,7 @@ pub(crate) async fn prepare_smtp_send(
     )?
     .ok_or(SyncError::AccountNotFound)?;
 
-    let (is_active, smtp_host, smtp_port, smtp_security, email_address, user_id) = row;
+    let (is_active, smtp_host, smtp_port, smtp_security, email_address, auth_type, user_id) = row;
     if !is_active {
         return Err(SyncError::AccountDisabled);
     }
@@ -257,14 +259,25 @@ pub(crate) async fn prepare_smtp_send(
         crate::auth::AuthState::get_user_dek_and_credential(db, &user_id, account_id)
             .await
             .map_err(|e| SyncError::Crypto(e.to_string()))?;
-    let password = crate::smtp::decrypt_account_password(&credential_json, &dek)?;
+    let ms = crate::oauth::MsOAuthConfig::from_env();
+    let secret = crate::oauth::resolve_mail_access_secret(
+        db,
+        account_id,
+        &auth_type,
+        &credential_json,
+        &dek,
+        ms.as_ref(),
+    )
+    .await
+    .map_err(|e| SyncError::Crypto(e.to_string()))?;
 
     let config = SmtpConfig {
         host,
         port,
         security,
         username: email_address.clone(),
-        password: zeroize::Zeroizing::new(password),
+        password: zeroize::Zeroizing::new(secret.as_str().to_string()),
+        xoauth2: secret.is_xoauth2(),
     };
 
     let outbound = outbound_from_raw(email_address, raw)?;

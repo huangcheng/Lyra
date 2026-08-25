@@ -28,6 +28,8 @@ pub struct Config {
     /// Master key for the per-user DEK hierarchy (`LYRA_MASTER_KEY`, 32+ bytes).
     /// Required: the backend refuses to start without it. Never logged.
     pub master_key: Vec<u8>,
+    /// Optional Microsoft mail OAuth (Outlook / M365 XOAUTH2).
+    pub ms_oauth: Option<crate::oauth::MsOAuthConfig>,
 }
 
 /// Configuration error; boot fails closed on any variant.
@@ -103,6 +105,10 @@ impl Config {
         let redis_url = env::var("REDIS_URL").ok().filter(|s| !s.is_empty());
 
         let master_key = master_key_from_env()?;
+        let ms_oauth = crate::oauth::MsOAuthConfig::from_env();
+        if ms_oauth.is_some() {
+            tracing::info!("Microsoft mail OAuth configured");
+        }
 
         Ok(Self {
             listen_addr,
@@ -113,6 +119,7 @@ impl Config {
             sync_poll_secs,
             redis_url,
             master_key,
+            ms_oauth,
         })
     }
 }

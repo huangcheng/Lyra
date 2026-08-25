@@ -25,6 +25,7 @@ mod kernel;
 mod kv;
 mod media;
 mod netsec;
+mod oauth;
 mod opengpg;
 mod pim;
 mod plugins;
@@ -136,6 +137,7 @@ fn api_router(auth_state: auth::AuthState) -> Router {
         .merge(privacy::routes())
         .merge(media::routes())
         .merge(opengpg::routes())
+        .merge(oauth::routes())
         .merge(auth::routes())
         .with_state(auth_state)
 }
@@ -191,6 +193,7 @@ mod tests {
             sync_poll_secs: 300,
             redis_url: None,
             master_key: vec![0x11; 32],
+            ms_oauth: None,
         };
         let state = auth::AuthState::new(
             storage.pool().clone(),

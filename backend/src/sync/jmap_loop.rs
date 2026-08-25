@@ -38,14 +38,14 @@ pub(crate) async fn jmap_sync_account(
                 else {
                     return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
                 };
-                run_imap_sync(db, account_id, &row, &password).await?
+                run_imap_sync(db, account_id, &row, &password, false).await?
             }
         }
     } else {
         let Ok(password) = crate::imap::decrypt_account_password(&credential_json, &dek) else {
             return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
         };
-        run_imap_sync(db, account_id, &row, &password).await?
+        run_imap_sync(db, account_id, &row, &password, false).await?
     };
     Ok(outcome_from_response(&result))
 }

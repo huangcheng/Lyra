@@ -233,7 +233,15 @@
       "folderRoles": "文件夹角色",
       "folderRolesHint": "将归档 / 已发送 / 草稿 / 垃圾邮件 / 废纸篓映射到任意服务器文件夹。本地覆盖优先于 SPECIAL-USE 检测。",
       "folderRolesEmpty": "请先同步此账户以加载文件夹，再映射角色。",
-      "folderRoleDetected": "服务器 / 名称检测"
+      "folderRoleDetected": "服务器 / 名称检测",
+      "microsoft": "使用 Microsoft 登录",
+      "microsoftHint": "无需应用密码即可连接 Outlook 或 Microsoft 365。",
+      "microsoftUnavailable": "此服务器未配置 Microsoft OAuth。",
+      "microsoftStarting": "正在打开 Microsoft…",
+      "oauthOk": "已连接 Outlook 账户。",
+      "oauthReconnected": "已重新连接 Outlook 账户。",
+      "oauthDenied": "已取消或拒绝 Microsoft 登录。",
+      "oauthError": "无法完成 Microsoft 登录。"
     },
     "encryption": {
       "title": "加密",

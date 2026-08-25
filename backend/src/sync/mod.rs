@@ -319,6 +319,7 @@ mod tests {
             sync_poll_secs: 300,
             redis_url: None,
             master_key: crate::auth::TEST_MASTER_KEY.to_vec(),
+            ms_oauth: None,
         };
         AuthState::new(
             DbPool::Sqlite(pool),

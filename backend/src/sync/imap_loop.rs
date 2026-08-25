@@ -21,10 +21,20 @@ pub(crate) async fn imap_sync_account(
         return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
     };
     let row = load_account_sync_row(db, user_id, account_id).await?;
-    let Ok(password) = crate::imap::decrypt_account_password(&row.credential, &dek) else {
+    let ms = crate::oauth::MsOAuthConfig::from_env();
+    let Ok(secret) = crate::oauth::resolve_mail_access_secret(
+        db,
+        account_id,
+        &row.auth_type,
+        &row.credential,
+        &dek,
+        ms.as_ref(),
+    )
+    .await
+    else {
         return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
     };
-    let result = run_imap_sync(db, account_id, &row, &password).await?;
+    let result = run_imap_sync(db, account_id, &row, secret.as_str(), secret.is_xoauth2()).await?;
     Ok(outcome_from_response(&result))
 }
 
@@ -38,6 +48,7 @@ pub(crate) async fn run_imap_sync(
     account_id: &str,
     row: &AccountSyncRow,
     password: &str,
+    xoauth2: bool,
 ) -> Result<SyncResponse, SyncError> {
     let imap_host = row.imap_host.clone();
     let imap_port = row.imap_port;
@@ -62,6 +73,7 @@ pub(crate) async fn run_imap_sync(
         security,
         username: email_address,
         password: zeroize::Zeroizing::new(password.to_string()),
+        xoauth2,
     };
 
     // Connect to IMAP

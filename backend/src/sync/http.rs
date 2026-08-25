@@ -1015,6 +1015,7 @@ pub(crate) async fn connect_imap_for_account(
         security,
         username: email_address,
         password: zeroize::Zeroizing::new(password),
+        xoauth2: false,
     })
     .await?;
 

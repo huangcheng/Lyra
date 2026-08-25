@@ -233,7 +233,15 @@
       "folderRoles": "Folder roles",
       "folderRolesHint": "Remap which server folder plays Archive, Sent, Drafts, Spam, or Trash. Overrides win over SPECIAL-USE detection.",
       "folderRolesEmpty": "Sync this account once to load folders before remapping roles.",
-      "folderRoleDetected": "Server / name detection"
+      "folderRoleDetected": "Server / name detection",
+      "microsoft": "Sign in with Microsoft",
+      "microsoftHint": "Connect Outlook or Microsoft 365 without an app password.",
+      "microsoftUnavailable": "Microsoft OAuth is not configured on this server.",
+      "microsoftStarting": "Opening Microsoft…",
+      "oauthOk": "Outlook account connected.",
+      "oauthReconnected": "Outlook account reconnected.",
+      "oauthDenied": "Microsoft sign-in was cancelled or denied.",
+      "oauthError": "Could not complete Microsoft sign-in."
     },
     "encryption": {
       "title": "Encryption",

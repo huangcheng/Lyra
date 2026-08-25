@@ -12,6 +12,7 @@ use crate::storage::{DbPool, DbTxn};
 
 pub(crate) struct AccountSyncRow {
     pub(crate) email_address: String,
+    pub(crate) auth_type: String,
     pub(crate) credential: String,
     pub(crate) imap_host: Option<String>,
     pub(crate) imap_port: Option<i32>,
@@ -27,7 +28,7 @@ pub(crate) async fn load_account_sync_row(
     db_fetch_optional!(
         db,
         r"
-        SELECT id, email_address, protocol, credential,
+        SELECT id, email_address, protocol, auth_type, credential,
                imap_host, imap_port, imap_security,
                jmap_base_url,
                is_active, sync_enabled
@@ -36,6 +37,7 @@ pub(crate) async fn load_account_sync_row(
         ",
         |row| AccountSyncRow {
             email_address: row.get("email_address"),
+            auth_type: row.get("auth_type"),
             credential: row.get("credential"),
             imap_host: row.get("imap_host"),
             imap_port: row.get("imap_port"),

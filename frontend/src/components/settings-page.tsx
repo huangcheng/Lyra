@@ -24,6 +24,7 @@ import {
   updatePrivacySettings,
   type PrivacySettings,
 } from '@/lib/privacy-api';
+import { fetchMsOAuthStatus, startMsOAuth } from '@/lib/oauth-api';
 import { syncEvents$ } from '@/rxjs/sync-events';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -126,18 +127,63 @@ export function SettingsPage() {
   const [privacySettings, setPrivacySettings] = useState<PrivacySettings | null>(null);
   const [privacySaving, setPrivacySaving] = useState(false);
   const [privacyError, setPrivacyError] = useState<string | null>(null);
+  const [msOAuthConfigured, setMsOAuthConfigured] = useState(false);
+  const [msOAuthStarting, setMsOAuthStarting] = useState(false);
+  const [oauthMessage, setOauthMessage] = useState<string | null>(null);
+  const [oauthError, setOauthError] = useState<string | null>(null);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const sectionParam = params.get('section');
+    if (
+      sectionParam === 'general' ||
+      sectionParam === 'accounts' ||
+      sectionParam === 'spam' ||
+      sectionParam === 'privacy' ||
+      sectionParam === 'encryption'
+    ) {
+      setSection(sectionParam);
+    }
+    const oauth = params.get('oauth');
+    const detail = params.get('detail');
+    if (oauth === 'ok') {
+      setOauthMessage(
+        detail === 'reconnected'
+          ? t(locale, 'settings.accounts.oauthReconnected')
+          : t(locale, 'settings.accounts.oauthOk'),
+      );
+      setSection('accounts');
+    } else if (oauth === 'error') {
+      setOauthError(
+        detail === 'oauth_denied'
+          ? t(locale, 'settings.accounts.oauthDenied')
+          : t(locale, 'settings.accounts.oauthError'),
+      );
+      setSection('accounts');
+    }
+    if (oauth) {
+      params.delete('oauth');
+      params.delete('detail');
+      const next = params.toString();
+      const path = `${window.location.pathname}${next ? `?${next}` : ''}`;
+      window.history.replaceState({}, '', path);
+    }
+
     void fetchAccounts();
     void fetchPrivacySettings()
       .then(setPrivacySettings)
       .catch(() => {});
+    void fetchMsOAuthStatus()
+      .then((s) => setMsOAuthConfigured(s.configured))
+      .catch(() => setMsOAuthConfigured(false));
     void api<AuthMeResponse>('/auth/me')
       .then((me) => {
         setTotpEnabled(Boolean(me.totp_enabled));
         applyMarkReadPolicy(me.mark_read_policy);
       })
       .catch(() => {});
+    // locale only for oauth flash on first mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot URL + bootstrap
   }, []);
 
   useEffect(() => {
@@ -205,6 +251,23 @@ export function SettingsPage() {
       setSyncErrors((prev) => ({ ...prev, [id]: message }));
     } finally {
       setSyncingId(null);
+    }
+  }
+
+  async function handleMicrosoftSignIn() {
+    setOauthError(null);
+    setOauthMessage(null);
+    if (!msOAuthConfigured) {
+      setOauthError(t(locale, 'settings.accounts.microsoftUnavailable'));
+      return;
+    }
+    try {
+      setMsOAuthStarting(true);
+      const { authorizeUrl } = await startMsOAuth();
+      window.location.assign(authorizeUrl);
+    } catch (err: unknown) {
+      setOauthError(err instanceof Error ? err.message : String(err));
+      setMsOAuthStarting(false);
     }
   }
 
@@ -689,6 +752,12 @@ export function SettingsPage() {
           {section === 'accounts' && (
             <>
               {error && <div className="text-sm text-destructive">{error}</div>}
+              {oauthError && <div className="text-sm text-destructive">{oauthError}</div>}
+              {oauthMessage && (
+                <div className="text-sm text-muted-foreground" role="status">
+                  {oauthMessage}
+                </div>
+              )}
               {syncMessage && (
                 <div className="text-sm text-muted-foreground" role="status">
                   {syncMessage}
@@ -762,18 +831,36 @@ export function SettingsPage() {
                     </div>
                   ))}
 
-                  <button
-                    type="button"
-                    className="flex w-full flex-col items-center justify-center gap-1.5 rounded-[10px] border border-border bg-secondary px-5 py-6 text-[13px] font-medium text-foreground hover:bg-accent"
-                    onClick={() => {
-                      resetForm();
-                      setEditingAccount(null);
-                      setShowAddForm(true);
-                    }}
-                  >
-                    <Plus size={18} className="text-ter-foreground" />
-                    {t(locale, 'settings.accounts.add')}
-                  </button>
+                  <div className="flex flex-col gap-2">
+                    <button
+                      type="button"
+                      className="flex w-full flex-col items-center justify-center gap-1.5 rounded-[10px] border border-border bg-secondary px-5 py-6 text-[13px] font-medium text-foreground hover:bg-accent"
+                      onClick={() => {
+                        resetForm();
+                        setEditingAccount(null);
+                        setShowAddForm(true);
+                      }}
+                    >
+                      <Plus size={18} className="text-ter-foreground" />
+                      {t(locale, 'settings.accounts.add')}
+                    </button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full"
+                      disabled={msOAuthStarting}
+                      onClick={() => void handleMicrosoftSignIn()}
+                    >
+                      {msOAuthStarting
+                        ? t(locale, 'settings.accounts.microsoftStarting')
+                        : t(locale, 'settings.accounts.microsoft')}
+                    </Button>
+                    <p className="text-center text-xs text-ter-foreground">
+                      {msOAuthConfigured
+                        ? t(locale, 'settings.accounts.microsoftHint')
+                        : t(locale, 'settings.accounts.microsoftUnavailable')}
+                    </p>
+                  </div>
                   {accounts.length === 0 && (
                     <p className="text-center text-xs text-ter-foreground">
                       {t(locale, 'settings.accounts.empty')}

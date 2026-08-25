@@ -30,6 +30,7 @@ struct IdleAccount {
     id: String,
     user_id: String,
     email_address: String,
+    auth_type: String,
     credential: String,
     imap_host: Option<String>,
     imap_port: Option<i32>,
@@ -103,7 +104,7 @@ async fn list_imap_idle_candidates(db: &DbPool) -> Result<Vec<IdleAccount>, sqlx
     db_fetch_all!(
         db,
         r"
-        SELECT id, user_id, email_address, credential,
+        SELECT id, user_id, email_address, auth_type, credential,
                imap_host, imap_port, imap_security
         FROM mail_account
         WHERE is_active = ? AND sync_enabled = ?
@@ -113,6 +114,7 @@ async fn list_imap_idle_candidates(db: &DbPool) -> Result<Vec<IdleAccount>, sqlx
             id: id_from_row(row, "id"),
             user_id: id_from_row(row, "user_id"),
             email_address: row.get("email_address"),
+            auth_type: row.get("auth_type"),
             credential: row.get("credential"),
             imap_host: row.get("imap_host"),
             imap_port: row.get("imap_port"),
@@ -177,7 +179,17 @@ async fn watch_once(db: &DbPool, account: &IdleAccount) -> Result<IdleWatchOutco
     }
 
     let dek = crate::auth::AuthState::get_user_dek(db, &account.user_id).await?;
-    let password = crate::imap::decrypt_account_password(&account.credential, &dek)?;
+    let ms = crate::oauth::MsOAuthConfig::from_env();
+    let secret = crate::oauth::resolve_mail_access_secret(
+        db,
+        &account.id,
+        &account.auth_type,
+        &account.credential,
+        &dek,
+        ms.as_ref(),
+    )
+    .await
+    .map_err(|e| crate::imap::ImapError::Protocol(e.to_string()))?;
 
     let host = account
         .imap_host
@@ -198,7 +210,8 @@ async fn watch_once(db: &DbPool, account: &IdleAccount) -> Result<IdleWatchOutco
         port,
         security,
         username: account.email_address.clone(),
-        password: zeroize::Zeroizing::new(password),
+        password: zeroize::Zeroizing::new(secret.as_str().to_string()),
+        xoauth2: secret.is_xoauth2(),
     };
 
     let mut client = ImapClient::connect(&config).await?;

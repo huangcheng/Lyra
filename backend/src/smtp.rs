@@ -21,7 +21,7 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::crypto::{self, EncryptedCredential};
+use crate::crypto;
 use zeroize::Zeroizing;
 
 /// Preferred AUTH mechanisms (order = preference).
@@ -50,6 +50,7 @@ pub enum SmtpError {
     #[error("crypto error: {0}")]
     Crypto(#[from] crypto::CryptoError),
     #[error("invalid credential: {0}")]
+    #[allow(dead_code)] // reserved; mail secrets resolve via oauth::resolve_mail_access_secret
     Credential(String),
     #[error("configuration error: {0}")]
     #[allow(dead_code)]
@@ -108,6 +109,8 @@ pub struct SmtpConfig {
     pub security: SmtpSecurity,
     pub username: String,
     pub password: Zeroizing<String>,
+    /// Prefer SASL XOAUTH2 (password field holds the access token).
+    pub xoauth2: bool,
 }
 
 /// An outbound email message to be sent.
@@ -231,7 +234,11 @@ impl SmtpAdapter {
     /// AUTH mechanisms: PLAIN → LOGIN → XOAUTH2 (server must advertise).
     pub fn connect(config: &SmtpConfig) -> Result<Self, SmtpError> {
         let creds = Credentials::new(config.username.clone(), (*config.password).clone());
-        let mechanisms = SMTP_AUTH_MECHANISMS.to_vec();
+        let mechanisms = if config.xoauth2 {
+            vec![Mechanism::Xoauth2]
+        } else {
+            SMTP_AUTH_MECHANISMS.to_vec()
+        };
 
         let transport = match config.security {
             SmtpSecurity::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)?
@@ -332,17 +339,6 @@ fn build_message(msg: &OutboundMessage) -> Result<Message, SmtpError> {
     Ok(message)
 }
 
-/// Decrypt the stored credential for SMTP authentication.
-pub fn decrypt_account_password(credential_json: &str, dek: &[u8]) -> Result<String, SmtpError> {
-    let encrypted: EncryptedCredential = serde_json::from_str(credential_json)
-        .map_err(|e| SmtpError::Credential(format!("invalid credential blob: {e}")))?;
-
-    let plaintext = crypto::decrypt(dek, &encrypted)?;
-
-    String::from_utf8(plaintext)
-        .map_err(|e| SmtpError::Credential(format!("credential not valid UTF-8: {e}")))
-}
-
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -357,6 +353,7 @@ mod tests {
             security: SmtpSecurity::Tls,
             username: "user".into(),
             password: Zeroizing::new("secret".into()),
+            xoauth2: false,
         };
         assert_eq!(&*cfg.password, "secret");
     }
@@ -366,9 +363,8 @@ mod tests {
         let key = crypto::generate_key();
         let password = "smtp-test-password";
         let encrypted = crypto::encrypt(&key, password.as_bytes()).unwrap();
-        let json = serde_json::to_string(&encrypted).unwrap();
-        let decrypted = decrypt_account_password(&json, &key).unwrap();
-        assert_eq!(decrypted, password);
+        let plaintext = crypto::decrypt(&key, &encrypted).unwrap();
+        assert_eq!(String::from_utf8(plaintext).unwrap(), password);
     }
 
     #[test]
