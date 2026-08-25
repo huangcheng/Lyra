@@ -72,6 +72,16 @@
     "showRemoteContent": "显示图片",
     "alwaysShowFromSender": "始终允许此发件人",
     "trackingPixelHint": "检测到可能的跟踪像素（仅提示 — 图片仍会加载）。",
+    "opengpg": {
+      "locked": "此邮件已加密。请解锁您的 OpenGPG 密钥以阅读。",
+      "decrypted": "已用您的 OpenGPG 密钥解密。",
+      "encrypted": "OpenGPG 加密邮件。",
+      "decryptFailed": "无法解密此 OpenGPG 邮件。",
+      "sigValid": "签名有效（{{email}}）。",
+      "sigInvalid": "无法验证签名。",
+      "present": "OpenGPG 邮件。",
+      "unlock": "解锁密钥"
+    },
     "folder": {
       "inbox": "收件箱",
       "drafts": "草稿",

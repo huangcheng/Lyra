@@ -18,6 +18,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
+import { OpengpgMessageBanner } from '@/components/mail/opengpg-message-banner';
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -88,6 +89,7 @@ export function MailDisplay() {
   const [pixelAdvisory, setPixelAdvisory] = useState(false);
   const mailBodyRef = useRef<HTMLDivElement>(null);
   const [bodyLoading, setBodyLoading] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const today = new Date();
   const bodyScrollRef = useRef<HTMLDivElement>(null);
   const autoMarkedIdRef = useRef<string | null>(null);
@@ -134,7 +136,7 @@ export function MailDisplay() {
     return () => {
       cancelled = true;
     };
-  }, [selectedMessageId, token, upsertMessage, allowRemoteContent]);
+  }, [selectedMessageId, token, upsertMessage, allowRemoteContent, reloadNonce]);
 
   const mail = cached ?? null;
 
@@ -528,6 +530,13 @@ export function MailDisplay() {
             ) : null}
           </div>
           <Separator />
+          {mail.opengpg ? (
+            <OpengpgMessageBanner
+              locale={locale}
+              status={mail.opengpg}
+              onUnlocked={() => setReloadNonce((n) => n + 1)}
+            />
+          ) : null}
           {showRemoteBanner ? (
             <div className="px-4 pt-3">
               <div className="flex items-center gap-2 rounded-lg border border-border px-3.5 py-2.5 text-[12.5px] text-muted-foreground">

@@ -32,6 +32,17 @@ export interface ApiMessage {
   isStarred: boolean;
   hasAttachments: boolean;
   remoteContentBlocked?: boolean;
+  opengpg?: {
+    encrypted: boolean;
+    decrypted: boolean;
+    signatures: Array<{
+      fingerprint: string;
+      email?: string;
+      valid: boolean;
+      time?: string;
+    }>;
+    error?: string;
+  };
 }
 
 export function parseAddress(json?: string): MailAddress {
@@ -118,6 +129,19 @@ export function mapApiMessage(msg: ApiMessage | Record<string, unknown>): MailMe
     isDraft: false,
     hasAttachments: Boolean(row.hasAttachments),
     remoteContentBlocked: Boolean(row.remoteContentBlocked),
+    opengpg: row.opengpg
+      ? {
+          encrypted: Boolean(row.opengpg.encrypted),
+          decrypted: Boolean(row.opengpg.decrypted),
+          signatures: (row.opengpg.signatures ?? []).map((s) => ({
+            fingerprint: s.fingerprint ?? '',
+            email: s.email,
+            valid: Boolean(s.valid),
+            time: s.time,
+          })),
+          error: row.opengpg.error,
+        }
+      : undefined,
   };
 }
 

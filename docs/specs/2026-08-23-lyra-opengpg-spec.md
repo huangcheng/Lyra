@@ -130,7 +130,7 @@ Keygen default is **RSA-4096** (signing key + RSA-4096 encryption subkey, AES-25
 - Detect in `get_message`: `Content-Type: application/pgp-encrypted` parts and inline `-----BEGIN PGP MESSAGE-----` in text bodies. **done** (CHE-65; also cleartext signed + OpenPGP/MIME attachment candidates)
 - Decrypt OpenPGP/MIME at serve time; replace `body_text`/`body_html` (HTML still passes `persist_body_html` sanitization) and expose inner attachments through the existing attachment mechanism. **done** for body replace (CHE-65); inner attachment re-expose deferred if needed
 - Signature verification results into the `opengpg` response block. **done** (CHE-65)
-- UI: lock/shield badge on message header, signature status line, `locked` state triggers the inline passphrase prompt. *(CHE-66)*
+- UI: lock/shield badge on message header, signature status line, `locked` state triggers the inline passphrase prompt. **done** (CHE-66)
 - Do **not** persist decrypted content in v-scope; decrypt per request (measure latency; add an in-memory LRU keyed by message id only if needed). **done** (CHE-65)
 
 ### P3 — Sign & encrypt on send

@@ -29,9 +29,25 @@ export interface MailMessage {
   isDraft: boolean;
   hasAttachments: boolean;
   remoteContentBlocked?: boolean;
+  /** OpenGPG decrypt/verify status from GET message (when present). */
+  opengpg?: MailOpengpgStatus;
   /** Thread was replied to (list status glyph). */
   isReplied?: boolean;
   labels?: string[];
+}
+
+export interface MailOpengpgSignature {
+  fingerprint: string;
+  email?: string;
+  valid: boolean;
+  time?: string;
+}
+
+export interface MailOpengpgStatus {
+  encrypted: boolean;
+  decrypted: boolean;
+  signatures: MailOpengpgSignature[];
+  error?: string;
 }
 
 export interface MailFolder {

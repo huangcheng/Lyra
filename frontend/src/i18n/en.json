@@ -72,6 +72,16 @@
     "showRemoteContent": "Show images",
     "alwaysShowFromSender": "Always allow this sender",
     "trackingPixelHint": "Possible tracking pixel detected (advisory — images still load).",
+    "opengpg": {
+      "locked": "This message is encrypted. Unlock your OpenGPG key to read it.",
+      "decrypted": "Decrypted with your OpenGPG key.",
+      "encrypted": "Encrypted OpenGPG message.",
+      "decryptFailed": "Could not decrypt this OpenGPG message.",
+      "sigValid": "Signature valid ({{email}}).",
+      "sigInvalid": "Signature could not be verified.",
+      "present": "OpenGPG message.",
+      "unlock": "Unlock key"
+    },
     "folder": {
       "inbox": "Inbox",
       "drafts": "Drafts",
