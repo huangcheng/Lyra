@@ -45,7 +45,7 @@ Consequence (accepted): the backend sees plaintext of decrypted mail. That match
 | **sequoia-pgp** (recommended) | Most complete Rust OpenPGP implementation; active; signature policy engine; `sequoia-openpgp` handles MIME parsing cleanly | LGPL-2.0+; nettle backend pulls a C dependency (Docker image must install nettle dev libs, or use the `crypto-net`/OpenSSL backend) |
 | rPGP (`pgp` crate) | MIT/Apache, pure Rust, small | Less complete policy handling, weaker ergonomics for certification/revocation |
 
-Decision at P1 kickoff; prototype both for keygen + decrypt in a scratch test first. License note: Lyra is open source, LGPL is compatible as a dynamic dependency — document in `backend/README.md`.
+Decision: **rPGP** (`pgp` crate) for P1 — pure Rust, MIT/Apache, no nettle/C toolchain in Docker. Sequoia remains a future option if we need its policy engine; document any switch here.
 
 ### Key protection: passphrase-locked keys, user-chosen unlock caching (decided)
 
@@ -63,7 +63,9 @@ Storing an unwrapped secret key at rest is insecure and rejected. Instead:
 - Read paths needing a locked key return `opengpg.error = "locked"`; the UI shows an inline passphrase prompt (XState machine) with the remember-choice control and retries the request after unlock.
 - Signing on send: if no key is unlocked, compose shows "signing disabled — unlock your key" rather than silently dropping the signature.
 
-## Schema (dual-DB, migration `0007_opengpg_keys`)
+## Schema (dual-DB, migration `0008_opengpg_keys`)
+
+> Note: `0007` is already used for `folder.role_override` (CHE-128). OpenGPG keys ship as **`0008_opengpg_keys`**.
 
 ```sql
 CREATE TABLE opengpg_key (
@@ -118,8 +120,8 @@ Keygen default is **RSA-4096** (signing key + RSA-4096 encryption subkey, AES-25
 ## Phases
 
 ### P1 — Key store & management (foundation)
-- Migration `0007_opengpg_keys` (sqlite + postgres + up/down).
-- `backend/src/opengpg/` module: `mod.rs`, `keys.rs` (cert parsing, fingerprinting), `store.rs` (DB seam), `session.rs` (in-memory per-session unlock ring, idle timeout, zeroize-on-drop).
+- Migration `0008_opengpg_keys` (sqlite + postgres + up/down). **done** (CHE-63)
+- `backend/src/opengpg/` module: `mod.rs`, `keys.rs` (cert parsing, fingerprinting), `store.rs` (DB seam). **done** (CHE-63); `session.rs` → CHE-64.
 - `/api/v1/opengpg/keys` CRUD + generate + `unlock`/`lock`.
 - Frontend: Settings → "Encryption" page: list/import/export/primary selection; unlock prompt (XState) with idle-relock indicator.
 - Tests at the seam: import → list → export roundtrip; wrong passphrase on unlock rejected; unlocked material absent from DB/serialized session state.

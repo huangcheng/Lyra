@@ -25,6 +25,7 @@ mod kernel;
 mod kv;
 mod media;
 mod netsec;
+mod opengpg;
 mod pim;
 mod plugins;
 mod privacy;
