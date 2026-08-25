@@ -16,7 +16,10 @@ HTML mail routinely embeds 1×1 tracking pixels and remote images. Loading them 
 - Proxy remote images through the backend — **senders see only the Lyra server's IP and a generic server user-agent, never the user's device**.
 - Cache proxied images so re-opening a message never re-contacts the sender.
 - Per-message "load remote content" escape hatch, plus a global mode setting.
-- Serve remote images under `'self'` so the HTML can render in a sandboxed container with a strict CSP (`img-src 'self' blob: cid:` style).
+- Serve remote images under `'self'` (proxied) or placeholders so the HTML can
+  render without contacting sender hosts. Privacy is enforced by **server-side
+  rewriting** at message serve time — not by the web reader's iframe CSP
+  (in-page render as of 2026-08-25; see `docs/superpowers/specs/2026-08-25-mail-inpage-render-design.md`).
 - Work for every API client — rewriting happens at serve time in the backend, not web-only.
 
 ## Non-goals (this phase)
@@ -88,7 +91,8 @@ During rewrite, flag images with explicit dimensions ≤ 4×4 px or 1-byte-class
 - Per-sender allow-list: kv persistence, allow/forbid API, `From`-match in the rewriter.
 - Frontend: blocked-content banner in `mail-display.tsx` with the two actions (Thunderbird-style, per-message, not per-app prompt spam); i18n en/zh.
 - Optional but cheap here: rewrite `cid:` inline images to the existing attachment download endpoint so inline attachments render (flagged as future work in `sanitize.rs` today).
-- CSP tightened: rendered mail iframe/container `img-src 'self' blob: cid:`.
+- CSP note (historical M1): early reader used a sandboxed iframe `img-src`;
+  current web UI renders in-page — privacy remains server rewrite + DOMPurify.
 
 ### M2 — Proxy + cache
 - `media` module: URL encode/decode + `sig` HMAC, per-user media secret, cache store + LRU eviction.

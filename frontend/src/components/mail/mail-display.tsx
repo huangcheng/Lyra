@@ -3,7 +3,6 @@
  */
 
 import { addDays, addHours, format, nextSaturday } from 'date-fns';
-import DOMPurify from 'dompurify';
 import {
   Archive,
   ArchiveX,
@@ -41,56 +40,11 @@ import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { allowSenderPrivacy } from '@/lib/privacy-api';
+import { sanitizeEmailHtml } from '@/lib/sanitize-email-html';
 import { getInitials } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
-
-/**
- * Sanitize attacker-controlled email HTML before rendering.
- * Defense in depth: the backend sanitizes at ingest; this guards the render
- * path against anything stored before that, or from other sources.
- * Strict config: no iframes/forms/embeds, no unknown protocols. CSS (`style`
- * tags and attributes) is allowed: HTML email layout depends on it, and the
- * sandboxed iframe + CSP confines what CSS can reach.
- */
-function sanitizeEmailHtml(html: string): string {
-  // Deliberately looser than the backend ingest policy (e.g. data: images
-  // survive here): this layer also guards legacy rows stored before backend
-  // sanitization existed, without re-deciding ingest-time trade-offs.
-  return DOMPurify.sanitize(html, {
-    FORBID_TAGS: ['iframe', 'object', 'embed', 'form', 'meta', 'link', 'base'],
-  });
-}
-
-/**
- * Sandboxed iframe document with strict CSP for mail HTML (M1 remote-image
- * privacy). The iframe uses `allow-same-origin` so the parent can auto-size
- * it to the content; scripts still cannot run (no `allow-scripts`, and the
- * CSP blocks every load), and links open in a new, unsandboxed tab via
- * `allow-popups(-to-escape-sandbox)`.
- *
- * The base stylesheet supplies app-consistent typography for emails that
- * don't style every element themselves (otherwise they fall back to the
- * browser's serif defaults). The email's own inline styles always win.
- */
-function mailHtmlSrcDoc(bodyHtml: string, allowRemoteImages: boolean, dark: boolean): string {
-  const imgSrc = allowRemoteImages
-    ? "'self' blob: cid: data: https: http:"
-    : "'self' blob: cid: data:";
-  const csp = `default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'`;
-  const safe = sanitizeEmailHtml(bodyHtml);
-  const baseCss =
-    'body{margin:0;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;' +
-    `color:${dark ? '#e4e4e7' : '#1a1a1a'};word-wrap:break-word;overflow-wrap:break-word}` +
-    'img{max-width:100%;height:auto}table{max-width:100%}' +
-    'pre,code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.92em}' +
-    'pre{white-space:pre-wrap}' +
-    `blockquote{margin:0;padding-left:.8em;border-left:3px solid ${dark ? '#3f3f46' : '#dddddd'};color:${dark ? '#a1a1aa' : '#555555'}}` +
-    'h1,h2,h3,h4{line-height:1.3}' +
-    `hr{border:0;border-top:1px solid ${dark ? '#3f3f46' : '#e5e5e5'}}`;
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${baseCss}</style></head><body>${safe}</body></html>`;
-}
 
 function quoteBody(message: {
   from: { email: string };
@@ -113,10 +67,6 @@ function isScrolledToBottom(el: HTMLElement): boolean {
 
 export function MailDisplay() {
   const locale = useUIStore((s) => s.locale);
-  const theme = useUIStore((s) => s.theme);
-  const isDark =
-    theme === 'dark' ||
-    (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
   const markReadPolicy = useUIStore((s) => s.markReadPolicy);
   const selectedMessageId = useUIStore((s) => s.selectedMessageId);
   const setSelectedMessage = useUIStore((s) => s.setSelectedMessage);
@@ -135,8 +85,7 @@ export function MailDisplay() {
   const [busy, setBusy] = useState(false);
   const [replyText, setReplyText] = useState('');
   const [allowRemoteContent, setAllowRemoteContent] = useState(false);
-  const [frameHeight, setFrameHeight] = useState(192);
-  const [frameLoaded, setFrameLoaded] = useState(false);
+  const [bodyLoading, setBodyLoading] = useState(false);
   const today = new Date();
   const bodyScrollRef = useRef<HTMLDivElement>(null);
   const autoMarkedIdRef = useRef<string | null>(null);
@@ -144,8 +93,6 @@ export function MailDisplay() {
   useEffect(() => {
     autoMarkedIdRef.current = null;
     setAllowRemoteContent(false);
-    setFrameHeight(192);
-    setFrameLoaded(false);
   }, [selectedMessageId]);
 
   const tryAutoMarkRead = useCallback(async () => {
@@ -165,6 +112,7 @@ export function MailDisplay() {
 
     const load = async () => {
       setLoadError(null);
+      setBodyLoading(true);
       try {
         const qs = allowRemoteContent ? '?remote_content=allow' : '';
         const msg = await api<ApiMessage>(`/messages/${selectedMessageId}${qs}`);
@@ -174,6 +122,8 @@ export function MailDisplay() {
         if (!cancelled) {
           setLoadError(err instanceof Error ? err.message : 'Failed to load message');
         }
+      } finally {
+        if (!cancelled) setBodyLoading(false);
       }
     };
 
@@ -568,43 +518,24 @@ export function MailDisplay() {
               </div>
             </div>
           ) : null}
-          <div ref={bodyScrollRef} className="flex-1 overflow-auto p-4 text-sm whitespace-pre-wrap">
+          <div ref={bodyScrollRef} className="flex-1 overflow-auto p-4 text-sm">
             {loadError ? (
-              <p className="text-destructive">{loadError}</p>
-            ) : mail.bodyHtml ? (
-              <div className="relative">
-                {frameLoaded ? null : (
-                  <div className="space-y-3 py-1" aria-hidden>
-                    <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
-                    <div className="h-4 w-full animate-pulse rounded bg-muted" />
-                    <div className="h-4 w-5/6 animate-pulse rounded bg-muted" />
-                    <div className="h-32 w-full animate-pulse rounded bg-muted" />
-                  </div>
-                )}
-                <iframe
-                  title={mail.subject}
-                  sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-                  className={
-                    frameLoaded
-                      ? 'w-full border-0 bg-transparent opacity-100 transition-opacity duration-150'
-                      : 'absolute inset-x-0 top-0 w-full border-0 bg-transparent opacity-0'
-                  }
-                  style={{ height: frameHeight }}
-                  onLoad={(e) => {
-                    const doc = e.currentTarget.contentDocument;
-                    if (!doc) return;
-                    const height = Math.max(
-                      192,
-                      Math.min(doc.documentElement.scrollHeight + 2, 100_000),
-                    );
-                    setFrameHeight(height);
-                    setFrameLoaded(true);
-                  }}
-                  srcDoc={mailHtmlSrcDoc(mail.bodyHtml, !mail.remoteContentBlocked, isDark)}
-                />
+              <p className="text-destructive whitespace-pre-wrap">{loadError}</p>
+            ) : bodyLoading && !mail.bodyHtml && !mail.bodyText ? (
+              <div className="space-y-3 py-1" aria-hidden>
+                <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
+                <div className="h-4 w-full animate-pulse rounded bg-muted" />
+                <div className="h-4 w-5/6 animate-pulse rounded bg-muted" />
+                <div className="h-32 w-full animate-pulse rounded bg-muted" />
               </div>
+            ) : mail.bodyHtml ? (
+              <div
+                className="mail-body animate-in fade-in duration-150"
+                // Sanitized via sanitizeEmailHtml (class/style-tag stripped).
+                dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(mail.bodyHtml) }}
+              />
             ) : (
-              (mail.bodyText ?? mail.snippet)
+              <div className="whitespace-pre-wrap">{mail.bodyText ?? mail.snippet}</div>
             )}
           </div>
           <Separator className="mt-auto" />
