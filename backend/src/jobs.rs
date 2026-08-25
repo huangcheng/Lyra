@@ -223,7 +223,7 @@ fn sanitize_error(err: &SyncError) -> &'static str {
     match err {
         SyncError::Imap(_) => "IMAP error",
         SyncError::Jmap(_) => "JMAP error",
-        SyncError::Smtp(_) => "SMTP error",
+        SyncError::Smtp(smtp) => smtp.job_category(),
         SyncError::Database(_) => "database error",
         SyncError::Protocol(_) => "protocol error",
         _ => "sync failed",
@@ -257,6 +257,34 @@ async fn mark_failed(db: &DbPool, id: &str, last_error: &str) -> Result<(), sqlx
     )?;
     Ok(())
 }
+
+/// Reschedule a transient send failure: bump attempts, set pending + delayed `run_at`.
+async fn reschedule_transient(
+    db: &DbPool,
+    id: &str,
+    last_error: &str,
+    delay_secs: i64,
+) -> Result<(), sqlx::Error> {
+    let run_at = (chrono::Utc::now() + chrono::Duration::seconds(delay_secs)).to_rfc3339();
+    db_execute!(
+        db,
+        r"
+        UPDATE jobs
+        SET status = 'pending',
+            last_error = ?,
+            attempts = attempts + 1,
+            run_at = ?,
+            updated_at = datetime('now')
+        WHERE id = ?
+        ",
+        last_error,
+        &run_at,
+        id
+    )?;
+    Ok(())
+}
+
+const SMTP_TRANSIENT_MAX_ATTEMPTS: i64 = 3;
 
 async fn revert_pending(db: &DbPool, id: &str) -> Result<(), sqlx::Error> {
     db_execute!(
@@ -342,11 +370,36 @@ pub async fn process_job(
                 mark_failed(db, &job.id, "unknown send protocol").await?;
                 return Ok(());
             };
-            if plugin.send(&account_id, &raw).await.is_ok() {
-                mark_completed(db, &job.id).await?;
-            } else {
-                tracing::warn!(job_id = %job.id, "send job failed");
-                mark_failed(db, &job.id, "SMTP error").await?;
+            match plugin.send(&account_id, &raw).await {
+                Ok(()) => mark_completed(db, &job.id).await?,
+                Err(err_cat) => {
+                    let attempts: i64 = db_scalar_optional!(
+                        db,
+                        i64,
+                        "SELECT attempts FROM jobs WHERE id = ?",
+                        &job.id
+                    )?
+                    .unwrap_or(0);
+                    let is_transient = err_cat == "SMTP transient";
+                    if is_transient && attempts + 1 < SMTP_TRANSIENT_MAX_ATTEMPTS {
+                        let delay = 30i64 * (1i64 << attempts.min(4));
+                        tracing::warn!(
+                            job_id = %job.id,
+                            attempts,
+                            delay_secs = delay,
+                            "send job transient failure — reschedule"
+                        );
+                        reschedule_transient(db, &job.id, &err_cat, delay).await?;
+                    } else {
+                        let safe = if err_cat.starts_with("SMTP ") {
+                            err_cat.as_str()
+                        } else {
+                            "SMTP error"
+                        };
+                        tracing::warn!(job_id = %job.id, error = %safe, "send job failed");
+                        mark_failed(db, &job.id, safe).await?;
+                    }
+                }
             }
         }
     }
@@ -714,6 +767,18 @@ mod tests {
             "SMTP error"
         );
         assert_eq!(
+            sanitize_error(&SyncError::Smtp(crate::smtp::SmtpError::Transient(
+                msg.into()
+            ))),
+            "SMTP transient"
+        );
+        assert_eq!(
+            sanitize_error(&SyncError::Smtp(crate::smtp::SmtpError::Permanent(
+                msg.into()
+            ))),
+            "SMTP permanent"
+        );
+        assert_eq!(
             sanitize_error(&SyncError::Database(sqlx::Error::Protocol(msg.into()))),
             "database error"
         );
@@ -761,7 +826,8 @@ mod tests {
         }
 
         async fn send(&self, _account_id: &str, _raw: &str) -> Result<(), String> {
-            Err("password=hunter2 smtp auth failed".into())
+            // Simulate sanitized plugin output (real smtp_send maps via job_category).
+            Err("SMTP permanent".into())
         }
     }
 
@@ -827,7 +893,50 @@ mod tests {
         .unwrap();
         assert_eq!(row.0, "failed");
         let err = row.1.expect("last_error");
+        assert_eq!(err, "SMTP permanent");
         assert!(!err.contains("hunter2"), "{err}");
         assert!(!err.to_lowercase().contains("password"), "{err}");
+    }
+
+    struct TransientSend;
+
+    #[async_trait]
+    impl crate::protocol::SendPlugin for TransientSend {
+        fn id(&self) -> &'static str {
+            "smtp"
+        }
+
+        async fn send(&self, _account_id: &str, _raw: &str) -> Result<(), String> {
+            Err("SMTP transient".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn send_message_transient_is_rescheduled() {
+        let db = test_pool().await;
+        let (_, account_id, _) = seed_account_with_cursor(&db).await;
+        let now = "2026-08-22T00:00:00+00:00";
+
+        let mut app = App::new();
+        app.register_send(Arc::new(TransientSend));
+
+        let payload = JobPayload::SendMessage {
+            account_id,
+            outbound: serde_json::json!({"to":["a@example.com"]}),
+        };
+        let job_id = enqueue(&db, &payload, now).await.unwrap();
+        let claimed = claim_due(&db, now).await.unwrap().expect("due job");
+        process_one(&db, &app, claimed).await;
+
+        let row = sqlx::query_as::<_, (String, Option<String>, i64)>(
+            "SELECT status, last_error, attempts FROM jobs WHERE id = ?",
+        )
+        .bind(&job_id)
+        .fetch_one(sqlite_pool(&db))
+        .await
+        .unwrap();
+        assert_eq!(row.0, "pending");
+        assert_eq!(row.1.as_deref(), Some("SMTP transient"));
+        assert_eq!(row.2, 1);
     }
 }

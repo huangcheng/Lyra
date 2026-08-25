@@ -36,10 +36,18 @@ impl SendPlugin for SmtpSendPlugin {
         let db = super::storage()?;
         let (config, outbound) = crate::sync::prepare_smtp_send(&db, account_id, raw)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(send_err_category)?;
         crate::sync::deliver_smtp(config, outbound)
             .await
             .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(send_err_category)
+    }
+}
+
+/// Prefer SMTP job categories (transient/permanent) over raw error Display text.
+fn send_err_category(err: crate::sync::SyncError) -> String {
+    match err {
+        crate::sync::SyncError::Smtp(smtp) => smtp.job_category().to_string(),
+        other => other.to_string(),
     }
 }

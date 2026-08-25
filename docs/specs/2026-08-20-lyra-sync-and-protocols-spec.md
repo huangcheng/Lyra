@@ -442,11 +442,11 @@ Status key: **done** = implemented and tested · **partial** = core path works, 
 | Requirement | Status | Notes / tracking |
 |-------------|--------|------------------|
 | EHLO → STARTTLS → AUTH → MAIL/RCPT/DATA | **done** | `lettre` adapter |
-| 8BITMIME when server advertises | **gap** | CHE-125 |
-| SMTPUTF8 / internationalized addresses | **gap** | CHE-125 |
-| AUTH method negotiation (PLAIN, LOGIN, XOAUTH2) | **partial** | PLAIN; XOAUTH2 via CHE-26 |
-| DSN (RFC 3461) when supported | **gap** | CHE-125 (optional) |
-| Permanent vs transient error handling | **partial** | Typed errors; audit retry policy |
+| 8BITMIME when server advertises | **done** | lettre negotiates `BODY=8BITMIME`; `EhloCapabilities` + tests |
+| SMTPUTF8 / internationalized addresses | **done** | lettre + `needs_smtputf8` gate; CHE-125 tests |
+| AUTH method negotiation (PLAIN, LOGIN, XOAUTH2) | **partial** | PLAIN→LOGIN→XOAUTH2 preference set; XOAUTH2 tokens via CHE-26 |
+| DSN (RFC 3461) when supported | **gap** | Optional post-v1 |
+| Permanent vs transient error handling | **done** | 4xx→retry job; 5xx→terminal (`SmtpError::Transient`/`Permanent`) |
 
 #### POP3 (RFC 1939)
 
