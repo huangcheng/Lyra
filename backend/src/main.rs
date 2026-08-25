@@ -19,6 +19,7 @@ mod db_row;
 mod imap;
 mod imap_idle;
 mod jmap;
+mod jmap_push;
 mod jobs;
 mod kernel;
 mod kv;
@@ -101,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
     );
     scheduler::start_scheduler(auth_state.db.clone(), config.sync_poll_secs);
     imap_idle::start_idle_supervisor(auth_state.db.clone());
+    jmap_push::start_jmap_push_supervisor(auth_state.db.clone());
 
     let api = api_router(auth_state);
 

@@ -71,7 +71,6 @@ pub struct JmapSession {
     pub api_url: String,
     /// URL for event source (push).
     #[serde(rename = "eventSourceUrl")]
-    #[allow(dead_code)]
     pub event_source_url: Option<String>,
     /// URL for uploading blobs.
     #[serde(rename = "uploadUrl")]
@@ -277,6 +276,60 @@ impl JmapClient {
     #[allow(dead_code)]
     pub fn api_url(&self) -> &str {
         &self.session.api_url
+    }
+
+    /// Expanded EventSource URL when the session provides a template, else `None`.
+    ///
+    /// Substitutes RFC 8620 placeholders: `types=*`, `closeafter=no`, `ping=30`.
+    #[must_use]
+    pub fn event_source_url_expanded(&self) -> Option<String> {
+        self.session.event_source_url.as_ref().map(|t| expand_event_source_url(t))
+    }
+
+    /// Open the session EventSource and wait until a `state` (or similar) push event.
+    ///
+    /// Returns [`EventSourceOutcome::Unsupported`] when `eventSourceUrl` is absent.
+    pub async fn wait_event_source_state(&self) -> Result<EventSourceOutcome, JmapError> {
+        let Some(url) = self.event_source_url_expanded() else {
+            return Ok(EventSourceOutcome::Unsupported);
+        };
+
+        let target = crate::netsec::origin_of(&url).map_err(JmapError::InvalidServerUrl)?;
+        if target != self.origin {
+            return Err(JmapError::CrossOrigin(url));
+        }
+
+        let mut resp = self
+            .client
+            .get(&url)
+            .header("Authorization", &self.auth_token)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(JmapError::Method {
+                code: resp.status().to_string(),
+                description: format!("EventSource HTTP {}", resp.status()),
+            });
+        }
+
+        let mut buffer = String::new();
+        loop {
+            let Some(chunk) = resp.chunk().await.map_err(JmapError::Http)? else {
+                break;
+            };
+            buffer.push_str(&String::from_utf8_lossy(&chunk).replace("\r\n", "\n"));
+            while let Some(idx) = buffer.find("\n\n") {
+                let frame = buffer[..idx].to_string();
+                buffer = buffer[idx + 2..].to_string();
+                if sse_frame_is_state_push(&frame) {
+                    return Ok(EventSourceOutcome::StateChanged);
+                }
+            }
+        }
+
+        Ok(EventSourceOutcome::StreamEnded)
     }
 
     /// True when the session resource advertises `capability` (top-level key).
@@ -816,6 +869,47 @@ fn jmap_address(name: Option<&str>, email: &str) -> serde_json::Value {
     }
 }
 
+fn expand_event_source_url(template: &str) -> String {
+    template
+        .replace("{types}", "*")
+        .replace("{closeafter}", "no")
+        .replace("{ping}", "30")
+}
+
+/// True when an SSE frame is a JMAP push that should trigger sync.
+fn sse_frame_is_state_push(frame: &str) -> bool {
+    let mut event_name = "message";
+    let mut data = String::new();
+    for line in frame.lines() {
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_name = rest.trim();
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(rest.trim_start());
+        }
+    }
+    // RFC 8620 §7.3: `state` events carry changed account states.
+    // Some servers also emit `ping`; ignore those.
+    if event_name.eq_ignore_ascii_case("ping") {
+        return false;
+    }
+    if event_name.eq_ignore_ascii_case("state") {
+        return true;
+    }
+    // Default event type with JSON body containing "changed" (Fastmail-style).
+    data.contains("\"changed\"") || data.contains("\"State\"")
+}
+
+/// Outcome of waiting on a JMAP EventSource stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventSourceOutcome {
+    StateChanged,
+    Unsupported,
+    StreamEnded,
+}
+
 // ── JMAP data types ─────────────────────────────────────────────────
 
 /// A JMAP Identity object (submission capability).
@@ -833,9 +927,19 @@ pub struct JmapIdentity {
 /// Add new session URLs here when they start being consumed
 /// (e.g. `eventSourceUrl`, `downloadUrl`).
 fn check_session_urls(origin: &str, session: &JmapSession) -> Result<(), JmapError> {
-    let mut urls = vec![session.api_url.as_str()];
+    let mut owned: Vec<String> = Vec::new();
+    let mut urls: Vec<&str> = vec![session.api_url.as_str()];
     if let Some(upload) = &session.upload_url {
         urls.push(upload.as_str());
+    }
+    if let Some(es) = &session.event_source_url {
+        // Template may contain `{types}` etc.; pin the expanded URL origin.
+        owned.push(
+            es.replace("{types}", "*")
+                .replace("{closeafter}", "no")
+                .replace("{ping}", "30"),
+        );
+        urls.push(owned.last().expect("just pushed").as_str());
     }
     for url in urls {
         let target = crate::netsec::origin_of(url).map_err(JmapError::InvalidServerUrl)?;
@@ -1365,6 +1469,26 @@ mod tests {
         assert_eq!(email["mailboxIds"]["mb-drafts"], true);
         assert_eq!(email["to"][0]["email"], "you@example.com");
         assert_eq!(email["bodyValues"]["bd1"]["value"], "Hello");
+    }
+
+    #[test]
+    fn expand_event_source_url_fills_rfc_placeholders() {
+        let t = "https://jmap.example.com/events/{types}/{closeafter}/{ping}";
+        assert_eq!(
+            expand_event_source_url(t),
+            "https://jmap.example.com/events/*/no/30"
+        );
+    }
+
+    #[test]
+    fn sse_frame_detects_state_event() {
+        assert!(sse_frame_is_state_push(
+            "event: state\ndata: {\"changed\":{\"a1\":{\"Email\":\"s1\"}}}\n"
+        ));
+        assert!(!sse_frame_is_state_push("event: ping\ndata: 30\n"));
+        assert!(sse_frame_is_state_push(
+            "data: {\"changed\":{\"a1\":{\"Mailbox\":\"m1\"}}}\n"
+        ));
     }
 
     #[test]

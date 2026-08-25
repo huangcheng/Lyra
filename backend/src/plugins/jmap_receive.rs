@@ -35,4 +35,13 @@ impl ReceivePlugin for JmapReceivePlugin {
             .await
             .map_err(|e| e.to_string())
     }
+
+    fn capabilities(&self) -> crate::protocol::ReceiveCaps {
+        crate::protocol::ReceiveCaps {
+            folders: true,
+            flags: true,
+            push: true, // EventSource when session provides URL (`jmap_push` supervisor)
+            delete_on_fetch: false,
+        }
+    }
 }

@@ -433,7 +433,7 @@ Status key: **done** = implemented and tested · **partial** = core path works, 
 | Mailbox sync + `parentId` hierarchy | **done** | `upsert_jmap_folder`, `link_jmap_folder_parent` |
 | `Email/queryChanges` + opaque `queryState` | **done** | `cannotCalculateChanges` → full query |
 | Keyword / flag changes | **partial** | Core keywords; audit full set vs RFC 8621 |
-| EventSource push | **gap** | CHE-102 |
+| EventSource push | **done** | Session `eventSourceUrl` SSE; supervisor enqueues sync on `state` |
 | EmailSubmission send when available | **done** | `JmapClient::submit_email`; `send_protocol=jmap` when capability advertised |
 | Blob download / large attachments | **gap** | CHE-109 (storage) + JMAP blob fetch |
 
