@@ -19,7 +19,7 @@ pub use types::{SyncError, SyncResponse};
 
 pub(crate) use imap_loop::imap_sync_account;
 pub(crate) use jmap_loop::jmap_sync_account;
-pub(crate) use send::{deliver_smtp, prepare_smtp_send};
+pub(crate) use send::{deliver_jmap, deliver_smtp, prepare_jmap_send, prepare_smtp_send};
 
 #[cfg(test)]
 pub(crate) use send::{outbound_from_raw, resolve_send_plugin};

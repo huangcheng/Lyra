@@ -145,6 +145,60 @@ pub(crate) async fn deliver_smtp(
     Ok(adapter.send(&outbound).await?)
 }
 
+/// Discover a JMAP session and submit via EmailSubmission.
+pub(crate) async fn deliver_jmap(
+    jmap_base_url: &str,
+    email: &str,
+    password: &str,
+    outbound: OutboundMessage,
+) -> Result<String, SyncError> {
+    let client = crate::jmap::JmapClient::discover(jmap_base_url, email, password).await?;
+    Ok(client.submit_email(&outbound).await?)
+}
+
+/// Load JMAP settings for `account_id` and build an outbound message from raw source.
+pub(crate) async fn prepare_jmap_send(
+    db: &DbPool,
+    account_id: &str,
+    raw: &str,
+) -> Result<(String, String, String, OutboundMessage), SyncError> {
+    let row = db_fetch_optional!(
+        db,
+        r"
+        SELECT email_address, user_id, jmap_base_url, is_active
+        FROM mail_account
+        WHERE id = ?
+        ",
+        |row| {
+            let is_active: bool = row.get("is_active");
+            let jmap_base_url: Option<String> = row.get("jmap_base_url");
+            let email_address: String = row.get("email_address");
+            let user_id = id_from_row(&row, "user_id");
+            (is_active, jmap_base_url, email_address, user_id)
+        },
+        &id_param(db, account_id)?
+    )?
+    .ok_or(SyncError::AccountNotFound)?;
+
+    let (is_active, jmap_base_url, email_address, user_id) = row;
+    if !is_active {
+        return Err(SyncError::AccountDisabled);
+    }
+
+    let base_url = jmap_base_url.ok_or_else(|| {
+        SyncError::InvalidInput("JMAP base URL not configured".into())
+    })?;
+
+    let (dek, credential_json) =
+        crate::auth::AuthState::get_user_dek_and_credential(db, &user_id, account_id)
+            .await
+            .map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let password = crate::jmap::decrypt_account_password(&credential_json, &dek)?;
+
+    let outbound = outbound_from_raw(email_address.clone(), raw)?;
+    Ok((base_url, email_address, password, outbound))
+}
+
 /// Load SMTP settings for `account_id` and build an outbound message from raw source.
 ///
 /// `raw` may be JSON [`OutboundMessage`] (HTTP compose) or minimal RFC822-ish text.

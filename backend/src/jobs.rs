@@ -380,7 +380,7 @@ pub async fn process_job(
                         &job.id
                     )?
                     .unwrap_or(0);
-                    let is_transient = err_cat == "SMTP transient";
+                    let is_transient = err_cat == "SMTP transient" || err_cat == "JMAP transient";
                     if is_transient && attempts + 1 < SMTP_TRANSIENT_MAX_ATTEMPTS {
                         let delay = 30i64 * (1i64 << attempts.min(4));
                         tracing::warn!(
@@ -391,10 +391,10 @@ pub async fn process_job(
                         );
                         reschedule_transient(db, &job.id, &err_cat, delay).await?;
                     } else {
-                        let safe = if err_cat.starts_with("SMTP ") {
+                        let safe = if err_cat.starts_with("SMTP ") || err_cat.starts_with("JMAP ") {
                             err_cat.as_str()
                         } else {
-                            "SMTP error"
+                            "send error"
                         };
                         tracing::warn!(job_id = %job.id, error = %safe, "send job failed");
                         mark_failed(db, &job.id, safe).await?;

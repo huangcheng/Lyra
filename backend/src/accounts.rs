@@ -72,6 +72,9 @@ pub struct CreateAccountRequest {
     pub smtp_host: Option<String>,
     pub smtp_port: Option<i32>,
     pub smtp_security: Option<String>,
+    /// Base URL for JMAP discovery (`https://host` or `…/.well-known/jmap`).
+    /// When omitted and `protocol` is `jmap`, derived as `https://{email-domain}`.
+    pub jmap_base_url: Option<String>,
 }
 
 /// Request to update an existing mail account.
@@ -258,7 +261,10 @@ async fn create_account(
     } else {
         "imap".to_string()
     };
-    let send_protocol = "smtp".to_string();
+    let jmap_base_url = resolve_jmap_base_url(&protocol, body.jmap_base_url.as_deref(), &body.email_address);
+    let send_protocol =
+        choose_send_protocol(&protocol, jmap_base_url.as_deref(), &body.email_address, &body.password)
+            .await;
     let auth_type = body.auth_type.unwrap_or_else(|| "password".into());
     let id_bind = id_param(db, &id)?;
     let user_bind = id_param(db, &user_id)?;
@@ -269,9 +275,9 @@ async fn create_account(
         INSERT INTO mail_account (
             id, user_id, display_name, email_address, protocol, auth_type,
             credential, imap_host, imap_port, imap_security,
-            smtp_host, smtp_port, smtp_security, is_active, sync_enabled,
-            receive_protocol, send_protocol
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            smtp_host, smtp_port, smtp_security, jmap_base_url,
+            is_active, sync_enabled, receive_protocol, send_protocol
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
         &id_bind,
         &user_bind,
@@ -286,6 +292,7 @@ async fn create_account(
         &body.smtp_host,
         body.smtp_port,
         &smtp_security,
+        &jmap_base_url,
         true,
         true,
         &receive_protocol,
@@ -475,6 +482,54 @@ async fn delete_account(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Resolve JMAP discovery base URL for a new account.
+fn resolve_jmap_base_url(
+    protocol: &str,
+    explicit: Option<&str>,
+    email_address: &str,
+) -> Option<String> {
+    if protocol != "jmap" {
+        return None;
+    }
+    if let Some(url) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(url.to_owned());
+    }
+    let domain = extract_domain(email_address);
+    if domain.is_empty() {
+        return None;
+    }
+    Some(format!("https://{domain}"))
+}
+
+/// Prefer JMAP EmailSubmission when the session advertises it; otherwise SMTP.
+async fn choose_send_protocol(
+    protocol: &str,
+    jmap_base_url: Option<&str>,
+    email: &str,
+    password: &str,
+) -> String {
+    if protocol != "jmap" {
+        return "smtp".into();
+    }
+    let Some(base) = jmap_base_url else {
+        return "smtp".into();
+    };
+    match crate::jmap::JmapClient::discover(base, email, password).await {
+        Ok(client) if client.supports_submission() => {
+            tracing::info!(%email, "JMAP submission capability present; send_protocol=jmap");
+            "jmap".into()
+        }
+        Ok(_) => {
+            tracing::info!(%email, "JMAP session lacks submission; send_protocol=smtp");
+            "smtp".into()
+        }
+        Err(err) => {
+            tracing::warn!(%email, error = %err, "JMAP probe failed; send_protocol=smtp");
+            "smtp".into()
+        }
+    }
 }
 
 /// Probe for server configuration (Thunderbird/Apple Mail style).

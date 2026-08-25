@@ -1,8 +1,8 @@
 //! JMAP protocol adapter.
 //!
 //! Implements a JMAP HTTP client for session discovery, mailbox sync,
-//! and Email/query + Email/get operations. JMAP is preferred over IMAP
-//! when the server advertises it (via `/.well-known/jmap`).
+//! Email/query + Email/get, and EmailSubmission send when the session
+//! advertises `urn:ietf:params:jmap:submission`.
 //!
 //! See `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md` §6.
 
@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::crypto::{self, EncryptedCredential};
+use crate::smtp::OutboundMessage;
 
 /// Errors specific to the JMAP adapter.
 #[derive(Debug, Error)]
@@ -61,7 +62,6 @@ pub struct JmapSession {
     #[serde(rename = "primaryAccounts")]
     pub primary_accounts: PrimaryAccounts,
     /// Map of capability URIs to their objects.
-    #[allow(dead_code)]
     pub capabilities: serde_json::Value,
     /// Map of account ID → account object.
     #[allow(dead_code)]
@@ -279,6 +279,21 @@ impl JmapClient {
         &self.session.api_url
     }
 
+    /// True when the session resource advertises `capability` (top-level key).
+    #[must_use]
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.session
+            .capabilities
+            .as_object()
+            .is_some_and(|m| m.contains_key(capability))
+    }
+
+    /// True when `urn:ietf:params:jmap:submission` is advertised (RFC 8621).
+    #[must_use]
+    pub fn supports_submission(&self) -> bool {
+        self.has_capability("urn:ietf:params:jmap:submission")
+    }
+
     // ── Mailbox operations ──────────────────────────────────────
 
     /// List all mailboxes (folders) for this account.
@@ -296,7 +311,7 @@ impl JmapClient {
         };
 
         let resp = self.send_request(&req).await?;
-        let args = take_ok_args(resp, "Mailbox/get")?;
+        let args = take_ok_args(&resp, "Mailbox/get")?;
 
         let list = args
             .get("list")
@@ -342,7 +357,7 @@ impl JmapClient {
         };
 
         let resp = self.send_request(&req).await?;
-        let args = take_ok_args(resp, "Email/query")?;
+        let args = take_ok_args(&resp, "Email/query")?;
 
         let ids: Vec<String> = args
             .get("ids")
@@ -388,7 +403,7 @@ impl JmapClient {
         };
 
         let resp = self.send_request(&req).await?;
-        let args = take_ok_args(resp, "Email/queryChanges")?;
+        let args = take_ok_args(&resp, "Email/queryChanges")?;
 
         let added_ids: Vec<String> = args
             .get("added")
@@ -471,7 +486,7 @@ impl JmapClient {
         };
 
         let resp = self.send_request(&req).await?;
-        let args = take_ok_args(resp, "Email/get")?;
+        let args = take_ok_args(&resp, "Email/get")?;
 
         let list = args
             .get("list")
@@ -486,6 +501,137 @@ impl JmapClient {
         }
 
         Ok(emails)
+    }
+
+    // ── Submission (RFC 8621 EmailSubmission) ─────────────────────
+
+    /// List identities for the mail account (`Identity/get`).
+    pub async fn list_identities(&self) -> Result<Vec<JmapIdentity>, JmapError> {
+        let req = JmapRequest {
+            using: vec![
+                "urn:ietf:params:jmap:core".into(),
+                "urn:ietf:params:jmap:submission".into(),
+            ],
+            method_calls: vec![(
+                "Identity/get".into(),
+                serde_json::json!({
+                    "accountId": self.account_id,
+                    "ids": null
+                }),
+                "id0".into(),
+            )],
+        };
+
+        let resp = self.send_request(&req).await?;
+        let args = take_ok_args(&resp, "Identity/get")?;
+        let list = args
+            .get("list")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| JmapError::InvalidResponse("missing list in Identity/get".into()))?;
+
+        let mut identities = Vec::new();
+        for item in list {
+            let identity: JmapIdentity = serde_json::from_value(item.clone())
+                .map_err(|e| JmapError::InvalidResponse(format!("Identity parse: {e}")))?;
+            identities.push(identity);
+        }
+        Ok(identities)
+    }
+
+    /// Create a draft via `Email/set` and submit it with `EmailSubmission/set`.
+    ///
+    /// Requires [`Self::supports_submission`]. Moves the message to Sent on
+    /// success when a `sent` mailbox exists.
+    pub async fn submit_email(&self, outbound: &OutboundMessage) -> Result<String, JmapError> {
+        if !self.supports_submission() {
+            return Err(JmapError::SessionDiscovery(
+                "JMAP session does not advertise urn:ietf:params:jmap:submission".into(),
+            ));
+        }
+
+        let identities = self.list_identities().await?;
+        let identity = pick_identity(&identities, &outbound.from_email).ok_or_else(|| {
+            JmapError::InvalidResponse(format!(
+                "no JMAP identity for {}",
+                outbound.from_email
+            ))
+        })?;
+
+        let mailboxes = self.list_mailboxes().await?;
+        let drafts_id = mailbox_id_for_role(&mailboxes, "drafts");
+        let sent_id = mailbox_id_for_role(&mailboxes, "sent");
+
+        let email_create = build_email_create(outbound, drafts_id.as_deref())?;
+
+        let mut on_success_update = serde_json::Map::new();
+        if let Some(ref drafts) = drafts_id {
+            on_success_update.insert(format!("mailboxIds/{drafts}"), serde_json::Value::Null);
+        }
+        on_success_update.insert("keywords/$draft".into(), serde_json::Value::Null);
+        if let Some(ref sent) = sent_id {
+            on_success_update.insert(format!("mailboxIds/{sent}"), serde_json::json!(true));
+        }
+
+        let req = JmapRequest {
+            using: vec![
+                "urn:ietf:params:jmap:core".into(),
+                "urn:ietf:params:jmap:mail".into(),
+                "urn:ietf:params:jmap:submission".into(),
+            ],
+            method_calls: vec![
+                (
+                    "Email/set".into(),
+                    serde_json::json!({
+                        "accountId": self.account_id,
+                        "create": {
+                            "draft": email_create
+                        }
+                    }),
+                    "es0".into(),
+                ),
+                (
+                    "EmailSubmission/set".into(),
+                    serde_json::json!({
+                        "accountId": self.account_id,
+                        "create": {
+                            "sub": {
+                                "emailId": "#draft",
+                                "identityId": identity.id
+                            }
+                        },
+                        "onSuccessUpdateEmail": {
+                            "#sub": on_success_update
+                        }
+                    }),
+                    "es1".into(),
+                ),
+            ],
+        };
+
+        let resp = self.send_request(&req).await?;
+        let email_args = take_ok_args_ref(&resp, "Email/set")?;
+        if let Some(not_created) = email_args.get("notCreated").and_then(|v| v.as_object())
+            && let Some(err) = not_created.get("draft")
+        {
+            return Err(jmap_set_error("Email/set", err));
+        }
+
+        let sub_args = take_ok_args(&resp, "EmailSubmission/set")?;
+        if let Some(not_created) = sub_args.get("notCreated").and_then(|v| v.as_object())
+            && let Some(err) = not_created.get("sub")
+        {
+            return Err(jmap_set_error("EmailSubmission/set", err));
+        }
+
+        let submission_id = sub_args
+            .pointer("/created/sub/id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                JmapError::InvalidResponse("EmailSubmission/set missing created.sub.id".into())
+            })?;
+
+        Ok(submission_id)
     }
 
     // ── Internal helpers ────────────────────────────────────────
@@ -528,35 +674,158 @@ impl JmapClient {
     }
 }
 
-/// Unwrap the first method response, mapping JMAP `"error"` methods to [`JmapError::Method`].
-fn take_ok_args(resp: JmapResponse, expected: &str) -> Result<serde_json::Value, JmapError> {
-    let (name, args, _cid) = resp
-        .method_responses
-        .into_iter()
-        .next()
-        .ok_or_else(|| JmapError::InvalidResponse("empty method responses".into()))?;
-    if name == "error" {
-        let code = args
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_owned();
-        let description = args
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_owned();
-        return Err(JmapError::Method { code, description });
+/// Unwrap a method response matching `expected`, mapping JMAP `"error"` methods
+/// to [`JmapError::Method`]. Prefers an exact name match when several responses
+/// are present (e.g. Email/set + EmailSubmission/set).
+fn take_ok_args(resp: &JmapResponse, expected: &str) -> Result<serde_json::Value, JmapError> {
+    take_ok_args_ref(resp, expected).cloned()
+}
+
+fn take_ok_args_ref<'a>(
+    resp: &'a JmapResponse,
+    expected: &str,
+) -> Result<&'a serde_json::Value, JmapError> {
+    let mut first_error: Option<JmapError> = None;
+    for (name, args, _cid) in &resp.method_responses {
+        if name == "error" {
+            if first_error.is_none() {
+                let code = args
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let description = args
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                first_error = Some(JmapError::Method { code, description });
+            }
+            continue;
+        }
+        if name == expected {
+            return Ok(args);
+        }
     }
-    if name != expected {
-        return Err(JmapError::InvalidResponse(format!(
-            "expected {expected}, got {name}"
-        )));
+    if let Some(err) = first_error {
+        return Err(err);
     }
-    Ok(args)
+    Err(JmapError::InvalidResponse(format!(
+        "expected {expected}, got {:?}",
+        resp.method_responses
+            .iter()
+            .map(|(n, _, _)| n.as_str())
+            .collect::<Vec<_>>()
+    )))
+}
+
+fn jmap_set_error(method: &str, err: &serde_json::Value) -> JmapError {
+    let code = err
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_owned();
+    let description = err
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    JmapError::Method {
+        code: format!("{method}: {code}"),
+        description,
+    }
+}
+
+/// Pick the identity whose email matches `from`, else the first identity.
+fn pick_identity<'a>(identities: &'a [JmapIdentity], from: &str) -> Option<&'a JmapIdentity> {
+    let from_lower = from.to_ascii_lowercase();
+    identities
+        .iter()
+        .find(|i| i.email.eq_ignore_ascii_case(&from_lower))
+        .or_else(|| identities.first())
+}
+
+fn mailbox_id_for_role(mailboxes: &[JmapMailbox], role: &str) -> Option<String> {
+    mailboxes
+        .iter()
+        .find(|m| m.role.as_deref() == Some(role))
+        .map(|m| m.id.clone())
+}
+
+/// Build the Email object for `Email/set` create (RFC 8621 §4.7).
+fn build_email_create(
+    outbound: &OutboundMessage,
+    drafts_id: Option<&str>,
+) -> Result<serde_json::Value, JmapError> {
+    let mut mailbox_ids = serde_json::Map::new();
+    if let Some(id) = drafts_id {
+        mailbox_ids.insert(id.to_owned(), serde_json::json!(true));
+    }
+
+    let text = outbound
+        .body_text
+        .clone()
+        .or_else(|| outbound.body_html.clone())
+        .unwrap_or_default();
+
+    let mut email = serde_json::json!({
+        "from": [jmap_address(outbound.from_name.as_deref(), &outbound.from_email)],
+        "to": outbound.to.iter().map(|(n, e)| jmap_address(n.as_deref(), e)).collect::<Vec<_>>(),
+        "cc": outbound.cc.iter().map(|(n, e)| jmap_address(n.as_deref(), e)).collect::<Vec<_>>(),
+        "bcc": outbound.bcc.iter().map(|(n, e)| jmap_address(n.as_deref(), e)).collect::<Vec<_>>(),
+        "subject": outbound.subject,
+        "keywords": { "$draft": true },
+        "mailboxIds": mailbox_ids,
+        "bodyValues": {
+            "bd1": {
+                "value": text,
+                "charset": "utf-8"
+            }
+        },
+        "textBody": [{ "partId": "bd1", "type": "text/plain" }]
+    });
+
+    if let Some(html) = &outbound.body_html
+        && outbound.body_text.is_some()
+    {
+        email["bodyValues"]["bd2"] = serde_json::json!({
+            "value": html,
+            "charset": "utf-8"
+        });
+        email["htmlBody"] = serde_json::json!([{ "partId": "bd2", "type": "text/html" }]);
+    } else if outbound.body_html.is_some() && outbound.body_text.is_none() {
+        email["textBody"] = serde_json::Value::Array(vec![]);
+        email["htmlBody"] = serde_json::json!([{ "partId": "bd1", "type": "text/html" }]);
+    }
+
+    if let Some(ref irt) = outbound.in_reply_to {
+        email["inReplyTo"] = serde_json::json!([irt]);
+    }
+    if let Some(ref refs) = outbound.references {
+        let list: Vec<&str> = refs.split_whitespace().collect();
+        email["references"] = serde_json::json!(list);
+    }
+
+    Ok(email)
+}
+
+fn jmap_address(name: Option<&str>, email: &str) -> serde_json::Value {
+    match name {
+        Some(n) if !n.is_empty() => serde_json::json!({ "name": n, "email": email }),
+        _ => serde_json::json!({ "email": email }),
+    }
 }
 
 // ── JMAP data types ─────────────────────────────────────────────────
+
+/// A JMAP Identity object (submission capability).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JmapIdentity {
+    pub id: String,
+    pub name: String,
+    pub email: String,
+}
 
 /// Verify every credential-bearing URL in the session document shares the
 /// configured origin (`apiUrl`, and `uploadUrl` when present).
@@ -998,7 +1267,7 @@ mod tests {
             )],
             session_state: None,
         };
-        let err = take_ok_args(resp, "Email/queryChanges").unwrap_err();
+        let err = take_ok_args(&resp, "Email/queryChanges").unwrap_err();
         assert!(err.is_stale_query_state(), "got: {err}");
     }
 
@@ -1012,8 +1281,90 @@ mod tests {
             )],
             session_state: None,
         };
-        let args = take_ok_args(resp, "Email/query").expect("ok");
+        let args = take_ok_args(&resp, "Email/query").expect("ok");
         assert_eq!(args["queryState"], "s1");
+    }
+
+    #[test]
+    fn take_ok_args_picks_named_method_among_several() {
+        let resp = JmapResponse {
+            method_responses: vec![
+                (
+                    "Email/set".into(),
+                    serde_json::json!({ "created": { "draft": { "id": "e1" } } }),
+                    "es0".into(),
+                ),
+                (
+                    "EmailSubmission/set".into(),
+                    serde_json::json!({ "created": { "sub": { "id": "s1" } } }),
+                    "es1".into(),
+                ),
+            ],
+            session_state: None,
+        };
+        let args = take_ok_args(&resp, "EmailSubmission/set").expect("ok");
+        assert_eq!(args["created"]["sub"]["id"], "s1");
+    }
+
+    #[test]
+    fn session_supports_submission_capability() {
+        let session = JmapSession {
+            primary_accounts: PrimaryAccounts {
+                mail: Some("a1".into()),
+            },
+            capabilities: serde_json::json!({
+                "urn:ietf:params:jmap:core": {},
+                "urn:ietf:params:jmap:mail": {},
+                "urn:ietf:params:jmap:submission": {}
+            }),
+            accounts: serde_json::json!({}),
+            api_url: "https://jmap.example.com/api/".into(),
+            event_source_url: None,
+            upload_url: None,
+        };
+        let client = JmapClient::from_session(session, "a1".into(), "u@example.com", "pw");
+        assert!(client.supports_submission());
+        assert!(!client.has_capability("urn:ietf:params:jmap:calendars"));
+    }
+
+    #[test]
+    fn pick_identity_prefers_matching_email() {
+        let identities = vec![
+            JmapIdentity {
+                id: "i1".into(),
+                name: "Other".into(),
+                email: "other@example.com".into(),
+            },
+            JmapIdentity {
+                id: "i2".into(),
+                name: "Me".into(),
+                email: "me@example.com".into(),
+            },
+        ];
+        let picked = pick_identity(&identities, "ME@example.com").unwrap();
+        assert_eq!(picked.id, "i2");
+    }
+
+    #[test]
+    fn build_email_create_sets_draft_keywords_and_recipients() {
+        let outbound = OutboundMessage {
+            from_email: "me@example.com".into(),
+            from_name: Some("Me".into()),
+            to: vec![(Some("You".into()), "you@example.com".into())],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Hi".into(),
+            body_text: Some("Hello".into()),
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+        };
+        let email = build_email_create(&outbound, Some("mb-drafts")).unwrap();
+        assert_eq!(email["subject"], "Hi");
+        assert_eq!(email["keywords"]["$draft"], true);
+        assert_eq!(email["mailboxIds"]["mb-drafts"], true);
+        assert_eq!(email["to"][0]["email"], "you@example.com");
+        assert_eq!(email["bodyValues"]["bd1"]["value"], "Hello");
     }
 
     #[test]

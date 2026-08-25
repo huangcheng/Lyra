@@ -434,7 +434,7 @@ Status key: **done** = implemented and tested · **partial** = core path works, 
 | `Email/queryChanges` + opaque `queryState` | **done** | `cannotCalculateChanges` → full query |
 | Keyword / flag changes | **partial** | Core keywords; audit full set vs RFC 8621 |
 | EventSource push | **gap** | CHE-102 |
-| EmailSubmission send when available | **gap** | CHE-126 |
+| EmailSubmission send when available | **done** | `JmapClient::submit_email`; `send_protocol=jmap` when capability advertised |
 | Blob download / large attachments | **gap** | CHE-109 (storage) + JMAP blob fetch |
 
 #### SMTP (RFC 5321)

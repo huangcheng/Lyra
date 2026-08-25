@@ -2,6 +2,7 @@
 
 mod imap_receive;
 mod jmap_receive;
+mod jmap_send;
 mod smtp_send;
 
 use std::sync::OnceLock;
@@ -11,6 +12,7 @@ use crate::storage::DbPool;
 
 pub use imap_receive::ImapReceivePlugin;
 pub use jmap_receive::JmapReceivePlugin;
+pub use jmap_send::JmapSendPlugin;
 pub use smtp_send::SmtpSendPlugin;
 
 static STORAGE: OnceLock<DbPool> = OnceLock::new();
@@ -34,6 +36,7 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
         Box::new(ImapReceivePlugin),
         Box::new(JmapReceivePlugin),
         Box::new(SmtpSendPlugin),
+        Box::new(JmapSendPlugin),
     ]
 }
 
@@ -52,6 +55,7 @@ mod tests {
         assert!(app.receive("imap").is_ok());
         assert!(app.receive("jmap").is_ok());
         assert!(app.send("smtp").is_ok());
+        assert!(app.send("jmap").is_ok());
         assert!(app.receive("pop3").is_err());
     }
 }
