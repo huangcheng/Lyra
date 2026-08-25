@@ -11,6 +11,7 @@
 #[macro_use]
 mod db_sql;
 mod accounts;
+mod api_error;
 mod auth;
 mod config;
 mod crypto;
@@ -33,6 +34,7 @@ mod privacy;
 mod protocol;
 mod sanitize;
 mod scheduler;
+mod search;
 mod smtp;
 mod stats;
 mod storage;

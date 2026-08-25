@@ -454,6 +454,10 @@ pub(crate) async fn clear_jmap_cursor(
 }
 
 // ── Message upsert ──────────────────────────────────────────────────
+//
+// Full-text index rows are maintained by migration 0009 triggers on `message`
+// (FTS5 on SQLite, `search_vector` on PostgreSQL). Upserts and deletes here
+// automatically refresh the search index — no separate hook required.
 
 /// Upsert a message from IMAP metadata.
 ///

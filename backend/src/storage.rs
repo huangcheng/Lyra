@@ -263,14 +263,10 @@ async fn run_sqlite_migrations(
 
         // Strip inline comments and execute statements individually.
         // SQLite doesn't support multi-statement execution via prepare,
-        // so we need to split carefully.
+        // so we need to split carefully (respecting BEGIN…END in triggers).
         let cleaned = strip_sql_comments(&sql);
-        for stmt in cleaned.split(';') {
-            let stmt = stmt.trim();
-            if stmt.is_empty() {
-                continue;
-            }
-            sqlx::query(stmt).execute(pool).await?;
+        for stmt in split_sql_statements(&cleaned) {
+            sqlx::query(&stmt).execute(pool).await?;
         }
 
         // Record migration
@@ -379,6 +375,83 @@ fn strip_sql_comments(sql: &str) -> String {
     }
 
     result
+}
+
+/// Split SQL into statements on `;`, but not inside string literals or `BEGIN…END` blocks.
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut begin_depth = 0i32;
+    let mut in_single = false;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if in_single {
+            let ch = bytes[i] as char;
+            current.push(ch);
+            if ch == '\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    current.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'\'' {
+            in_single = true;
+            current.push('\'');
+            i += 1;
+            continue;
+        }
+
+        if sql_keyword_at(sql, i, "BEGIN") {
+            begin_depth += 1;
+        } else if begin_depth > 0 && sql_keyword_at(sql, i, "END") {
+            begin_depth -= 1;
+        }
+
+        if bytes[i] == b';' && begin_depth == 0 {
+            let stmt = current.trim();
+            if !stmt.is_empty() {
+                statements.push(stmt.to_string());
+            }
+            current.clear();
+            i += 1;
+            continue;
+        }
+
+        current.push(bytes[i] as char);
+        i += 1;
+    }
+
+    let stmt = current.trim();
+    if !stmt.is_empty() {
+        statements.push(stmt.to_string());
+    }
+    statements
+}
+
+fn sql_keyword_at(sql: &str, i: usize, keyword: &str) -> bool {
+    if i > 0 {
+        let prev = sql.as_bytes()[i - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return false;
+        }
+    }
+    let Some(rest) = sql.get(i..) else {
+        return false;
+    };
+    if !rest.len().ge(&keyword.len()) || !rest[..keyword.len()].eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    rest.get(keyword.len()..)
+        .and_then(|s| s.chars().next())
+        .is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
 }
 
 /// Collect migration files from a directory, returning (version, path) pairs.
@@ -505,6 +578,23 @@ mod tests {
                 "URL should be recognized as PostgreSQL: {url}"
             );
         }
+    }
+
+    #[test]
+    fn split_sql_statements_respects_trigger_blocks() {
+        let sql = r"
+CREATE VIRTUAL TABLE message_fts USING fts5(subject);
+CREATE TRIGGER message_fts_ai AFTER INSERT ON message BEGIN
+    INSERT INTO message_fts (subject) VALUES (NEW.subject);
+END;
+INSERT INTO message_fts (subject) VALUES ('x');
+";
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 3);
+        assert!(stmts[0].starts_with("CREATE VIRTUAL TABLE"));
+        assert!(stmts[1].contains("CREATE TRIGGER"));
+        assert!(stmts[1].trim_end().ends_with("END"));
+        assert!(stmts[2].starts_with("INSERT INTO message_fts"));
     }
 
     #[test]

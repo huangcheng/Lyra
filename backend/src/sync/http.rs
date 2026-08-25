@@ -29,6 +29,7 @@ use crate::privacy::{
     load_settings, rewrite_remote_images, sender_email_from_json, should_allow_remote,
 };
 use crate::sanitize::persist_body_html;
+use crate::search::{fts_available, search_message_ids};
 use crate::storage::DbPool;
 
 pub fn routes() -> Router<AuthState> {
@@ -604,7 +605,7 @@ pub(crate) struct SearchMessagesQuery {
     limit: Option<i64>,
 }
 
-/// Search messages by subject / snippet / body / from (local index).
+/// Search messages by subject / body / from (local FTS index, LIKE fallback).
 pub(crate) async fn search_messages(
     State(state): State<AuthState>,
     AuthUser(user_id): AuthUser,
@@ -622,48 +623,100 @@ pub(crate) async fn search_messages(
         ));
     }
 
-    let pattern = format!("%{q}%");
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let user_bind = id_param(db, &user_id)?;
     let account_bind = opt_id_param(db, query.account_id.as_deref())?;
     let folder_bind = opt_id_param(db, query.folder_id.as_deref())?;
 
-    let messages = db_fetch_all!(
-        db,
-        r"
-        SELECT m.id, m.account_id, m.folder_id, m.subject, m.from_address,
-               m.to_addresses, m.cc_addresses, m.date, m.snippet,
-               m.body_text, m.body_html, m.is_read, m.is_starred, m.has_attachments
-        FROM message m
-        JOIN mail_account a ON m.account_id = a.id
-        WHERE a.user_id = ?
-          AND m.is_deleted = ?
-          AND (? IS NULL OR m.account_id = ?)
-          AND (? IS NULL OR m.folder_id = ?)
-          AND (
-            IFNULL(m.subject, '') LIKE ?
-            OR IFNULL(m.snippet, '') LIKE ?
-            OR IFNULL(m.body_text, '') LIKE ?
-            OR IFNULL(m.from_address, '') LIKE ?
-          )
-        ORDER BY m.date DESC
-        LIMIT ?
-        ",
-        |row| message_response_from_sql!(row),
-        &user_bind,
-        false,
-        &account_bind,
-        &account_bind,
-        &folder_bind,
-        &folder_bind,
-        &pattern,
-        &pattern,
-        &pattern,
-        &pattern,
-        limit
-    )?;
+    let messages = if fts_available(db).await? {
+        let ids = search_message_ids(
+            db,
+            &user_id,
+            q,
+            query.account_id.as_deref(),
+            query.folder_id.as_deref(),
+            limit,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::search::SearchError::InvalidQuery | crate::search::SearchError::InvalidId(_) => {
+                SyncError::InvalidInput("invalid search query".into())
+            }
+            crate::search::SearchError::Database(err) => SyncError::Database(err),
+        })?;
+        if ids.is_empty() {
+            Vec::new()
+        } else {
+            fetch_messages_by_ids(db, &ids, &user_bind).await?
+        }
+    } else {
+        let pattern = format!("%{q}%");
+        db_fetch_all!(
+            db,
+            r"
+            SELECT m.id, m.account_id, m.folder_id, m.subject, m.from_address,
+                   m.to_addresses, m.cc_addresses, m.date, m.snippet,
+                   m.body_text, m.body_html, m.is_read, m.is_starred, m.has_attachments
+            FROM message m
+            JOIN mail_account a ON m.account_id = a.id
+            WHERE a.user_id = ?
+              AND m.is_deleted = ?
+              AND (? IS NULL OR m.account_id = ?)
+              AND (? IS NULL OR m.folder_id = ?)
+              AND (
+                IFNULL(m.subject, '') LIKE ?
+                OR IFNULL(m.snippet, '') LIKE ?
+                OR IFNULL(m.body_text, '') LIKE ?
+                OR IFNULL(m.from_address, '') LIKE ?
+              )
+            ORDER BY m.date DESC
+            LIMIT ?
+            ",
+            |row| message_response_from_sql!(row),
+            &user_bind,
+            false,
+            &account_bind,
+            &account_bind,
+            &folder_bind,
+            &folder_bind,
+            &pattern,
+            &pattern,
+            &pattern,
+            &pattern,
+            limit
+        )?
+    };
 
     Ok(Json(messages))
+}
+
+async fn fetch_messages_by_ids(
+    db: &DbPool,
+    ids: &[String],
+    user_bind: &crate::db_row::IdParam,
+) -> Result<Vec<MessageResponse>, SyncError> {
+    let mut messages = Vec::with_capacity(ids.len());
+    for id in ids {
+        let id_bind = id_param(db, id)?;
+        if let Some(message) = db_fetch_optional!(
+            db,
+            r"
+            SELECT m.id, m.account_id, m.folder_id, m.subject, m.from_address,
+                   m.to_addresses, m.cc_addresses, m.date, m.snippet,
+                   m.body_text, m.body_html, m.is_read, m.is_starred, m.has_attachments
+            FROM message m
+            JOIN mail_account a ON m.account_id = a.id
+            WHERE m.id = ? AND a.user_id = ? AND m.is_deleted = ?
+            ",
+            |row| message_response_from_sql!(row),
+            &id_bind,
+            user_bind,
+            false
+        )? {
+            messages.push(message);
+        }
+    }
+    Ok(messages)
 }
 
 /// Attachment metadata for list responses.
@@ -1285,14 +1338,8 @@ pub(crate) async fn patch_message(
     update_folder_counts(db, &row.folder_id).await?;
 
     Ok(Json(
-        finalize_message_response_with_opengpg(
-            &state,
-            &user_id,
-            Some(&session.token),
-            &row,
-            false,
-        )
-        .await?,
+        finalize_message_response_with_opengpg(&state, &user_id, Some(&session.token), &row, false)
+            .await?,
     ))
 }
 
