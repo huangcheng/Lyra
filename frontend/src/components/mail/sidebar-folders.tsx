@@ -168,10 +168,13 @@ function AccountSection({
   account,
   selectedAccountId,
   selectedFolderId,
+  bare = false,
 }: {
   account: MailAccount;
   selectedAccountId: string;
   selectedFolderId: string | null;
+  /** Single-account view: header omitted (the switcher already names the account). */
+  bare?: boolean;
 }) {
   const locale = useUIStore((s) => s.locale);
   // Subscribe to `folders` so this section re-renders on folder updates.
@@ -198,27 +201,29 @@ function AccountSection({
 
   return (
     <div>
-      <button
-        type="button"
-        onClick={() => setExpanded((value) => !value)}
-        aria-expanded={expanded}
-        className="flex h-8 w-full items-center gap-1.5 rounded-[7px] px-2.5 hover:bg-accent/60"
-      >
-        {expanded ? (
-          <ChevronDown className="size-3.5 shrink-0 text-ter-foreground" />
-        ) : (
-          <ChevronRight className="size-3.5 shrink-0 text-ter-foreground" />
-        )}
-        <span
-          className="truncate text-[12.5px] font-semibold"
-          title={account.displayName || account.emailAddress}
+      {bare ? null : (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          className="flex h-8 w-full items-center gap-1.5 rounded-[7px] px-2.5 hover:bg-accent/60"
         >
-          {account.displayName || account.emailAddress}
-        </span>
-        <UnreadCount count={totalUnread} />
-      </button>
-      {expanded ? (
-        <div className="pl-4">
+          {expanded ? (
+            <ChevronDown className="size-3.5 shrink-0 text-ter-foreground" />
+          ) : (
+            <ChevronRight className="size-3.5 shrink-0 text-ter-foreground" />
+          )}
+          <span
+            className="truncate text-[12.5px] font-semibold"
+            title={account.displayName || account.emailAddress}
+          >
+            {account.displayName || account.emailAddress}
+          </span>
+          <UnreadCount count={totalUnread} />
+        </button>
+      )}
+      {bare || expanded ? (
+        <div className={bare ? undefined : 'pl-4'}>
           {roleFolders.map((folder) => {
             const role = folder.role as StandardFolderRole;
             const Icon = ROLE_ICONS[role] ?? Folder;
@@ -367,6 +372,7 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
             account={selectedAccount}
             selectedAccountId={selectedAccountId}
             selectedFolderId={selectedFolderId}
+            bare
           />
         </div>
       </div>
