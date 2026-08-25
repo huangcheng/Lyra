@@ -233,6 +233,11 @@ impl ImapClient {
         self.capabilities.has_str("MOVE")
     }
 
+    /// Whether the server advertises RFC 2177 IDLE.
+    pub fn supports_idle(&self) -> bool {
+        self.capabilities.has_str("IDLE")
+    }
+
     /// List all folders (mailboxes) on the server.
     pub async fn list_folders(&mut self) -> Result<Vec<ImapFolder>, ImapError> {
         let listing = self
@@ -441,6 +446,55 @@ impl ImapClient {
         self.session.logout().await.map_err(ImapError::Imap)?;
         Ok(())
     }
+
+    /// Enter IDLE on the currently selected mailbox until a server notify or renew.
+    ///
+    /// Consumes the client (IDLE owns the session). Returns after `NewData`
+    /// (typically EXISTS/EXPUNGE/FETCH). Renews IDLE on inactivity timeout
+    /// (RFC 2177: re-issue before ~29 minutes).
+    ///
+    /// Caller must have [`Self::select`]ed a mailbox first and checked
+    /// [`Self::supports_idle`].
+    pub async fn into_idle_watch(self) -> Result<IdleWatchOutcome, ImapError> {
+        if !self.supports_idle() {
+            return Ok(IdleWatchOutcome::Unsupported);
+        }
+
+        let renew = std::time::Duration::from_secs(25 * 60);
+        let mut handle = self.session.idle();
+        handle.init().await.map_err(ImapError::Imap)?;
+
+        loop {
+            let (wait_fut, _interrupt) = handle.wait_with_timeout(renew);
+            match wait_fut.await.map_err(ImapError::Imap)? {
+                async_imap::extensions::idle::IdleResponse::NewData(_) => {
+                    // Drop DONE + session; next sync opens a fresh connection.
+                    let _ = handle.done().await;
+                    return Ok(IdleWatchOutcome::Notified);
+                }
+                async_imap::extensions::idle::IdleResponse::Timeout => {
+                    let session = handle.done().await.map_err(ImapError::Imap)?;
+                    handle = session.idle();
+                    handle.init().await.map_err(ImapError::Imap)?;
+                }
+                async_imap::extensions::idle::IdleResponse::ManualInterrupt => {
+                    let _ = handle.done().await;
+                    return Ok(IdleWatchOutcome::Interrupted);
+                }
+            }
+        }
+    }
+}
+
+/// Result of an IDLE watch session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleWatchOutcome {
+    /// Server pushed mailbox state (EXISTS / EXPUNGE / etc.).
+    Notified,
+    /// Server does not advertise IDLE — caller should poll only.
+    Unsupported,
+    /// Local interrupt (stop token); reconnect later.
+    Interrupted,
 }
 
 // ── Parsing helpers ─────────────────────────────────────────────────
