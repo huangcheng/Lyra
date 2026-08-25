@@ -58,6 +58,10 @@ pub enum OpengpgError {
     NotFound,
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("{0}")]
+    Unauthorized(String),
+    #[error("too many unlock attempts")]
+    TooManyRequests,
 }
 
 /// Parse an armored public or secret key and extract metadata.
@@ -190,6 +194,20 @@ pub fn public_armored_from_stored(key_data: &str) -> Result<String, OpengpgError
     let (_public, _) = SignedPublicKey::from_string(trimmed)
         .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
     Ok(trimmed.to_string())
+}
+
+/// Verify that `passphrase` unlocks the primary secret key material.
+pub fn verify_secret_passphrase(key_data: &str, passphrase: &str) -> Result<(), OpengpgError> {
+    let trimmed = key_data.trim();
+    let (secret, _) = SignedSecretKey::from_string(trimmed)
+        .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
+    let pw = Password::from(passphrase);
+    match secret.primary_key.unlock(&pw, |_, _| Ok(())) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) | Err(e) => Err(OpengpgError::InvalidInput(format!(
+            "passphrase rejected: {e}"
+        ))),
+    }
 }
 
 fn parsed_from_details(
@@ -336,15 +354,12 @@ mod tests {
     }
 
     #[test]
-    fn generate_ed25519_keypair_locked() {
-        let parsed = generate_keypair(
-            "ada@example.com",
-            "Ada",
-            "s3cret-phrase",
-            KeyAlgorithm::Ed25519,
-        )
-        .expect("generate");
-        assert!(parsed.is_secret);
-        assert_eq!(parsed.primary_email, "ada@example.com");
+    fn verify_passphrase_accepts_and_rejects() {
+        let armor = gen_test_secret_armor(Some("correct-horse"));
+        verify_secret_passphrase(&armor, "correct-horse").expect("ok");
+        assert!(matches!(
+            verify_secret_passphrase(&armor, "wrong"),
+            Err(OpengpgError::InvalidInput(_))
+        ));
     }
 }

@@ -164,6 +164,30 @@ impl FromRequestParts<AuthState> for AuthUser {
     }
 }
 
+/// Authenticated user plus raw bearer token (for session-scoped caches).
+pub struct AuthSession {
+    pub user_id: String,
+    pub token: String,
+}
+
+impl FromRequestParts<AuthState> for AuthSession {
+    type Rejection = AuthError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AuthState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = extract_token_from_headers(&parts.headers)
+            .ok_or_else(|| AuthError::unauthorized("Missing authorization header"))?;
+        let user_id = state
+            .sessions
+            .get_session(&token)
+            .await
+            .ok_or_else(|| AuthError::unauthorized("Invalid or expired session"))?;
+        Ok(Self { user_id, token })
+    }
+}
+
 // ── Request types ───────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1083,6 +1107,8 @@ pub struct AuthState {
     pub min_password_length: usize,
     pub data_dir: std::path::PathBuf,
     pub app: Arc<App>,
+    /// Per-auth-session OpenGPG unlock cache (passphrases only; never persisted).
+    pub opengpg_unlock: Arc<crate::opengpg::UnlockRing>,
 }
 
 impl AuthState {
@@ -1100,6 +1126,7 @@ impl AuthState {
             min_password_length: config.min_password_length,
             data_dir: std::path::PathBuf::from(&config.data_dir),
             app,
+            opengpg_unlock: Arc::new(crate::opengpg::UnlockRing::new()),
         })
     }
 
@@ -1587,6 +1614,7 @@ async fn auth_logout(
     headers: HeaderMap,
 ) -> Result<StatusCode, AuthError> {
     if let Some(token) = extract_token_from_headers(&headers) {
+        state.opengpg_unlock.lock(&token, None);
         state.sessions.remove_session(&token).await;
     }
     Ok(StatusCode::NO_CONTENT)

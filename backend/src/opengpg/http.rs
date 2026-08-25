@@ -9,12 +9,19 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::keys::{KeyAlgorithm, OpengpgError, generate_keypair};
+use super::keys::{
+    KeyAlgorithm, OpengpgError, generate_keypair, verify_secret_passphrase,
+};
+use super::session::{
+    CacheMode, DEFAULT_TTL_MINUTES, MAX_TTL_MINUTES,
+};
 use super::store::{
     StoredKey, delete_key, export_armored, export_public_armored, get_key, import_armored,
     list_keys, set_primary,
 };
-use crate::auth::{AuthError, AuthState, AuthUser, verify_current_password};
+use crate::auth::{AuthError, AuthSession, AuthState, AuthUser, verify_current_password};
+use crate::kv::KvStore;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,6 +93,81 @@ struct ExportResponse {
     is_secret: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnlockRequest {
+    key_id: String,
+    passphrase: String,
+    /// `once` | `timed` | `session`
+    cache: String,
+    /// Timed TTL minutes (1–120); ignored for once/session.
+    #[serde(default)]
+    ttl_minutes: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnlockResponse {
+    key_id: String,
+    cache: String,
+    /// True when the passphrase was accepted.
+    unlocked: bool,
+    /// True when the passphrase was retained in the session ring.
+    cached: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LockRequest {
+    /// When set, lock only this key; otherwise clear the whole session ring.
+    #[serde(default)]
+    key_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LockResponse {
+    unlocked_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PassphraseCachePref {
+    mode: String,
+    #[serde(default = "default_ttl")]
+    ttl_minutes: u32,
+}
+
+fn default_ttl() -> u32 {
+    DEFAULT_TTL_MINUTES
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct OpengpgSettings {
+    passphrase_cache: PassphraseCachePref,
+}
+
+impl Default for OpengpgSettings {
+    fn default() -> Self {
+        Self {
+            passphrase_cache: PassphraseCachePref {
+                mode: "timed".into(),
+                ttl_minutes: DEFAULT_TTL_MINUTES,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchOpengpgSettings {
+    passphrase_cache: Option<PassphraseCachePref>,
+}
+
+const UNLOCK_RL_MAX: i64 = 5;
+const UNLOCK_RL_TTL: u64 = 15 * 60;
+
 impl IntoResponse for OpengpgError {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match &self {
@@ -94,6 +176,8 @@ impl IntoResponse for OpengpgError {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
             OpengpgError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
+            OpengpgError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
+            OpengpgError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             OpengpgError::Database(e) => {
                 tracing::error!(error = %e, "opengpg database error");
                 (
@@ -117,6 +201,12 @@ pub fn routes() -> Router<AuthState> {
                 .delete(delete_key_handler),
         )
         .route("/api/v1/opengpg/keys/{id}/export", get(export_key))
+        .route("/api/v1/opengpg/unlock", post(unlock_key))
+        .route("/api/v1/opengpg/lock", post(lock_keys))
+        .route(
+            "/api/v1/settings/opengpg",
+            get(get_opengpg_settings).patch(patch_opengpg_settings),
+        )
 }
 
 async fn list_keys_handler(
@@ -251,4 +341,162 @@ async fn export_key(
         armored,
         is_secret: false,
     }))
+}
+
+fn unlock_rl_key(token: &str) -> String {
+    format!("rl:opengpg-unlock:{token}")
+}
+
+async fn ensure_unlock_allowed(kv: &dyn KvStore, token: &str) -> Result<(), OpengpgError> {
+    let key = unlock_rl_key(token);
+    let attempts = kv
+        .get(&key)
+        .await
+        .map_err(|e| OpengpgError::InvalidInput(e.to_string()))?
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    if attempts >= UNLOCK_RL_MAX {
+        return Err(OpengpgError::TooManyRequests);
+    }
+    Ok(())
+}
+
+async fn note_unlock_failure(kv: &dyn KvStore, token: &str) -> Result<(), OpengpgError> {
+    let key = unlock_rl_key(token);
+    let attempts = kv
+        .get(&key)
+        .await
+        .map_err(|e| OpengpgError::InvalidInput(e.to_string()))?
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0)
+        + 1;
+    kv.set(&key, &attempts.to_string(), Some(UNLOCK_RL_TTL))
+        .await
+        .map_err(|e| OpengpgError::InvalidInput(e.to_string()))?;
+    Ok(())
+}
+
+async fn clear_unlock_failures(kv: &dyn KvStore, token: &str) {
+    let _ = kv.del(&unlock_rl_key(token)).await;
+}
+
+async fn unlock_key(
+    State(state): State<AuthState>,
+    session: AuthSession,
+    Json(body): Json<UnlockRequest>,
+) -> Result<Json<UnlockResponse>, OpengpgError> {
+    ensure_unlock_allowed(state.kv().as_ref(), &session.token).await?;
+
+    let mode = CacheMode::parse(&body.cache).map_err(OpengpgError::InvalidInput)?;
+    let ttl = body
+        .ttl_minutes
+        .unwrap_or(DEFAULT_TTL_MINUTES)
+        .clamp(1, MAX_TTL_MINUTES);
+
+    let key = get_key(&state.db, &session.user_id, &body.key_id)
+        .await?
+        .ok_or(OpengpgError::NotFound)?;
+    if !key.is_secret {
+        return Err(OpengpgError::InvalidInput(
+            "cannot unlock a public-only key".into(),
+        ));
+    }
+
+    let key_data = key.key_data.clone();
+    let passphrase = body.passphrase.clone();
+    let verify = tokio::task::spawn_blocking(move || {
+        verify_secret_passphrase(&key_data, &passphrase)
+    })
+    .await
+    .map_err(|e| OpengpgError::InvalidInput(format!("unlock task failed: {e}")))?;
+
+    if let Err(e) = verify {
+        note_unlock_failure(state.kv().as_ref(), &session.token).await?;
+        // Map passphrase rejection to 401 without leaking crypto detail.
+        return Err(match e {
+            OpengpgError::InvalidInput(_) => {
+                OpengpgError::Unauthorized("passphrase rejected".into())
+            }
+            other => other,
+        });
+    }
+    clear_unlock_failures(state.kv().as_ref(), &session.token).await;
+
+    state.opengpg_unlock.put(
+        &session.token,
+        &body.key_id,
+        Zeroizing::new(body.passphrase),
+        mode,
+        ttl,
+    );
+
+    let cached = state
+        .opengpg_unlock
+        .is_unlocked(&session.token, &body.key_id);
+
+    Ok(Json(UnlockResponse {
+        key_id: body.key_id,
+        cache: mode.as_str().into(),
+        unlocked: true,
+        cached,
+    }))
+}
+
+async fn lock_keys(
+    State(state): State<AuthState>,
+    session: AuthSession,
+    body: Option<Json<LockRequest>>,
+) -> Result<Json<LockResponse>, OpengpgError> {
+    let key_id = body.and_then(|Json(b)| b.key_id);
+    state
+        .opengpg_unlock
+        .lock(&session.token, key_id.as_deref());
+    Ok(Json(LockResponse {
+        unlocked_ids: state.opengpg_unlock.unlocked_ids(&session.token),
+    }))
+}
+
+fn settings_kv_key(user_id: &str) -> String {
+    format!("user:{user_id}:opengpg")
+}
+
+async fn load_opengpg_settings(kv: &dyn KvStore, user_id: &str) -> OpengpgSettings {
+    let Ok(Some(raw)) = kv.get(&settings_kv_key(user_id)).await else {
+        return OpengpgSettings::default();
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+async fn get_opengpg_settings(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<OpengpgSettings>, OpengpgError> {
+    Ok(Json(
+        load_opengpg_settings(state.kv().as_ref(), &user_id).await,
+    ))
+}
+
+async fn patch_opengpg_settings(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<PatchOpengpgSettings>,
+) -> Result<Json<OpengpgSettings>, OpengpgError> {
+    let mut settings = load_opengpg_settings(state.kv().as_ref(), &user_id).await;
+    if let Some(cache) = body.passphrase_cache {
+        let _ = CacheMode::parse(&cache.mode).map_err(OpengpgError::InvalidInput)?;
+        if !(1..=MAX_TTL_MINUTES).contains(&cache.ttl_minutes) {
+            return Err(OpengpgError::InvalidInput(format!(
+                "ttlMinutes must be 1–{MAX_TTL_MINUTES}"
+            )));
+        }
+        settings.passphrase_cache = cache;
+    }
+    let raw = serde_json::to_string(&settings)
+        .map_err(|e| OpengpgError::InvalidInput(e.to_string()))?;
+    state
+        .kv()
+        .set(&settings_kv_key(&user_id), &raw, None)
+        .await
+        .map_err(|e| OpengpgError::InvalidInput(e.to_string()))?;
+    Ok(Json(settings))
 }

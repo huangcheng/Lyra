@@ -5,6 +5,8 @@
 
 mod http;
 pub mod keys;
+pub mod session;
 pub mod store;
 
 pub use http::routes;
+pub use session::UnlockRing;
