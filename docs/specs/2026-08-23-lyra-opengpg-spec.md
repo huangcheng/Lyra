@@ -122,7 +122,7 @@ Keygen default is **RSA-4096** (signing key + RSA-4096 encryption subkey, AES-25
 ### P1 — Key store & management (foundation)
 - Migration `0008_opengpg_keys` (sqlite + postgres + up/down). **done** (CHE-63)
 - `backend/src/opengpg/` module: `mod.rs`, `keys.rs` (cert parsing, fingerprinting), `store.rs` (DB seam). **done** (CHE-63); `session.rs` → CHE-64.
-- `/api/v1/opengpg/keys` CRUD + generate + `unlock`/`lock`.
+- `/api/v1/opengpg/keys` CRUD + generate + export (re-auth for secrets). **done** (CHE-61); `unlock`/`lock` → CHE-64.
 - Frontend: Settings → "Encryption" page: list/import/export/primary selection; unlock prompt (XState) with idle-relock indicator.
 - Tests at the seam: import → list → export roundtrip; wrong passphrase on unlock rejected; unlocked material absent from DB/serialized session state.
 

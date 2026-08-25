@@ -1,13 +1,36 @@
-//! OpenGPG key parsing and fingerprinting (rPGP / RFC 9580).
+//! OpenGPG key parsing, fingerprinting, and keygen (rPGP / RFC 9580).
 //!
 //! Secret material is never unwrapped here — armored passphrase-locked
 //! blobs are stored as-is (opengpg-spec key protection).
 
-#![allow(dead_code)] // HTTP surface lands in CHE-61
-
-use pgp::composed::{Deserializable, SignedPublicKey, SignedSecretKey};
-use pgp::types::KeyDetails;
+use pgp::composed::{
+    Deserializable, KeyType, SecretKeyParamsBuilder, SignedPublicKey, SignedSecretKey,
+    SubkeyParamsBuilder,
+};
+use pgp::crypto::ecc_curve::ECCCurve;
+use pgp::types::{KeyDetails, Password};
+use rand::thread_rng;
 use thiserror::Error;
+
+/// Keygen algorithm (opengpg-spec: RSA-4096 default; ed25519/cv25519 option).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyAlgorithm {
+    #[default]
+    Rsa4096,
+    Ed25519,
+}
+
+impl KeyAlgorithm {
+    pub fn parse(s: &str) -> Result<Self, OpengpgError> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "rsa4096" | "rsa-4096" | "rsa" => Ok(Self::Rsa4096),
+            "ed25519" | "cv25519" | "curve25519" => Ok(Self::Ed25519),
+            other => Err(OpengpgError::InvalidInput(format!(
+                "unsupported algorithm '{other}' (use rsa4096 or ed25519)"
+            ))),
+        }
+    }
+}
 
 /// Parsed key metadata ready for persistence (no unlocked secret material).
 #[derive(Debug, Clone)]
@@ -33,6 +56,8 @@ pub enum OpengpgError {
     InvalidInput(String),
     #[error("not found")]
     NotFound,
+    #[error("conflict: {0}")]
+    Conflict(String),
 }
 
 /// Parse an armored public or secret key and extract metadata.
@@ -41,6 +66,7 @@ pub fn parse_armored_key(armored: &str) -> Result<ParsedKey, OpengpgError> {
     if trimmed.is_empty() {
         return Err(OpengpgError::InvalidKey("empty armored key".into()));
     }
+    reject_multi_secret_bundle(trimmed)?;
 
     // Prefer secret: a secret key armor also contains the public half.
     if let Ok((secret, _)) = SignedSecretKey::from_string(trimmed) {
@@ -60,6 +86,110 @@ pub fn parse_armored_key(armored: &str) -> Result<ParsedKey, OpengpgError> {
         false,
         trimmed.to_string(),
     )
+}
+
+fn reject_multi_secret_bundle(armored: &str) -> Result<(), OpengpgError> {
+    let lower = armored.to_ascii_uppercase();
+    let secrets = lower.matches("BEGIN PGP PRIVATE KEY BLOCK").count()
+        + lower.matches("BEGIN PGP SECRET KEY BLOCK").count();
+    if secrets > 1 {
+        return Err(OpengpgError::InvalidInput(
+            "multi-secret key bundles are not supported; import one key at a time".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Generate a new passphrase-locked secret keypair (RSA-4096 or ed25519/cv25519).
+pub fn generate_keypair(
+    email: &str,
+    name: &str,
+    passphrase: &str,
+    algorithm: KeyAlgorithm,
+) -> Result<ParsedKey, OpengpgError> {
+    let email = email.trim().to_lowercase();
+    if !email.contains('@') {
+        return Err(OpengpgError::InvalidInput(
+            "email must be an address".into(),
+        ));
+    }
+    if passphrase.is_empty() {
+        return Err(OpengpgError::InvalidInput(
+            "passphrase is required for key generation".into(),
+        ));
+    }
+    let name = name.trim();
+    let uid = if name.is_empty() {
+        format!("<{email}>")
+    } else {
+        format!("{name} <{email}>")
+    };
+
+    let mut rng = thread_rng();
+    let mut builder = SecretKeyParamsBuilder::default();
+    match algorithm {
+        KeyAlgorithm::Rsa4096 => {
+            builder
+                .key_type(KeyType::Rsa(4096))
+                .can_certify(true)
+                .can_sign(true)
+                .subkey(
+                    SubkeyParamsBuilder::default()
+                        .key_type(KeyType::Rsa(4096))
+                        .can_encrypt(true)
+                        .passphrase(Some(passphrase.into()))
+                        .build()
+                        .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?,
+                );
+        }
+        KeyAlgorithm::Ed25519 => {
+            builder
+                .key_type(KeyType::Ed25519Legacy)
+                .can_certify(true)
+                .can_sign(true)
+                .subkey(
+                    SubkeyParamsBuilder::default()
+                        .key_type(KeyType::ECDH(ECCCurve::Curve25519))
+                        .can_encrypt(true)
+                        .passphrase(Some(passphrase.into()))
+                        .build()
+                        .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?,
+                );
+        }
+    }
+    builder
+        .primary_user_id(uid)
+        .passphrase(Some(passphrase.into()));
+
+    let params = builder
+        .build()
+        .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
+    let secret = params
+        .generate(&mut rng)
+        .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
+    let pw = Password::from(passphrase);
+    let signed = secret
+        .sign(&mut rng, &pw)
+        .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
+    let armor = signed
+        .to_armored_string(None.into())
+        .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
+    parse_armored_key(&armor)
+}
+
+/// Public certificate armor from a stored armored secret (or public) key.
+pub fn public_armored_from_stored(key_data: &str) -> Result<String, OpengpgError> {
+    let trimmed = key_data.trim();
+    if let Ok((secret, _)) = SignedSecretKey::from_string(trimmed) {
+        return secret
+            .signed_public_key()
+            .to_armored_string(None.into())
+            .map_err(|e| OpengpgError::InvalidKey(e.to_string()));
+    }
+    // Already public — return as stored.
+    let (_public, _) = SignedPublicKey::from_string(trimmed)
+        .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
+    Ok(trimmed.to_string())
 }
 
 fn parsed_from_details(
@@ -116,26 +246,17 @@ pub(crate) fn extract_email(uid: &str) -> Option<String> {
 
 #[cfg(test)]
 pub(crate) mod tests_support {
-    use pgp::composed::{KeyType, SecretKeyParamsBuilder};
-    use pgp::types::Password;
-    use rand::thread_rng;
+    use super::{KeyAlgorithm, generate_keypair};
 
     pub fn gen_test_secret_armor(passphrase: Option<&str>) -> String {
-        let mut rng = thread_rng();
-        let mut builder = SecretKeyParamsBuilder::default();
-        builder
-            .key_type(KeyType::Ed25519Legacy)
-            .can_certify(true)
-            .can_sign(true)
-            .primary_user_id("Lyra Test <test@example.com>".into());
-        if let Some(pw) = passphrase {
-            builder.passphrase(Some(pw.into()));
-        }
-        let params = builder.build().expect("params");
-        let secret = params.generate(&mut rng).expect("generate");
-        let pw = Password::from(passphrase.unwrap_or(""));
-        let signed = secret.sign(&mut rng, &pw).expect("sign");
-        signed.to_armored_string(None.into()).expect("armor")
+        generate_keypair(
+            "test@example.com",
+            "Lyra Test",
+            passphrase.unwrap_or("test-pass"),
+            KeyAlgorithm::Ed25519,
+        )
+        .expect("gen")
+        .key_data
     }
 }
 
@@ -167,6 +288,17 @@ mod tests {
     }
 
     #[test]
+    fn reject_multi_secret_bundle() {
+        let a = gen_test_secret_armor(Some("a"));
+        let b = gen_test_secret_armor(Some("b"));
+        let bundled = format!("{a}\n{b}");
+        assert!(matches!(
+            parse_armored_key(&bundled),
+            Err(OpengpgError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
     fn parse_generated_secret_key_roundtrip_metadata() {
         let armor = gen_test_secret_armor(Some("test-pass"));
         let parsed = parse_armored_key(&armor).expect("parse secret");
@@ -185,7 +317,7 @@ mod tests {
 
     #[test]
     fn parse_public_certificate_from_secret() {
-        let armor = gen_test_secret_armor(None);
+        let armor = gen_test_secret_armor(Some("pw"));
         let (secret, _) = SignedSecretKey::from_string(&armor).expect("secret");
         let public_armor = secret
             .signed_public_key()
@@ -195,5 +327,24 @@ mod tests {
         assert!(!parsed.is_secret);
         assert_eq!(parsed.primary_email, "test@example.com");
         let _ = SignedPublicKey::from_string(&public_armor);
+
+        let via_helper = public_armored_from_stored(&armor).expect("public half");
+        assert!(
+            via_helper.contains("BEGIN PGP PUBLIC KEY BLOCK"),
+            "expected public armor"
+        );
+    }
+
+    #[test]
+    fn generate_ed25519_keypair_locked() {
+        let parsed = generate_keypair(
+            "ada@example.com",
+            "Ada",
+            "s3cret-phrase",
+            KeyAlgorithm::Ed25519,
+        )
+        .expect("generate");
+        assert!(parsed.is_secret);
+        assert_eq!(parsed.primary_email, "ada@example.com");
     }
 }

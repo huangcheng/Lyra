@@ -629,10 +629,41 @@ fn totp_rl_key(user_id: &str) -> String {
     format!("rl:totp:{user_id}")
 }
 
-/// Guards password-gated endpoints (change-password, TOTP disable) so a
-/// stolen session is not an offline-speed password oracle.
+/// Guards password-gated endpoints (change-password, TOTP disable, secret key export)
+/// so a stolen session is not an offline-speed password oracle.
 fn pwd_rl_key(user_id: &str) -> String {
     format!("rl:pwd:{user_id}")
+}
+
+/// Re-authenticate with the account password (rate-limited). Used by
+/// password-gated actions outside auth routes (e.g. OpenGPG secret export).
+pub async fn verify_current_password(
+    state: &AuthState,
+    user_id: &str,
+    password: &str,
+) -> Result<(), AuthError> {
+    let kv = Arc::clone(state.sessions.kv());
+    let rl_key = pwd_rl_key(user_id);
+    ensure_not_rate_limited(kv.as_ref(), &rl_key, "Verification failed").await?;
+
+    let user = find_user_by_id(&state.db, user_id)
+        .await?
+        .ok_or_else(|| AuthError::internal("User not found"))?;
+
+    let valid = verify_password(
+        password,
+        &user
+            .password_hash
+            .ok_or_else(|| AuthError::internal("Password hash not available"))?,
+    )
+    .await
+    .map_err(|_| AuthError::internal("Verification failed"))?;
+    if !valid {
+        note_failed_attempt(kv.as_ref(), &rl_key, "Verification failed").await?;
+        return Err(AuthError::unauthorized("Current password is incorrect"));
+    }
+    clear_failed_attempts(kv.as_ref(), &rl_key).await;
+    Ok(())
 }
 
 fn totp_step_key(user_id: &str) -> String {

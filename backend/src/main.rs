@@ -135,6 +135,7 @@ fn api_router(auth_state: auth::AuthState) -> Router {
         .merge(stats::routes())
         .merge(privacy::routes())
         .merge(media::routes())
+        .merge(opengpg::routes())
         .merge(auth::routes())
         .with_state(auth_state)
 }

@@ -2,7 +2,7 @@
 
 Rust + Axum backend for the Lyra mail client.
 
-**OpenGPG:** key parse/store uses the [`pgp`](https://crates.io/crates/pgp) (rPGP) crate — pure Rust, MIT/Apache. See `docs/specs/2026-08-23-lyra-opengpg-spec.md`.
+**OpenGPG:** key parse/store uses the [`pgp`](https://crates.io/crates/pgp) (rPGP) crate — pure Rust, MIT/Apache. Keys API: `/api/v1/opengpg/keys` (list/import/generate/export/delete/primary). See `docs/specs/2026-08-23-lyra-opengpg-spec.md`.
 
 ## Quick start
 

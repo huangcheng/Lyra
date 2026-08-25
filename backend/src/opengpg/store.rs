@@ -1,21 +1,17 @@
 //! Persist OpenGPG keys (armored, passphrase-locked secrets at rest).
-//!
-//! Wired to HTTP in CHE-61; keep the seam public and tested.
-
-#![allow(dead_code)]
 
 use sqlx::Row;
 use uuid::Uuid;
 
-use super::keys::{OpengpgError, ParsedKey, parse_armored_key};
+use super::keys::{OpengpgError, ParsedKey, parse_armored_key, public_armored_from_stored};
 use crate::db_row::{id_from_row, id_param, json_text_from_row, opt_json_param, opt_ts_from_row};
 use crate::storage::DbPool;
 
 /// Stored key row (never includes unlocked secret material).
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields reserved for CHE-61 API responses
 pub struct StoredKey {
     pub id: String,
+    #[allow(dead_code)] // ownership; reserved for future multi-user checks
     pub user_id: String,
     pub fingerprint: String,
     pub primary_email: String,
@@ -27,6 +23,16 @@ pub struct StoredKey {
     pub key_data: String,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+}
+
+fn map_db_err(e: sqlx::Error) -> OpengpgError {
+    if let sqlx::Error::Database(db) = &e {
+        let msg = db.message();
+        if msg.contains("UNIQUE") || msg.contains("unique") || msg.contains("duplicate") {
+            return OpengpgError::Conflict("fingerprint already imported".into());
+        }
+    }
+    OpengpgError::Database(e)
 }
 
 /// Insert a newly parsed key for `user_id`.
@@ -70,7 +76,8 @@ pub async fn insert_key(
         is_primary,
         parsed.revoked,
         &parsed.key_data
-    )?;
+    )
+    .map_err(map_db_err)?;
 
     get_key(db, user_id, &id)
         .await?
@@ -171,6 +178,48 @@ pub async fn export_armored(
         .await?
         .ok_or(OpengpgError::NotFound)?;
     Ok(key.key_data)
+}
+
+/// Public certificate only (never secret material).
+pub async fn export_public_armored(
+    db: &DbPool,
+    user_id: &str,
+    key_id: &str,
+) -> Result<String, OpengpgError> {
+    let key = get_key(db, user_id, key_id)
+        .await?
+        .ok_or(OpengpgError::NotFound)?;
+    public_armored_from_stored(&key.key_data)
+}
+
+/// Promote `key_id` to primary (clears other primaries for the user).
+pub async fn set_primary(
+    db: &DbPool,
+    user_id: &str,
+    key_id: &str,
+) -> Result<StoredKey, OpengpgError> {
+    let _ = get_key(db, user_id, key_id)
+        .await?
+        .ok_or(OpengpgError::NotFound)?;
+    let user_bind =
+        id_param(db, user_id).map_err(|_| OpengpgError::InvalidInput("user id".into()))?;
+    let key_bind = id_param(db, key_id).map_err(|_| OpengpgError::InvalidInput("key id".into()))?;
+    db_execute!(
+        db,
+        "UPDATE opengpg_key SET is_primary = ?, updated_at = datetime('now') WHERE user_id = ?",
+        false,
+        &user_bind
+    )?;
+    db_execute!(
+        db,
+        "UPDATE opengpg_key SET is_primary = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?",
+        true,
+        &key_bind,
+        &user_bind
+    )?;
+    get_key(db, user_id, key_id)
+        .await?
+        .ok_or(OpengpgError::NotFound)
 }
 
 pub async fn delete_key(db: &DbPool, user_id: &str, key_id: &str) -> Result<(), OpengpgError> {
