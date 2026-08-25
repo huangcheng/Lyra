@@ -136,6 +136,7 @@ pub(crate) async fn upsert_folder(
     )?;
 
     if let Some(id) = existing {
+        // Preserve role_override: only refresh detected role / name / parent.
         db_execute!(
             db,
             "UPDATE folder SET name = ?, role = ?, parent_id = ?, updated_at = datetime('now') WHERE id = ?",
@@ -162,6 +163,18 @@ pub(crate) async fn upsert_folder(
     }
 
     Ok(())
+}
+
+/// Effective folder role: local override wins over SPECIAL-USE / name inference.
+#[must_use]
+pub(crate) fn effective_folder_role(
+    role: Option<&str>,
+    role_override: Option<&str>,
+) -> Option<String> {
+    role_override
+        .filter(|s| !s.is_empty())
+        .or(role)
+        .map(str::to_owned)
 }
 
 /// Upsert a JMAP mailbox. Uses mailbox `id` as `external_id`.
@@ -853,4 +866,29 @@ pub(crate) async fn update_folder_counts_in_tx(
         &folder_bind
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod effective_role_tests {
+    use super::effective_folder_role;
+
+    #[test]
+    fn override_wins_over_detected() {
+        assert_eq!(
+            effective_folder_role(Some("inbox"), Some("archive")).as_deref(),
+            Some("archive")
+        );
+        assert_eq!(
+            effective_folder_role(Some("sent"), None).as_deref(),
+            Some("sent")
+        );
+        assert_eq!(
+            effective_folder_role(None, Some("drafts")).as_deref(),
+            Some("drafts")
+        );
+        assert_eq!(
+            effective_folder_role(Some("spam"), Some("")).as_deref(),
+            Some("spam")
+        );
+    }
 }

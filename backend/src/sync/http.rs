@@ -16,7 +16,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::send::send_message;
-use super::store::update_folder_counts;
+use super::store::{effective_folder_role, update_folder_counts};
 use super::types::{EnqueuedSync, SyncError, SyncStatus};
 use crate::auth::{AuthState, AuthUser};
 use crate::db_row::{
@@ -40,6 +40,7 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/v1/messages/search", get(search_messages))
         .route("/api/v1/messages", get(list_messages_query))
         .route("/api/v1/folders", get(list_folders))
+        .route("/api/v1/folders/{folder_id}", axum::routing::patch(patch_folder))
         .route("/api/v1/folders/{folder_id}/messages", get(list_messages))
         .route(
             "/api/v1/messages/{message_id}",
@@ -220,7 +221,10 @@ pub struct FolderResponse {
     pub id: String,
     pub account_id: String,
     pub name: String,
+    /// Effective role: `COALESCE(role_override, role)`.
     pub role: Option<String>,
+    /// Explicit local override (null = use detected SPECIAL-USE / name).
+    pub role_override: Option<String>,
     pub parent_id: Option<String>,
     pub sort_order: i32,
     pub total_messages: i32,
@@ -290,27 +294,143 @@ pub(crate) async fn list_folders(
     let folders = db_fetch_all!(
         db,
         r"
-        SELECT f.id, f.account_id, f.name, f.role, f.parent_id, f.sort_order,
+        SELECT f.id, f.account_id, f.name, f.role, f.role_override, f.parent_id, f.sort_order,
                f.total_messages, f.unread_messages
         FROM folder f
         JOIN mail_account a ON f.account_id = a.id
         WHERE a.user_id = ?
         ORDER BY f.sort_order, f.name
         ",
-        |row| FolderResponse {
-            id: id_from_row(row, "id"),
-            account_id: id_from_row(row, "account_id"),
-            name: row.get("name"),
-            role: row.get("role"),
-            parent_id: opt_id_from_row(row, "parent_id"),
-            sort_order: row.get("sort_order"),
-            total_messages: row.get("total_messages"),
-            unread_messages: row.get("unread_messages"),
+        |row| {
+            let detected: Option<String> = row.get("role");
+            let override_role: Option<String> = row.get("role_override");
+            FolderResponse {
+                id: id_from_row(row, "id"),
+                account_id: id_from_row(row, "account_id"),
+                name: row.get("name"),
+                role: effective_folder_role(detected.as_deref(), override_role.as_deref()),
+                role_override: override_role,
+                parent_id: opt_id_from_row(row, "parent_id"),
+                sort_order: row.get("sort_order"),
+                total_messages: row.get("total_messages"),
+                unread_messages: row.get("unread_messages"),
+            }
         },
         &user_bind
     )?;
 
     Ok(Json(folders))
+}
+
+/// Allowed values for `role_override` / SPECIAL-USE remapping.
+const OVERRIDE_ROLES: &[&str] = &["inbox", "sent", "drafts", "trash", "spam", "archive"];
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchFolderRequest {
+    /// Set override role; omit with `clearRoleOverride: true` to clear.
+    pub role_override: Option<String>,
+    #[serde(default)]
+    pub clear_role_override: bool,
+}
+
+/// PATCH /api/v1/folders/{folder_id} — set or clear a local role override.
+pub(crate) async fn patch_folder(
+    State(state): State<AuthState>,
+    Path(folder_id): Path<String>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<PatchFolderRequest>,
+) -> Result<Json<FolderResponse>, SyncError> {
+    let db = state.db();
+    let folder_bind = id_param(db, &folder_id)?;
+    let user_bind = id_param(db, &user_id)?;
+
+    let Some(account_id) = db_id_optional!(
+        db,
+        r"
+        SELECT f.account_id FROM folder f
+        JOIN mail_account a ON f.account_id = a.id
+        WHERE f.id = ? AND a.user_id = ?
+        ",
+        &folder_bind,
+        &user_bind
+    )?
+    else {
+        return Err(SyncError::InvalidInput("folder not found".into()));
+    };
+
+    if !body.clear_role_override && body.role_override.is_none() {
+        return Err(SyncError::InvalidInput(
+            "provide roleOverride or clearRoleOverride".into(),
+        ));
+    }
+
+    if body.clear_role_override {
+        db_execute!(
+            db,
+            r"
+            UPDATE folder SET role_override = NULL, updated_at = datetime('now')
+            WHERE id = ?
+            ",
+            &folder_bind
+        )?;
+    } else if let Some(ref role) = body.role_override {
+        if !OVERRIDE_ROLES.contains(&role.as_str()) {
+            return Err(SyncError::InvalidInput(format!(
+                "roleOverride must be one of: {}",
+                OVERRIDE_ROLES.join(", ")
+            )));
+        }
+        // One folder per override role per account.
+        db_execute!(
+            db,
+            r"
+            UPDATE folder SET role_override = NULL, updated_at = datetime('now')
+            WHERE account_id = ? AND role_override = ? AND id != ?
+            ",
+            &id_param(db, &account_id)?,
+            role,
+            &folder_bind
+        )?;
+        db_execute!(
+            db,
+            r"
+            UPDATE folder SET role_override = ?, updated_at = datetime('now')
+            WHERE id = ?
+            ",
+            role,
+            &folder_bind
+        )?;
+    }
+
+    let folder = db_fetch_optional!(
+        db,
+        r"
+        SELECT f.id, f.account_id, f.name, f.role, f.role_override, f.parent_id, f.sort_order,
+               f.total_messages, f.unread_messages
+        FROM folder f
+        WHERE f.id = ?
+        ",
+        |row| {
+            let detected: Option<String> = row.get("role");
+            let override_role: Option<String> = row.get("role_override");
+            FolderResponse {
+                id: id_from_row(&row, "id"),
+                account_id: id_from_row(&row, "account_id"),
+                name: row.get("name"),
+                role: effective_folder_role(detected.as_deref(), override_role.as_deref()),
+                role_override: override_role,
+                parent_id: opt_id_from_row(&row, "parent_id"),
+                sort_order: row.get("sort_order"),
+                total_messages: row.get("total_messages"),
+                unread_messages: row.get("unread_messages"),
+            }
+        },
+        &folder_bind
+    )?
+    .ok_or_else(|| SyncError::InvalidInput("folder not found".into()))?;
+
+    Ok(Json(folder))
 }
 
 /// List messages in a folder.
@@ -404,7 +524,7 @@ pub(crate) async fn query_user_messages(
         WHERE a.user_id = ?
           AND m.is_deleted = ?
           AND (m.snoozed_until IS NULL OR m.snoozed_until <= datetime('now'))
-          AND (? IS NULL OR f.role = ?)
+          AND (? IS NULL OR COALESCE(f.role_override, f.role) = ?)
           AND (? IS NULL OR m.account_id = ?)
         ORDER BY m.date DESC
         LIMIT 500
@@ -1166,7 +1286,7 @@ pub(crate) async fn move_message_to_role(
         db,
         r"
         SELECT id, external_id, name FROM folder
-        WHERE account_id = ? AND role = ?
+        WHERE account_id = ? AND COALESCE(role_override, role) = ?
         ORDER BY sort_order ASC
         LIMIT 1
         ",
