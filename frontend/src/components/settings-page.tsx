@@ -2,15 +2,16 @@
  * Settings page with account management.
  *
  * Standalone slim-nav shell; sections: General, Accounts, Spam & Filters,
- * Privacy. Provides CRUD operations for mail accounts with i18n support.
+ * Privacy, Encryption. Provides CRUD operations for mail accounts with i18n support.
  */
 
 import { useState, useEffect } from 'react';
 import { useNavigate } from '@tanstack/react-router';
-import { Flag, Plus, Shield, SlidersHorizontal, Users, X } from 'lucide-react';
+import { Flag, KeyRound, Plus, Shield, SlidersHorizontal, Users, X } from 'lucide-react';
 import { t } from '../i18n';
 import { SlimPageNav, type SlimNavItem } from '@/components/slim-page-nav';
 import { FolderRoleMapping } from './folder-role-mapping';
+import { EncryptionSettings } from './encryption-settings';
 import { TotpEnroll } from './totp-enroll';
 import { useUIStore } from '../stores/ui';
 import { useAuthStore } from '../stores/auth';
@@ -39,7 +40,7 @@ import type { MarkReadPolicy } from '@/types';
 const REMOTE_IMAGE_MODES = ['block', 'proxy'] as const;
 type RemoteImageMode = (typeof REMOTE_IMAGE_MODES)[number];
 
-type SettingsSection = 'general' | 'accounts' | 'spam' | 'privacy';
+type SettingsSection = 'general' | 'accounts' | 'spam' | 'privacy' | 'encryption';
 
 interface MailAccount {
   id: string;
@@ -430,6 +431,13 @@ export function SettingsPage() {
       active: section === 'privacy',
       onClick: () => setSection('privacy'),
     },
+    {
+      key: 'encryption',
+      label: t(locale, 'settings.encryption.title'),
+      icon: KeyRound,
+      active: section === 'encryption',
+      onClick: () => setSection('encryption'),
+    },
   ];
 
   const sectionMeta: Record<SettingsSection, { title: string; subtitle: string }> = {
@@ -448,6 +456,10 @@ export function SettingsPage() {
     privacy: {
       title: t(locale, 'settings.privacy.title'),
       subtitle: t(locale, 'settings.privacySubtitle'),
+    },
+    encryption: {
+      title: t(locale, 'settings.encryption.title'),
+      subtitle: t(locale, 'settings.encryption.subtitle'),
     },
   };
 
@@ -983,6 +995,8 @@ export function SettingsPage() {
               </section>
             </>
           )}
+
+          {section === 'encryption' && <EncryptionSettings />}
         </div>
 
         {showAddForm && (
