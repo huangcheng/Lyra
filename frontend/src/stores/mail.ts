@@ -15,6 +15,25 @@ export interface UnifiedFolder {
   totalCount: number;
 }
 
+/**
+ * Merge an incoming (often list-/snippet-only) message over the cached one.
+ * List payloads carry no body; detail fetches do. Never let a list payload
+ * wipe a body or OpenPGP status the reader already fetched.
+ */
+function mergeMessage(existing: MailMessage | undefined, incoming: MailMessage): MailMessage {
+  if (!existing) return incoming;
+  const incomingHasBody = incoming.bodyHtml != null || incoming.bodyText != null;
+  if (incomingHasBody) return incoming;
+  const existingHasBody = existing.bodyHtml != null || existing.bodyText != null;
+  if (!existingHasBody) return incoming;
+  return {
+    ...incoming,
+    bodyHtml: existing.bodyHtml,
+    bodyText: existing.bodyText,
+    opengpg: incoming.opengpg ?? existing.opengpg,
+  };
+}
+
 interface MailState {
   accounts: MailAccount[];
   folders: Record<string, MailFolder>;
@@ -108,7 +127,10 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   upsertMessage: (message) =>
     set((state) => ({
-      messages: { ...state.messages, [message.id]: message },
+      messages: {
+        ...state.messages,
+        [message.id]: mergeMessage(state.messages[message.id], message),
+      },
     })),
 
   replaceMessagesForView: ({ accountId, folderId, folderRole }, incoming) =>
@@ -124,7 +146,7 @@ export const useMailStore = create<MailState>((set, get) => ({
             : false;
         if (inView && !ids.has(id)) delete next[id];
       }
-      for (const msg of incoming) next[msg.id] = msg;
+      for (const msg of incoming) next[msg.id] = mergeMessage(next[msg.id], msg);
       return { messages: next };
     }),
 

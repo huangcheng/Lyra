@@ -222,7 +222,11 @@ export function MailList() {
             } catch {
               relative = item.date;
             }
-            const snippet = (item.snippet || item.bodyText || '').trim();
+            const snippet = (item.snippet || item.bodyText || '').replace(/\s+/g, ' ').trim();
+            const subjectNorm = (item.subject || '').replace(/\s+/g, ' ').trim();
+            const showSnippet =
+              snippet.length > 0 &&
+              (subjectNorm.length === 0 || !snippet.startsWith(subjectNorm.slice(0, 60)));
             return (
               <button
                 key={item.id}
@@ -260,7 +264,7 @@ export function MailList() {
                     {showAccountBadge && accountLabel ? (
                       <Badge
                         variant="outline"
-                        className="max-w-[8rem] shrink-0 truncate rounded-md px-1.5 py-0 text-[10px] font-normal"
+                        className="max-w-[8rem] shrink-0 truncate rounded-md px-1.5 py-0 text-[11px] font-normal"
                       >
                         {accountLabel}
                       </Badge>
@@ -282,7 +286,7 @@ export function MailList() {
                   >
                     {item.subject || '—'}
                   </div>
-                  {snippet ? (
+                  {showSnippet ? (
                     <div className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
                       {snippet.slice(0, 300)}
                     </div>

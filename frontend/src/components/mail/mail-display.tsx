@@ -636,8 +636,15 @@ export function MailDisplay() {
                 // Sanitized via sanitizeEmailHtml (class/style-tag stripped).
                 dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(mail.bodyHtml) }}
               />
+            ) : mail.bodyText ? (
+              <div className="whitespace-pre-wrap">{mail.bodyText}</div>
             ) : (
-              <div className="whitespace-pre-wrap">{mail.bodyText ?? mail.snippet}</div>
+              <div className="flex flex-col items-start gap-3 text-muted-foreground">
+                <p>{t(locale, 'mail.bodyUnavailable')}</p>
+                <Button variant="outline" size="sm" onClick={() => setReloadNonce((n) => n + 1)}>
+                  {t(locale, 'common.retry')}
+                </Button>
+              </div>
             )}
           </div>
           <Separator className="mt-auto" />

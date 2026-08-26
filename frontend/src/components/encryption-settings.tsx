@@ -371,7 +371,10 @@ export function EncryptionSettings() {
                           <Badge variant="outline">{t(locale, 'settings.encryption.public')}</Badge>
                         )}
                         {key.revoked ? (
-                          <Badge variant="destructive">
+                          <Badge
+                            variant="outline"
+                            className="border-destructive/40 text-destructive"
+                          >
                             {t(locale, 'settings.encryption.revoked')}
                           </Badge>
                         ) : null}

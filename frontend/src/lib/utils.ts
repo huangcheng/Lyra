@@ -31,7 +31,13 @@ export function formatMailDate(dateStr: string): string {
   });
 }
 
+const CJK_CHAR = /[\u3400-\u9FFF\uF900-\uFAFF]/g;
+
 export function getInitials(nameOrEmail: string): string {
+  // CJK names read best as their first one or two characters; mixing a latin
+  // letter with a hanzi ("M帐") looks broken.
+  const cjk = nameOrEmail.match(CJK_CHAR);
+  if (cjk && cjk.length > 0) return cjk.slice(0, 2).join('');
   const parts = nameOrEmail.split(/[@.\s]+/).filter(Boolean);
   if (parts.length === 0) return '?';
   if (parts.length === 1) return parts[0].charAt(0).toUpperCase();

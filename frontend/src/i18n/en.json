@@ -37,6 +37,7 @@
     "noMessages": "No messages",
     "noMessagesHint": "New mail will appear here after the next sync.",
     "selectMessage": "Select a message to read",
+    "bodyUnavailable": "This message's content has not been downloaded yet. It will appear after the next successful sync.",
     "moveToJunk": "Move to junk",
     "moveToTrash": "Move to trash",
     "snooze": "Snooze",

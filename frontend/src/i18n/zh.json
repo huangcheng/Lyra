@@ -37,6 +37,7 @@
     "noMessages": "没有邮件",
     "noMessagesHint": "下次同步后，新邮件会显示在这里。",
     "selectMessage": "选择一封邮件以阅读",
+    "bodyUnavailable": "这封邮件的内容尚未下载，将在下次同步成功后显示。",
     "moveToJunk": "移到垃圾邮件",
     "moveToTrash": "移到废纸篓",
     "snooze": "延后",

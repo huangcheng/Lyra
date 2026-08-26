@@ -171,7 +171,7 @@ export function CalendarPage() {
                   <button
                     key={event.id}
                     type="button"
-                    className="block w-full truncate rounded px-1 py-0.5 text-left text-xs text-white"
+                    className="block w-full truncate rounded px-1 py-0.5 text-left text-xs text-[#1a1b1f]"
                     style={
                       selectedCalendar?.color
                         ? { backgroundColor: selectedCalendar.color }
