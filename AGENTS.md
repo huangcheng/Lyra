@@ -82,6 +82,7 @@ Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall
 Lyra/
   AGENTS.md
   Makefile                      ← fmt / lint / check / secretscan
+  PRODUCT.md / DESIGN.md / DESIGN.json  ← impeccable design context (brand + visual system); read before UI work
   docs/
     product/                    ← product spec + far-horizon roadmaps (multi-client, AI assist)
     specs/                      ← data model, sync, engineering standards
