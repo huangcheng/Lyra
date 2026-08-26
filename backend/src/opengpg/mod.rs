@@ -4,6 +4,8 @@
 //! Migration: `0008_opengpg_keys` (0007 already used for folder role overrides).
 
 mod http;
+#[cfg(test)]
+mod interop;
 pub mod keys;
 pub mod read;
 pub mod send;

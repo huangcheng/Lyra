@@ -4,12 +4,11 @@ use std::collections::HashMap;
 use std::io::Cursor;
 
 use pgp::composed::{
-    ArmorOptions, Deserializable, MessageBuilder, SignedPublicKey, SignedSecretKey,
-    StandaloneSignature,
+    ArmorOptions, Deserializable, DetachedSignature, MessageBuilder, SignedPublicKey,
+    SignedSecretKey,
 };
 use pgp::crypto::hash::HashAlgorithm;
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
-use pgp::packet::{SignatureConfig, SignatureType};
 use pgp::types::{CompressionAlgorithm, Password};
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -178,18 +177,18 @@ fn wrap_signed(
 ) -> Result<OpengpgMimeBody, OpengpgError> {
     let (secret, _) = SignedSecretKey::from_string(secret_armor.trim())
         .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
-    let signing_key = &*secret;
     let password = Password::from(pw);
 
     let mut rng = thread_rng();
-    let mut config = SignatureConfig::from_key(&mut rng, signing_key, SignatureType::Binary)
-        .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
-    config.hash_alg = HashAlgorithm::Sha256;
-
-    let sig = config
-        .sign(signing_key, &password, Cursor::new(payload.body.as_bytes()))
-        .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
-    let armored = StandaloneSignature::new(sig)
+    let sig = DetachedSignature::sign_binary_data(
+        &mut rng,
+        &secret.primary_key,
+        &password,
+        HashAlgorithm::Sha256,
+        Cursor::new(payload.body.as_bytes()),
+    )
+    .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
+    let armored = sig
         .to_armored_string(ArmorOptions::default())
         .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
 

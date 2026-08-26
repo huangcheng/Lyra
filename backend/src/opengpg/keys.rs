@@ -4,8 +4,8 @@
 //! blobs are stored as-is (opengpg-spec key protection).
 
 use pgp::composed::{
-    Deserializable, KeyType, SecretKeyParamsBuilder, SignedPublicKey, SignedSecretKey,
-    SubkeyParamsBuilder,
+    Deserializable, EncryptionCaps, KeyType, SecretKeyParamsBuilder, SignedPublicKey,
+    SignedSecretKey, SubkeyParamsBuilder,
 };
 use pgp::crypto::ecc_curve::ECCCurve;
 use pgp::types::{KeyDetails, Password};
@@ -140,7 +140,7 @@ pub fn generate_keypair(
                 .subkey(
                     SubkeyParamsBuilder::default()
                         .key_type(KeyType::Rsa(4096))
-                        .can_encrypt(true)
+                        .can_encrypt(EncryptionCaps::All)
                         .passphrase(Some(passphrase.into()))
                         .build()
                         .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?,
@@ -154,7 +154,7 @@ pub fn generate_keypair(
                 .subkey(
                     SubkeyParamsBuilder::default()
                         .key_type(KeyType::ECDH(ECCCurve::Curve25519))
-                        .can_encrypt(true)
+                        .can_encrypt(EncryptionCaps::All)
                         .passphrase(Some(passphrase.into()))
                         .build()
                         .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?,
@@ -168,12 +168,8 @@ pub fn generate_keypair(
     let params = builder
         .build()
         .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
-    let secret = params
+    let signed = params
         .generate(&mut rng)
-        .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
-    let pw = Password::from(passphrase);
-    let signed = secret
-        .sign(&mut rng, &pw)
         .map_err(|e| OpengpgError::InvalidKey(e.to_string()))?;
     let armor = signed
         .to_armored_string(None.into())
@@ -186,7 +182,7 @@ pub fn public_armored_from_stored(key_data: &str) -> Result<String, OpengpgError
     let trimmed = key_data.trim();
     if let Ok((secret, _)) = SignedSecretKey::from_string(trimmed) {
         return secret
-            .signed_public_key()
+            .to_public_key()
             .to_armored_string(None.into())
             .map_err(|e| OpengpgError::InvalidKey(e.to_string()));
     }
@@ -338,7 +334,7 @@ mod tests {
         let armor = gen_test_secret_armor(Some("pw"));
         let (secret, _) = SignedSecretKey::from_string(&armor).expect("secret");
         let public_armor = secret
-            .signed_public_key()
+            .to_public_key()
             .to_armored_string(None.into())
             .expect("pub armor");
         let parsed = parse_armored_key(&public_armor).expect("parse public");

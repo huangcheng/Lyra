@@ -9,7 +9,7 @@ use pgp::composed::{
     CleartextSignedMessage, Deserializable, Message, SignedPublicKey, SignedSecretKey,
     VerificationResult,
 };
-use pgp::types::{Password, PublicKeyTrait};
+use pgp::types::{Password, VerifyingKey};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
@@ -310,7 +310,7 @@ fn verify_message_signatures(
         let Ok((pk, _)) = SignedPublicKey::from_string(&key.key_data) else {
             continue;
         };
-        let refs: Vec<&dyn PublicKeyTrait> = vec![&pk as &dyn PublicKeyTrait];
+        let refs: Vec<&dyn VerifyingKey> = vec![&pk as &dyn VerifyingKey];
         let Ok(results) = msg.verify_nested(&refs) else {
             continue;
         };
@@ -571,7 +571,7 @@ mod tests {
         let csf = CleartextSignedMessage::sign(
             &mut rng,
             "signed body",
-            &*skey,
+            &skey.primary_key,
             &Password::from("test-pass"),
         )
         .unwrap();
