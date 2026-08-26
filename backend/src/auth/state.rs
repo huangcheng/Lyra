@@ -22,8 +22,10 @@ pub struct AuthState {
     pub app: Arc<App>,
     /// Per-auth-session OpenGPG unlock cache (passphrases only; never persisted).
     pub opengpg_unlock: Arc<crate::opengpg::UnlockRing>,
-    /// Microsoft mail OAuth app settings (None when not configured).
+    /// Optional Microsoft mail OAuth app settings (None when not configured).
     pub ms_oauth: Option<crate::oauth::MsOAuthConfig>,
+    /// Optional Yandex mail OAuth app settings (None when not configured).
+    pub yandex_oauth: Option<crate::oauth::YandexOAuthConfig>,
 }
 
 impl AuthState {
@@ -43,6 +45,7 @@ impl AuthState {
             app,
             opengpg_unlock: Arc::new(crate::opengpg::UnlockRing::new()),
             ms_oauth: config.ms_oauth.clone(),
+            yandex_oauth: config.yandex_oauth.clone(),
         })
     }
 

@@ -112,6 +112,10 @@ pub struct ProbeResult {
     pub found: bool,
     pub source: Option<String>,
     pub protocol: String,
+    /// Suggested auth: `"oauth2"` for Microsoft Outlook/365, otherwise omitted
+    /// (password form). Frontend uses this to switch away from app-password UX.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<String>,
     pub imap_host: Option<String>,
     pub imap_port: Option<i32>,
     pub imap_security: Option<String>,
@@ -568,25 +572,36 @@ async fn probe_server_config(
 
     let domain = crate::netsec::validate_domain(&domain).map_err(AccountError::InvalidInput)?;
 
+    // Microsoft consumer / 365 domains should use OAuth2 (XOAUTH2), not a
+    // password. ISPDB still returns outlook.office365.com + password auth,
+    // which fails for modern Outlook accounts without an app password.
+    if is_microsoft_mail_domain(&domain) {
+        return Ok(Json(microsoft_oauth_probe_result("microsoft_domain")));
+    }
+    if is_yandex_mail_domain(&domain) {
+        return Ok(Json(yandex_oauth_probe_result("yandex_domain")));
+    }
+
     // Try Mozilla ISPDB first
     if let Some(config) = probe_mozilla_ispdb(&domain).await {
-        return Ok(Json(config));
+        return Ok(Json(annotate_oauth_probe(config)));
     }
 
     // Try SRV records
     if let Some(config) = probe_srv_records(&domain) {
-        return Ok(Json(config));
+        return Ok(Json(annotate_oauth_probe(config)));
     }
 
     // Try common patterns
     if let Some(config) = probe_common_patterns(&domain).await {
-        return Ok(Json(config));
+        return Ok(Json(annotate_oauth_probe(config)));
     }
 
     Ok(Json(ProbeResult {
         found: false,
         source: None,
         protocol: "imap".into(),
+        auth_method: None,
         imap_host: None,
         imap_port: None,
         imap_security: None,
@@ -651,6 +666,7 @@ fn parse_mozilla_autoconfig(xml: &str) -> Option<ProbeResult> {
             found: true,
             source: Some("mozilla_ispdb".into()),
             protocol: "imap".into(),
+            auth_method: None,
             imap_host,
             imap_port,
             imap_security: normalize_security(imap_security.as_deref()),
@@ -733,6 +749,7 @@ async fn probe_common_patterns(domain: &str) -> Option<ProbeResult> {
             found: true,
             source: Some("common_patterns".into()),
             protocol: "imap".into(),
+            auth_method: None,
             imap_host: imap_config.as_ref().map(|c| c.0.clone()),
             imap_port: imap_config.as_ref().map(|c| c.1),
             imap_security: imap_config.as_ref().map(|c| c.2.clone()),
@@ -743,6 +760,115 @@ async fn probe_common_patterns(domain: &str) -> Option<ProbeResult> {
     } else {
         None
     }
+}
+
+/// True for Microsoft consumer / 365 mailbox domains that should use OAuth2.
+pub(crate) fn is_microsoft_mail_domain(domain: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "outlook.com",
+        "hotmail.com",
+        "live.com",
+        "live.in",
+        "msn.com",
+        "passport.com",
+        "office365.com",
+    ];
+    let d = domain.trim().to_ascii_lowercase();
+    if EXACT.iter().any(|e| *e == d) {
+        return true;
+    }
+    d.ends_with(".outlook.com")
+        || d.ends_with(".hotmail.com")
+        || d.ends_with(".live.com")
+        || d.ends_with(".msn.com")
+        || d.ends_with(".onmicrosoft.com")
+}
+
+/// True for Yandex mailbox domains that should use OAuth2.
+pub(crate) fn is_yandex_mail_domain(domain: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "yandex.ru",
+        "yandex.com",
+        "ya.ru",
+        "yandex.by",
+        "yandex.kz",
+        "yandex.ua",
+        "yandex.com.tr",
+        "yandex.az",
+        "yandex.co.il",
+        "yandex.lv",
+        "yandex.ee",
+        "yandex.lt",
+        "yandex.md",
+        "yandex.tj",
+        "yandex.tm",
+        "narod.ru",
+    ];
+    let d = domain.trim().to_ascii_lowercase();
+    if EXACT.iter().any(|e| *e == d) {
+        return true;
+    }
+    d.ends_with(".yandex.ru") || d.ends_with(".yandex.com")
+}
+
+pub(crate) fn is_yandex_mail_host(host: &str) -> bool {
+    let h = host.trim().to_ascii_lowercase();
+    h == "imap.yandex.com" || h == "smtp.yandex.com" || h.ends_with(".yandex.com")
+}
+
+pub(crate) fn is_microsoft_mail_host(host: &str) -> bool {
+    let h = host.trim().to_ascii_lowercase();
+    h == "outlook.office365.com"
+        || h == "outlook.office.com"
+        || h == "smtp-mail.outlook.com"
+        || h.ends_with(".office365.com")
+        || h.ends_with(".outlook.com")
+}
+
+fn microsoft_oauth_probe_result(source: &str) -> ProbeResult {
+    ProbeResult {
+        found: true,
+        source: Some(source.into()),
+        protocol: "imap".into(),
+        auth_method: Some("oauth2".into()),
+        imap_host: Some("outlook.office365.com".into()),
+        imap_port: Some(993),
+        imap_security: Some("tls".into()),
+        smtp_host: Some("smtp-mail.outlook.com".into()),
+        smtp_port: Some(587),
+        smtp_security: Some("starttls".into()),
+    }
+}
+
+fn yandex_oauth_probe_result(source: &str) -> ProbeResult {
+    ProbeResult {
+        found: true,
+        source: Some(source.into()),
+        protocol: "imap".into(),
+        auth_method: Some("oauth2".into()),
+        imap_host: Some("imap.yandex.com".into()),
+        imap_port: Some(993),
+        imap_security: Some("tls".into()),
+        smtp_host: Some("smtp.yandex.com".into()),
+        smtp_port: Some(465),
+        smtp_security: Some("tls".into()),
+    }
+}
+
+/// If ISPDB/SRV pointed at OAuth-capable mail hosts, prefer OAuth2 over password.
+fn annotate_oauth_probe(mut result: ProbeResult) -> ProbeResult {
+    let oauth_host = result
+        .imap_host
+        .as_deref()
+        .is_some_and(|h| is_microsoft_mail_host(h) || is_yandex_mail_host(h))
+        || result
+            .smtp_host
+            .as_deref()
+            .is_some_and(|h| is_microsoft_mail_host(h) || is_yandex_mail_host(h));
+    if oauth_host {
+        result.auth_method = Some("oauth2".into());
+    }
+    result
 }
 
 /// Try to connect to a TCP port.
@@ -785,5 +911,36 @@ mod tests {
         // Unknown → default to TLS (secure default).
         assert_eq!(normalize_security(Some("weird")), Some("tls".into()));
         assert_eq!(normalize_security(None), Some("tls".into()));
+    }
+
+    #[test]
+    fn microsoft_domains_prefer_oauth2() {
+        assert!(is_microsoft_mail_domain("live.in"));
+        assert!(is_microsoft_mail_domain("outlook.com"));
+        assert!(is_microsoft_mail_domain("Hotmail.Com"));
+        assert!(is_microsoft_mail_domain("contoso.onmicrosoft.com"));
+        assert!(!is_microsoft_mail_domain("fastmail.com"));
+        assert!(!is_microsoft_mail_domain("example.com"));
+    }
+
+    #[test]
+    fn microsoft_hosts_annotate_oauth2() {
+        assert!(is_microsoft_mail_host("outlook.office365.com"));
+        assert!(is_microsoft_mail_host("smtp-mail.outlook.com"));
+        assert!(!is_microsoft_mail_host("imap.fastmail.com"));
+
+        let annotated = annotate_oauth_probe(ProbeResult {
+            found: true,
+            source: Some("mozilla_ispdb".into()),
+            protocol: "imap".into(),
+            auth_method: None,
+            imap_host: Some("outlook.office365.com".into()),
+            imap_port: Some(993),
+            imap_security: Some("tls".into()),
+            smtp_host: Some("smtp-mail.outlook.com".into()),
+            smtp_port: Some(587),
+            smtp_security: Some("starttls".into()),
+        });
+        assert_eq!(annotated.auth_method.as_deref(), Some("oauth2"));
     }
 }

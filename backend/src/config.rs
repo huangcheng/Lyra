@@ -30,6 +30,8 @@ pub struct Config {
     pub master_key: Vec<u8>,
     /// Optional Microsoft mail OAuth (Outlook / M365 XOAUTH2).
     pub ms_oauth: Option<crate::oauth::MsOAuthConfig>,
+    /// Optional Yandex mail OAuth (IMAP/SMTP XOAUTH2).
+    pub yandex_oauth: Option<crate::oauth::YandexOAuthConfig>,
 }
 
 /// Configuration error; boot fails closed on any variant.
@@ -46,6 +48,27 @@ pub enum ConfigError {
          Generate one with `openssl rand -base64 32`."
     )]
     MasterKeyTooShort(usize),
+    #[error(
+        "LYRA_PUBLIC_URL is not set; refusing to start. \
+         Set the URL users type in the browser, e.g. http://localhost:3000 or https://mail.example.com \
+         (see .env.example)."
+    )]
+    PublicUrlMissing,
+    #[error("LYRA_PUBLIC_URL must start with http:// or https:// (got {0:?})")]
+    PublicUrlInvalid(String),
+    #[error("mail OAuth provider config is invalid: {0}")]
+    OauthConfig(String),
+}
+
+fn normalize_public_url(raw: &str) -> Result<String, ConfigError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ConfigError::PublicUrlMissing);
+    }
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Err(ConfigError::PublicUrlInvalid(trimmed.to_string()));
+    }
+    Ok(trimmed.trim_end_matches('/').to_string())
 }
 
 /// Load and validate the master key from `LYRA_MASTER_KEY`.
@@ -72,9 +95,10 @@ impl Config {
     ///   - `SYNC_MAX_CONCURRENT` — default `3`
     ///   - `SYNC_POLL_SECS` — default `300`
     ///   - `REDIS_URL` — if set, Redis kv (fail boot on connect error); else memory
+    ///   - `LYRA_PUBLIC_URL` — required; public base URL (no trailing slash)
     ///
     /// # Errors
-    /// Returns `ConfigError` if `LYRA_MASTER_KEY` is missing or shorter than 32 bytes.
+    /// Returns `ConfigError` if `LYRA_MASTER_KEY` or `LYRA_PUBLIC_URL` is invalid.
     pub fn from_env() -> Result<Self, ConfigError> {
         let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
 
@@ -105,10 +129,19 @@ impl Config {
         let redis_url = env::var("REDIS_URL").ok().filter(|s| !s.is_empty());
 
         let master_key = master_key_from_env()?;
-        let ms_oauth = crate::oauth::MsOAuthConfig::from_env();
-        if ms_oauth.is_some() {
-            tracing::info!("Microsoft mail OAuth configured");
-        }
+        let public_url = normalize_public_url(
+            &env::var("LYRA_PUBLIC_URL").map_err(|_| ConfigError::PublicUrlMissing)?,
+        )?;
+        // Fail closed: a present-but-invalid provider matrix refuses boot
+        // instead of silently disabling mail OAuth. (A missing file is fine —
+        // `load` returns an empty registry then.)
+        let oauth_registry =
+            crate::oauth::OAuthRegistry::load(&public_url, &data_dir).map_err(|e| {
+                tracing::error!(error = %e, "mail OAuth provider config invalid; refusing to start");
+                ConfigError::OauthConfig(e.to_string())
+            })?;
+        let ms_oauth = oauth_registry.microsoft().cloned();
+        let yandex_oauth = oauth_registry.yandex().cloned();
 
         Ok(Self {
             listen_addr,
@@ -120,6 +153,7 @@ impl Config {
             redis_url,
             master_key,
             ms_oauth,
+            yandex_oauth,
         })
     }
 }
@@ -146,7 +180,9 @@ mod tests {
             env::remove_var("SYNC_MAX_CONCURRENT");
             env::remove_var("SYNC_POLL_SECS");
             env::remove_var("REDIS_URL");
+            env::remove_var("LYRA_PUBLIC_URL");
             env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
+            env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
         }
 
         let cfg = Config::from_env().unwrap();
@@ -161,6 +197,7 @@ mod tests {
 
         unsafe {
             env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
         }
     }
 
@@ -170,6 +207,7 @@ mod tests {
         // SAFETY: see `defaults_are_sensible`.
         unsafe {
             env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
         }
 
         let err = Config::from_env().unwrap_err();
@@ -183,6 +221,7 @@ mod tests {
         // SAFETY: see `defaults_are_sensible`.
         unsafe {
             env::set_var("LYRA_MASTER_KEY", "too-short");
+            env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
         }
 
         let err = Config::from_env().unwrap_err();
@@ -191,6 +230,40 @@ mod tests {
 
         unsafe {
             env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
+        }
+    }
+
+    #[test]
+    fn missing_public_url_fails_closed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
+            env::remove_var("LYRA_PUBLIC_URL");
+        }
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::PublicUrlMissing));
+
+        unsafe {
+            env::remove_var("LYRA_MASTER_KEY");
+        }
+    }
+
+    #[test]
+    fn invalid_public_url_scheme_fails_closed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
+            env::set_var("LYRA_PUBLIC_URL", "ftp://mail.example.com");
+        }
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::PublicUrlInvalid(_)));
+
+        unsafe {
+            env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
         }
     }
 }

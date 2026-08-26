@@ -61,32 +61,43 @@ export function dataFromSseFrame(frame: string): string | null {
 function sseObservable(): Observable<SyncEvent> {
   return new Observable<SyncEvent>((subscriber) => {
     const ac = new AbortController();
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, ms);
+      });
 
     const run = async () => {
-      const res = await apiStream('/sync/events', ac.signal);
-      const body = res.body;
-      if (!body) {
-        subscriber.error(new Error('SSE response had no body'));
-        return;
-      }
-      const reader = body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      let backoffMs = 1_000;
       while (!ac.signal.aborted) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
-        const split = framesFromBuffer(buffer);
-        buffer = split.rest;
-        for (const frame of split.frames) {
-          const data = dataFromSseFrame(frame);
-          if (!data) continue;
-          const event = parseSyncEvent(data);
-          if (event) subscriber.next(event);
+        const res = await apiStream('/sync/events', ac.signal);
+        const body = res.body;
+        if (!body) {
+          throw new Error('SSE response had no body');
         }
-      }
-      if (!ac.signal.aborted) {
-        subscriber.complete();
+        const reader = body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let sawTraffic = false;
+        while (!ac.signal.aborted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          sawTraffic = true;
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+          const split = framesFromBuffer(buffer);
+          buffer = split.rest;
+          for (const frame of split.frames) {
+            const data = dataFromSseFrame(frame);
+            if (!data) continue;
+            const event = parseSyncEvent(data);
+            if (event) subscriber.next(event);
+          }
+        }
+        if (ac.signal.aborted) return;
+        // A clean server-side close (backend restart, proxy idle timeout)
+        // must reconnect like EventSource does — completing here would kill
+        // live updates until a full page reload.
+        await sleep(backoffMs);
+        backoffMs = sawTraffic ? 1_000 : Math.min(backoffMs * 2, 60_000);
       }
     };
 

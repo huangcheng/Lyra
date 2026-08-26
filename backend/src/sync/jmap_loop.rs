@@ -61,6 +61,9 @@ pub(crate) async fn run_jmap_sync(
     email: &str,
     password: &str,
 ) -> Result<SyncResponse, SyncError> {
+    /// Email/get page size (kept small so one response stays bounded).
+    const EMAIL_GET_PAGE: usize = 100;
+
     // 1. Discover JMAP session
     let client = JmapClient::discover(jmap_base_url, email, password).await?;
 
@@ -99,14 +102,12 @@ pub(crate) async fn run_jmap_sync(
                         "JMAP queryState expired; clearing cursor and running a full query"
                     );
                     clear_jmap_cursor(db, account_id, &folder_id).await?;
-                    let full = client.query_emails(&mb.id, Some(100)).await?;
-                    (full.ids, full.query_state)
+                    query_all_email_ids(&client, &mb.id).await?
                 }
                 Err(e) => return Err(e.into()),
             }
         } else {
-            let full = client.query_emails(&mb.id, Some(100)).await?;
-            (full.ids, full.query_state)
+            query_all_email_ids(&client, &mb.id).await?
         };
 
         if ids.is_empty() {
@@ -115,12 +116,22 @@ pub(crate) async fn run_jmap_sync(
             continue;
         }
 
-        let emails = client.get_emails(&ids).await?;
-        let (n, u) =
-            persist_jmap_folder_batch(db, account_id, &folder_id, &emails, query_state.as_deref())
-                .await?;
-        total_new += n;
-        total_updated += u;
+        // Fetch + persist one page at a time: Email/get responses for a huge
+        // mailbox in one call would balloon memory, and a crash mid-way just
+        // redoes the (idempotent) upserts on the next run.
+        for chunk in ids.chunks(EMAIL_GET_PAGE) {
+            let emails = client.get_emails(chunk).await?;
+            let (n, u) = persist_jmap_folder_batch(
+                db,
+                account_id,
+                &folder_id,
+                &emails,
+                query_state.as_deref(),
+            )
+            .await?;
+            total_new += n;
+            total_updated += u;
+        }
     }
 
     Ok(SyncResponse {
@@ -131,4 +142,32 @@ pub(crate) async fn run_jmap_sync(
         messages_updated: total_updated,
         messages_deleted: 0,
     })
+}
+
+/// Page through `Email/query` until the mailbox is exhausted.
+///
+/// The first page's `queryState` must not be committed before every page is
+/// read: once it lands, `Email/queryChanges` only ever returns deltas and
+/// anything past page one would be unreachable forever (sync spec §4.1).
+async fn query_all_email_ids(
+    client: &JmapClient,
+    mailbox_id: &str,
+) -> Result<(Vec<String>, Option<String>), SyncError> {
+    const QUERY_PAGE: u32 = 100;
+    let mut ids: Vec<String> = Vec::new();
+    let mut query_state: Option<String> = None;
+    let mut position: u32 = 0;
+    loop {
+        let page = client
+            .query_emails(mailbox_id, Some(position), Some(QUERY_PAGE))
+            .await?;
+        query_state = page.query_state.or(query_state);
+        let fetched = u32::try_from(page.ids.len()).unwrap_or(QUERY_PAGE);
+        ids.extend(page.ids);
+        if fetched < QUERY_PAGE {
+            break;
+        }
+        position += QUERY_PAGE;
+    }
+    Ok((ids, query_state))
 }

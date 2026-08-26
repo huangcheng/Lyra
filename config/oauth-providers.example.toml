@@ -1,0 +1,11 @@
+# Copy to config/oauth-providers.toml (gitignored) and fill in client credentials.
+# OAuth redirect URI is derived from LYRA_PUBLIC_URL — do not set per provider.
+
+[providers.yandex]
+client_id = "your-yandex-client-id"
+client_secret = "your-yandex-client-secret"
+
+# [providers.microsoft]
+# client_id = "your-entra-client-id"
+# client_secret = "your-entra-client-secret"
+# tenant = "common"

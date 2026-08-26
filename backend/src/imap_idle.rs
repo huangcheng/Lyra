@@ -181,14 +181,15 @@ async fn watch_once(
     }
 
     let dek = crate::auth::AuthState::get_user_dek(db, &account.user_id).await?;
-    let ms = crate::oauth::MsOAuthConfig::from_env();
+    let oauth = crate::oauth::OAuthRegistry::refresh_configs();
     let secret = crate::oauth::resolve_mail_access_secret(
         db,
         &account.id,
         &account.auth_type,
         &account.credential,
         &dek,
-        ms.as_ref(),
+        account.imap_host.as_deref(),
+        &oauth,
     )
     .await
     .map_err(|e| crate::imap::ImapError::Protocol(e.to_string()))?;

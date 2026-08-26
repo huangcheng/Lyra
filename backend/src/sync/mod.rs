@@ -117,6 +117,7 @@ pub async fn run_account_sync(
 
 #[cfg(test)]
 mod tests {
+    use super::store::imap_message_external_id;
     use super::*;
     use crate::auth::{AuthState, AuthUser};
     use crate::imap::ImapMessage;
@@ -320,6 +321,7 @@ mod tests {
             redis_url: None,
             master_key: crate::auth::TEST_MASTER_KEY.to_vec(),
             ms_oauth: None,
+            yandex_oauth: None,
         };
         AuthState::new(
             DbPool::Sqlite(pool),
@@ -654,9 +656,10 @@ mod tests {
 
         // Verify only one row
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM message WHERE account_id = ? AND external_id = '42'",
+            "SELECT COUNT(*) FROM message WHERE account_id = ? AND external_id = ?",
         )
         .bind(&account_id)
+        .bind(imap_message_external_id(&folder_id, 42))
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -664,9 +667,10 @@ mod tests {
 
         // Verify flags were updated
         let flags: String = sqlx::query_scalar(
-            "SELECT flags FROM message WHERE account_id = ? AND external_id = '42'",
+            "SELECT flags FROM message WHERE account_id = ? AND external_id = ?",
         )
         .bind(&account_id)
+        .bind(imap_message_external_id(&folder_id, 42))
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -721,9 +725,10 @@ mod tests {
 
         let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
             "SELECT subject, from_address, snippet FROM message \
-             WHERE account_id = ? AND external_id = '7'",
+             WHERE account_id = ? AND external_id = ?",
         )
         .bind(&account_id)
+        .bind(imap_message_external_id(&folder_id, 7))
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1112,10 +1117,15 @@ mod tests {
         }
     }
 
-    async fn message_id_for_uid(pool: &sqlx::SqlitePool, account_id: &str, uid: u32) -> String {
+    async fn message_id_for_uid(
+        pool: &sqlx::SqlitePool,
+        account_id: &str,
+        folder_id: &str,
+        uid: u32,
+    ) -> String {
         sqlx::query_scalar("SELECT id FROM message WHERE account_id = ? AND external_id = ?")
             .bind(account_id)
-            .bind(uid.to_string())
+            .bind(imap_message_external_id(folder_id, uid))
             .fetch_one(pool)
             .await
             .unwrap()
@@ -1139,7 +1149,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let message_id = message_id_for_uid(&pool, &account_id, 7).await;
+        let message_id = message_id_for_uid(&pool, &account_id, &folder_id, 7).await;
         let future = sqlite_utc_datetime(chrono::Utc::now() + chrono::Duration::hours(1));
         sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
             .bind(&future)
@@ -1175,7 +1185,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let message_id = message_id_for_uid(&pool, &account_id, 10).await;
+        let message_id = message_id_for_uid(&pool, &account_id, &folder_id, 10).await;
 
         // Client sends RFC3339 with `T`; store the SQLite-safe form the handler writes.
         let past_rfc = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
@@ -1229,7 +1239,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let message_id = message_id_for_uid(&pool, &account_id, 8).await;
+        let message_id = message_id_for_uid(&pool, &account_id, &folder_id, 8).await;
         sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
             .bind(sqlite_utc_datetime(
                 chrono::Utc::now() + chrono::Duration::hours(1),
@@ -1291,7 +1301,7 @@ mod tests {
         upsert_message(&as_db(&pool), &account_id, &folder_id, &msg)
             .await
             .unwrap();
-        let message_id = message_id_for_uid(&pool, &account_id, 9).await;
+        let message_id = message_id_for_uid(&pool, &account_id, &folder_id, 9).await;
         let until = sqlite_utc_datetime(chrono::Utc::now() + chrono::Duration::days(30));
         sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
             .bind(&until)

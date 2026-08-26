@@ -161,6 +161,7 @@ fn test_config() -> crate::config::Config {
         redis_url: None,
         master_key: TEST_MASTER_KEY.to_vec(),
         ms_oauth: None,
+        yandex_oauth: None,
     }
 }
 

@@ -262,19 +262,22 @@ async fn run_sqlite_migrations(
 
         let sql = std::fs::read_to_string(&path)?;
 
+        // Apply each file inside one transaction: a statement-level failure
+        // would otherwise half-apply DDL (autocommit) and wedge every later
+        // boot on the already-created objects.
+        let cleaned = strip_sql_comments(&sql);
+        let mut tx = pool.begin().await?;
         // Strip inline comments and execute statements individually.
         // SQLite doesn't support multi-statement execution via prepare,
         // so we need to split carefully (respecting BEGIN…END in triggers).
-        let cleaned = strip_sql_comments(&sql);
         for stmt in split_sql_statements(&cleaned) {
-            sqlx::query(&stmt).execute(pool).await?;
+            sqlx::query(&stmt).execute(&mut *tx).await?;
         }
-
-        // Record migration
         sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
             .bind(version)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
 
         tracing::info!("Migration {version} applied successfully");
     }

@@ -1,15 +1,56 @@
 //! Encrypted OAuth token blob + access-secret resolution for sync/send.
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
 
-use super::microsoft::{MsOAuthConfig, MsOAuthError, refresh_access_token};
+use super::microsoft::{MsOAuthConfig, MsOAuthError, refresh_access_token as refresh_microsoft};
+use super::yandex::{YandexOAuthConfig, refresh_access_token as refresh_yandex};
+use crate::accounts::{is_microsoft_mail_host, is_yandex_mail_host};
 use crate::crypto::{self, EncryptedCredential};
 use crate::db_row::id_param;
 use crate::storage::DbPool;
 
 /// Refresh when the access token expires within this window.
 const REFRESH_SKEW_SECS: i64 = 120;
+
+/// Per-account refresh single-flight locks.
+///
+/// The sync loop, IDLE watcher, SMTP send, and HTTP mutations can all resolve
+/// the same account concurrently. Providers rotate refresh tokens on use, so
+/// two racing refreshes can invalidate each other and lock the mailbox out
+/// until re-consent. Serializing per account (plus the post-lock re-read in
+/// [`resolve_mail_access_secret`]) makes the loser reuse the winner's tokens.
+static REFRESH_LOCKS: LazyLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn refresh_lock_for(account_id: &str) -> Arc<AsyncMutex<()>> {
+    REFRESH_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(account_id.to_string())
+        .or_default()
+        .clone()
+}
+
+/// Runtime OAuth client configs for token refresh in sync workers.
+#[derive(Debug, Clone, Default)]
+pub struct OAuthRefreshConfigs {
+    pub microsoft: Option<MsOAuthConfig>,
+    pub yandex: Option<YandexOAuthConfig>,
+}
+
+impl OAuthRefreshConfigs {
+    pub fn from_env() -> Self {
+        Self {
+            microsoft: MsOAuthConfig::from_client_env(),
+            yandex: YandexOAuthConfig::from_client_env(),
+        }
+    }
+}
 
 /// Plaintext JSON stored inside the DEK-encrypted `mail_account.credential` blob
 /// when `auth_type = oauth2`.
@@ -57,13 +98,11 @@ pub fn encrypt_oauth_tokens(dek: &[u8], tokens: &OAuthTokenSet) -> Result<String
 }
 
 fn decrypt_oauth_tokens(credential_json: &str, dek: &[u8]) -> Result<OAuthTokenSet, MsOAuthError> {
-    let encrypted: EncryptedCredential = serde_json::from_str(credential_json)
-        .map_err(|e| MsOAuthError::Internal(format!("invalid credential blob: {e}")))?;
-    let bytes =
-        crypto::decrypt(dek, &encrypted).map_err(|e| MsOAuthError::Internal(e.to_string()))?;
-    let json = String::from_utf8(bytes)
-        .map_err(|e| MsOAuthError::Internal(format!("token utf-8: {e}")))?;
-    serde_json::from_str(&json).map_err(|e| MsOAuthError::Internal(format!("token json: {e}")))
+    let encrypted: EncryptedCredential =
+        serde_json::from_str(credential_json).map_err(|_| MsOAuthError::CredentialDecrypt)?;
+    let bytes = crypto::decrypt(dek, &encrypted).map_err(|_| MsOAuthError::CredentialDecrypt)?;
+    let json = String::from_utf8(bytes).map_err(|_| MsOAuthError::CredentialDecrypt)?;
+    serde_json::from_str(&json).map_err(|_| MsOAuthError::CredentialDecrypt)
 }
 
 fn decrypt_password(credential_json: &str, dek: &[u8]) -> Result<Zeroizing<String>, MsOAuthError> {
@@ -94,23 +133,66 @@ pub async fn update_account_credential(
     Ok(())
 }
 
+/// Re-read the stored credential blob (single-flight re-check).
+async fn load_credential_blob(
+    db: &DbPool,
+    account_id: &str,
+) -> Result<Option<String>, MsOAuthError> {
+    let id = id_param(db, account_id)
+        .map_err(|_| MsOAuthError::Internal("invalid account id".into()))?;
+    let row = db_scalar_optional!(
+        db,
+        String,
+        "SELECT credential FROM mail_account WHERE id = ?",
+        &id
+    )
+    .map_err(|e| MsOAuthError::Internal(format!("load credential: {e}")))?;
+    Ok(row)
+}
+
 /// Decrypt account credential; refresh OAuth access token when near expiry.
+///
+/// Refreshes are single-flight per account: after acquiring the lock the
+/// credential is re-read from the DB, so a task that waited behind a
+/// concurrent refresh reuses the freshly persisted tokens instead of
+/// redeeming (and burning) the previous refresh token again.
 pub async fn resolve_mail_access_secret(
     db: &DbPool,
     account_id: &str,
     auth_type: &str,
     credential_json: &str,
     dek: &[u8],
-    ms: Option<&MsOAuthConfig>,
+    imap_host: Option<&str>,
+    configs: &OAuthRefreshConfigs,
 ) -> Result<MailAccessSecret, MsOAuthError> {
     if auth_type == "oauth2" {
         let mut tokens = decrypt_oauth_tokens(credential_json, dek)?;
         let now = chrono::Utc::now().timestamp();
         if tokens.expires_at - now <= REFRESH_SKEW_SECS {
-            let Some(cfg) = ms else {
-                return Err(MsOAuthError::NotConfigured);
+            let refresh_lock = refresh_lock_for(account_id);
+            let _guard = refresh_lock.lock().await;
+            // Double-check: another caller may have refreshed while we waited.
+            let reloaded = match load_credential_blob(db, account_id).await {
+                Ok(Some(blob)) => decrypt_oauth_tokens(&blob, dek).ok(),
+                _ => None,
             };
-            let refreshed = refresh_access_token(cfg, &tokens.refresh_token).await?;
+            if let Some(fresh) = reloaded {
+                if fresh.expires_at - chrono::Utc::now().timestamp() > REFRESH_SKEW_SECS {
+                    return Ok(MailAccessSecret::AccessToken(Zeroizing::new(
+                        fresh.access_token,
+                    )));
+                }
+                // Newest refresh_token wins even when still inside the skew.
+                tokens = fresh;
+            }
+            let refreshed = match refresh_provider(imap_host, configs)? {
+                OAuthRefreshProvider::Microsoft(cfg) => {
+                    refresh_microsoft(cfg, &tokens.refresh_token).await?
+                }
+                OAuthRefreshProvider::Yandex(cfg) => {
+                    refresh_yandex(cfg, &tokens.refresh_token).await?
+                }
+            };
             tokens.access_token = refreshed.access_token;
             if let Some(rt) = refreshed.refresh_token {
                 tokens.refresh_token = rt;
@@ -131,6 +213,34 @@ pub async fn resolve_mail_access_secret(
         credential_json,
         dek,
     )?))
+}
+
+enum OAuthRefreshProvider<'a> {
+    Microsoft(&'a MsOAuthConfig),
+    Yandex(&'a YandexOAuthConfig),
+}
+
+fn refresh_provider<'a>(
+    imap_host: Option<&str>,
+    configs: &'a OAuthRefreshConfigs,
+) -> Result<OAuthRefreshProvider<'a>, MsOAuthError> {
+    if imap_host.is_some_and(is_yandex_mail_host) {
+        return configs
+            .yandex
+            .as_ref()
+            .map(OAuthRefreshProvider::Yandex)
+            .ok_or(MsOAuthError::NotConfigured);
+    }
+    if imap_host.is_some_and(is_microsoft_mail_host) {
+        return configs
+            .microsoft
+            .as_ref()
+            .map(OAuthRefreshProvider::Microsoft)
+            .ok_or(MsOAuthError::NotConfigured);
+    }
+    // Unknown or missing host: fail closed instead of guessing a provider —
+    // redeeming a refresh token against the wrong client invalidates it.
+    Err(MsOAuthError::NotConfigured)
 }
 
 #[cfg(test)]

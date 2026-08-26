@@ -31,6 +31,7 @@ All config via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LYRA_MASTER_KEY` | *(required)* | Master key (32+ bytes) for the per-user DEK hierarchy that encrypts stored account credentials and TOTP secrets. Boot fails without it. Generate: `openssl rand -base64 32` |
+| `LYRA_PUBLIC_URL` | *(required)* | Public base URL users open in the browser (no trailing slash), e.g. `http://localhost:3000` or `https://mail.example.com`. OAuth redirect URIs are derived from this. |
 | `LISTEN_ADDR` | `0.0.0.0:3000` | Address and port to listen on |
 | `DATABASE_URL` | `sqlite:./data/lyra.db` | Database connection string |
 | `DATA_DIR` | `./data` | Directory for message blobs and attachments |
@@ -40,10 +41,15 @@ All config via environment variables:
 | `RUST_LOG` | `info` | Log level filter (tracing-subscriber) |
 | `LYRA_MS_OAUTH_CLIENT_ID` | unset | Microsoft Entra app client ID (enables Outlook OAuth) |
 | `LYRA_MS_OAUTH_CLIENT_SECRET` | unset | App secret (confidential clients; omit for public+PKCE-only) |
-| `LYRA_MS_OAUTH_REDIRECT_URI` | unset | Must match Entra redirect, e.g. `http://localhost:3000/api/v1/oauth/microsoft/callback` |
 | `LYRA_MS_OAUTH_TENANT` | `common` | Entra tenant (`common`, `organizations`, or tenant GUID) |
 
-When Microsoft OAuth is configured, Settings → Accounts shows **Sign in with Microsoft**. Tokens are encrypted under the user DEK (`auth_type = oauth2`); IMAP/SMTP use SASL XOAUTH2 with automatic refresh.
+When Microsoft OAuth is configured, Settings → Accounts shows **Sign in with Microsoft**. Register this redirect URI in Entra (and in every future mail OAuth app — same URL for all providers):
+
+```text
+{LYRA_PUBLIC_URL}/api/v1/oauth/callback
+```
+
+Start flow: `GET /api/v1/oauth/start?email=user@live.in` (provider inferred from the mailbox domain; `email` is required).
 
 ### Database URLs
 

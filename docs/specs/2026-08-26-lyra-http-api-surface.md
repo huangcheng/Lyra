@@ -58,9 +58,17 @@ User-facing copy for i18n still lives in clients; the API returns English diagno
 
 ---
 
-## OAuth callback (Microsoft)
+## OAuth callback (mail accounts)
 
-`GET /api/v1/oauth/microsoft/callback` normally **302 redirects** to `/settings?section=accounts&oauth=…&detail=…` for browser flows.
+`GET /api/v1/oauth/callback` is the **single shared redirect URI** for all mail OAuth providers. Register:
+
+```text
+{LYRA_PUBLIC_URL}/api/v1/oauth/callback
+```
+
+with each vendor app (Microsoft Entra, Yandex OAuth, etc.).
+
+The handler normally **302 redirects** to `/settings?section=accounts&oauth=…&detail=…` for browser flows.
 
 When the client sends `Accept: application/json`, the same outcomes return JSON instead of a redirect:
 

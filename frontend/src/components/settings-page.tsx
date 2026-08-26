@@ -25,7 +25,14 @@ import {
   updatePrivacySettings,
   type PrivacySettings,
 } from '@/lib/privacy-api';
-import { fetchMsOAuthStatus, startMsOAuth } from '@/lib/oauth-api';
+import { fetchOAuthProviders, startOAuth } from '@/lib/oauth-api';
+import { isMicrosoftMailHost } from '@/lib/microsoft-mail';
+import { isYandexMailHost } from '@/lib/yandex-mail';
+import {
+  resolveMailOAuthProvider,
+  suggestsMailOAuth,
+  type MailOAuthProvider,
+} from '@/lib/mail-oauth-provider';
 import { syncEvents$ } from '@/rxjs/sync-events';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -66,6 +73,8 @@ interface ProbeResult {
   found: boolean;
   source?: string;
   protocol: string;
+  /** `"oauth2"` when Microsoft Outlook/365 — use Sign in with Microsoft */
+  authMethod?: string;
   imapHost?: string;
   imapPort?: number;
   imapSecurity?: string;
@@ -129,10 +138,25 @@ export function SettingsPage() {
   const [privacySaving, setPrivacySaving] = useState(false);
   const [privacyError, setPrivacyError] = useState<string | null>(null);
   const [removingAllowSender, setRemovingAllowSender] = useState<string | null>(null);
-  const [msOAuthConfigured, setMsOAuthConfigured] = useState(false);
-  const [msOAuthStarting, setMsOAuthStarting] = useState(false);
+  const [oauthConfigured, setOauthConfigured] = useState<Record<MailOAuthProvider, boolean>>({
+    microsoft: false,
+    yandex: false,
+  });
+  const [oauthStarting, setOauthStarting] = useState(false);
   const [oauthMessage, setOauthMessage] = useState<string | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
+
+  const suggestedOAuthProvider =
+    probeResult?.authMethod === 'oauth2'
+      ? resolveMailOAuthProvider(formData.emailAddress)
+      : resolveMailOAuthProvider(formData.emailAddress);
+  const suggestedAuthMethod =
+    probeResult?.authMethod ?? (suggestedOAuthProvider ? 'oauth2' : undefined);
+  const preferMailOAuth =
+    suggestedAuthMethod === 'oauth2' &&
+    !editingAccount &&
+    suggestedOAuthProvider !== null &&
+    oauthConfigured[suggestedOAuthProvider];
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -175,9 +199,19 @@ export function SettingsPage() {
     void fetchPrivacySettings()
       .then(setPrivacySettings)
       .catch(() => {});
-    void fetchMsOAuthStatus()
-      .then((s) => setMsOAuthConfigured(s.configured))
-      .catch(() => setMsOAuthConfigured(false));
+    void fetchOAuthProviders()
+      .then(({ providers }) => {
+        setOauthConfigured({
+          microsoft: providers.some((p) => p.id === 'microsoft' && p.configured),
+          yandex: providers.some((p) => p.id === 'yandex' && p.configured),
+        });
+      })
+      .catch(() =>
+        setOauthConfigured({
+          microsoft: false,
+          yandex: false,
+        }),
+      );
     void api<AuthMeResponse>('/auth/me')
       .then((me) => {
         setTotpEnabled(Boolean(me.totp_enabled));
@@ -256,20 +290,37 @@ export function SettingsPage() {
     }
   }
 
-  async function handleMicrosoftSignIn() {
+  async function handleMailOAuthSignIn() {
     setOauthError(null);
     setOauthMessage(null);
-    if (!msOAuthConfigured) {
-      setOauthError(t(locale, 'settings.accounts.microsoftUnavailable'));
+    const provider = suggestedOAuthProvider;
+    if (!provider) {
+      setOauthError(t(locale, 'settings.accounts.oauthEmailRequired'));
+      return;
+    }
+    if (!oauthConfigured[provider]) {
+      setOauthError(
+        t(
+          locale,
+          provider === 'yandex'
+            ? 'settings.accounts.yandexUnavailable'
+            : 'settings.accounts.microsoftUnavailable',
+        ),
+      );
+      return;
+    }
+    const email = formData.emailAddress.trim();
+    if (!email.includes('@')) {
+      setOauthError(t(locale, 'settings.accounts.oauthEmailRequired'));
       return;
     }
     try {
-      setMsOAuthStarting(true);
-      const { authorizeUrl } = await startMsOAuth();
+      setOauthStarting(true);
+      const { authorizeUrl } = await startOAuth(email);
       window.location.assign(authorizeUrl);
     } catch (err: unknown) {
       setOauthError(err instanceof Error ? err.message : String(err));
-      setMsOAuthStarting(false);
+      setOauthStarting(false);
     }
   }
 
@@ -291,17 +342,27 @@ export function SettingsPage() {
         method: 'POST',
         body: JSON.stringify({ emailAddress: formData.emailAddress }),
       });
-      setProbeResult(data);
-      if (data.found) {
+      const authMethod =
+        data.authMethod ??
+        (suggestsMailOAuth(formData.emailAddress) ||
+        isMicrosoftMailHost(data.imapHost ?? '') ||
+        isMicrosoftMailHost(data.smtpHost ?? '') ||
+        isYandexMailHost(data.imapHost ?? '') ||
+        isYandexMailHost(data.smtpHost ?? '')
+          ? 'oauth2'
+          : undefined);
+      const enriched = authMethod ? { ...data, authMethod } : data;
+      setProbeResult(enriched);
+      if (enriched.found) {
         setFormData((prev) => ({
           ...prev,
-          protocol: data.protocol,
-          imapHost: data.imapHost || prev.imapHost,
-          imapPort: data.imapPort || prev.imapPort,
-          imapSecurity: data.imapSecurity || prev.imapSecurity,
-          smtpHost: data.smtpHost || prev.smtpHost,
-          smtpPort: data.smtpPort || prev.smtpPort,
-          smtpSecurity: data.smtpSecurity || prev.smtpSecurity,
+          protocol: enriched.protocol,
+          imapHost: enriched.imapHost || prev.imapHost,
+          imapPort: enriched.imapPort || prev.imapPort,
+          imapSecurity: enriched.imapSecurity || prev.imapSecurity,
+          smtpHost: enriched.smtpHost || prev.smtpHost,
+          smtpPort: enriched.smtpPort || prev.smtpPort,
+          smtpSecurity: enriched.smtpSecurity || prev.smtpSecurity,
         }));
       }
     } catch (err: any) {
@@ -310,6 +371,17 @@ export function SettingsPage() {
       setProbing(false);
     }
   }
+
+  useEffect(() => {
+    if (!showAddForm || editingAccount) return;
+    const email = formData.emailAddress.trim();
+    if (!email.includes('@') || !suggestsMailOAuth(email)) return;
+    const timer = window.setTimeout(() => {
+      void handleProbe();
+    }, 400);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- debounced probe on OAuth-capable domains
+  }, [formData.emailAddress, showAddForm, editingAccount]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -860,22 +932,6 @@ export function SettingsPage() {
                       <Plus size={18} className="text-ter-foreground" />
                       {t(locale, 'settings.accounts.add')}
                     </button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="w-full"
-                      disabled={msOAuthStarting}
-                      onClick={() => void handleMicrosoftSignIn()}
-                    >
-                      {msOAuthStarting
-                        ? t(locale, 'settings.accounts.microsoftStarting')
-                        : t(locale, 'settings.accounts.microsoft')}
-                    </Button>
-                    <p className="text-center text-xs text-ter-foreground">
-                      {msOAuthConfigured
-                        ? t(locale, 'settings.accounts.microsoftHint')
-                        : t(locale, 'settings.accounts.microsoftUnavailable')}
-                    </p>
                   </div>
                   {accounts.length === 0 && (
                     <p className="text-center text-xs text-ter-foreground">
@@ -1185,129 +1241,184 @@ export function SettingsPage() {
                   </button>
                 </div>
 
-                {probeResult?.found && (
-                  <div className="probe-result">
+                {(probeResult?.found || suggestedAuthMethod === 'oauth2') && (
+                  <div className="probe-result space-y-2">
                     <p>
-                      {t(locale, 'settings.accounts.probeFound', {
-                        source: probeResult.source || 'unknown',
-                      })}
+                      {suggestedAuthMethod === 'oauth2'
+                        ? suggestedOAuthProvider === 'yandex'
+                          ? t(locale, 'settings.accounts.probeYandexOAuth')
+                          : t(locale, 'settings.accounts.probeMicrosoftOAuth')
+                        : t(locale, 'settings.accounts.probeFound', {
+                            source: probeResult?.source || 'unknown',
+                          })}
                     </p>
+                    {suggestedAuthMethod === 'oauth2' &&
+                      !editingAccount &&
+                      suggestedOAuthProvider && (
+                        <div className="space-y-2 rounded-md border border-border bg-muted/40 p-3">
+                          <p className="text-xs text-muted-foreground">
+                            {oauthConfigured[suggestedOAuthProvider]
+                              ? t(
+                                  locale,
+                                  suggestedOAuthProvider === 'yandex'
+                                    ? 'settings.accounts.yandexHint'
+                                    : 'settings.accounts.microsoftHint',
+                                )
+                              : t(
+                                  locale,
+                                  suggestedOAuthProvider === 'yandex'
+                                    ? 'settings.accounts.yandexUnavailable'
+                                    : 'settings.accounts.microsoftUnavailable',
+                                )}
+                          </p>
+                          {oauthConfigured[suggestedOAuthProvider] && (
+                            <Button
+                              type="button"
+                              className="w-full"
+                              disabled={oauthStarting}
+                              onClick={() => void handleMailOAuthSignIn()}
+                            >
+                              {oauthStarting
+                                ? t(
+                                    locale,
+                                    suggestedOAuthProvider === 'yandex'
+                                      ? 'settings.accounts.yandexStarting'
+                                      : 'settings.accounts.microsoftStarting',
+                                  )
+                                : t(
+                                    locale,
+                                    suggestedOAuthProvider === 'yandex'
+                                      ? 'settings.accounts.yandex'
+                                      : 'settings.accounts.microsoft',
+                                  )}
+                            </Button>
+                          )}
+                        </div>
+                      )}
                   </div>
                 )}
 
-                <div className="form-group">
-                  <label>{t(locale, 'settings.accounts.password')}</label>
-                  <input
-                    type="password"
-                    value={formData.password}
-                    onChange={(e) =>
-                      setFormData((prev) => ({
-                        ...prev,
-                        password: e.target.value,
-                      }))
-                    }
-                    required={!editingAccount}
-                  />
-                </div>
+                {!preferMailOAuth && (
+                  <div className="form-group">
+                    <label>{t(locale, 'settings.accounts.password')}</label>
+                    <input
+                      type="password"
+                      value={formData.password}
+                      onChange={(e) =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          password: e.target.value,
+                        }))
+                      }
+                      required={!editingAccount && !preferMailOAuth}
+                    />
+                  </div>
+                )}
 
-                <fieldset>
-                  <legend>{t(locale, 'settings.accounts.imapSettings')}</legend>
-                  <div className="form-group">
-                    <label>{t(locale, 'settings.accounts.host')}</label>
-                    <input
-                      type="text"
-                      value={formData.imapHost}
-                      onChange={(e) =>
-                        setFormData((prev) => ({
-                          ...prev,
-                          imapHost: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label>{t(locale, 'settings.accounts.port')}</label>
-                    <input
-                      type="number"
-                      value={formData.imapPort}
-                      onChange={(e) =>
-                        setFormData((prev) => ({
-                          ...prev,
-                          imapPort: parseInt(e.target.value),
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label>{t(locale, 'settings.accounts.security')}</label>
-                    <select
-                      value={formData.imapSecurity}
-                      onChange={(e) =>
-                        setFormData((prev) => ({
-                          ...prev,
-                          imapSecurity: e.target.value,
-                        }))
-                      }
-                    >
-                      <option value="tls">TLS</option>
-                      <option value="starttls">STARTTLS</option>
-                    </select>
-                  </div>
-                </fieldset>
+                {!preferMailOAuth && (
+                  <>
+                    <fieldset>
+                      <legend>{t(locale, 'settings.accounts.imapSettings')}</legend>
+                      <div className="form-group">
+                        <label>{t(locale, 'settings.accounts.host')}</label>
+                        <input
+                          type="text"
+                          value={formData.imapHost}
+                          onChange={(e) =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              imapHost: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>{t(locale, 'settings.accounts.port')}</label>
+                        <input
+                          type="number"
+                          value={formData.imapPort}
+                          onChange={(e) =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              imapPort: parseInt(e.target.value),
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>{t(locale, 'settings.accounts.security')}</label>
+                        <select
+                          value={formData.imapSecurity}
+                          onChange={(e) =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              imapSecurity: e.target.value,
+                            }))
+                          }
+                        >
+                          <option value="tls">TLS</option>
+                          <option value="starttls">STARTTLS</option>
+                        </select>
+                      </div>
+                    </fieldset>
 
-                <fieldset>
-                  <legend>{t(locale, 'settings.accounts.smtpSettings')}</legend>
-                  <div className="form-group">
-                    <label>{t(locale, 'settings.accounts.host')}</label>
-                    <input
-                      type="text"
-                      value={formData.smtpHost}
-                      onChange={(e) =>
-                        setFormData((prev) => ({
-                          ...prev,
-                          smtpHost: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label>{t(locale, 'settings.accounts.port')}</label>
-                    <input
-                      type="number"
-                      value={formData.smtpPort}
-                      onChange={(e) =>
-                        setFormData((prev) => ({
-                          ...prev,
-                          smtpPort: parseInt(e.target.value),
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label>{t(locale, 'settings.accounts.security')}</label>
-                    <select
-                      value={formData.smtpSecurity}
-                      onChange={(e) =>
-                        setFormData((prev) => ({
-                          ...prev,
-                          smtpSecurity: e.target.value,
-                        }))
-                      }
-                    >
-                      <option value="tls">TLS</option>
-                      <option value="starttls">STARTTLS</option>
-                    </select>
-                  </div>
-                </fieldset>
+                    <fieldset>
+                      <legend>{t(locale, 'settings.accounts.smtpSettings')}</legend>
+                      <div className="form-group">
+                        <label>{t(locale, 'settings.accounts.host')}</label>
+                        <input
+                          type="text"
+                          value={formData.smtpHost}
+                          onChange={(e) =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              smtpHost: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>{t(locale, 'settings.accounts.port')}</label>
+                        <input
+                          type="number"
+                          value={formData.smtpPort}
+                          onChange={(e) =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              smtpPort: parseInt(e.target.value),
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>{t(locale, 'settings.accounts.security')}</label>
+                        <select
+                          value={formData.smtpSecurity}
+                          onChange={(e) =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              smtpSecurity: e.target.value,
+                            }))
+                          }
+                        >
+                          <option value="tls">TLS</option>
+                          <option value="starttls">STARTTLS</option>
+                        </select>
+                      </div>
+                    </fieldset>
+                  </>
+                )}
 
                 {editingAccount ? (
                   <FolderRoleMapping accountId={editingAccount.id} locale={locale} />
                 ) : null}
 
                 <div className="form-actions">
-                  <button type="submit">
-                    {editingAccount ? t(locale, 'common.save') : t(locale, 'common.add')}
-                  </button>
+                  {!preferMailOAuth && (
+                    <button type="submit">
+                      {editingAccount ? t(locale, 'common.save') : t(locale, 'common.add')}
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => {

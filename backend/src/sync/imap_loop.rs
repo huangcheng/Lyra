@@ -21,18 +21,28 @@ pub(crate) async fn imap_sync_account(
         return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
     };
     let row = load_account_sync_row(db, user_id, account_id).await?;
-    let ms = crate::oauth::MsOAuthConfig::from_env();
-    let Ok(secret) = crate::oauth::resolve_mail_access_secret(
+    let oauth = crate::oauth::OAuthRegistry::refresh_configs();
+    let secret = match crate::oauth::resolve_mail_access_secret(
         db,
         account_id,
         &row.auth_type,
         &row.credential,
         &dek,
-        ms.as_ref(),
+        row.imap_host.as_deref(),
+        &oauth,
     )
     .await
-    else {
-        return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
+    {
+        Ok(secret) => secret,
+        // Only an undecryptable stored credential justifies deactivation.
+        Err(e) if e.is_credential_decrypt() => {
+            return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
+        }
+        // Token endpoint outages / missing server config are retryable.
+        Err(e) => {
+            tracing::warn!(account_id, error = %e, "mail access secret resolve failed");
+            return Err(SyncError::Protocol(e.to_string()));
+        }
     };
     let result = run_imap_sync(db, account_id, &row, secret.as_str(), secret.is_xoauth2()).await?;
     Ok(outcome_from_response(&result))
@@ -102,6 +112,13 @@ pub(crate) async fn run_imap_sync(
     let total_deleted = 0;
 
     for folder in &folders {
+        // Hierarchy placeholders (`Archive/` with \Noselect) cannot be SELECTed;
+        // one failure here would abort the whole account's sync.
+        if folder.attributes.iter().any(|a| a.contains("Noselect")) {
+            tracing::debug!(account_id, folder = %folder.name, "skipping \\Noselect folder");
+            continue;
+        }
+
         let folder_id = get_folder_id(db, account_id, &folder.name).await?;
 
         let select = client.select(&folder.name).await?;

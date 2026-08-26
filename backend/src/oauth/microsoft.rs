@@ -22,24 +22,42 @@ pub struct MsOAuthConfig {
 pub enum MsOAuthError {
     #[error("Microsoft OAuth is not configured on this server")]
     NotConfigured,
+    #[error("OAuth provider not supported: {0}")]
+    UnknownProvider(String),
+    #[error("OAuth provider is not configured on this server: {0}")]
+    ProviderNotConfigured(String),
     #[error("invalid OAuth state")]
     InvalidState,
     #[error("token exchange failed: {0}")]
     TokenExchange(String),
-    #[error("missing email in Microsoft profile")]
+    #[error("mailbox email is required to start OAuth")]
+    MissingEmailParam,
+    #[error("missing email in OAuth profile")]
     MissingEmail,
+    #[error("stored mail credential could not be decrypted")]
+    CredentialDecrypt,
     #[error("{0}")]
     Internal(String),
 }
 
+impl MsOAuthError {
+    /// True when the account's stored credential itself is unreadable — the
+    /// only failure class that justifies deactivating the account. Token
+    /// endpoint outages, network errors, and missing server config are
+    /// transient from the account's perspective and must stay retryable.
+    pub fn is_credential_decrypt(&self) -> bool {
+        matches!(self, Self::CredentialDecrypt)
+    }
+}
+
 impl MsOAuthConfig {
-    pub fn from_env() -> Option<Self> {
+    /// Load Microsoft OAuth client credentials from the environment.
+    ///
+    /// `redirect_uri` is left empty — sufficient for token refresh in sync/send
+    /// workers. HTTP handlers should call [`Self::with_redirect`].
+    pub fn from_client_env() -> Option<Self> {
         let client_id = std::env::var("LYRA_MS_OAUTH_CLIENT_ID").ok()?;
         if client_id.trim().is_empty() {
-            return None;
-        }
-        let redirect_uri = std::env::var("LYRA_MS_OAUTH_REDIRECT_URI").ok()?;
-        if redirect_uri.trim().is_empty() {
             return None;
         }
         let client_secret = std::env::var("LYRA_MS_OAUTH_CLIENT_SECRET")
@@ -52,7 +70,7 @@ impl MsOAuthConfig {
         Some(Self {
             client_id: client_id.trim().into(),
             client_secret,
-            redirect_uri: redirect_uri.trim().into(),
+            redirect_uri: String::new(),
             tenant: if tenant.is_empty() {
                 "common".into()
             } else {
@@ -124,28 +142,16 @@ pub fn build_authorize_url(cfg: &MsOAuthConfig, state: &str, pkce: &PkcePair) ->
 }
 
 fn urlencoding(s: &str) -> String {
-    use std::fmt::Write;
-    // Minimal encode for query values.
-    let mut out = String::with_capacity(s.len() * 2);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            b' ' => out.push_str("%20"),
-            _ => {
-                let _ = write!(out, "%{b:02X}");
-            }
-        }
-    }
-    out
+    super::urlencode_component(s)
 }
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
+    #[serde(default)]
     access_token: String,
     #[serde(default)]
     refresh_token: Option<String>,
+    #[serde(default)]
     expires_in: i64,
     #[serde(default)]
     #[allow(dead_code)]
@@ -160,13 +166,26 @@ struct TokenResponse {
     error_description: Option<String>,
 }
 
-#[derive(Debug)]
-pub struct ExchangedTokens {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_at: i64,
-    pub scope: Option<String>,
-    pub email: Option<String>,
+use super::exchange::ExchangedTokens;
+
+async fn post_token_form(
+    client: &reqwest::Client,
+    url: String,
+    form: &[(&str, &str)],
+) -> Result<TokenResponse, MsOAuthError> {
+    let res = client
+        .post(url)
+        .form(form)
+        .send()
+        .await
+        .map_err(|e| MsOAuthError::TokenExchange(e.to_string()))?;
+    let status = res.status();
+    let text = res
+        .text()
+        .await
+        .map_err(|e| MsOAuthError::TokenExchange(e.to_string()))?;
+    serde_json::from_str(&text)
+        .map_err(|e| MsOAuthError::TokenExchange(format!("decode response (HTTP {status}): {e}")))
 }
 
 /// Exchange authorization `code` for tokens.
@@ -175,7 +194,7 @@ pub async fn exchange_code(
     code: &str,
     pkce_verifier: &str,
 ) -> Result<ExchangedTokens, MsOAuthError> {
-    let client = reqwest::Client::new();
+    let client = super::oauth_http_client();
     let mut form = vec![
         ("client_id", cfg.client_id.as_str()),
         ("grant_type", "authorization_code"),
@@ -188,16 +207,7 @@ pub async fn exchange_code(
         form.push(("client_secret", secret));
     }
 
-    let res = client
-        .post(cfg.token_url())
-        .form(&form)
-        .send()
-        .await
-        .map_err(|e| MsOAuthError::TokenExchange(e.to_string()))?;
-    let body: TokenResponse = res
-        .json()
-        .await
-        .map_err(|e| MsOAuthError::TokenExchange(e.to_string()))?;
+    let body = post_token_form(&client, cfg.token_url(), &form).await?;
     if let Some(err) = body.error {
         return Err(MsOAuthError::TokenExchange(format!(
             "{err}: {}",
@@ -233,7 +243,7 @@ pub async fn refresh_access_token(
     cfg: &MsOAuthConfig,
     refresh_token: &str,
 ) -> Result<ExchangedTokens, MsOAuthError> {
-    let client = reqwest::Client::new();
+    let client = super::oauth_http_client();
     let mut form = vec![
         ("client_id", cfg.client_id.as_str()),
         ("grant_type", "refresh_token"),
@@ -244,16 +254,7 @@ pub async fn refresh_access_token(
         form.push(("client_secret", secret));
     }
 
-    let res = client
-        .post(cfg.token_url())
-        .form(&form)
-        .send()
-        .await
-        .map_err(|e| MsOAuthError::TokenExchange(e.to_string()))?;
-    let body: TokenResponse = res
-        .json()
-        .await
-        .map_err(|e| MsOAuthError::TokenExchange(e.to_string()))?;
+    let body = post_token_form(&client, cfg.token_url(), &form).await?;
     if let Some(err) = body.error {
         return Err(MsOAuthError::TokenExchange(format!(
             "{err}: {}",
@@ -311,7 +312,7 @@ mod tests {
         let cfg = MsOAuthConfig {
             client_id: "cid".into(),
             client_secret: Some("sec".into()),
-            redirect_uri: "http://localhost:3000/api/v1/oauth/microsoft/callback".into(),
+            redirect_uri: "http://localhost:3000/api/v1/oauth/callback".into(),
             tenant: "common".into(),
         };
         let pkce = generate_pkce();

@@ -308,17 +308,24 @@ pub(crate) async fn prepare_smtp_send(
         crate::auth::AuthState::get_user_dek_and_credential(db, &user_id, account_id)
             .await
             .map_err(|e| SyncError::Crypto(e.to_string()))?;
-    let ms = crate::oauth::MsOAuthConfig::from_env();
+    let oauth = crate::oauth::OAuthRegistry::refresh_configs();
     let secret = crate::oauth::resolve_mail_access_secret(
         db,
         account_id,
         &auth_type,
         &credential_json,
         &dek,
-        ms.as_ref(),
+        Some(&host),
+        &oauth,
     )
     .await
-    .map_err(|e| SyncError::Crypto(e.to_string()))?;
+    .map_err(|e| {
+        if e.is_credential_decrypt() {
+            SyncError::Crypto(e.to_string())
+        } else {
+            SyncError::Protocol(e.to_string())
+        }
+    })?;
 
     let config = SmtpConfig {
         host,

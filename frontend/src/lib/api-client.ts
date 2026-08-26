@@ -45,8 +45,10 @@ export function userFromMe(me: AuthMeResponse): User {
   };
 }
 
-/** Session extractor messages from `AuthError::unauthorized` on missing/bad tokens. */
-export function isSessionExpiryMessage(message: string): boolean {
+/** Session extractor: the backend's stable `code` field, with a message
+ * regex as belt-and-braces for older/edge paths. */
+export function isSessionExpiry(message: string, code: string | null): boolean {
+  if (code === 'unauthorized') return true;
   return /expired session|missing authorization|invalid or expired session/i.test(message);
 }
 
@@ -74,11 +76,12 @@ function clearSessionAndRedirect(): void {
   }
 }
 
-async function errorMessage(res: Response): Promise<string> {
-  const data = (await res.json().catch(() => ({}))) as { error?: unknown };
-  return typeof data.error === 'string' && data.error.length > 0
-    ? data.error
-    : `HTTP ${res.status}`;
+async function errorBody(res: Response): Promise<{ message: string; code: string | null }> {
+  const data = (await res.json().catch(() => ({}))) as { error?: unknown; code?: unknown };
+  const message =
+    typeof data.error === 'string' && data.error.length > 0 ? data.error : `HTTP ${res.status}`;
+  const code = typeof data.code === 'string' ? data.code : null;
+  return { message, code };
 }
 
 /**
@@ -103,16 +106,16 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   }
 
   if (res.status === 401) {
-    const message = await errorMessage(res);
-    if (auth && isSessionExpiryMessage(message)) {
+    const { message, code } = await errorBody(res);
+    if (auth && isSessionExpiry(message, code)) {
       clearSessionAndRedirect();
-      throw new ApiError(401, 'unauthorized', message);
     }
     throw new ApiError(401, 'unauthorized', message);
   }
 
   if (!res.ok) {
-    throw new ApiError(res.status, 'http', await errorMessage(res));
+    const { message } = await errorBody(res);
+    throw new ApiError(res.status, 'http', message);
   }
 
   if (res.status === 204) {
@@ -140,14 +143,15 @@ export async function apiStream(path: string, signal?: AbortSignal): Promise<Res
   }
 
   if (res.status === 401) {
-    const message = await errorMessage(res);
-    if (isSessionExpiryMessage(message)) {
+    const { message, code } = await errorBody(res);
+    if (isSessionExpiry(message, code)) {
       clearSessionAndRedirect();
     }
     throw new ApiError(401, 'unauthorized', message);
   }
   if (!res.ok) {
-    throw new ApiError(res.status, 'http', await errorMessage(res));
+    const { message } = await errorBody(res);
+    throw new ApiError(res.status, 'http', message);
   }
   return res;
 }

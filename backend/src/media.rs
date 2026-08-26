@@ -292,15 +292,22 @@ async fn fetch_upstream(url: &str) -> Result<FetchedImage, SyncError> {
             .trim()
             .to_string();
 
+        // Stream the body with a hard cap: `resp.bytes()` would buffer the
+        // entire upstream response (potentially gigabytes within the timeout
+        // window) before the size check runs.
+        let mut resp = resp;
+        let cap = usize::try_from(MAX_UPSTREAM_BYTES).unwrap_or(usize::MAX);
         let mut bytes = Vec::new();
-        let body = resp
-            .bytes()
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| SyncError::Internal(format!("upstream read: {e}")))?;
-        if body.len() > usize::try_from(MAX_UPSTREAM_BYTES).unwrap_or(usize::MAX) {
-            return Err(SyncError::InvalidInput("upstream image too large".into()));
+            .map_err(|e| SyncError::Internal(format!("upstream read: {e}")))?
+        {
+            if bytes.len() + chunk.len() > cap {
+                return Err(SyncError::InvalidInput("upstream image too large".into()));
+            }
+            bytes.extend_from_slice(&chunk);
         }
-        bytes.extend_from_slice(&body);
 
         if !looks_like_image(&content_type, &bytes) {
             return Err(SyncError::InvalidInput("upstream not an image".into()));
@@ -590,6 +597,7 @@ mod tests {
             redis_url: None,
             master_key: TEST_MASTER_KEY.to_vec(),
             ms_oauth: None,
+            yandex_oauth: None,
         };
         AuthState::new(
             DbPool::Sqlite(pool),

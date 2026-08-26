@@ -11,6 +11,11 @@ backend/target/
 .env
 .env.*
 !.env.example
+config/oauth-providers.toml
+
+# Never rsync local DB into deploy trees
+backend/data/*.db
+backend/data/*.db.*
 
 # OS / IDE
 .DS_Store

@@ -108,7 +108,7 @@ One row per email message. Stores metadata; full body is stored as a blob.
 | `id` | PK | |
 | `account_id` | `TEXT NOT NULL` | FK → `mail_account.id` |
 | `folder_id` | `TEXT NOT NULL` | FK → `folder.id` |
-| `external_id` | `TEXT` | Server-side message ID |
+| `external_id` | `TEXT` | Server-side message ID. IMAP: `{folder_id}:{uid}` — RFC 3501 UIDs are only unique within a mailbox, so the folder must scope the id (migration `0010` re-keyed existing rows). JMAP: opaque email id. |
 | `thread_id` | `TEXT` | FK → `thread.id` |
 | `message_id_header` | `TEXT` | RFC 5322 `Message-ID` header value |
 | `subject` | `TEXT` | |

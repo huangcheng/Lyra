@@ -15,8 +15,11 @@ services:
       args:
         # DaoCloud mirror — Docker Hub auth times out on some networks.
         REGISTRY: docker.m.daocloud.io/library/
+    # Bind loopback IPv4 only. On macOS + OrbStack/Docker Desktop, `0.0.0.0:3000`
+    # also opens `[::1]:3000`, which resets connections — breaking OAuth callbacks
+    # that must use `http://localhost` (Microsoft Entra rejects `127.0.0.1`).
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       LISTEN_ADDR: 0.0.0.0:3000
       DATABASE_URL: sqlite:/data/lyra.db
@@ -26,8 +29,18 @@ services:
       # Required secret — set it in .env (see .env.example). Compose
       # refuses to start while it is unset.
       LYRA_MASTER_KEY: ${LYRA_MASTER_KEY:?set LYRA_MASTER_KEY in .env (openssl rand -base64 32)}
+      LYRA_PUBLIC_URL: ${LYRA_PUBLIC_URL:?set LYRA_PUBLIC_URL in .env (e.g. http://localhost:3000)}
+      LYRA_OAUTH_CONFIG: /config/oauth-providers.toml
+      # Optional — enables Settings → Sign in with Microsoft (Outlook / M365).
+      LYRA_MS_OAUTH_CLIENT_ID: ${LYRA_MS_OAUTH_CLIENT_ID:-}
+      LYRA_MS_OAUTH_CLIENT_SECRET: ${LYRA_MS_OAUTH_CLIENT_SECRET:-}
+      LYRA_MS_OAUTH_TENANT: ${LYRA_MS_OAUTH_TENANT:-common}
+      # Optional — enables Settings → Sign in with Yandex.
+      LYRA_YANDEX_OAUTH_CLIENT_ID: ${LYRA_YANDEX_OAUTH_CLIENT_ID:-}
+      LYRA_YANDEX_OAUTH_CLIENT_SECRET: ${LYRA_YANDEX_OAUTH_CLIENT_SECRET:-}
     volumes:
       - lyra-data:/data
+      - ./config/oauth-providers.toml:/config/oauth-providers.toml:ro
     depends_on:
       redis:
         condition: service_healthy

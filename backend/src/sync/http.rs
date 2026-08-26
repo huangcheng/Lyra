@@ -16,7 +16,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::send::send_message;
-use super::store::{effective_folder_role, update_folder_counts};
+use super::store::{effective_folder_role, parse_imap_uid, update_folder_counts};
 use super::types::{EnqueuedSync, SyncError, SyncStatus};
 use crate::auth::{AuthState, AuthUser};
 use crate::db_row::{
@@ -1064,7 +1064,7 @@ pub(crate) async fn connect_imap_for_account(
     let row = db_fetch_optional!(
         db,
         r"
-        SELECT email_address, imap_host, imap_port, imap_security, protocol
+        SELECT email_address, imap_host, imap_port, imap_security, protocol, auth_type
         FROM mail_account
         WHERE id = ? AND user_id = ? AND is_active = ?
         ",
@@ -1074,7 +1074,15 @@ pub(crate) async fn connect_imap_for_account(
             let imap_port: Option<i32> = row.get("imap_port");
             let imap_security: Option<String> = row.get("imap_security");
             let email_address: String = row.get("email_address");
-            (protocol, imap_host, imap_port, imap_security, email_address)
+            let auth_type: String = row.get("auth_type");
+            (
+                protocol,
+                imap_host,
+                imap_port,
+                imap_security,
+                email_address,
+                auth_type,
+            )
         },
         &id_param(db, account_id)?,
         &id_param(db, user_id)?,
@@ -1082,7 +1090,7 @@ pub(crate) async fn connect_imap_for_account(
     )?
     .ok_or(SyncError::AccountNotFound)?;
 
-    let (protocol, imap_host, imap_port, imap_security, email_address) = row;
+    let (protocol, imap_host, imap_port, imap_security, email_address, auth_type) = row;
     if protocol != "imap" {
         return Err(SyncError::InvalidInput(
             "remote flag/move ops require an IMAP account in v1".into(),
@@ -1102,26 +1110,36 @@ pub(crate) async fn connect_imap_for_account(
         None => ImapSecurity::Tls,
     };
 
-    let password = crate::imap::decrypt_account_password(&credential_json, &dek)
-        .map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let oauth = crate::oauth::OAuthRegistry::refresh_configs();
+    let secret = crate::oauth::resolve_mail_access_secret(
+        db,
+        account_id,
+        &auth_type,
+        &credential_json,
+        &dek,
+        Some(&host),
+        &oauth,
+    )
+    .await
+    .map_err(|e| {
+        if e.is_credential_decrypt() {
+            SyncError::Crypto(e.to_string())
+        } else {
+            SyncError::Protocol(e.to_string())
+        }
+    })?;
 
     let client = ImapClient::connect(&ImapConfig {
         host,
         port,
         security,
         username: email_address,
-        password: zeroize::Zeroizing::new(password),
-        xoauth2: false,
+        password: zeroize::Zeroizing::new(secret.as_str().to_string()),
+        xoauth2: secret.is_xoauth2(),
     })
     .await?;
 
     Ok((client, protocol))
-}
-
-pub(crate) fn parse_imap_uid(external_id: Option<&str>) -> Result<u32, SyncError> {
-    external_id
-        .and_then(|s| s.parse::<u32>().ok())
-        .ok_or_else(|| SyncError::InvalidInput("message has no IMAP UID".into()))
 }
 
 /// GET /api/v1/messages/{id} — return one message; lazily fetch IMAP body if missing.
@@ -1209,13 +1227,7 @@ async fn maybe_fill_imap_body(
     let snippet = fetched
         .subject
         .as_deref()
-        .map(|s| {
-            if s.len() > 120 {
-                format!("{}...", &s[..117])
-            } else {
-                s.to_string()
-            }
-        })
+        .map(super::store::truncate_for_snippet)
         .or_else(|| {
             fetched
                 .body_text

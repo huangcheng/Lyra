@@ -98,6 +98,25 @@ impl async_imap::Authenticator for &Xoauth2Auth {
     }
 }
 
+/// Read the RFC 3501 untagged `* OK` greeting after TLS connect.
+///
+/// Required before [`async_imap::Client::authenticate`] (XOAUTH2). Password
+/// [`async_imap::Client::login`] tolerates an unread greeting via its tagged
+/// response loop, but SASL handshake mis-parses the greeting as auth continuation
+/// and hangs until timeout.
+async fn consume_server_greeting<T>(client: &mut async_imap::Client<T>) -> Result<(), ImapError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug + 'static,
+{
+    match client.read_response().await {
+        Some(Ok(_)) => Ok(()),
+        Some(Err(e)) => Err(ImapError::Imap(async_imap::error::Error::Io(e))),
+        None => Err(ImapError::Connection(
+            "IMAP server closed before greeting".into(),
+        )),
+    }
+}
+
 async fn authenticate_client<T>(
     client: async_imap::Client<T>,
     config: &ImapConfig,
@@ -245,7 +264,8 @@ impl ImapClient {
                     .await
                     .map_err(|e| ImapError::Tls(e.to_string()))?;
 
-                let client = async_imap::Client::new(tls_stream);
+                let mut client = async_imap::Client::new(tls_stream);
+                consume_server_greeting(&mut client).await?;
                 let mut session = authenticate_client(client, config).await?;
 
                 let capabilities = session.capabilities().await.map_err(ImapError::Imap)?;

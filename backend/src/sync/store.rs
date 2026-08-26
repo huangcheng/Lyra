@@ -10,6 +10,14 @@ use crate::protocol::SyncOutcome;
 use crate::sanitize::persist_body_html;
 use crate::storage::{DbPool, DbTxn};
 
+/// Truncate subject/preview for snippet storage (char-safe for CJK, etc.).
+pub(crate) fn truncate_for_snippet(s: &str) -> String {
+    if s.chars().count() <= 120 {
+        return s.to_string();
+    }
+    format!("{}...", s.chars().take(117).collect::<String>())
+}
+
 pub(crate) struct AccountSyncRow {
     pub(crate) email_address: String,
     pub(crate) auth_type: String,
@@ -561,6 +569,30 @@ pub(crate) async fn persist_jmap_folder_batch(
     Ok((new, updated))
 }
 
+/// Wire-format for IMAP message identity.
+///
+/// RFC 3501 UIDs are unique only within a mailbox (paired with UIDVALIDITY),
+/// so the folder must scope the stored id — bare UIDs collide across folders
+/// and silently absorb each other on the `UNIQUE(account_id, external_id)`
+/// upsert. The folder's internal id (not its wire name) is used so renames
+/// don't re-key history.
+pub(crate) fn imap_message_external_id(folder_id: &str, uid: u32) -> String {
+    format!("{folder_id}:{uid}")
+}
+
+/// Recover the IMAP UID from a stored message `external_id`.
+///
+/// Accepts bare numeric ids as a fallback for rows written before ids became
+/// folder-scoped.
+pub(crate) fn parse_imap_uid(external_id: Option<&str>) -> Result<u32, SyncError> {
+    let raw =
+        external_id.ok_or_else(|| SyncError::InvalidInput("message has no IMAP UID".into()))?;
+    let uid_part = raw.rsplit(':').next().unwrap_or(raw);
+    uid_part
+        .parse::<u32>()
+        .map_err(|_| SyncError::InvalidInput("message has no IMAP UID".into()))
+}
+
 pub(crate) async fn upsert_message_in_tx(
     tx: &mut DbTxn,
     db: &DbPool,
@@ -568,7 +600,7 @@ pub(crate) async fn upsert_message_in_tx(
     folder_id: &str,
     msg: &ImapMessage,
 ) -> Result<bool, SyncError> {
-    let external_id = msg.uid.to_string();
+    let external_id = imap_message_external_id(folder_id, msg.uid);
     let account_bind = id_param(db, account_id)?;
     let folder_bind = id_param(db, folder_id)?;
 
@@ -588,13 +620,7 @@ pub(crate) async fn upsert_message_in_tx(
         .flags
         .iter()
         .any(|f| f.contains("Flagged") || f.contains("\\Flagged"));
-    let snippet = msg.subject.as_deref().map(|s| {
-        if s.len() > 120 {
-            format!("{}...", &s[..117])
-        } else {
-            s.to_string()
-        }
-    });
+    let snippet = msg.subject.as_deref().map(truncate_for_snippet);
 
     let from_json = msg
         .from
@@ -685,15 +711,10 @@ pub(crate) async fn upsert_jmap_message_in_tx(
 
     let is_read = email.is_seen();
     let is_starred = email.is_flagged();
-    let snippet = email.preview.clone().or_else(|| {
-        email.subject.as_ref().map(|s| {
-            if s.len() > 120 {
-                format!("{}...", &s[..117])
-            } else {
-                s.clone()
-            }
-        })
-    });
+    let snippet = email
+        .preview
+        .clone()
+        .or_else(|| email.subject.as_ref().map(|s| truncate_for_snippet(s)));
 
     let from_json = email
         .format_from()

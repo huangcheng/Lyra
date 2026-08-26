@@ -276,7 +276,44 @@ paths:
                   format: email
       responses:
         "200":
-          description: Suggested server configuration
+          description: >
+            Suggested server configuration. When `authMethod` is `oauth2`
+            (Microsoft Outlook / 365), clients should call
+            `GET /api/v1/oauth/start?email=…` instead of collecting a password.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  found:
+                    type: boolean
+                  source:
+                    type: string
+                    nullable: true
+                  protocol:
+                    type: string
+                  authMethod:
+                    type: string
+                    enum: [oauth2]
+                    description: Present when Microsoft OAuth is preferred
+                  imapHost:
+                    type: string
+                    nullable: true
+                  imapPort:
+                    type: integer
+                    nullable: true
+                  imapSecurity:
+                    type: string
+                    nullable: true
+                  smtpHost:
+                    type: string
+                    nullable: true
+                  smtpPort:
+                    type: integer
+                    nullable: true
+                  smtpSecurity:
+                    type: string
+                    nullable: true
         "401":
           $ref: "#/components/responses/Error"
 
@@ -745,10 +782,10 @@ paths:
         "200":
           description: Updated allowlist
 
-  /api/v1/oauth/microsoft/status:
+  /api/v1/oauth/providers:
     get:
       tags: [oauth]
-      summary: Whether Microsoft OAuth is configured
+      summary: Configured mail OAuth providers
       responses:
         "200":
           content:
@@ -756,13 +793,30 @@ paths:
               schema:
                 type: object
                 properties:
-                  configured:
-                    type: boolean
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        displayName:
+                          type: string
+                        configured:
+                          type: boolean
 
-  /api/v1/oauth/microsoft/start:
+  /api/v1/oauth/start:
     get:
       tags: [oauth]
-      summary: Start OAuth (returns authorize URL)
+      summary: Start mail OAuth (returns authorize URL)
+      parameters:
+        - name: email
+          in: query
+          required: true
+          description: Mailbox address; OAuth provider is inferred from the domain
+          schema:
+            type: string
+            format: email
       responses:
         "200":
           content:
@@ -773,14 +827,21 @@ paths:
                   authorizeUrl:
                     type: string
                     format: uri
+                  provider:
+                    type: string
+        "400":
+          $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
 
-  /api/v1/oauth/microsoft/callback:
+  /api/v1/oauth/callback:
     get:
       tags: [oauth]
-      summary: OAuth redirect callback
+      summary: Shared OAuth redirect callback (all mail providers)
       description: |
+        Register with each vendor OAuth app (derived from `LYRA_PUBLIC_URL`):
+        `{LYRA_PUBLIC_URL}/api/v1/oauth/callback`.
+
         Browser flow: 302 to `/settings?section=accounts&oauth=…&detail=…`.
         When `Accept: application/json`, returns `{ "status", "detail" }` instead.
       security: []

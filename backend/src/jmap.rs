@@ -393,19 +393,23 @@ impl JmapClient {
     pub async fn query_emails(
         &self,
         mailbox_id: &str,
+        position: Option<u32>,
         limit: Option<u32>,
     ) -> Result<EmailQueryResult, JmapError> {
         let filter = serde_json::json!({
             "inMailbox": mailbox_id
         });
 
-        let args = serde_json::json!({
+        let mut args = serde_json::json!({
             "accountId": self.account_id,
             "filter": filter,
             "sort": [{ "property": "receivedAt", "isAscending": false }],
             "limit": limit.unwrap_or(100),
             "calculateTotal": true
         });
+        if let Some(pos) = position {
+            args["position"] = serde_json::json!(pos);
+        }
 
         let req = JmapRequest {
             using: vec!["urn:ietf:params:jmap:mail".into()],
