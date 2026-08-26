@@ -16,7 +16,8 @@
     "accounts": "Accounts",
     "settings": "Settings",
     "dashboard": "Dashboard",
-    "mail": "Mail"
+    "mail": "Mail",
+    "folders": "Folders"
   },
   "mail": {
     "compose": "Compose",
@@ -67,6 +68,7 @@
     "toPlaceholder": "recipient@example.com",
     "subjectPlaceholder": "Subject",
     "bodyPlaceholder": "Write your message…",
+    "body": "Body",
     "syncNow": "Sync Now",
     "syncing": "Syncing…",
     "syncDone": "Sync complete",

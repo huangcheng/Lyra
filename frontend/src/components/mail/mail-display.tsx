@@ -6,6 +6,7 @@ import { addDays, addHours, format, nextSaturday } from 'date-fns';
 import {
   Archive,
   ArchiveX,
+  ChevronLeft,
   Clock,
   Forward,
   MailOpen,
@@ -42,6 +43,7 @@ import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { allowSenderPrivacy } from '@/lib/privacy-api';
 import { sanitizeEmailHtml } from '@/lib/sanitize-email-html';
+import { useMediaQuery } from '@/lib/use-media-query';
 import { getInitials } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
@@ -75,6 +77,7 @@ export function MailDisplay() {
   const mutedMessageIds = useUIStore((s) => s.mutedMessageIds);
   const toggleMuteMessage = useUIStore((s) => s.toggleMuteMessage);
   const token = useAuthStore((s) => s.token);
+  const isMobile = useMediaQuery('(max-width: 1023px)');
   const cached = useMailStore((s) =>
     selectedMessageId ? s.messages[selectedMessageId] : undefined,
   );
@@ -342,6 +345,17 @@ export function MailDisplay() {
     <div className="flex h-full flex-col">
       <div className="flex items-center p-2">
         <div className="flex items-center gap-1.5">
+          {isMobile ? (
+            <Button
+              variant="ghost"
+              size="icon"
+              className={toolbarIconClass}
+              onClick={() => setSelectedMessage(null)}
+            >
+              <ChevronLeft className="h-4 w-4" />
+              <span className="sr-only">{t(locale, 'common.back')}</span>
+            </Button>
+          ) : null}
           <Tooltip>
             <TooltipTrigger asChild>
               <Button

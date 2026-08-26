@@ -197,11 +197,14 @@ export function ComposeDialog() {
 
   return (
     <Dialog open={composeOpen} onOpenChange={(open) => !open && handleClose()}>
-      <DialogContent className="sm:max-w-xl" showCloseButton>
+      <DialogContent
+        className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-xl"
+        showCloseButton
+      >
         <DialogHeader>
           <DialogTitle>{t(locale, titleKey)}</DialogTitle>
         </DialogHeader>
-        <FieldGroup>
+        <FieldGroup className="min-h-0 overflow-y-auto">
           {accounts.length > 1 || selectedAccountId === ALL_ACCOUNTS ? (
             <Field>
               <FieldLabel htmlFor="compose-from">{t(locale, 'mail.from')}</FieldLabel>
@@ -246,7 +249,7 @@ export function ComposeDialog() {
             />
           </Field>
           <Field>
-            <FieldLabel htmlFor="compose-body">{t(locale, 'mail.bodyPlaceholder')}</FieldLabel>
+            <FieldLabel htmlFor="compose-body">{t(locale, 'mail.body')}</FieldLabel>
             <Textarea
               id="compose-body"
               className="min-h-40"
@@ -260,6 +263,7 @@ export function ComposeDialog() {
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
+                className="accent-foreground"
                 checked={signMessage}
                 onChange={(e) => setSignMessage(e.target.checked)}
               />
@@ -268,6 +272,7 @@ export function ComposeDialog() {
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
+                className="accent-foreground"
                 checked={encryptMessage}
                 onChange={(e) => setEncryptMessage(e.target.checked)}
               />
@@ -276,6 +281,7 @@ export function ComposeDialog() {
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
+                className="accent-foreground"
                 checked={attachPublicKey}
                 onChange={(e) => setAttachPublicKey(e.target.checked)}
               />

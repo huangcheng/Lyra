@@ -36,6 +36,9 @@ import {
 import { syncEvents$ } from '@/rxjs/sync-events';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
+import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import {
   Select,
@@ -1190,26 +1193,37 @@ export function SettingsPage() {
           {section === 'encryption' && <EncryptionSettings />}
         </div>
 
-        {showAddForm && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-            <div className="max-h-[90vh] w-full max-w-lg overflow-auto rounded-lg border bg-background p-6 shadow-lg">
-              <h2>
+        <Dialog
+          open={showAddForm}
+          onOpenChange={(open) => {
+            if (!open) {
+              setShowAddForm(false);
+              setEditingAccount(null);
+            }
+          }}
+        >
+          <DialogContent
+            className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-xl"
+            showCloseButton
+          >
+            <DialogHeader>
+              <DialogTitle>
                 {editingAccount
                   ? t(locale, 'settings.accounts.edit')
                   : t(locale, 'settings.accounts.add')}
-              </h2>
-              <form
-                onSubmit={handleSubmit}
-                className="space-y-4 [&_input]:h-9 [&_input]:w-full [&_input]:rounded-md [&_input]:border [&_input]:border-input [&_input]:bg-transparent [&_input]:px-3 [&_input]:text-sm [&_select]:h-9 [&_select]:w-full [&_select]:rounded-md [&_select]:border [&_select]:bg-background [&_select]:px-3 [&_label]:text-sm [&_label]:font-medium [&_fieldset]:space-y-3 [&_fieldset]:rounded-md [&_fieldset]:border [&_fieldset]:p-3 [&_legend]:px-1 [&_legend]:text-sm [&_legend]:font-medium [&_button]:rounded-md [&_button]:border [&_button]:px-3 [&_button]:py-1.5 [&_button]:text-sm [&_button]:hover:bg-accent"
-              >
-                <div className="space-y-2">
-                  <label className="text-sm font-medium" htmlFor="settings-display-name">
+              </DialogTitle>
+            </DialogHeader>
+            <form
+              onSubmit={handleSubmit}
+              className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto] gap-4"
+            >
+              <FieldGroup className="min-h-0 overflow-y-auto">
+                <Field>
+                  <FieldLabel htmlFor="settings-display-name">
                     {t(locale, 'settings.accounts.displayName')}
-                  </label>
-                  <input
+                  </FieldLabel>
+                  <Input
                     id="settings-display-name"
-                    type="text"
-                    className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
                     value={formData.displayName}
                     onChange={(e) =>
                       setFormData((prev) => ({
@@ -1219,27 +1233,38 @@ export function SettingsPage() {
                     }
                     required
                   />
-                </div>
+                </Field>
 
-                <div className="form-group">
-                  <label>{t(locale, 'settings.accounts.email')}</label>
-                  <input
-                    type="email"
-                    value={formData.emailAddress}
-                    onChange={(e) =>
-                      setFormData((prev) => ({
-                        ...prev,
-                        emailAddress: e.target.value,
-                      }))
-                    }
-                    required
-                  />
-                  <button type="button" onClick={handleProbe} disabled={probing}>
-                    {probing
-                      ? t(locale, 'settings.accounts.probing')
-                      : t(locale, 'settings.accounts.autoDetect')}
-                  </button>
-                </div>
+                <Field>
+                  <FieldLabel htmlFor="settings-email">
+                    {t(locale, 'settings.accounts.email')}
+                  </FieldLabel>
+                  <div className="flex gap-2">
+                    <Input
+                      id="settings-email"
+                      type="email"
+                      className="flex-1"
+                      value={formData.emailAddress}
+                      onChange={(e) =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          emailAddress: e.target.value,
+                        }))
+                      }
+                      required
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={handleProbe}
+                      disabled={probing}
+                    >
+                      {probing
+                        ? t(locale, 'settings.accounts.probing')
+                        : t(locale, 'settings.accounts.autoDetect')}
+                    </Button>
+                  </div>
+                </Field>
 
                 {(probeResult?.found || suggestedAuthMethod === 'oauth2') && (
                   <div className="probe-result space-y-2">
@@ -1299,9 +1324,12 @@ export function SettingsPage() {
                 )}
 
                 {!preferMailOAuth && (
-                  <div className="form-group">
-                    <label>{t(locale, 'settings.accounts.password')}</label>
-                    <input
+                  <Field>
+                    <FieldLabel htmlFor="settings-password">
+                      {t(locale, 'settings.accounts.password')}
+                    </FieldLabel>
+                    <Input
+                      id="settings-password"
                       type="password"
                       value={formData.password}
                       onChange={(e) =>
@@ -1312,42 +1340,46 @@ export function SettingsPage() {
                       }
                       required={!editingAccount && !preferMailOAuth}
                     />
-                  </div>
+                  </Field>
                 )}
 
                 {!preferMailOAuth && (
                   <>
-                    <fieldset>
-                      <legend>{t(locale, 'settings.accounts.imapSettings')}</legend>
-                      <div className="form-group">
-                        <label>{t(locale, 'settings.accounts.host')}</label>
-                        <input
-                          type="text"
-                          value={formData.imapHost}
-                          onChange={(e) =>
-                            setFormData((prev) => ({
-                              ...prev,
-                              imapHost: e.target.value,
-                            }))
-                          }
-                        />
+                    <Field className="gap-3 rounded-md border border-border/60 p-3">
+                      <p className="text-sm font-medium">
+                        {t(locale, 'settings.accounts.imapSettings')}
+                      </p>
+                      <div className="grid grid-cols-[1fr_6rem] gap-3">
+                        <Field>
+                          <FieldLabel>{t(locale, 'settings.accounts.host')}</FieldLabel>
+                          <Input
+                            value={formData.imapHost}
+                            onChange={(e) =>
+                              setFormData((prev) => ({
+                                ...prev,
+                                imapHost: e.target.value,
+                              }))
+                            }
+                          />
+                        </Field>
+                        <Field>
+                          <FieldLabel>{t(locale, 'settings.accounts.port')}</FieldLabel>
+                          <Input
+                            type="number"
+                            value={formData.imapPort}
+                            onChange={(e) =>
+                              setFormData((prev) => ({
+                                ...prev,
+                                imapPort: parseInt(e.target.value),
+                              }))
+                            }
+                          />
+                        </Field>
                       </div>
-                      <div className="form-group">
-                        <label>{t(locale, 'settings.accounts.port')}</label>
-                        <input
-                          type="number"
-                          value={formData.imapPort}
-                          onChange={(e) =>
-                            setFormData((prev) => ({
-                              ...prev,
-                              imapPort: parseInt(e.target.value),
-                            }))
-                          }
-                        />
-                      </div>
-                      <div className="form-group">
-                        <label>{t(locale, 'settings.accounts.security')}</label>
+                      <Field>
+                        <FieldLabel>{t(locale, 'settings.accounts.security')}</FieldLabel>
                         <select
+                          className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
                           value={formData.imapSecurity}
                           onChange={(e) =>
                             setFormData((prev) => ({
@@ -1359,40 +1391,44 @@ export function SettingsPage() {
                           <option value="tls">TLS</option>
                           <option value="starttls">STARTTLS</option>
                         </select>
-                      </div>
-                    </fieldset>
+                      </Field>
+                    </Field>
 
-                    <fieldset>
-                      <legend>{t(locale, 'settings.accounts.smtpSettings')}</legend>
-                      <div className="form-group">
-                        <label>{t(locale, 'settings.accounts.host')}</label>
-                        <input
-                          type="text"
-                          value={formData.smtpHost}
-                          onChange={(e) =>
-                            setFormData((prev) => ({
-                              ...prev,
-                              smtpHost: e.target.value,
-                            }))
-                          }
-                        />
+                    <Field className="gap-3 rounded-md border border-border/60 p-3">
+                      <p className="text-sm font-medium">
+                        {t(locale, 'settings.accounts.smtpSettings')}
+                      </p>
+                      <div className="grid grid-cols-[1fr_6rem] gap-3">
+                        <Field>
+                          <FieldLabel>{t(locale, 'settings.accounts.host')}</FieldLabel>
+                          <Input
+                            value={formData.smtpHost}
+                            onChange={(e) =>
+                              setFormData((prev) => ({
+                                ...prev,
+                                smtpHost: e.target.value,
+                              }))
+                            }
+                          />
+                        </Field>
+                        <Field>
+                          <FieldLabel>{t(locale, 'settings.accounts.port')}</FieldLabel>
+                          <Input
+                            type="number"
+                            value={formData.smtpPort}
+                            onChange={(e) =>
+                              setFormData((prev) => ({
+                                ...prev,
+                                smtpPort: parseInt(e.target.value),
+                              }))
+                            }
+                          />
+                        </Field>
                       </div>
-                      <div className="form-group">
-                        <label>{t(locale, 'settings.accounts.port')}</label>
-                        <input
-                          type="number"
-                          value={formData.smtpPort}
-                          onChange={(e) =>
-                            setFormData((prev) => ({
-                              ...prev,
-                              smtpPort: parseInt(e.target.value),
-                            }))
-                          }
-                        />
-                      </div>
-                      <div className="form-group">
-                        <label>{t(locale, 'settings.accounts.security')}</label>
+                      <Field>
+                        <FieldLabel>{t(locale, 'settings.accounts.security')}</FieldLabel>
                         <select
+                          className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
                           value={formData.smtpSecurity}
                           onChange={(e) =>
                             setFormData((prev) => ({
@@ -1404,35 +1440,36 @@ export function SettingsPage() {
                           <option value="tls">TLS</option>
                           <option value="starttls">STARTTLS</option>
                         </select>
-                      </div>
-                    </fieldset>
+                      </Field>
+                    </Field>
                   </>
                 )}
 
                 {editingAccount ? (
                   <FolderRoleMapping accountId={editingAccount.id} locale={locale} />
                 ) : null}
+              </FieldGroup>
 
-                <div className="form-actions">
-                  {!preferMailOAuth && (
-                    <button type="submit">
-                      {editingAccount ? t(locale, 'common.save') : t(locale, 'common.add')}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowAddForm(false);
-                      setEditingAccount(null);
-                    }}
-                  >
-                    {t(locale, 'common.cancel')}
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setShowAddForm(false);
+                    setEditingAccount(null);
+                  }}
+                >
+                  {t(locale, 'common.cancel')}
+                </Button>
+                {!preferMailOAuth && (
+                  <Button type="submit">
+                    {editingAccount ? t(locale, 'common.save') : t(locale, 'common.add')}
+                  </Button>
+                )}
+              </div>
+            </form>
+          </DialogContent>
+        </Dialog>
       </main>
     </div>
   );

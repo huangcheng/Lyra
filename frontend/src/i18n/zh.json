@@ -16,7 +16,8 @@
     "accounts": "账户",
     "settings": "设置",
     "dashboard": "仪表盘",
-    "mail": "邮件"
+    "mail": "邮件",
+    "folders": "文件夹"
   },
   "mail": {
     "compose": "写邮件",
@@ -67,6 +68,7 @@
     "toPlaceholder": "recipient@example.com",
     "subjectPlaceholder": "主题",
     "bodyPlaceholder": "输入邮件内容…",
+    "body": "正文",
     "syncNow": "立即同步",
     "syncing": "同步中…",
     "syncDone": "同步完成",
