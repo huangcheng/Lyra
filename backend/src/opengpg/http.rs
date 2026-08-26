@@ -332,6 +332,9 @@ async fn delete_key_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// Handler returns several error kinds rendered as `Response`; boxing the Err
+// variant would obfuscate the handler for no runtime benefit.
+#[allow(clippy::result_large_err)]
 async fn export_key(
     State(state): State<AuthState>,
     AuthUser(user_id): AuthUser,
