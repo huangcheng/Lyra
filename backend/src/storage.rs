@@ -14,6 +14,15 @@ use sqlx::{Pool, Sqlite};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+/// sqlx 0.9 audit marker for the migration runner.
+///
+/// Migration SQL comes from version-controlled `.up.sql` files in this
+/// crate; statement parameters are bound separately. Marking the text
+/// audited satisfies sqlx 0.9's SqlSafeStr gate.
+fn audited_sql(sql: &str) -> sqlx::AssertSqlSafe<&str> {
+    sqlx::AssertSqlSafe(sql)
+}
+
 /// Database pool wrapper supporting both `SQLite` and `PostgreSQL`.
 #[derive(Clone, Debug)]
 pub enum DbPool {
@@ -300,7 +309,7 @@ async fn run_sqlite_migrations(
         // SQLite doesn't support multi-statement execution via prepare,
         // so we need to split carefully (respecting BEGIN…END in triggers).
         for stmt in split_sql_statements(&cleaned) {
-            sqlx::query(crate::db_sql::audited_sql(stmt.as_str()))
+            sqlx::query(audited_sql(stmt.as_str()))
                 .execute(&mut *tx)
                 .await?;
         }
@@ -353,7 +362,7 @@ async fn run_postgres_migrations(
         let sql = std::fs::read_to_string(&path)?;
 
         // Execute the full SQL (PostgreSQL supports multi-statement execution)
-        sqlx::raw_sql(crate::db_sql::audited_sql(sql.as_str()))
+        sqlx::raw_sql(audited_sql(sql.as_str()))
             .execute(pool)
             .await?;
 

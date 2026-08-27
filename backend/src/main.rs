@@ -9,7 +9,6 @@
 #![allow(clippy::match_same_arms)]
 
 #[macro_use]
-mod db_sql;
 mod accounts;
 mod api_error;
 mod auth;

@@ -7,16 +7,18 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 
 use crate::crypto;
-use crate::db_row::id_param;
 use crate::kv::KvStore;
 use crate::storage::DbPool;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use sea_orm::sea_query::{Expr, Query};
+use sea_orm::{ColumnTrait, ConnectionTrait};
+
 use super::db::{
-    UserData, find_first_user_totp_enabled, find_user_by_id, find_user_by_username, has_any_user,
-    insert_user, is_unique_violation, parse_mark_read_policy, update_user_password,
-    update_user_totp, user_info_from,
+    UserData, dberr_to_sqlx, find_first_user_totp_enabled, find_user_by_id, find_user_by_username,
+    has_any_user, id_bind_value, insert_user, is_unique_violation, parse_mark_read_policy,
+    update_user_password, update_user_totp, user_info_from,
 };
 use super::dek::{crypto_err, master_key};
 use super::password::{hash_password, validate_password, verify_password};
@@ -34,6 +36,7 @@ use super::{
     TotpEnrollConfirmRequest, TotpEnrollResponse, TotpVerifyRequest, UserInfo,
     extract_token_from_headers,
 };
+use crate::entities::lyra_user as user_entity;
 
 pub(super) async fn auth_status(State(state): State<AuthState>) -> Json<AuthStatus> {
     let has_user = has_any_user(&state.db).await.is_ok_and(|v| v);
@@ -487,14 +490,16 @@ pub(super) async fn update_locale(
     user_id: &str,
     locale: &str,
 ) -> Result<(), AuthError> {
-    let id = id_param(db, user_id).map_err(|_| AuthError::internal("Failed to look up user"))?;
-    db_execute!(
-        db,
-        "UPDATE lyra_user SET locale = ?, updated_at = datetime('now') WHERE id = ?",
-        locale,
-        &id
-    )
-    .map_err(|e| {
+    let id =
+        id_bind_value(db, user_id).map_err(|_| AuthError::internal("Failed to look up user"))?;
+    let stmt = Query::update()
+        .table(user_entity::Entity)
+        .value(user_entity::Column::Locale, locale.to_string())
+        .value(user_entity::Column::UpdatedAt, Expr::current_timestamp())
+        .and_where(user_entity::Column::Id.eq(id))
+        .to_owned();
+    db.orm().execute(&stmt).await.map_err(|e| {
+        let e = dberr_to_sqlx(e);
         tracing::error!("DB error updating locale: {e}");
         AuthError::internal("Failed to update preferences")
     })?;
@@ -506,14 +511,16 @@ pub(super) async fn update_mark_read_policy(
     user_id: &str,
     policy: &str,
 ) -> Result<(), AuthError> {
-    let id = id_param(db, user_id).map_err(|_| AuthError::internal("Failed to look up user"))?;
-    db_execute!(
-        db,
-        "UPDATE lyra_user SET mark_read_policy = ?, updated_at = datetime('now') WHERE id = ?",
-        policy,
-        &id
-    )
-    .map_err(|e| {
+    let id =
+        id_bind_value(db, user_id).map_err(|_| AuthError::internal("Failed to look up user"))?;
+    let stmt = Query::update()
+        .table(user_entity::Entity)
+        .value(user_entity::Column::MarkReadPolicy, policy.to_string())
+        .value(user_entity::Column::UpdatedAt, Expr::current_timestamp())
+        .and_where(user_entity::Column::Id.eq(id))
+        .to_owned();
+    db.orm().execute(&stmt).await.map_err(|e| {
+        let e = dberr_to_sqlx(e);
         tracing::error!("DB error updating mark_read_policy: {e}");
         AuthError::internal("Failed to update preferences")
     })?;

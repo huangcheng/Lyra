@@ -2,8 +2,11 @@
 
 use std::sync::Arc;
 
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Value};
+
 use crate::crypto::{self, CryptoError};
 use crate::db_row::id_param;
+use crate::entities::mail_account as account_entity;
 use crate::kernel::App;
 use crate::kv::KvStore;
 use crate::storage::DbPool;
@@ -96,14 +99,27 @@ impl AuthState {
         let dek = Self::get_user_dek(db, user_id).await?;
         let account = id_param(db, account_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
         let user = id_param(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
-        let credential: Option<String> = db_scalar_optional!(
-            db,
-            String,
-            "SELECT credential FROM mail_account WHERE id = ? AND user_id = ?",
-            &account,
-            &user
-        )
-        .map_err(|e| CryptoError::Storage(e.to_string()))?;
+        let id_value = match account {
+            crate::db_row::IdParam::Text(s) => Value::String(Some(s)),
+            crate::db_row::IdParam::Uuid(u) => Value::Uuid(Some(u)),
+        };
+        let user_value = match user {
+            crate::db_row::IdParam::Text(s) => Value::String(Some(s)),
+            crate::db_row::IdParam::Uuid(u) => Value::Uuid(Some(u)),
+        };
+        let credential: Option<String> = account_entity::Entity::find()
+            .select_only()
+            .column(account_entity::Column::Credential)
+            .filter(
+                sea_orm::sea_query::Condition::all()
+                    .add(account_entity::Column::Id.eq(id_value))
+                    .add(account_entity::Column::UserId.eq(user_value)),
+            )
+            .into_tuple::<Option<String>>()
+            .one(&db.orm())
+            .await
+            .map_err(|e| CryptoError::Storage(unwrap_sqlx_err(e).to_string()))?
+            .flatten();
         let credential = credential.ok_or_else(|| {
             CryptoError::Storage("mail account not found while loading credentials".into())
         })?;
@@ -112,3 +128,15 @@ impl AuthState {
 }
 
 // ── Route handlers ──────────────────────────────────────────────────
+
+/// Unwrap sea_orm's Arc-wrapped driver error (sqlx 0.9 errors are not Clone).
+fn unwrap_sqlx_err(err: sea_orm::DbErr) -> sqlx::Error {
+    use sea_orm::RuntimeErr;
+    match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}

@@ -354,14 +354,16 @@ mod tests {
         let state = create_test_state().await;
         let db = &state.db;
         let user_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-        db_execute!(
-            db,
+        let stmt = sea_orm::Statement::from_sql_and_values(
+            db.backend(),
             "INSERT INTO lyra_user (id, username, password_hash) VALUES (?, ?, ?)",
-            &id_param(db, &user_id).unwrap(),
-            "opengpg-tester",
-            "hash"
-        )
-        .unwrap();
+            [
+                id_value(db, &user_id, "user").unwrap(),
+                sea_orm::Value::from("opengpg-tester"),
+                sea_orm::Value::from("hash"),
+            ],
+        );
+        db.orm().query_one_raw(stmt).await.unwrap();
 
         let armor = gen_test_secret_armor(Some("s3cret"));
         let stored = import_armored(db, &user_id, &armor, true)

@@ -13,10 +13,15 @@ use pgp::types::{Password, VerifyingKey};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
+use sea_orm::Value;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+
 use super::keys::OpengpgError;
 use super::session::UnlockRing;
 use super::store::{StoredKey, list_keys};
 use crate::auth::AuthState;
+use crate::db_row::id_param;
+use crate::entities::attachment;
 use crate::sanitize::persist_body_html;
 use crate::storage::DbPool;
 
@@ -437,31 +442,37 @@ fn collect_unlocked_secrets(
     out
 }
 
+fn unwrap_sqlx_err(err: sea_orm::DbErr) -> sqlx::Error {
+    use sea_orm::RuntimeErr;
+    match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
 async fn load_pgpish_attachments(
     db: &DbPool,
     data_dir: &std::path::Path,
     message_id: &str,
 ) -> Result<Vec<Vec<u8>>, OpengpgError> {
-    use crate::db_row::id_param;
-    use sqlx::Row;
-
     let bind = id_param(db, message_id).map_err(|_| OpengpgError::InvalidInput("id".into()))?;
-    let rows = db_fetch_all!(
-        db,
-        r"
-        SELECT filename, content_type, storage_path
-        FROM attachment
-        WHERE message_id = ?
-        ",
-        |row| {
-            let filename: Option<String> = row.get("filename");
-            let content_type: Option<String> = row.get("content_type");
-            let storage_path: String = row.get("storage_path");
-            (filename, content_type, storage_path)
-        },
-        &bind
-    )
-    .map_err(OpengpgError::Database)?;
+    let id_value = match bind {
+        crate::db_row::IdParam::Text(s) => Value::String(Some(s)),
+        crate::db_row::IdParam::Uuid(u) => Value::Uuid(Some(u)),
+    };
+    let rows = attachment::Entity::find()
+        .select_only()
+        .column(attachment::Column::Filename)
+        .column(attachment::Column::ContentType)
+        .column(attachment::Column::StoragePath)
+        .filter(attachment::Column::MessageId.eq(id_value))
+        .into_tuple::<(Option<String>, Option<String>, String)>()
+        .all(&db.orm())
+        .await
+        .map_err(|e| OpengpgError::Database(unwrap_sqlx_err(e)))?;
 
     let mut out = Vec::new();
     for (filename, content_type, storage_path) in rows {

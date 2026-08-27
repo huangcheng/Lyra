@@ -324,7 +324,6 @@ fn sender_name_from_json(from_address: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db_row::{message_date_param, opt_json_param};
     use crate::storage::{DbPool, Storage};
 
     /// In-memory SQLite with migrations applied.
@@ -334,41 +333,70 @@ mod tests {
         storage.pool().clone()
     }
 
+    /// Dialect-aware bind for fixture ids (TEXT on SQLite / UUID on PG).
+    fn bind_id(db: &DbPool, id: &str) -> sea_orm::Value {
+        match crate::db_row::id_param(db, id).unwrap() {
+            crate::db_row::IdParam::Text(s) => sea_orm::Value::String(Some(s)),
+            crate::db_row::IdParam::Uuid(u) => sea_orm::Value::Uuid(Some(u)),
+        }
+    }
+
+    async fn exec(
+        conn: &sea_orm::DatabaseConnection,
+        db: &DbPool,
+        sql: &str,
+        values: Vec<sea_orm::Value>,
+    ) {
+        let stmt = sea_orm::Statement::from_sql_and_values(db.backend(), sql, values);
+        conn.query_one_raw(stmt).await.unwrap();
+    }
+
     /// Seed a user + account; ids are plain TEXT on SQLite.
     async fn seed_account(db: &DbPool, user_id: &str, account_id: &str) {
-        db_execute!(
+        let conn = db.orm();
+        exec(
+            &conn,
             db,
             "INSERT INTO lyra_user (id, username, password_hash) VALUES (?, ?, ?)",
-            &id_param(db, user_id).unwrap(),
-            format!("user-{user_id}"),
-            "hash"
+            vec![
+                bind_id(db, user_id),
+                format!("user-{user_id}").into(),
+                "hash".into(),
+            ],
         )
-        .unwrap();
-        db_execute!(
+        .await;
+        exec(
+            &conn,
             db,
             r"
             INSERT INTO mail_account (
                 id, user_id, email_address, protocol, auth_type, credential
             ) VALUES (?, ?, ?, 'imap', 'password', '{}')
             ",
-            &id_param(db, account_id).unwrap(),
-            &id_param(db, user_id).unwrap(),
-            format!("{user_id}@example.com")
+            vec![
+                bind_id(db, account_id),
+                bind_id(db, user_id),
+                format!("{user_id}@example.com").into(),
+            ],
         )
-        .unwrap();
+        .await;
     }
 
     async fn seed_folder(db: &DbPool, account_id: &str, folder_id: &str, role: Option<&str>) {
-        db_execute!(
+        let conn = db.orm();
+        exec(
+            &conn,
             db,
             "INSERT INTO folder (id, account_id, external_id, name, role) VALUES (?, ?, ?, ?, ?)",
-            &id_param(db, folder_id).unwrap(),
-            &id_param(db, account_id).unwrap(),
-            folder_id,
-            folder_id,
-            role
+            vec![
+                bind_id(db, folder_id),
+                bind_id(db, account_id),
+                folder_id.into(),
+                folder_id.into(),
+                role.map(str::to_string).into(),
+            ],
         )
-        .unwrap();
+        .await;
     }
 
     /// Seed one message `days_ago` days in the past.
@@ -382,21 +410,26 @@ mod tests {
         is_read: bool,
     ) {
         let date = chrono::Utc::now() - chrono::Duration::days(days_ago);
-        db_execute!(
+        let conn = db.orm();
+        exec(
+            &conn,
             db,
             r"
             INSERT INTO message (id, account_id, folder_id, external_id, from_address, date, is_read)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ",
-            &id_param(db, external_id).unwrap(),
-            &id_param(db, account_id).unwrap(),
-            &id_param(db, folder_id).unwrap(),
-            external_id,
-            opt_json_param(db, Some(from_json)),
-            message_date_param(db, Some(&date.to_rfc3339())),
-            is_read
+            vec![
+                bind_id(db, external_id),
+                bind_id(db, account_id),
+                bind_id(db, folder_id),
+                external_id.into(),
+                from_json.into(),
+                // Same UTC text the macro layer's message_date_param wrote.
+                date.format("%Y-%m-%d %H:%M:%S").to_string().into(),
+                is_read.into(),
+            ],
         )
-        .unwrap();
+        .await;
     }
 
     /// Seed the standard fixture: 3 days of inbound mail from 2 senders,

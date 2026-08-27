@@ -39,11 +39,14 @@ pub(crate) use http::{
     user_has_active_sync_job,
 };
 
-use crate::db_row::id_param;
+use sea_orm::sea_query::{Expr, Query};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Value};
+
+use crate::db_row::{IdParam, id_param};
+use crate::entities::mail_account as account_entity;
 use crate::kernel::App;
 use crate::protocol::SyncCtx;
 use crate::storage::DbPool;
-use sqlx::Row;
 
 // ── Sync orchestration ──────────────────────────────────────────────
 
@@ -57,26 +60,26 @@ pub async fn run_account_sync(
     user_id: &str,
     account_id: &str,
 ) -> Result<SyncResponse, SyncError> {
-    let row = db_fetch_optional!(
-        db,
-        r"
-        SELECT receive_protocol, protocol, is_active, sync_enabled
-        FROM mail_account
-        WHERE id = ? AND user_id = ?
-        ",
-        |row| {
-            let is_active: bool = row.get("is_active");
-            let sync_enabled: bool = row.get("sync_enabled");
-            let receive_protocol: Option<String> = row.get("receive_protocol");
-            let protocol: String = row.get("protocol");
-            (is_active, sync_enabled, receive_protocol, protocol)
-        },
-        &id_param(db, account_id)?,
-        &id_param(db, user_id)?
-    )?
-    .ok_or(SyncError::AccountNotFound)?;
+    let id_value = bind_id(db, account_id)?;
+    let user_value = bind_id(db, user_id)?;
+    let row = account_entity::Entity::find()
+        .select_only()
+        .column(account_entity::Column::ReceiveProtocol)
+        .column(account_entity::Column::Protocol)
+        .column(account_entity::Column::IsActive)
+        .column(account_entity::Column::SyncEnabled)
+        .filter(
+            sea_orm::sea_query::Condition::all()
+                .add(account_entity::Column::Id.eq(id_value.clone()))
+                .add(account_entity::Column::UserId.eq(user_value)),
+        )
+        .into_tuple::<(Option<String>, String, bool, bool)>()
+        .one(&db.orm())
+        .await
+        .map_err(|e| SyncError::Database(unpack_db_err(e)))?
+        .ok_or(SyncError::AccountNotFound)?;
 
-    let (is_active, sync_enabled, receive_protocol, protocol) = row;
+    let (receive_protocol, protocol, is_active, sync_enabled) = row;
 
     if !is_active || !sync_enabled {
         return Err(SyncError::AccountDisabled);
@@ -97,11 +100,19 @@ pub async fn run_account_sync(
         .await
         .map_err(SyncError::Protocol)?;
 
-    db_execute!(
-        db,
-        "UPDATE mail_account SET last_sync_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-        &id_param(db, account_id)?
-    )?;
+    let stmt = Query::update()
+        .table(account_entity::Entity)
+        .value(
+            account_entity::Column::LastSyncAt,
+            Expr::current_timestamp(),
+        )
+        .value(account_entity::Column::UpdatedAt, Expr::current_timestamp())
+        .and_where(account_entity::Column::Id.eq(bind_id(db, account_id)?))
+        .to_owned();
+    db.orm()
+        .execute(&stmt)
+        .await
+        .map_err(|e| SyncError::Database(unpack_db_err(e)))?;
 
     Ok(SyncResponse {
         account_id: account_id.to_string(),
@@ -115,6 +126,25 @@ pub async fn run_account_sync(
 
 // ── Tests ───────────────────────────────────────────────────────────
 
+/// Unwrap sea_orm's Arc-wrapped driver error into the SyncError seam.
+fn unpack_db_err(err: sea_orm::DbErr) -> sqlx::Error {
+    use sea_orm::RuntimeErr;
+    match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
+/// Dialect-aware id bind for sea_query filters (TEXT on SQLite / UUID on PG).
+fn bind_id(db: &DbPool, id: &str) -> Result<Value, SyncError> {
+    Ok(match id_param(db, id)? {
+        IdParam::Text(s) => Value::String(Some(s)),
+        IdParam::Uuid(u) => Value::Uuid(Some(u)),
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::store::imap_message_external_id;
