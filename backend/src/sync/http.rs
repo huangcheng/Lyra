@@ -67,6 +67,11 @@ pub fn routes() -> Router<AuthState> {
             "/api/v1/attachments/{attachment_id}/download",
             get(download_attachment),
         )
+        .route("/api/v1/drafts", post(save_draft))
+        .route(
+            "/api/v1/messages/{message_id}/draft",
+            axum::routing::delete(discard_draft),
+        )
         .route("/api/v1/messages/{message_id}/move", post(move_message))
         .route("/api/v1/messages/{message_id}/trash", post(trash_message))
         .route(
@@ -238,6 +243,7 @@ const MESSAGE_LIST_COLS: &[message::Column] = &[
     message::Column::BodyHtml,
     message::Column::IsRead,
     message::Column::IsStarred,
+    message::Column::IsDraft,
     message::Column::HasAttachments,
 ];
 
@@ -313,6 +319,7 @@ fn message_response_from_query_row(row: &QueryResult) -> Result<MessageResponse,
         body_html: row.try_get("", "body_html")?,
         is_read: row.try_get("", "is_read")?,
         is_starred: row.try_get("", "is_starred")?,
+        is_draft: row.try_get("", "is_draft")?,
         has_attachments: row.try_get("", "has_attachments")?,
         remote_content_blocked: false,
         opengpg: None,
@@ -540,6 +547,7 @@ pub struct MessageResponse {
     pub body_html: Option<String>,
     pub is_read: bool,
     pub is_starred: bool,
+    pub is_draft: bool,
     pub has_attachments: bool,
     /// True when remote images were replaced with placeholders in this response.
     pub remote_content_blocked: bool,
@@ -1261,6 +1269,8 @@ pub(crate) struct PatchMessageRequest {
 }
 
 /// Loaded message row with account/folder context for mutations.
+// Schema-mapped row: bool columns mirror the DB 1:1.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct MessageRow {
     id: String,
     account_id: String,
@@ -1273,6 +1283,8 @@ pub(crate) struct MessageRow {
     body_html: Option<String>,
     is_read: bool,
     is_starred: bool,
+    is_draft: bool,
+    folder_role: Option<String>,
     subject: Option<String>,
     from_address: Option<String>,
     to_addresses: Option<String>,
@@ -1308,6 +1320,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         body_html: row.body_html.clone(),
         is_read: row.is_read,
         is_starred: row.is_starred,
+        is_draft: row.is_draft,
         has_attachments: row.has_attachments,
         remote_content_blocked: false,
         opengpg: None,
@@ -1405,6 +1418,7 @@ const MESSAGE_LOAD_COLS: &[message::Column] = &[
     message::Column::BodyHtml,
     message::Column::IsRead,
     message::Column::IsStarred,
+    message::Column::IsDraft,
     message::Column::HasAttachments,
     message::Column::SizeBytes,
 ];
@@ -1423,6 +1437,10 @@ pub(crate) async fn load_message_row(
     }
     query
         .expr_as(Expr::cust("f.external_id"), Alias::new("folder_name"))
+        .expr_as(
+            Expr::cust("COALESCE(f.role_override, f.role)"),
+            Alias::new("folder_role"),
+        )
         .expr_as(Expr::cust("a.protocol"), Alias::new("protocol"));
     add_message_account_join(&mut query);
     add_message_folder_join(&mut query);
@@ -1450,6 +1468,8 @@ pub(crate) async fn load_message_row(
         body_html: row.try_get("", "body_html").map_err(orm_err)?,
         is_read: row.try_get("", "is_read").map_err(orm_err)?,
         is_starred: row.try_get("", "is_starred").map_err(orm_err)?,
+        is_draft: row.try_get("", "is_draft").map_err(orm_err)?,
+        folder_role: row.try_get("", "folder_role").map_err(orm_err)?,
         subject: row.try_get("", "subject").map_err(orm_err)?,
         from_address: row_json_text(&row, "from_address").map_err(orm_err)?,
         to_addresses: row_json_text(&row, "to_addresses").map_err(orm_err)?,
@@ -2058,6 +2078,377 @@ pub(crate) async fn move_message(
         "action": "moved",
         "folderId": dest_id,
     })))
+}
+
+/// POST /api/v1/drafts — create or replace a draft in the account's Drafts
+/// folder. IMAP: APPEND (+ delete-and-expunge of the replaced draft), then a
+/// targeted account sync so the appended copy gains a local row (located via
+/// the stamped Message-ID). JMAP: `Email/set` create with `$draft` (+ destroy
+/// of the replaced draft) and a direct local row upsert.
+/// Active account's address + protocol for draft operations.
+async fn draft_account_probe(
+    db: &DbPool,
+    user_id: &str,
+    account_id: &str,
+) -> Result<(String, String), SyncError> {
+    let account_value = id_value(db, account_id)?;
+    let user_value = id_value(db, user_id)?;
+    let acct = query_first(db, |q| {
+        q.expr_as(
+            Expr::col(mail_account::Column::EmailAddress),
+            Alias::new("email_address"),
+        )
+        .expr_as(
+            Expr::col(mail_account::Column::Protocol),
+            Alias::new("protocol"),
+        )
+        .from(mail_account::Entity)
+        .and_where(Expr::col(mail_account::Column::Id).eq(account_value))
+        .and_where(Expr::col(mail_account::Column::UserId).eq(user_value))
+        .and_where(Expr::col(mail_account::Column::IsActive).eq(true));
+    })
+    .await?
+    .ok_or(SyncError::AccountNotFound)?;
+    Ok((
+        acct.try_get("", "email_address").map_err(orm_err)?,
+        acct.try_get("", "protocol").map_err(orm_err)?,
+    ))
+}
+
+/// The account's drafts-role folder: `(local id, external id, name)`.
+async fn drafts_folder(
+    db: &DbPool,
+    account_id: &str,
+) -> Result<(String, Option<String>, String), SyncError> {
+    let account_value = id_value(db, account_id)?;
+    let dest = query_first(db, |q| {
+        q.expr_as(Expr::col(folder::Column::Id), Alias::new("id"))
+            .expr_as(
+                Expr::col(folder::Column::ExternalId),
+                Alias::new("external_id"),
+            )
+            .expr_as(Expr::col(folder::Column::Name), Alias::new("name"))
+            .from(folder::Entity)
+            .and_where(Expr::col(folder::Column::AccountId).eq(account_value))
+            .and_where(Expr::cust_with_values(
+                "COALESCE(role_override, role) = ?",
+                ["drafts"],
+            ))
+            .order_by_expr(Expr::col(folder::Column::SortOrder), Order::Asc)
+            .limit(1);
+    })
+    .await?
+    .ok_or_else(|| SyncError::InvalidInput("account has no Drafts folder".into()))?;
+    Ok((
+        row_id(&dest, "id").map_err(orm_err)?,
+        dest.try_get("", "external_id").map_err(orm_err)?,
+        dest.try_get("", "name").map_err(orm_err)?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SaveDraftRequest {
+    account_id: String,
+    to: Vec<serde_json::Value>,
+    #[serde(default)]
+    cc: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    bcc: Option<Vec<serde_json::Value>>,
+    subject: String,
+    body_text: Option<String>,
+    body_html: Option<String>,
+    in_reply_to: Option<String>,
+    references: Option<String>,
+    /// Local row id of the draft this save replaces (edit / re-autosave).
+    #[serde(default)]
+    existing_draft_id: Option<String>,
+}
+
+pub(crate) async fn save_draft(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<SaveDraftRequest>,
+) -> Result<Json<serde_json::Value>, SyncError> {
+    let db = state.db();
+    let (email_address, protocol) = draft_account_probe(db, &user_id, &body.account_id).await?;
+    let (dest_id, dest_external, dest_name) = drafts_folder(db, &body.account_id).await?;
+
+    // Old draft being replaced (validated: exists, owned, in a drafts folder).
+    let old = match &body.existing_draft_id {
+        Some(id) => {
+            let row = load_message_row(db, &user_id, id).await?;
+            if row.folder_role.as_deref() != Some("drafts") {
+                return Err(SyncError::InvalidInput("message is not a draft".into()));
+            }
+            Some(row)
+        }
+        None => None,
+    };
+
+    let to = crate::sync::parse_address_list(&body.to);
+    if to.is_empty() && body.subject.trim().is_empty() {
+        return Err(SyncError::InvalidInput(
+            "draft needs recipients or a subject".into(),
+        ));
+    }
+    let outbound = crate::smtp::OutboundMessage {
+        from_email: email_address,
+        from_name: None,
+        to,
+        cc: body
+            .cc
+            .as_ref()
+            .map(|v| crate::sync::parse_address_list(v))
+            .unwrap_or_default(),
+        bcc: body
+            .bcc
+            .as_ref()
+            .map(|v| crate::sync::parse_address_list(v))
+            .unwrap_or_default(),
+        subject: body.subject.clone(),
+        body_text: body.body_text.clone(),
+        body_html: body.body_html.clone(),
+        in_reply_to: body.in_reply_to.clone(),
+        references: body.references.clone(),
+        mime_content_type: None,
+        mime_body: None,
+        attachments: Vec::new(),
+        message_id: Some(format!(
+            "<lyra-draft-{}@lyra>",
+            uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext))
+        )),
+    };
+
+    match protocol.as_str() {
+        "imap" => {
+            let raw = crate::smtp::build_message(&outbound)
+                .map_err(|e| SyncError::InvalidInput(format!("draft build: {e}")))?
+                .formatted();
+            let (mut client, _) = connect_imap_for_account(db, &user_id, &body.account_id).await?;
+            client
+                .append_draft(&dest_external.clone().unwrap_or(dest_name), &raw)
+                .await?;
+            if let Some(old) = &old
+                && let Ok(uid) = parse_imap_uid(old.external_id.as_deref())
+            {
+                client.select(&old.folder_name).await?;
+                client.delete_uid(uid).await?;
+            }
+            drop(client);
+
+            if let Some(old) = &old {
+                soft_delete_message_row(db, &old.id).await?;
+                update_folder_counts(db, &old.folder_id).await?;
+            }
+            // Sync so the appended draft gains a local row; then locate it by
+            // the Message-ID we stamped. Offline accounts still return saved.
+            let _ = crate::sync::imap_sync_account(db, &user_id, &body.account_id).await;
+            let header = outbound.message_id.clone().unwrap_or_default();
+            let new_id = message_id_by_header(db, &body.account_id, &header).await?;
+            Ok(Json(serde_json::json!({
+                "status": "saved",
+                "draftMessageId": new_id,
+            })))
+        }
+        "jmap" => {
+            let client = connect_jmap_for_account(db, &user_id, &body.account_id).await?;
+            let server_id = client.create_draft(&outbound).await?;
+            if let Some(old) = &old {
+                if let Some(ext) = old.external_id.as_deref() {
+                    let _ = client.destroy_email(ext).await;
+                }
+                soft_delete_message_row(db, &old.id).await?;
+                update_folder_counts(db, &old.folder_id).await?;
+            }
+            let local_id =
+                upsert_jmap_draft_row(db, &body.account_id, &dest_id, &server_id, &outbound)
+                    .await?;
+            Ok(Json(serde_json::json!({
+                "status": "saved",
+                "draftMessageId": local_id,
+            })))
+        }
+        other => Err(SyncError::InvalidInput(format!(
+            "unsupported receive protocol: {other}"
+        ))),
+    }
+}
+
+/// DELETE /api/v1/messages/{id}/draft — discard a draft server-side + local.
+pub(crate) async fn discard_draft(
+    State(state): State<AuthState>,
+    Path(message_id): Path<String>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<serde_json::Value>, SyncError> {
+    let db = state.db();
+    let row = load_message_row(db, &user_id, &message_id).await?;
+    if row.folder_role.as_deref() != Some("drafts") {
+        return Err(SyncError::InvalidInput("message is not a draft".into()));
+    }
+
+    match row.protocol.as_str() {
+        "imap" => {
+            let uid = parse_imap_uid(row.external_id.as_deref())?;
+            let (mut client, _) = connect_imap_for_account(db, &user_id, &row.account_id).await?;
+            client.select(&row.folder_name).await?;
+            client.delete_uid(uid).await?;
+        }
+        "jmap" => {
+            let email_id = row
+                .external_id
+                .as_deref()
+                .ok_or_else(|| SyncError::InvalidInput("JMAP draft has no server id".into()))?;
+            let client = connect_jmap_for_account(db, &user_id, &row.account_id).await?;
+            client.destroy_email(email_id).await?;
+        }
+        other => {
+            return Err(SyncError::InvalidInput(format!(
+                "unsupported receive protocol: {other}"
+            )));
+        }
+    }
+
+    soft_delete_message_row(db, &row.id).await?;
+    update_folder_counts(db, &row.folder_id).await?;
+    Ok(Json(serde_json::json!({ "status": "discarded" })))
+}
+
+/// Local soft-delete of a message row.
+async fn soft_delete_message_row(db: &DbPool, message_id: &str) -> Result<(), SyncError> {
+    let mut update = Sq::update();
+    update
+        .table(message::Entity)
+        .value(message::Column::IsDeleted, true)
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, message_id)?));
+    db.orm().execute(&update).await.map_err(orm_err)?;
+    Ok(())
+}
+
+/// Newest local row for an account matching a Message-ID header.
+async fn message_id_by_header(
+    db: &DbPool,
+    account_id: &str,
+    header: &str,
+) -> Result<Option<String>, SyncError> {
+    let account_value = id_value(db, account_id)?;
+    let row = query_first(db, |q| {
+        q.expr_as(Expr::col(message::Column::Id), Alias::new("id"))
+            .from(message::Entity)
+            .and_where(Expr::col(message::Column::AccountId).eq(account_value))
+            .and_where(Expr::col(message::Column::MessageIdHeader).eq(header))
+            .and_where(not_deleted_clause())
+            .order_by_expr(Expr::col(message::Column::CreatedAt), Order::Desc)
+            .limit(1);
+    })
+    .await?;
+    match row {
+        Some(r) => Ok(Some(row_id(&r, "id").map_err(orm_err)?)),
+        None => Ok(None),
+    }
+}
+
+/// Insert a local row for a JMAP draft created via `Email/set` (the drafts
+/// loop will reconcile it on the next full sync).
+async fn upsert_jmap_draft_row(
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    server_id: &str,
+    outbound: &crate::smtp::OutboundMessage,
+) -> Result<String, SyncError> {
+    // Replace any prior local row bound to this server id.
+    let existing = message_id_by_server_id(db, account_id, server_id).await?;
+    if let Some(id) = &existing {
+        let mut update = Sq::update();
+        update
+            .table(message::Entity)
+            .value(message::Column::Subject, outbound.subject.clone())
+            .value(
+                message::Column::BodyText,
+                outbound.body_text.clone().unwrap_or_default(),
+            )
+            .value(message::Column::BodyHtml, outbound.body_html.clone())
+            .value(message::Column::UpdatedAt, now_value(db))
+            .and_where(Expr::col(message::Column::Id).eq(id_value(db, id)?));
+        db.orm().execute(&update).await.map_err(orm_err)?;
+        return Ok(id.clone());
+    }
+
+    let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+    let to_json = serde_json::to_string(
+        &outbound
+            .to
+            .iter()
+            .map(|(n, e)| match n {
+                Some(name) => serde_json::json!({"name": name, "email": e}),
+                None => serde_json::json!({"email": e}),
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| SyncError::InvalidInput(e.to_string()))?;
+    let snippet: String = outbound
+        .body_text
+        .as_deref()
+        .unwrap_or_default()
+        .chars()
+        .take(120)
+        .collect();
+
+    let mut insert = Sq::insert();
+    insert
+        .into_table(message::Entity)
+        .columns([
+            message::Column::Id,
+            message::Column::AccountId,
+            message::Column::FolderId,
+            message::Column::ExternalId,
+            message::Column::MessageIdHeader,
+            message::Column::Subject,
+            message::Column::FromAddress,
+            message::Column::ToAddresses,
+            message::Column::BodyText,
+            message::Column::Snippet,
+            message::Column::IsDraft,
+        ])
+        .values_panic(vec![
+            id_value(db, &id)?.into(),
+            id_value(db, account_id)?.into(),
+            id_value(db, folder_id)?.into(),
+            Expr::val(server_id.to_owned()),
+            Expr::val(outbound.message_id.clone().unwrap_or_default()),
+            Expr::val(outbound.subject.clone()),
+            Expr::val(serde_json::json!({"email": outbound.from_email}).to_string()),
+            Expr::val(to_json),
+            Expr::val(outbound.body_text.clone().unwrap_or_default()),
+            Expr::val(snippet),
+            true.into(),
+        ]);
+    db.orm().execute(&insert).await.map_err(orm_err)?;
+    update_folder_counts(db, folder_id).await?;
+    Ok(id)
+}
+
+async fn message_id_by_server_id(
+    db: &DbPool,
+    account_id: &str,
+    server_id: &str,
+) -> Result<Option<String>, SyncError> {
+    let account_value = id_value(db, account_id)?;
+    let row = query_first(db, |q| {
+        q.expr_as(Expr::col(message::Column::Id), Alias::new("id"))
+            .from(message::Entity)
+            .and_where(Expr::col(message::Column::AccountId).eq(account_value))
+            .and_where(Expr::col(message::Column::ExternalId).eq(server_id))
+            .and_where(not_deleted_clause())
+            .limit(1);
+    })
+    .await?;
+    match row {
+        Some(r) => Ok(Some(row_id(&r, "id").map_err(orm_err)?)),
+        None => Ok(None),
+    }
 }
 
 /// Server-side move (IMAP UID MOVE / JMAP `mailboxIds` update) plus the local

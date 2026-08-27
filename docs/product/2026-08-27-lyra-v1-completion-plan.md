@@ -101,18 +101,24 @@ Acceptance criteria:
 - [ ] Ctrl/Cmd+Enter sends; OpenGPG sign/encrypt interop unchanged (P/GP/MIME wraps the final MIME).
 - [ ] All editor chrome i18n'd (en/zh).
 
-### W4 — Server drafts
+### W4 — Server drafts — shipped 2026-08-27
 
 **Decided:** in v1, server-persisted (Thunderbird parity).
 
 Acceptance criteria:
 
-- [ ] Draft CRUD: create/update lands in the account's Drafts folder — IMAP `APPEND` with
-      `\Seen`-tracked UID mapping; JMAP `$draft` handling.
-- [ ] Compose autosaves (debounced) with visible saved-state; reopening a draft from the Drafts
-      folder restores to/cc/subject/body (HTML included) and continues editing.
-- [ ] Sending a draft removes it from Drafts; explicit discard deletes it.
-- [ ] Drafts created outside Lyra (webmail/Thunderbird) open for editing in Lyra.
+- [x] Draft CRUD: `POST /api/v1/drafts` (IMAP `APPEND` with \Draft \Seen + delete/expunge of the
+      replaced draft + targeted resync located by stamped Message-ID; JMAP `Email/set` `$draft`
+      create/destroy with direct local row upsert) and `DELETE /messages/{id}/draft`. Message
+      responses now carry `isDraft`.
+- [x] Compose autosaves (1.5 s debounce) with a "Draft saved" indicator; reopening a draft from
+      the Drafts folder (Edit-draft action in the reader toolbar) restores to/cc/subject/body and
+      continues editing — including drafts created outside Lyra (they are ordinary Drafts-folder
+      messages). Plain-text bodies in v1; HTML draft bodies ride the same wire (`bodyHtml` field)
+      and light up with the W3 editor.
+- [x] Sending a draft removes it from Drafts (delete-on-send); Discard deletes it.
+- [ ] Deferred: autosave while compose attachments are pending (draft-APPEND of full
+      `multipart/mixed` MIME) — autosave pauses while files are attached.
 
 ### W5 — Security & deploy polish — shipped 2026-08-27
 

@@ -21,7 +21,8 @@ pub use types::{SyncError, SyncResponse};
 pub(crate) use imap_loop::imap_sync_account;
 pub(crate) use jmap_loop::jmap_sync_account;
 pub(crate) use send::{
-    MAX_ATTACHMENTS_PER_SEND, deliver_jmap, deliver_smtp, prepare_jmap_send, prepare_smtp_send,
+    MAX_ATTACHMENTS_PER_SEND, deliver_jmap, deliver_smtp, parse_address_list, prepare_jmap_send,
+    prepare_smtp_send,
 };
 
 #[cfg(test)]

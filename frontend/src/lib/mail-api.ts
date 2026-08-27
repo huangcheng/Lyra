@@ -40,6 +40,7 @@ export interface ApiMessage {
   bodyHtml?: string;
   isRead: boolean;
   isStarred: boolean;
+  isDraft?: boolean;
   hasAttachments: boolean;
   attachments?: ApiAttachment[];
   remoteContentBlocked?: boolean;
@@ -150,7 +151,7 @@ export function mapApiMessage(msg: ApiMessage | Record<string, unknown>): MailMe
     bodyHtml: row.bodyHtml,
     isRead: Boolean(row.isRead),
     isStarred: Boolean(row.isStarred),
-    isDraft: false,
+    isDraft: Boolean(row.isDraft),
     hasAttachments: Boolean(row.hasAttachments),
     attachments: mapApiAttachments(row.attachments),
     remoteContentBlocked: Boolean(row.remoteContentBlocked),

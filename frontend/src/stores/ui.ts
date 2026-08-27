@@ -10,9 +10,12 @@ import type { MarkReadPolicy, SupportedLocale } from '@/types';
 
 export interface ComposeDraft {
   to: string;
+  cc?: string;
   subject: string;
   body: string;
-  mode: 'new' | 'reply' | 'forward';
+  mode: 'new' | 'reply' | 'forward' | 'draft';
+  /** Local message id of the server draft being edited (autosave replaces it). */
+  draftMessageId?: string;
   /** Forwarding carries the original's non-inline attachments (metadata). */
   forwardAttachments?: Array<{ id: string; filename?: string; contentType?: string }>;
 }

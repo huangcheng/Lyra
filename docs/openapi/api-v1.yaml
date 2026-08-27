@@ -669,6 +669,71 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
 
+  /api/v1/drafts:
+    post:
+      tags: [messages]
+      summary: Create or replace a server-side draft
+      description: >
+        IMAP: APPEND to the Drafts folder (\Draft \Seen) with a stamped
+        Message-ID, delete+expunge the replaced draft, run a targeted account
+        sync, and return the new local row id. JMAP: Email/set create with
+        $draft (destroy of the replaced draft) plus a direct local row upsert.
+        Autosave sends the same request with existingDraftId.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId, to, subject]
+              properties:
+                accountId:
+                  type: string
+                to:
+                  type: array
+                  items:
+                    type: object
+                cc:
+                  type: array
+                  items:
+                    type: object
+                bcc:
+                  type: array
+                  items:
+                    type: object
+                subject:
+                  type: string
+                bodyText:
+                  type: string
+                bodyHtml:
+                  type: string
+                inReplyTo:
+                  type: string
+                references:
+                  type: string
+                existingDraftId:
+                  type: string
+                  description: Local row id of the draft this save replaces
+      responses:
+        "200":
+          description: 'JSON `{status: saved, draftMessageId}` (id may be null when offline sync could not locate the appended copy)'
+        "400":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/messages/{message_id}/draft:
+    delete:
+      tags: [messages]
+      summary: Discard a draft (server-side delete + local soft-delete)
+      parameters:
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "200":
+          description: 'JSON `{status: discarded}`'
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
   /api/v1/folders:
     get:
       tags: [folders]

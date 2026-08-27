@@ -556,6 +556,46 @@ impl ImapClient {
     /// Move a message UID into another mailbox (RFC 6851 UID MOVE).
     ///
     /// Falls back to UID COPY + STORE \\Deleted + EXPUNGE when MOVE is not advertised.
+    /// APPEND a raw RFC 5322 draft into `mailbox` with `\Draft \Seen`.
+    pub async fn append_draft(&mut self, mailbox: &str, content: &[u8]) -> Result<(), ImapError> {
+        timed(COMMAND_TIMEOUT, async {
+            self.session
+                .append(mailbox, Some("(\\Draft \\Seen)"), None, content)
+                .await
+                .map_err(ImapError::Imap)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Mark a UID `\Deleted` and expunge it (UIDPLUS `UID EXPUNGE` when
+    /// available, mailbox-wide EXPUNGE otherwise).
+    pub async fn delete_uid(&mut self, uid: u32) -> Result<(), ImapError> {
+        timed(COMMAND_TIMEOUT, async {
+            let uid_str = uid.to_string();
+            let query = "+FLAGS (\\Deleted)".to_string();
+            let stream = self
+                .session
+                .uid_store(uid_str.clone(), query)
+                .await
+                .map_err(ImapError::Imap)?;
+            let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+            if self.capabilities.has_str("UIDPLUS") {
+                let stream = self
+                    .session
+                    .uid_expunge(&uid_str)
+                    .await
+                    .map_err(ImapError::Imap)?;
+                let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+            } else {
+                let stream = self.session.expunge().await.map_err(ImapError::Imap)?;
+                let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn move_uid(&mut self, uid: u32, destination: &str) -> Result<(), ImapError> {
         timed(COMMAND_TIMEOUT, async {
             let uid_str = uid.to_string();

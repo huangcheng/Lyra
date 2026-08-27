@@ -63,6 +63,8 @@
     "attachments": "Attachments",
     "moveToFolder": "Move to…",
     "noFolders": "No folders",
+    "editDraft": "Edit draft",
+    "draftSaved": "Draft saved",
     "addAttachment": "Attach files",
     "removeAttachment": "Remove {{name}}",
     "attachmentTooLarge": "{{name}} exceeds the 25 MB per-file attachment limit.",

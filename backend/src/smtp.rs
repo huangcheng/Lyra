@@ -177,6 +177,10 @@ pub struct OutboundMessage {
     /// body part (RFC 2046).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<OutboundAttachment>,
+    /// RFC 5322 Message-ID to stamp (drafts set this so a later sync can
+    /// locate the appended copy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 impl OutboundMessage {
@@ -381,12 +385,16 @@ fn attachment_part(att: &OutboundAttachment) -> Result<SinglePart, SmtpError> {
 }
 
 /// Build a `lettre::Message` from an `OutboundMessage`.
-fn build_message(msg: &OutboundMessage) -> Result<Message, SmtpError> {
+pub(crate) fn build_message(msg: &OutboundMessage) -> Result<Message, SmtpError> {
     let from_mailbox = Mailbox::new(msg.from_name.clone(), msg.from_email.parse()?);
 
     let mut builder = Message::builder()
         .from(from_mailbox)
         .subject(msg.subject.clone());
+
+    if let Some(ref mid) = msg.message_id {
+        builder = builder.message_id(Some(mid.clone()));
+    }
 
     // Add In-Reply-To and References for threading
     if let Some(ref irt) = msg.in_reply_to {
@@ -516,6 +524,7 @@ mod tests {
             mime_content_type: None,
             mime_body: None,
             attachments: Vec::new(),
+            message_id: None,
         };
         assert!(caps.allows_message(&msg).is_ok());
     }
@@ -538,6 +547,7 @@ mod tests {
             mime_content_type: None,
             mime_body: None,
             attachments: Vec::new(),
+            message_id: None,
         };
         assert!(msg.needs_smtputf8());
         assert!(caps.allows_message(&msg).is_err());
@@ -560,6 +570,7 @@ mod tests {
             mime_content_type: None,
             mime_body: None,
             attachments: Vec::new(),
+            message_id: None,
         };
         assert!(msg.needs_8bitmime());
         assert!(caps.allows_message(&msg).is_err());
@@ -594,6 +605,7 @@ mod tests {
             mime_content_type: None,
             mime_body: None,
             attachments: Vec::new(),
+            message_id: None,
         };
 
         let message = build_message(&msg).unwrap();
@@ -616,6 +628,7 @@ mod tests {
             mime_content_type: None,
             mime_body: None,
             attachments: Vec::new(),
+            message_id: None,
         };
 
         let message = build_message(&msg).unwrap();
@@ -641,6 +654,7 @@ mod tests {
             mime_content_type: None,
             mime_body: None,
             attachments: Vec::new(),
+            message_id: None,
         };
 
         let message = build_message(&msg).unwrap();
@@ -665,6 +679,7 @@ mod tests {
             mime_content_type: None,
             mime_body: None,
             attachments: Vec::new(),
+            message_id: None,
         };
 
         let message = build_message(&msg).unwrap();
@@ -688,6 +703,7 @@ mod tests {
             mime_content_type: None,
             mime_body: None,
             attachments: vec![att],
+            message_id: None,
         };
 
         let message = build_message(&msg).unwrap();
@@ -723,6 +739,7 @@ mod tests {
             ),
             mime_body: Some("signed payload".into()),
             attachments: vec![att],
+            message_id: None,
         };
 
         let message = build_message(&msg).unwrap();

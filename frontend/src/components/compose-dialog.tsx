@@ -70,7 +70,11 @@ export function ComposeDialog() {
   const [recipientKeyIds, setRecipientKeyIds] = useState<Record<string, string>>({});
   const [keys, setKeys] = useState<OpengpgKey[] | null>(null);
   const [files, setFiles] = useState<File[]>([]);
+  const [draftMessageId, setDraftMessageId] = useState<string | null>(null);
+  const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Last autosave payload sent — prevents re-saving unchanged drafts. */
+  const autosavePayloadRef = useRef<string | null>(null);
   /** Forward drafts load their original attachments once, not per rerender. */
   const forwardLoadedRef = useRef<unknown>(null);
 
@@ -96,7 +100,7 @@ export function ComposeDialog() {
     if (!composeOpen) return;
     setForm({
       to: composeDraft?.to ?? '',
-      cc: '',
+      cc: composeDraft?.cc ?? '',
       bcc: '',
       subject: composeDraft?.subject ?? '',
       body: composeDraft?.body ?? '',
@@ -112,6 +116,8 @@ export function ComposeDialog() {
     setRecipientKeys([]);
     setRecipientKeyIds({});
     setFiles([]);
+    setDraftMessageId(composeDraft?.draftMessageId ?? null);
+    setDraftSavedAt(null);
   }, [composeOpen, composeDraft, selectedAccountId, accounts]);
 
   // Forwarding carries the original's (non-inline) attachments: fetch bytes
@@ -194,6 +200,54 @@ export function ComposeDialog() {
     }
   }, [cryptoAllowed]);
 
+  // Debounced server autosave. Only when there is something to save, no
+  // pending attachments (multipart sends skip drafts), and not mid-send.
+  const draftDirty = form.to.trim() !== '' || form.subject.trim() !== '' || form.body.trim() !== '';
+  const autosavePayload = JSON.stringify({
+    accountId: fromAccountId,
+    to: form.to,
+    cc: form.cc,
+    subject: form.subject,
+    body: form.body,
+    draftMessageId,
+  });
+  useEffect(() => {
+    if (!composeOpen || !draftDirty || files.length > 0 || sending) return;
+    if (autosavePayloadRef.current === autosavePayload) return;
+    const timer = window.setTimeout(() => {
+      autosavePayloadRef.current = autosavePayload;
+      void (async () => {
+        try {
+          const res = await api<{ status: string; draftMessageId?: string | null }>('/drafts', {
+            method: 'POST',
+            body: JSON.stringify({
+              accountId: fromAccountId,
+              to: form.to
+                .split(',')
+                .map((x) => x.trim())
+                .filter(Boolean)
+                .map((email) => ({ email })),
+              cc: form.cc
+                .split(',')
+                .map((x) => x.trim())
+                .filter(Boolean)
+                .map((email) => ({ email })),
+              subject: form.subject,
+              bodyText: form.body,
+              existingDraftId: draftMessageId,
+            }),
+          });
+          if (res.draftMessageId) setDraftMessageId(res.draftMessageId);
+          setDraftSavedAt(Date.now());
+        } catch {
+          // Offline save failures surface on the next keystroke retry.
+        }
+      })();
+    }, 1500);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [composeOpen, autosavePayload, files.length, sending]);
+
   useEffect(() => {
     if (!composeOpen || !encryptMessage || recipientEmails.length === 0) {
       setRecipientKeys([]);
@@ -239,6 +293,16 @@ export function ComposeDialog() {
     setEncryptMessage(false);
     setAttachPublicKey(false);
     setFiles([]);
+    setDraftMessageId(null);
+    setDraftSavedAt(null);
+    autosavePayloadRef.current = null;
+  };
+
+  const handleDiscard = () => {
+    if (draftMessageId) {
+      void api(`/messages/${draftMessageId}/draft`, { method: 'DELETE' }).catch(() => {});
+    }
+    handleClose();
   };
 
   const handleSend = async () => {
@@ -301,6 +365,9 @@ export function ComposeDialog() {
         });
       }
 
+      if (draftMessageId) {
+        void api(`/messages/${draftMessageId}/draft`, { method: 'DELETE' }).catch(() => {});
+      }
       setSuccess(true);
       window.setTimeout(() => handleClose(), 1500);
     } catch (err: unknown) {
@@ -491,12 +558,15 @@ export function ComposeDialog() {
             ) : null}
           </Field>
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
+          {draftSavedAt && !success ? (
+            <p className="text-xs text-ter-foreground">{t(locale, 'mail.draftSaved')}</p>
+          ) : null}
           {success ? (
             <p className="text-sm text-muted-foreground">{t(locale, 'mail.sendSuccess')}</p>
           ) : null}
         </FieldGroup>
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={handleClose} disabled={sending}>
+          <Button type="button" variant="outline" onClick={handleDiscard} disabled={sending}>
             {t(locale, 'mail.discard')}
           </Button>
           <Button type="button" onClick={() => void handleSend()} disabled={sending}>

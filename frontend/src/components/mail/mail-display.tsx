@@ -229,6 +229,18 @@ export function MailDisplay() {
     }
   };
 
+  const handleEditDraft = () => {
+    if (!mail) return;
+    openCompose({
+      mode: 'draft',
+      to: mail.to.map((a) => a.email).join(', '),
+      cc: (mail.cc ?? []).map((a) => a.email).join(', '),
+      subject: mail.subject ?? '',
+      body: mail.bodyText ?? '',
+      draftMessageId: mail.id,
+    });
+  };
+
   const handleMoveToFolder = async (folderId: string) => {
     if (!token || !mail || busy || folderId === mail.folderId) return;
     setBusy(true);
@@ -432,6 +444,23 @@ export function MailDisplay() {
               </PopoverContent>
             </Popover>
           </Tooltip>
+          {mail?.isDraft ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={toolbarIconClass}
+                  disabled={disabled}
+                  onClick={handleEditDraft}
+                >
+                  <Reply className="h-4 w-4" />
+                  <span className="sr-only">{t(locale, 'mail.editDraft')}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t(locale, 'mail.editDraft')}</TooltipContent>
+            </Tooltip>
+          ) : null}
           <Separator orientation="vertical" className="mx-1 h-6" />
           <Tooltip>
             <Popover>

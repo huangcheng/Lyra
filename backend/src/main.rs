@@ -559,6 +559,122 @@ mod tests {
         assert_eq!(json["action"].as_str(), Some("noop"));
     }
 
+    /// A drafts-role folder + one draft-flagged message on the seeded account.
+    async fn seed_draft_message(db: &DbPool, user_id: &str) -> (String, String) {
+        let (_, folder_id, _) = seed_account_folder_message(db, user_id).await;
+        let pool = sqlite_pool(db);
+        let drafts_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let message_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let account: String = sqlx::query_scalar("SELECT account_id FROM folder WHERE id = ?")
+            .bind(&folder_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO folder (id, account_id, external_id, name, role, sort_order)              VALUES (?, ?, 'Drafts', 'Drafts', 'drafts', 1)",
+        )
+        .bind(&drafts_id)
+        .bind(&account)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO message (id, account_id, folder_id, external_id, subject, is_read, is_draft)              VALUES (?, ?, ?, '99', 'WIP draft', 0, 1)",
+        )
+        .bind(&message_id)
+        .bind(&account)
+        .bind(&drafts_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        (drafts_id, message_id)
+    }
+
+    #[tokio::test]
+    async fn http_list_marks_drafts() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (drafts_id, message_id) = seed_draft_message(&db, &user_id).await;
+
+        let (status, json) = request_json(
+            app,
+            Method::GET,
+            &format!("/api/v1/folders/{drafts_id}/messages"),
+            None,
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let messages = json.as_array().expect("message array");
+        assert_eq!(messages[0]["id"].as_str(), Some(message_id.as_str()));
+        assert_eq!(messages[0]["isDraft"].as_bool(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn http_save_draft_requires_drafts_folder() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        // Seeded account has only an Inbox folder.
+        let (account_id, _, _) = seed_account_folder_message(&db, &user_id).await;
+
+        let (status, json) = request_json(
+            app,
+            Method::POST,
+            "/api/v1/drafts",
+            Some(&serde_json::json!({
+                "accountId": account_id,
+                "to": [{"email": "bob@example.com"}],
+                "subject": "hi",
+                "bodyText": "draft body"
+            })),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap_or("").contains("Drafts"));
+    }
+
+    #[tokio::test]
+    async fn http_save_draft_rejects_non_draft_replacement() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (account_id, _, inbox_message) = seed_account_folder_message(&db, &user_id).await;
+        seed_draft_message(&db, &user_id).await; // drafts folder exists
+
+        let (status, _) = request_json(
+            app,
+            Method::POST,
+            "/api/v1/drafts",
+            Some(&serde_json::json!({
+                "accountId": account_id,
+                "to": [{"email": "bob@example.com"}],
+                "subject": "hi",
+                "bodyText": "b",
+                "existingDraftId": inbox_message
+            })),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_discard_draft_rejects_non_draft() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (_, _, inbox_message) = seed_account_folder_message(&db, &user_id).await;
+
+        let (status, _) = request_json(
+            app,
+            Method::DELETE,
+            &format!("/api/v1/messages/{inbox_message}/draft"),
+            None,
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn http_move_message_unknown_folder_is_404() {
         let (app, db) = test_app().await;

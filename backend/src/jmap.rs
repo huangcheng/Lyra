@@ -710,6 +710,66 @@ impl JmapClient {
         Ok(submission_id)
     }
 
+    /// Create a draft Email (no submission) and return its server id.
+    pub async fn create_draft(&self, outbound: &OutboundMessage) -> Result<String, JmapError> {
+        let mailboxes = self.list_mailboxes().await?;
+        let drafts_id = mailbox_id_for_role(&mailboxes, "drafts").ok_or_else(|| {
+            JmapError::InvalidResponse("no drafts mailbox on this account".into())
+        })?;
+        let email_create = build_email_create(outbound, Some(&drafts_id), &[])?;
+        let req = JmapRequest {
+            using: vec![
+                "urn:ietf:params:jmap:core".into(),
+                "urn:ietf:params:jmap:mail".into(),
+            ],
+            method_calls: vec![(
+                "Email/set".into(),
+                serde_json::json!({
+                    "accountId": self.account_id,
+                    "create": { "draft": email_create }
+                }),
+                "ds0".into(),
+            )],
+        };
+        let resp = self.send_request(&req).await?;
+        let args = take_ok_args_ref(&resp, "Email/set")?;
+        if let Some(not_created) = args.get("notCreated").and_then(|v| v.as_object())
+            && let Some(err) = not_created.get("draft")
+        {
+            return Err(jmap_set_error("Email/set", err));
+        }
+        args.pointer("/created/draft/id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| JmapError::InvalidResponse("Email/set draft create missing id".into()))
+    }
+
+    /// Destroy an Email server-side (draft cleanup after send/discard).
+    pub async fn destroy_email(&self, email_id: &str) -> Result<(), JmapError> {
+        let req = JmapRequest {
+            using: vec![
+                "urn:ietf:params:jmap:core".into(),
+                "urn:ietf:params:jmap:mail".into(),
+            ],
+            method_calls: vec![(
+                "Email/set".into(),
+                serde_json::json!({
+                    "accountId": self.account_id,
+                    "destroy": [email_id]
+                }),
+                "dd0".into(),
+            )],
+        };
+        let resp = self.send_request(&req).await?;
+        let args = take_ok_args_ref(&resp, "Email/set")?;
+        if let Some(not_destroyed) = args.get("notDestroyed").and_then(|v| v.as_object())
+            && let Some(err) = not_destroyed.get(email_id)
+        {
+            return Err(jmap_set_error("Email/set", err));
+        }
+        Ok(())
+    }
+
     /// Move an email to exactly these mailboxes: `Email/set` update of
     /// `mailboxIds` (the full map replaces all memberships, RFC 8621 §4.4).
     pub async fn set_email_mailboxes(
@@ -1598,6 +1658,7 @@ mod tests {
             mime_content_type: None,
             mime_body: None,
             attachments: Vec::new(),
+            message_id: None,
         };
         let email = build_email_create(&outbound, Some("mb-drafts"), &[]).unwrap();
         assert_eq!(email["subject"], "Hi");
@@ -1623,6 +1684,7 @@ mod tests {
             mime_content_type: None,
             mime_body: None,
             attachments: Vec::new(),
+            message_id: None,
         };
         let uploaded = vec![UploadedAttachment {
             blob_id: "blob-1".into(),

@@ -303,6 +303,7 @@ pub(crate) async fn send_message(
         mime_content_type,
         mime_body,
         attachments: files,
+        message_id: None,
     };
 
     let raw = serde_json::to_string(&outbound)
@@ -544,6 +545,7 @@ pub(crate) fn outbound_from_raw(
         mime_content_type: None,
         mime_body: None,
         attachments: Vec::new(),
+        message_id: None,
     })
 }
 

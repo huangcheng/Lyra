@@ -63,6 +63,8 @@
     "attachments": "附件",
     "moveToFolder": "移动到…",
     "noFolders": "暂无文件夹",
+    "editDraft": "编辑草稿",
+    "draftSaved": "草稿已保存",
     "addAttachment": "添加附件",
     "removeAttachment": "移除 {{name}}",
     "attachmentTooLarge": "{{name}} 超过单个附件 25 MB 的限制。",
