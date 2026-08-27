@@ -16,6 +16,8 @@ export interface MailMessage {
   accountId: string;
   folderId: string;
   threadId?: string;
+  /** RFC 5322 Message-ID — identifies cross-folder copies of one message. */
+  messageIdHeader?: string;
   subject: string;
   from: MailAddress;
   to: MailAddress[];

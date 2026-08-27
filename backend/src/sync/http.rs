@@ -226,6 +226,7 @@ const MESSAGE_LIST_COLS: &[message::Column] = &[
     message::Column::Id,
     message::Column::AccountId,
     message::Column::FolderId,
+    message::Column::MessageIdHeader,
     message::Column::Subject,
     message::Column::FromAddress,
     message::Column::ToAddresses,
@@ -293,6 +294,7 @@ fn message_response_from_query_row(row: &QueryResult) -> Result<MessageResponse,
         id: row_id(row, "id")?,
         account_id: row_id(row, "account_id")?,
         folder_id: row_id(row, "folder_id")?,
+        message_id_header: row.try_get("", "message_id_header")?,
         subject: row
             .try_get::<Option<String>>("", "subject")?
             .map(|s| crate::imap::decode_mime_header(&s)),
@@ -523,6 +525,9 @@ pub struct MessageResponse {
     pub id: String,
     pub account_id: String,
     pub folder_id: String,
+    /// RFC 5322 Message-ID — clients use it to recognize cross-folder
+    /// copies of the same message (e.g. INBOX + Archive).
+    pub message_id_header: Option<String>,
     pub subject: Option<String>,
     pub from_address: Option<String>,
     pub to_addresses: Option<String>,
@@ -1246,6 +1251,7 @@ pub(crate) struct MessageRow {
     folder_id: String,
     folder_name: String,
     external_id: Option<String>,
+    message_id_header: Option<String>,
     protocol: String,
     body_text: Option<String>,
     body_html: Option<String>,
@@ -1266,6 +1272,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         id: row.id.clone(),
         account_id: row.account_id.clone(),
         folder_id: row.folder_id.clone(),
+        message_id_header: row.message_id_header.clone(),
         subject: row.subject.as_deref().map(crate::imap::decode_mime_header),
         from_address: row
             .from_address
@@ -1370,6 +1377,7 @@ const MESSAGE_LOAD_COLS: &[message::Column] = &[
     message::Column::AccountId,
     message::Column::FolderId,
     message::Column::ExternalId,
+    message::Column::MessageIdHeader,
     message::Column::Subject,
     message::Column::FromAddress,
     message::Column::ToAddresses,
@@ -1419,6 +1427,7 @@ pub(crate) async fn load_message_row(
         folder_id: row_id(&row, "folder_id").map_err(orm_err)?,
         folder_name: row.try_get("", "folder_name").map_err(orm_err)?,
         external_id: row.try_get("", "external_id").map_err(orm_err)?,
+        message_id_header: row.try_get("", "message_id_header").map_err(orm_err)?,
         protocol: row.try_get("", "protocol").map_err(orm_err)?,
         body_text: row.try_get("", "body_text").map_err(orm_err)?,
         body_html: row.try_get("", "body_html").map_err(orm_err)?,

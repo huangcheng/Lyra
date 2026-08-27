@@ -20,6 +20,7 @@ export interface ApiMessage {
   id: string;
   accountId: string;
   folderId: string;
+  messageIdHeader?: string;
   subject?: string;
   fromAddress?: string;
   toAddresses?: string;
@@ -116,6 +117,7 @@ export function mapApiMessage(msg: ApiMessage | Record<string, unknown>): MailMe
     id: String(row.id),
     accountId: String(row.accountId),
     folderId: String(row.folderId),
+    messageIdHeader: row.messageIdHeader ?? undefined,
     subject: row.subject ?? '(no subject)',
     from: parseAddress(row.fromAddress),
     to: parseAddresses(row.toAddresses),

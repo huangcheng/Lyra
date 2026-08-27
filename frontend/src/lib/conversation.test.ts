@@ -79,4 +79,30 @@ describe('grouping', () => {
     const all = { m1: original, m2: reply, m3: msg('m3', 'Nope', '2026-08-27T00:00:00Z') };
     expect(conversationMembers(reply, all).map((m) => m.id)).toEqual(['m1', 'm2']);
   });
+
+  it('collapses cross-folder copies by Message-ID, keeping the viewed copy', () => {
+    const inboxCopy = msg('m1', 'Hi', '2026-08-25T10:00:00Z', {
+      folderId: 'inbox',
+      messageIdHeader: '<abc@x>',
+    });
+    const archiveCopy = msg('m1b', 'Hi', '2026-08-25T10:00:00Z', {
+      folderId: 'archive',
+      messageIdHeader: '<abc@x>',
+      bodyText: 'full body',
+    });
+    const reply = msg('m2', 'Re: Hi', '2026-08-26T10:00:00Z', {
+      messageIdHeader: '<def@x>',
+    });
+    const all = { m1: inboxCopy, m1b: archiveCopy, m2: reply };
+    // Selecting the inbox copy keeps it even though the archive copy has a body.
+    expect(conversationMembers(inboxCopy, all).map((m) => m.id)).toEqual(['m1', 'm2']);
+    // From the archive folder the archive copy wins instead.
+    expect(conversationMembers(archiveCopy, all).map((m) => m.id)).toEqual(['m1b', 'm2']);
+  });
+
+  it('keeps header-less copies separate', () => {
+    const a = msg('m1', 'Hi', '2026-08-25T10:00:00Z', { folderId: 'inbox' });
+    const b = msg('m2', 'Hi', '2026-08-25T10:00:00Z', { folderId: 'archive' });
+    expect(conversationMembers(a, { m1: a, m2: b })).toHaveLength(2);
+  });
 });

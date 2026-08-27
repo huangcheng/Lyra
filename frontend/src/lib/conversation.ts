@@ -78,13 +78,55 @@ export function groupIntoConversations(messages: MailMessage[]): Conversation[] 
 /**
  * All store messages belonging to the same conversation as `message`,
  * ascending by date. Always contains `message` itself.
+ *
+ * Cross-folder copies of one message (same RFC 5322 Message-ID — e.g.
+ * INBOX + Archive) collapse to a single card: prefer the copy in
+ * `preferFolderId` (the folder being viewed), then a copy that already
+ * has a body, then the newest.
  */
 export function conversationMembers(
   message: MailMessage,
   all: Record<string, MailMessage>,
 ): MailMessage[] {
   const key = conversationKeyOf(message);
-  return Object.values(all)
+  const members = Object.values(all)
     .filter((m) => conversationKeyOf(m) === key)
     .sort(byDateAsc);
+  return dedupeCopies(members, message.folderId, message.id);
+}
+
+function dedupeCopies(
+  members: MailMessage[],
+  preferFolderId: string,
+  selectedId: string,
+): MailMessage[] {
+  const byHeader = new Map<string, MailMessage[]>();
+  const singles: MailMessage[] = [];
+  for (const m of members) {
+    const header = m.messageIdHeader?.trim();
+    if (!header) {
+      singles.push(m);
+      continue;
+    }
+    const group = byHeader.get(header);
+    if (group) group.push(m);
+    else byHeader.set(header, [m]);
+  }
+  const kept: MailMessage[] = [...singles];
+  for (const group of byHeader.values()) {
+    group.sort(
+      (a, b) => scoreCopy(b, preferFolderId, selectedId) - scoreCopy(a, preferFolderId, selectedId),
+    );
+    kept.push(group[0]);
+  }
+  return kept.sort(byDateAsc);
+}
+
+function scoreCopy(m: MailMessage, preferFolderId: string, selectedId: string): number {
+  let score = 0;
+  if (m.id === selectedId) score += 8;
+  if (m.folderId === preferFolderId) score += 4;
+  if (m.bodyHtml != null || m.bodyText != null) score += 2;
+  if (m.snippet) score += 1;
+  return score;
 }
