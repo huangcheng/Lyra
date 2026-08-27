@@ -542,6 +542,34 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
 
+  /api/v1/messages/{message_id}/move:
+    post:
+      tags: [messages]
+      summary: Move a message into a folder of its own account
+      description: >
+        IMAP: UID MOVE (RFC 6851, COPY+\Deleted+EXPUNGE fallback). JMAP:
+        Email/set mailboxIds replace. Cross-account moves are rejected 400;
+        same-folder move is a 200 noop.
+      parameters:
+        - $ref: "#/components/parameters/MessageId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [folderId]
+              properties:
+                folderId:
+                  type: string
+      responses:
+        "200":
+          description: 'JSON `{status, action: moved|noop, folderId}`'
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
   /api/v1/messages/{message_id}/trash:
     post:
       tags: [messages]

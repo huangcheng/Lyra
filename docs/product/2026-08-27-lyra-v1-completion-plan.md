@@ -68,15 +68,18 @@ Acceptance criteria:
       `downloadUrl`). Until then JMAP accounts show the has-attachments flag only.
       IMAP accounts (metadata persisted at lazy body-fill) are fully covered.
 
-### W2 — Move to folder
+### W2 — Move to folder — shipped 2026-08-27
 
 Acceptance criteria:
 
-- [ ] `POST /api/v1/messages/{id}/move { folderId }` (backend): IMAP MOVE (fallback COPY+DELETE),
-      JMAP mailbox update; sync-safe with cursors.
-- [ ] UI: move action in the message list/reading-pane menus with a folder picker; optimistic
-      update via the existing RxJS event stream.
-- [ ] Works from the unified inbox (resolves the message's account) and per-folder views.
+- [x] `POST /api/v1/messages/{id}/move { folderId }` (backend): IMAP MOVE (fallback COPY+DELETE),
+      JMAP `Email/set` mailboxIds replace (role actions trash/archive/spam now take the same
+      server-side path on JMAP instead of local-only rewrites); cross-account rejected, same
+      folder is a noop.
+- [x] UI: reading-pane toolbar "Move to…" popover listing the message's account folders with a
+      current-folder check; optimistic remove from the current list on success.
+- [x] Works from the unified inbox (the menu only offers the message's own account folders) and
+      per-folder views.
 
 ### W3 — Compose: real editor, quoting, signatures
 

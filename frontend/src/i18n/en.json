@@ -61,6 +61,8 @@
     "date": "Date",
     "subject": "Subject",
     "attachments": "Attachments",
+    "moveToFolder": "Move to…",
+    "noFolders": "No folders",
     "addAttachment": "Attach files",
     "removeAttachment": "Remove {{name}}",
     "attachmentTooLarge": "{{name}} exceeds the 25 MB per-file attachment limit.",

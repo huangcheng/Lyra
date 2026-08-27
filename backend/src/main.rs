@@ -489,4 +489,90 @@ mod tests {
         let keys = json.as_array().expect("key array");
         assert!(keys.is_empty());
     }
+
+    /// A second folder on a *different* account, for cross-account rejection.
+    async fn seed_foreign_folder(db: &DbPool, user_id: &str) -> String {
+        let pool = sqlite_pool(db);
+        let account_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let folder_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        sqlx::query(
+            "INSERT INTO mail_account (id, user_id, email_address, protocol, auth_type, \
+             credential, is_active, sync_enabled) \
+             VALUES (?, ?, 'other@example.com', 'imap', 'password', 'x', 1, 1)",
+        )
+        .bind(&account_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO folder (id, account_id, external_id, name, sort_order) \
+             VALUES (?, ?, 'Archive', 'Archive', 0)",
+        )
+        .bind(&folder_id)
+        .bind(&account_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        folder_id
+    }
+
+    #[tokio::test]
+    async fn http_move_message_rejects_cross_account_folder() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (_, _, message_id) = seed_account_folder_message(&db, &user_id).await;
+        let foreign = seed_foreign_folder(&db, &user_id).await;
+
+        let (status, json) = request_json(
+            app,
+            Method::POST,
+            &format!("/api/v1/messages/{message_id}/move"),
+            Some(&serde_json::json!({ "folderId": foreign })),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("cross-account")
+        );
+    }
+
+    #[tokio::test]
+    async fn http_move_message_same_folder_is_noop() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (_, folder_id, message_id) = seed_account_folder_message(&db, &user_id).await;
+
+        let (status, json) = request_json(
+            app,
+            Method::POST,
+            &format!("/api/v1/messages/{message_id}/move"),
+            Some(&serde_json::json!({ "folderId": folder_id })),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["action"].as_str(), Some("noop"));
+    }
+
+    #[tokio::test]
+    async fn http_move_message_unknown_folder_is_404() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (_, _, message_id) = seed_account_folder_message(&db, &user_id).await;
+
+        let (status, _) = request_json(
+            app,
+            Method::POST,
+            &format!("/api/v1/messages/{message_id}/move"),
+            Some(&serde_json::json!({ "folderId": "missing-folder" })),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
 }

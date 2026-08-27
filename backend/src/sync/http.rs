@@ -67,6 +67,7 @@ pub fn routes() -> Router<AuthState> {
             "/api/v1/attachments/{attachment_id}/download",
             get(download_attachment),
         )
+        .route("/api/v1/messages/{message_id}/move", post(move_message))
         .route("/api/v1/messages/{message_id}/trash", post(trash_message))
         .route(
             "/api/v1/messages/{message_id}/archive",
@@ -1563,6 +1564,44 @@ pub(crate) async fn connect_imap_for_account(
     Ok((client, protocol))
 }
 
+/// Connect a JMAP client for an account (discover session, basic auth).
+pub(crate) async fn connect_jmap_for_account(
+    db: &DbPool,
+    user_id: &str,
+    account_id: &str,
+) -> Result<crate::jmap::JmapClient, SyncError> {
+    let (dek, credential_json) =
+        crate::auth::AuthState::get_user_dek_and_credential(db, user_id, account_id)
+            .await
+            .map_err(|e| SyncError::Crypto(e.to_string()))?;
+    let acct_value = id_value(db, account_id)?;
+    let user_value = id_value(db, user_id)?;
+
+    let row = query_first(db, |q| {
+        q.expr_as(
+            Expr::col(mail_account::Column::JmapBaseUrl),
+            Alias::new("jmap_base_url"),
+        )
+        .expr_as(
+            Expr::col(mail_account::Column::EmailAddress),
+            Alias::new("email_address"),
+        )
+        .from(mail_account::Entity)
+        .and_where(Expr::col(mail_account::Column::Id).eq(acct_value))
+        .and_where(Expr::col(mail_account::Column::UserId).eq(user_value))
+        .and_where(Expr::col(mail_account::Column::IsActive).eq(true));
+    })
+    .await?
+    .ok_or(SyncError::AccountNotFound)?;
+
+    let jmap_base_url: Option<String> = row.try_get("", "jmap_base_url").map_err(orm_err)?;
+    let email_address: String = row.try_get("", "email_address").map_err(orm_err)?;
+    let base_url = jmap_base_url
+        .ok_or_else(|| SyncError::InvalidInput("JMAP base URL not configured".into()))?;
+    let password = crate::jmap::decrypt_account_password(&credential_json, &dek)?;
+    Ok(crate::jmap::JmapClient::discover(&base_url, &email_address, &password).await?)
+}
+
 /// GET /api/v1/messages/{id} — return one message; lazily fetch IMAP body if missing.
 #[derive(Debug, Deserialize)]
 pub(crate) struct GetMessageQuery {
@@ -1946,25 +1985,9 @@ pub(crate) async fn move_message_to_role(
     let dest_id = row_id(&dest, "id").map_err(orm_err)?;
     let external_id: Option<String> = dest.try_get("", "external_id").map_err(orm_err)?;
     let name: String = dest.try_get("", "name").map_err(orm_err)?;
-    let dest_name = external_id.unwrap_or(name);
+    let dest_name = external_id.clone().unwrap_or(name);
 
-    if row.protocol == "imap" {
-        let uid = parse_imap_uid(row.external_id.as_deref())?;
-        let (mut client, _) = connect_imap_for_account(db, &user_id, &row.account_id).await?;
-        client.select(&row.folder_name).await?;
-        client.move_uid(uid, &dest_name).await?;
-    }
-
-    let mut move_update = Sq::update();
-    move_update
-        .table(message::Entity)
-        .value(message::Column::FolderId, id_value(db, &dest_id)?)
-        .value(message::Column::UpdatedAt, now_value(db))
-        .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
-    db.orm().execute(&move_update).await.map_err(orm_err)?;
-
-    update_folder_counts(db, &row.folder_id).await?;
-    update_folder_counts(db, &dest_id).await?;
+    apply_message_move(&state, &user_id, &row, &dest_id, external_id, dest_name).await?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -1972,4 +1995,117 @@ pub(crate) async fn move_message_to_role(
         "role": role,
         "folderId": dest_id,
     })))
+}
+
+/// POST /api/v1/messages/{id}/move — file a message into a chosen folder of
+/// its own account (cross-account moves are rejected).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MoveMessageRequest {
+    folder_id: String,
+}
+
+pub(crate) async fn move_message(
+    State(state): State<AuthState>,
+    Path(message_id): Path<String>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<MoveMessageRequest>,
+) -> Result<Json<serde_json::Value>, SyncError> {
+    let db = state.db();
+    let row = load_message_row(db, &user_id, &message_id).await?;
+
+    let folder_value = id_value(db, &body.folder_id)?;
+    let dest = query_first(db, |q| {
+        q.expr_as(Expr::col(folder::Column::Id), Alias::new("id"))
+            .expr_as(
+                Expr::col(folder::Column::AccountId),
+                Alias::new("account_id"),
+            )
+            .expr_as(
+                Expr::col(folder::Column::ExternalId),
+                Alias::new("external_id"),
+            )
+            .expr_as(Expr::col(folder::Column::Name), Alias::new("name"))
+            .from(folder::Entity)
+            .and_where(Expr::col(folder::Column::Id).eq(folder_value));
+    })
+    .await?
+    .ok_or(SyncError::MessageNotFound)?;
+
+    let dest_id = row_id(&dest, "id").map_err(orm_err)?;
+    let dest_account = row_id(&dest, "account_id").map_err(orm_err)?;
+    if dest_account != row.account_id {
+        return Err(SyncError::InvalidInput(
+            "cross-account moves are not supported; pick a folder of the same account".into(),
+        ));
+    }
+    if dest_id == row.folder_id {
+        return Ok(Json(serde_json::json!({
+            "status": "ok",
+            "action": "noop",
+            "folderId": dest_id,
+        })));
+    }
+
+    let external_id: Option<String> = dest.try_get("", "external_id").map_err(orm_err)?;
+    let name: String = dest.try_get("", "name").map_err(orm_err)?;
+    let dest_name = external_id.clone().unwrap_or(name);
+
+    apply_message_move(&state, &user_id, &row, &dest_id, external_id, dest_name).await?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "action": "moved",
+        "folderId": dest_id,
+    })))
+}
+
+/// Server-side move (IMAP UID MOVE / JMAP `mailboxIds` update) plus the local
+/// `folder_id` rewrite and folder count refresh. `dest_external` is the
+/// protocol-level destination id; IMAP tolerates `None` (name fallback).
+async fn apply_message_move(
+    state: &AuthState,
+    user_id: &str,
+    row: &MessageRow,
+    dest_id: &str,
+    dest_external: Option<String>,
+    dest_name: String,
+) -> Result<(), SyncError> {
+    let db = state.db();
+    match row.protocol.as_str() {
+        "imap" => {
+            let uid = parse_imap_uid(row.external_id.as_deref())?;
+            let (mut client, _) = connect_imap_for_account(db, user_id, &row.account_id).await?;
+            client.select(&row.folder_name).await?;
+            client.move_uid(uid, &dest_name).await?;
+        }
+        "jmap" => {
+            let email_id = row
+                .external_id
+                .as_deref()
+                .ok_or_else(|| SyncError::InvalidInput("JMAP message has no server id".into()))?;
+            let mailbox_id = dest_external.clone().ok_or_else(|| {
+                SyncError::InvalidInput("JMAP target folder has no server id".into())
+            })?;
+            let client = connect_jmap_for_account(db, user_id, &row.account_id).await?;
+            client.set_email_mailboxes(email_id, &[mailbox_id]).await?;
+        }
+        other => {
+            return Err(SyncError::InvalidInput(format!(
+                "unsupported receive protocol: {other}"
+            )));
+        }
+    }
+
+    let mut move_update = Sq::update();
+    move_update
+        .table(message::Entity)
+        .value(message::Column::FolderId, id_value(db, dest_id)?)
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
+    db.orm().execute(&move_update).await.map_err(orm_err)?;
+
+    update_folder_counts(db, &row.folder_id).await?;
+    update_folder_counts(db, dest_id).await?;
+    Ok(())
 }

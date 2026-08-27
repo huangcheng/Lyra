@@ -11,8 +11,10 @@ import { addDays, addHours, format, nextSaturday } from 'date-fns';
 import {
   Archive,
   ArchiveX,
+  Check,
   ChevronLeft,
   Clock,
+  FolderInput,
   Forward,
   MailOpen,
   MoreVertical,
@@ -227,6 +229,24 @@ export function MailDisplay() {
     }
   };
 
+  const handleMoveToFolder = async (folderId: string) => {
+    if (!token || !mail || busy || folderId === mail.folderId) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await api(`/messages/${mail.id}/move`, {
+        method: 'POST',
+        body: JSON.stringify({ folderId }),
+      });
+      removeMessage(mail.id);
+      setSelectedMessage(null);
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : t(locale, 'common.error'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleSnooze = async (until: Date) => {
     if (!token || !mail || busy) return;
     setBusy(true);
@@ -299,6 +319,14 @@ export function MailDisplay() {
     }
   };
 
+  const accountFolders = useMemo(
+    () =>
+      Object.values(folders)
+        .filter((f) => f.accountId === mail?.accountId)
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)),
+    [folders, mail?.accountId],
+  );
+
   const fromLabel = mail ? (mail.from.name ?? mail.from.email) : '';
   const disabled = !mail || busy;
   const toolbarIconClass =
@@ -363,6 +391,46 @@ export function MailDisplay() {
               </Button>
             </TooltipTrigger>
             <TooltipContent>{t(locale, 'mail.moveToTrash')}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <Popover>
+              <PopoverTrigger asChild>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={toolbarIconClass}
+                    disabled={disabled}
+                  >
+                    <FolderInput className="h-4 w-4" />
+                    <span className="sr-only">{t(locale, 'mail.moveToFolder')}</span>
+                  </Button>
+                </TooltipTrigger>
+              </PopoverTrigger>
+              <TooltipContent>{t(locale, 'mail.moveToFolder')}</TooltipContent>
+              <PopoverContent className="w-60 p-1" align="start">
+                <div className="max-h-72 overflow-y-auto">
+                  {accountFolders.length === 0 ? (
+                    <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                      {t(locale, 'mail.noFolders')}
+                    </p>
+                  ) : (
+                    accountFolders.map((f) => (
+                      <button
+                        key={f.id}
+                        type="button"
+                        disabled={busy || f.id === mail?.folderId}
+                        className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent disabled:opacity-40"
+                        onClick={() => void handleMoveToFolder(f.id)}
+                      >
+                        <span className="truncate">{f.name}</span>
+                        {f.id === mail?.folderId ? <Check className="size-3.5 shrink-0" /> : null}
+                      </button>
+                    ))
+                  )}
+                </div>
+              </PopoverContent>
+            </Popover>
           </Tooltip>
           <Separator orientation="vertical" className="mx-1 h-6" />
           <Tooltip>

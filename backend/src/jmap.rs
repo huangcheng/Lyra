@@ -710,6 +710,48 @@ impl JmapClient {
         Ok(submission_id)
     }
 
+    /// Move an email to exactly these mailboxes: `Email/set` update of
+    /// `mailboxIds` (the full map replaces all memberships, RFC 8621 §4.4).
+    pub async fn set_email_mailboxes(
+        &self,
+        email_id: &str,
+        mailbox_ids: &[String],
+    ) -> Result<(), JmapError> {
+        if mailbox_ids.is_empty() {
+            return Err(JmapError::InvalidResponse(
+                "move requires at least one destination mailbox".into(),
+            ));
+        }
+        let mailbox_map: serde_json::Map<String, serde_json::Value> = mailbox_ids
+            .iter()
+            .map(|id| (id.clone(), serde_json::Value::Bool(true)))
+            .collect();
+        let req = JmapRequest {
+            using: vec![
+                "urn:ietf:params:jmap:core".into(),
+                "urn:ietf:params:jmap:mail".into(),
+            ],
+            method_calls: vec![(
+                "Email/set".into(),
+                serde_json::json!({
+                    "accountId": self.account_id,
+                    "update": {
+                        email_id: { "mailboxIds": mailbox_map }
+                    }
+                }),
+                "mv0".into(),
+            )],
+        };
+        let resp = self.send_request(&req).await?;
+        let args = take_ok_args_ref(&resp, "Email/set")?;
+        if let Some(not_updated) = args.get("notUpdated").and_then(|v| v.as_object())
+            && let Some(err) = not_updated.get(email_id)
+        {
+            return Err(jmap_set_error("Email/set", err));
+        }
+        Ok(())
+    }
+
     // ── Internal helpers ────────────────────────────────────────
 
     /// Upload raw bytes via the session's `uploadUrl` (RFC 8620 blob upload)
