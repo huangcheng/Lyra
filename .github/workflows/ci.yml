@@ -79,4 +79,7 @@ jobs:
 
       - name: cargo test (ignored postgres tests)
         working-directory: backend
-        run: cargo test --bin lyra_backend -- --ignored
+        # Scoped to storage:: — the only module with #[ignore = "needs
+        # postgres"] tests. Blanket --ignored also sweeps kv::redis's live
+        # Redis roundtrip, which has no service container here.
+        run: cargo test --bin lyra_backend -- storage:: --ignored
