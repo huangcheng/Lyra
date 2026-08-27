@@ -16,6 +16,8 @@ export interface ComposeDraft {
   mode: 'new' | 'reply' | 'forward' | 'draft';
   /** Local message id of the server draft being edited (autosave replaces it). */
   draftMessageId?: string;
+  /** Initial rich-editor content (reply/forward quote, restored draft body). */
+  initialHtml?: string;
   /** Forwarding carries the original's non-inline attachments (metadata). */
   forwardAttachments?: Array<{ id: string; filename?: string; contentType?: string }>;
 }

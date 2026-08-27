@@ -57,6 +57,8 @@ pub struct Account {
     pub smtp_security: Option<String>,
     pub carddav_url: Option<String>,
     pub caldav_url: Option<String>,
+    /// Compose signature (plain text or simple HTML), prepended on reply/forward.
+    pub signature: Option<String>,
     pub is_active: bool,
     pub sync_enabled: bool,
     pub last_sync_at: Option<String>,
@@ -99,6 +101,7 @@ pub struct UpdateAccountRequest {
     pub smtp_security: Option<String>,
     pub carddav_url: Option<String>,
     pub caldav_url: Option<String>,
+    pub signature: Option<String>,
     pub is_active: Option<bool>,
     pub sync_enabled: Option<bool>,
 }
@@ -246,6 +249,7 @@ fn add_account_columns(query: &mut SelectStatement) {
         mail_account::Column::SmtpSecurity,
         mail_account::Column::CarddavUrl,
         mail_account::Column::CaldavUrl,
+        mail_account::Column::Signature,
         mail_account::Column::IsActive,
         mail_account::Column::SyncEnabled,
         mail_account::Column::LastSyncAt,
@@ -270,6 +274,7 @@ fn account_from_row(row: &QueryResult) -> Result<Account, AccountError> {
         smtp_port: row.try_get("", "smtp_port").map_err(orm_err)?,
         smtp_security: row.try_get("", "smtp_security").map_err(orm_err)?,
         carddav_url: row.try_get("", "carddav_url").map_err(orm_err)?,
+        signature: row.try_get("", "signature").map_err(orm_err)?,
         caldav_url: row.try_get("", "caldav_url").map_err(orm_err)?,
         is_active: row.try_get("", "is_active").map_err(orm_err)?,
         sync_enabled: row.try_get("", "sync_enabled").map_err(orm_err)?,
@@ -463,6 +468,7 @@ async fn create_account(
             smtp_security,
             carddav_url: None,
             caldav_url: None,
+            signature: None,
             is_active: true,
             sync_enabled: true,
             last_sync_at: None,
@@ -531,6 +537,7 @@ async fn update_account(
         || body.imap_security.is_some()
         || body.carddav_url.is_some()
         || body.caldav_url.is_some()
+        || body.signature.is_some()
         || body.smtp_host.is_some()
         || body.smtp_port.is_some()
         || body.smtp_security.is_some();
@@ -581,6 +588,9 @@ async fn update_account(
     }
     if let Some(v) = &body.caldav_url {
         updater = updater.col_expr(mail_account::Column::CaldavUrl, Expr::val(v.as_str()));
+    }
+    if let Some(v) = &body.signature {
+        updater = updater.col_expr(mail_account::Column::Signature, Expr::val(v.as_str()));
     }
     if let Some(v) = &body.smtp_host {
         updater = updater.col_expr(mail_account::Column::SmtpHost, Expr::val(v.as_str()));

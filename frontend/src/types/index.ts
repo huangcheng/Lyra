@@ -97,6 +97,8 @@ export interface MailAccount {
   emailAddress: string;
   protocol: 'jmap' | 'imap';
   isActive: boolean;
+  /** Compose signature (plain text or simple HTML). */
+  signature?: string | null;
   syncEnabled: boolean;
   lastSyncAt?: string;
 }

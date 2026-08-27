@@ -27,6 +27,8 @@ pub struct Model {
     pub smtp_auth_type: Option<String>,
     pub smtp_credential: Option<String>,
     pub auto_config_source: Option<String>,
+    /// Compose signature (plain text or simple HTML).
+    pub signature: Option<String>,
     pub carddav_url: Option<String>,
     pub caldav_url: Option<String>,
     pub is_active: bool,

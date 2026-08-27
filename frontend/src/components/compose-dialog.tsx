@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { Paperclip, X } from 'lucide-react';
+import { Paperclip, Type, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -18,8 +18,10 @@ import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { t } from '@/i18n';
+import { RichTextEditor } from '@/components/compose/rich-text-editor';
 import { api, apiBlob } from '@/lib/api-client';
 import { formatBytes } from '@/lib/attachments';
+import { htmlToText } from '@/lib/html-text';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
 import {
   listOpengpgKeys,
@@ -70,6 +72,11 @@ export function ComposeDialog() {
   const [recipientKeyIds, setRecipientKeyIds] = useState<Record<string, string>>({});
   const [keys, setKeys] = useState<OpengpgKey[] | null>(null);
   const [files, setFiles] = useState<File[]>([]);
+  /** Rich editor output (HTML); plaintext mode uses form.body instead. */
+  const [richMode, setRichMode] = useState(true);
+  const [editorHtml, setEditorHtml] = useState('');
+  const [editorKey, setEditorKey] = useState(0);
+  const [initialHtml, setInitialHtml] = useState('');
   const [draftMessageId, setDraftMessageId] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -118,6 +125,10 @@ export function ComposeDialog() {
     setFiles([]);
     setDraftMessageId(composeDraft?.draftMessageId ?? null);
     setDraftSavedAt(null);
+    setRichMode(true);
+    setEditorHtml(composeDraft?.initialHtml ?? '');
+    setInitialHtml(composeDraft?.initialHtml ?? '');
+    setEditorKey((k) => k + 1);
   }, [composeOpen, composeDraft, selectedAccountId, accounts]);
 
   // Forwarding carries the original's (non-inline) attachments: fetch bytes
@@ -208,7 +219,8 @@ export function ComposeDialog() {
     to: form.to,
     cc: form.cc,
     subject: form.subject,
-    body: form.body,
+    body: richMode ? htmlToText(editorHtml ?? '') : form.body,
+    bodyHtml: richMode ? editorHtml : undefined,
     draftMessageId,
   });
   useEffect(() => {
@@ -295,6 +307,9 @@ export function ComposeDialog() {
     setFiles([]);
     setDraftMessageId(null);
     setDraftSavedAt(null);
+    setRichMode(true);
+    setEditorHtml('');
+    setInitialHtml('');
     autosavePayloadRef.current = null;
   };
 
@@ -341,14 +356,16 @@ export function ComposeDialog() {
             }
           : undefined;
 
+      const bodyHtml = richMode ? editorHtml || null : null;
+      const bodyText = richMode ? htmlToText(editorHtml ?? '') : form.body;
       const payload = {
         accountId: fromAccountId,
         to: split(form.to),
         cc: split(form.cc),
         bcc: split(form.bcc),
         subject: form.subject,
-        bodyText: form.body,
-        bodyHtml: null,
+        bodyText,
+        bodyHtml,
         opengpg,
       };
 
@@ -431,14 +448,60 @@ export function ComposeDialog() {
             />
           </Field>
           <Field>
-            <FieldLabel htmlFor="compose-body">{t(locale, 'mail.body')}</FieldLabel>
-            <Textarea
-              id="compose-body"
-              className="min-h-40"
-              value={form.body}
-              onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))}
-              placeholder={t(locale, 'mail.bodyPlaceholder')}
-            />
+            <div className="flex items-center justify-between">
+              <FieldLabel htmlFor="compose-body">{t(locale, 'mail.body')}</FieldLabel>
+              <div className="flex items-center gap-0.5 rounded-md border border-input p-0.5">
+                <button
+                  type="button"
+                  disabled={richMode}
+                  className="rounded-[5px] px-2 py-0.5 text-[11px] font-medium disabled:bg-accent disabled:text-foreground"
+                  onClick={() => setRichMode(true)}
+                >
+                  {t(locale, 'mail.richText')}
+                </button>
+                <button
+                  type="button"
+                  disabled={!richMode}
+                  className="flex items-center gap-1 rounded-[5px] px-2 py-0.5 text-[11px] font-medium disabled:bg-accent disabled:text-foreground"
+                  onClick={() => {
+                    // Rich → plain carries the text content over.
+                    setForm((f) => ({ ...f, body: htmlToText(editorHtml ?? '') || f.body }));
+                    setRichMode(false);
+                  }}
+                >
+                  <Type className="size-3" aria-hidden />
+                  {t(locale, 'mail.plainText')}
+                </button>
+              </div>
+            </div>
+            {richMode ? (
+              <RichTextEditor
+                key={editorKey}
+                initialHtml={initialHtml}
+                onChange={setEditorHtml}
+                placeholder={t(locale, 'mail.bodyPlaceholder')}
+                onKeyDown={(e) => {
+                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    void handleSend();
+                  }
+                }}
+              />
+            ) : (
+              <Textarea
+                id="compose-body"
+                className="min-h-40"
+                value={form.body}
+                onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))}
+                onKeyDown={(e) => {
+                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    void handleSend();
+                  }
+                }}
+                placeholder={t(locale, 'mail.bodyPlaceholder')}
+              />
+            )}
           </Field>
           <Field className="gap-2">
             <div className="flex flex-wrap items-center gap-2">

@@ -39,6 +39,7 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
 import {
   Select,
@@ -65,6 +66,7 @@ interface MailAccount {
   smtpHost?: string;
   smtpPort?: number;
   smtpSecurity?: string;
+  signature?: string | null;
   isActive: boolean;
   syncEnabled: boolean;
   lastSyncAt?: string;
@@ -108,6 +110,7 @@ export function SettingsPage() {
   // Form state
   const [formData, setFormData] = useState({
     displayName: '',
+    signature: '',
     emailAddress: '',
     password: '',
     protocol: 'imap',
@@ -405,6 +408,9 @@ export function SettingsPage() {
       if (formData.password) {
         body.password = formData.password;
       }
+      if (editingAccount) {
+        body.signature = formData.signature || null;
+      }
       await api(url, {
         method,
         body: JSON.stringify(body),
@@ -476,6 +482,7 @@ export function SettingsPage() {
     setEditingAccount(account);
     setFormData({
       displayName: account.displayName,
+      signature: account.signature ?? '',
       emailAddress: account.emailAddress,
       password: '',
       protocol: account.protocol,
@@ -498,6 +505,7 @@ export function SettingsPage() {
   function resetForm() {
     setFormData({
       displayName: '',
+      signature: '',
       emailAddress: '',
       password: '',
       protocol: 'imap',
@@ -1232,6 +1240,24 @@ export function SettingsPage() {
                       }))
                     }
                     required
+                  />
+                </Field>
+
+                <Field>
+                  <FieldLabel htmlFor="settings-signature">
+                    {t(locale, 'settings.accounts.signature')}
+                  </FieldLabel>
+                  <Textarea
+                    id="settings-signature"
+                    className="min-h-24"
+                    value={formData.signature}
+                    onChange={(e) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        signature: e.target.value,
+                      }))
+                    }
+                    placeholder={t(locale, 'settings.accounts.signatureHint')}
                   />
                 </Field>
 

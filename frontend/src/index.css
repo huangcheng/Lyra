@@ -183,3 +183,43 @@
   border: 0;
   border-top: 1px solid var(--border);
 }
+
+/* ── Compose rich editor (Plate) ─────────────────────────────────── */
+
+.lyra-editor {
+  min-height: 8rem;
+  line-height: 1.6;
+}
+
+.lyra-editor blockquote {
+  margin: 0.4em 0;
+  padding-left: 0.8em;
+  border-left: 3px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.lyra-editor ul,
+.lyra-editor ol {
+  padding-left: 1.4em;
+}
+
+.lyra-editor ul {
+  list-style: disc;
+}
+
+.lyra-editor ol {
+  list-style: decimal;
+}
+
+.lyra-editor a {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.lyra-editor[data-empty='true']::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--muted-foreground);
+}

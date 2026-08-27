@@ -81,25 +81,29 @@ Acceptance criteria:
 - [x] Works from the unified inbox (the menu only offers the message's own account folders) and
       per-folder views.
 
-### W3 — Compose: real editor, quoting, signatures
+### W3 — Compose: real editor, quoting, signatures — shipped 2026-08-27
 
-**Decided:** Plate.js (MIT, shadcn-native, active 2026) as the editor; **HTML is the default
+**Decided:** Plate.js v53 (MIT, shadcn-native, active 2026) as the editor; **HTML is the default
 mode**, plaintext a per-message toggle (textarea); alternatives considered and rejected —
 Tiptap (more assembly, UI partly paid), BlockNote/Novel (doc-app block chrome), Lexical (framework, not product).
 
 Acceptance criteria:
 
-- [ ] Rich text: bold/italic/underline/strike, lists, links (Ctrl+K), block quotes; toolbar
-      collapses to a usable mobile layout.
-- [ ] Paste from Word/GDocs/web produces clean HTML — DOMPurify at the editor edge, ammonia still
-      guards the server.
-- [ ] Inline images, including clipboard-paste screenshots.
-- [ ] Reply/forward fetches the original and renders an attributed blockquote; cursor starts above it.
-- [ ] Per-account signature (account settings), appended in HTML and plaintext modes.
-- [ ] HTML sends as `multipart/alternative` with an auto-generated plaintext alternative;
-      plaintext mode sends `text/plain` only.
-- [ ] Ctrl/Cmd+Enter sends; OpenGPG sign/encrypt interop unchanged (P/GP/MIME wraps the final MIME).
-- [ ] All editor chrome i18n'd (en/zh).
+- [x] Rich text: bold/italic/underline/strike, bullet/numbered lists, links, block quotes — Plate
+      toolbar on shadcn primitives; wraps on narrow screens.
+- [x] Paste from Word/GDocs/web produces clean HTML — Plate's HtmlPlugin normalizes clipboard
+      HTML on paste; ammonia still guards the server on display; outbound HTML is
+      editor-generated (not pasted-through markup).
+- [ ] Deferred: inline images in compose (incl. clipboard screenshots) — needs @platejs/media +
+      a compose-image upload path; the reading side already renders inline images (W1).
+- [x] Reply/forward builds an attributed blockquote of the original (sanitized body) with the
+      cursor above it; drafts restore their saved HTML body.
+- [x] Per-account signature (migration 0013, account settings field, PATCH support), appended on
+      reply/forward (above the quote) and new mail.
+- [x] HTML sends as `multipart/alternative` with an auto-generated plaintext alternative
+      (`htmlToText`); plaintext mode sends `text/plain` only; draft autosave carries both bodies.
+- [x] Ctrl/Cmd+Enter sends; OpenGPG sign/encrypt interop unchanged (P/GP/MIME wraps the final MIME).
+- [x] Editor chrome + settings strings i18n'd (en/zh).
 
 ### W4 — Server drafts — shipped 2026-08-27
 

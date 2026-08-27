@@ -734,6 +734,15 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
 
+  /api/v1/accounts:
+    get:
+      tags: [accounts]
+      summary: List mail accounts
+      responses:
+        "200":
+          description: >
+            Accounts now include a nullable `signature` (compose signature,
+            plain text or simple HTML); PATCH /accounts/{id} accepts `signature`.
   /api/v1/folders:
     get:
       tags: [folders]

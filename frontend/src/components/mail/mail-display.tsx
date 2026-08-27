@@ -46,7 +46,9 @@ import { api } from '@/lib/api-client';
 import { baseSubject, conversationKeyOf, conversationMembers } from '@/lib/conversation';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
+import { forwardHtml, quotedReplyHtml, textToHtml } from '@/lib/compose-html';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
+import { sanitizeEmailHtml } from '@/lib/sanitize-email-html';
 import { useMediaQuery } from '@/lib/use-media-query';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
@@ -190,11 +192,19 @@ export function MailDisplay() {
     const to = all
       ? [mail.from.email, ...mail.to.map((a) => a.email)].filter(Boolean).join(', ')
       : mail.from.email;
+    const source = {
+      fromName: mail.from.name ?? '',
+      fromEmail: mail.from.email,
+      date: mail.date,
+      bodyHtml: mail.bodyHtml ? sanitizeEmailHtml(mail.bodyHtml) : undefined,
+      bodyText: mail.bodyText,
+    };
     openCompose({
       mode: 'reply',
       to,
       subject: mail.subject.startsWith('Re:') ? mail.subject : `Re: ${mail.subject}`,
-      body: replyText || quoteBody(mail),
+      body: quoteBody(mail),
+      initialHtml: quotedReplyHtml(source, signatureOf(mail.accountId)),
     });
   };
 
@@ -205,11 +215,19 @@ export function MailDisplay() {
     const forwardAttachments = (mail.attachments ?? [])
       .filter((a) => !a.isInline)
       .map((a) => ({ id: a.id, filename: a.filename, contentType: a.contentType }));
+    const source = {
+      fromName: mail.from.name ?? '',
+      fromEmail: mail.from.email,
+      date: mail.date,
+      bodyHtml: mail.bodyHtml ? sanitizeEmailHtml(mail.bodyHtml) : undefined,
+      bodyText: mail.bodyText,
+    };
     openCompose({
       mode: 'forward',
       to: '',
       subject: mail.subject.startsWith('Fwd:') ? mail.subject : `Fwd: ${mail.subject}`,
       body: quoteBody(mail),
+      initialHtml: forwardHtml(source, signatureOf(mail.accountId)),
       forwardAttachments: forwardAttachments.length > 0 ? forwardAttachments : undefined,
     });
   };
@@ -237,6 +255,7 @@ export function MailDisplay() {
       cc: (mail.cc ?? []).map((a) => a.email).join(', '),
       subject: mail.subject ?? '',
       body: mail.bodyText ?? '',
+      initialHtml: mail.bodyHtml ?? textToHtml(mail.bodyText ?? ''),
       draftMessageId: mail.id,
     });
   };
@@ -330,6 +349,9 @@ export function MailDisplay() {
       toggleStar(mail.id);
     }
   };
+
+  const signatureOf = (accountId: string): string | undefined =>
+    accounts.find((a) => a.id === accountId)?.signature ?? undefined;
 
   const accountFolders = useMemo(
     () =>

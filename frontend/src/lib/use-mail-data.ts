@@ -18,6 +18,7 @@ interface ApiAccount {
   protocol: string;
   isActive: boolean;
   syncEnabled: boolean;
+  signature?: string | null;
   lastSyncAt?: string;
 }
 
@@ -38,6 +39,7 @@ export function useMailData() {
         protocol: a.protocol as 'jmap' | 'imap',
         isActive: a.isActive,
         syncEnabled: a.syncEnabled,
+        signature: a.signature ?? undefined,
         lastSyncAt: a.lastSyncAt,
       }));
       setAccounts(accounts);
