@@ -138,7 +138,7 @@ Lyra/
 
 | Layer | Choice |
 |-------|--------|
-| Frontend | React, TanStack Router, shadcn mail as the product UI |
+| Frontend | React, TanStack Router, shadcn mail as the product UI; compose = Plate.js (v53) rich editor |
 | i18n | English + Chinese (zh) |
 | Client state | Zustand (data) · XState (flows) · RxJS (async / recovery) |
 | Backend | Rust + Axum |
