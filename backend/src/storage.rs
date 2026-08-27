@@ -46,6 +46,31 @@ impl DbPool {
             Self::Postgres(pool) => Ok(DbTxn::Postgres(pool.begin().await?)),
         }
     }
+
+    /// SeaORM view of this pool for entity-based repository code.
+    ///
+    /// Pools are Arc-backed so this conversion is cheap; entity queries and
+    /// the raw macro layer share the same underlying connections and pool
+    /// limits.
+    #[allow(dead_code)] // first consumed by the entities layer
+    pub fn orm(&self) -> sea_orm::DatabaseConnection {
+        match self {
+            Self::Sqlite(pool) => sea_orm::DatabaseConnection::from(pool.clone()),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(pool) => sea_orm::DatabaseConnection::from(pool.clone()),
+        }
+    }
+
+    /// SeaORM backend tag for this pool (used to build raw `Statement`s with
+    /// the correct placeholder style).
+    #[allow(dead_code)] // first consumed by the entities layer
+    pub fn backend(&self) -> sea_orm::DbBackend {
+        match self {
+            Self::Sqlite(_) => sea_orm::DbBackend::Sqlite,
+            #[cfg(feature = "postgres")]
+            Self::Postgres(_) => sea_orm::DbBackend::Postgres,
+        }
+    }
 }
 
 /// Open transaction on [`DbPool`]. Commit explicitly; drop rolls back.
@@ -113,7 +138,11 @@ impl Storage {
 
             let options = SqliteConnectOptions::from_str(path)?
                 .create_if_missing(true)
-                .foreign_keys(true); // Enforce FK constraints
+                .foreign_keys(true) // Enforce FK constraints
+                // WAL + busy timeout: SQLite allows a single writer; without
+                // these, concurrent sync jobs trip "database is locked".
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .busy_timeout(std::time::Duration::from_secs(5));
 
             let pool = SqlitePoolOptions::new()
                 .max_connections(5)
@@ -271,7 +300,9 @@ async fn run_sqlite_migrations(
         // SQLite doesn't support multi-statement execution via prepare,
         // so we need to split carefully (respecting BEGIN…END in triggers).
         for stmt in split_sql_statements(&cleaned) {
-            sqlx::query(&stmt).execute(&mut *tx).await?;
+            sqlx::query(crate::db_sql::audited_sql(stmt.as_str()))
+                .execute(&mut *tx)
+                .await?;
         }
         sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
             .bind(version)
@@ -322,7 +353,9 @@ async fn run_postgres_migrations(
         let sql = std::fs::read_to_string(&path)?;
 
         // Execute the full SQL (PostgreSQL supports multi-statement execution)
-        sqlx::raw_sql(&sql).execute(pool).await?;
+        sqlx::raw_sql(crate::db_sql::audited_sql(sql.as_str()))
+            .execute(pool)
+            .await?;
 
         // Record migration
         sqlx::query("INSERT INTO schema_migrations (version) VALUES ($1)")

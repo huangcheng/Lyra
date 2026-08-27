@@ -26,7 +26,7 @@ use zeroize::Zeroizing;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Bound for a single IMAP command / fetch collect (CHE-129).
-pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+pub const COMMAND_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Errors specific to the IMAP adapter.
 #[derive(Debug, Error)]
@@ -619,7 +619,7 @@ impl ImapClient {
             return Ok(IdleWatchOutcome::Unsupported);
         }
 
-        let renew = std::time::Duration::from_secs(25 * 60);
+        let renew = std::time::Duration::from_mins(25);
         let mut handle = self.session.idle();
         timed(COMMAND_TIMEOUT, async {
             handle.init().await.map_err(ImapError::Imap)

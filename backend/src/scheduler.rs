@@ -371,11 +371,11 @@ mod tests {
     #[test]
     fn backoff_base_follows_configured_poll_secs() {
         let mut b = Backoff::with_base_secs(60);
-        assert_eq!(b.delay("a"), Duration::from_secs(60));
+        assert_eq!(b.delay("a"), Duration::from_mins(1));
         b.fail("a");
-        assert_eq!(b.delay("a"), Duration::from_secs(120));
+        assert_eq!(b.delay("a"), Duration::from_mins(2));
         b.ok("a");
-        assert_eq!(b.delay("a"), Duration::from_secs(60));
+        assert_eq!(b.delay("a"), Duration::from_mins(1));
     }
 
     #[tokio::test]

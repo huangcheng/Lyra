@@ -52,3 +52,31 @@ jobs:
       - name: cargo test
         working-directory: backend
         run: cargo test --bin lyra_backend
+
+  test-postgres:
+    name: backend tests (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: lyra
+          POSTGRES_PASSWORD: lyra
+          POSTGRES_DB: lyra_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lyra"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      LYRA_TEST_DATABASE_URL: postgres://lyra:lyra@localhost:5432/lyra_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo test (ignored postgres tests)
+        working-directory: backend
+        run: cargo test --bin lyra_backend -- --ignored

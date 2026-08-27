@@ -43,3 +43,6 @@ backend/data/
 .superpowers/
 kimi-export-session_*.md
 frontend/-s
+
+# ZCode session artifacts
+.zcode/

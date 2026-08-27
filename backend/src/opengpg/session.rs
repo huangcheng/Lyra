@@ -46,7 +46,7 @@ pub const DEFAULT_TTL_MINUTES: u32 = 10;
 /// Max configurable TTL.
 pub const MAX_TTL_MINUTES: u32 = 120;
 /// Idle timeout before relock (all cached modes).
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
 
 struct CachedUnlock {
     passphrase: Zeroizing<String>,

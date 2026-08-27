@@ -194,7 +194,7 @@ impl Type<sqlx::Sqlite> for IdParam {
 impl<'q> Encode<'q, sqlx::Sqlite> for IdParam {
     fn encode_by_ref(
         &self,
-        buf: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'q>>,
+        buf: &mut sqlx::sqlite::SqliteArgumentsBuffer,
     ) -> Result<IsNull, BoxDynError> {
         let text = match self {
             Self::Text(s) => s.clone(),
@@ -320,7 +320,7 @@ impl Type<sqlx::Sqlite> for TsParam {
 impl<'q> Encode<'q, sqlx::Sqlite> for TsParam {
     fn encode_by_ref(
         &self,
-        buf: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'q>>,
+        buf: &mut sqlx::sqlite::SqliteArgumentsBuffer,
     ) -> Result<IsNull, BoxDynError> {
         let text = match self {
             Self::Text(s) => s.clone(),
@@ -391,7 +391,7 @@ impl Type<sqlx::Sqlite> for JsonParam {
 impl<'q> Encode<'q, sqlx::Sqlite> for JsonParam {
     fn encode_by_ref(
         &self,
-        buf: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'q>>,
+        buf: &mut sqlx::sqlite::SqliteArgumentsBuffer,
     ) -> Result<IsNull, BoxDynError> {
         let text = match self {
             Self::Text(s) => s.clone(),

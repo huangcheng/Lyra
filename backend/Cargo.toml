@@ -3,10 +3,13 @@ name = "lyra_backend"
 version = "0.1.0"
 edition = "2024"
 # Edition 2024 needs 1.85; let-chains (used in if/while) need 1.88.
-rust-version = "1.88"
+# sea-orm 2.0 (sqlx 0.9) requires 1.94.
+rust-version = "1.94"
 
 [features]
-default = ["sqlite"]
+# Backend choice is a deploy-time DATABASE_URL decision; both drivers compile
+# by default so a single binary serves either database.
+default = ["sqlite", "postgres"]
 sqlite = []
 postgres = []
 
@@ -20,7 +23,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
-sqlx = { version = "0.8", features = [
+# Raw sqlx stays for the migration runner, FTS, and raw statements; version
+# must match the one sea-orm pairs with (2.0 → sqlx 0.9).
+sqlx = { version = "0.9", features = [
     "runtime-tokio",
     "tls-rustls",
     "sqlite",
@@ -29,6 +34,15 @@ sqlx = { version = "0.8", features = [
     "chrono",
     "uuid",
     "json",
+] }
+sea-orm = { version = "2.0", features = [
+    "runtime-tokio-rustls",
+    "macros",
+    "with-chrono",
+    "with-uuid",
+    "with-json",
+    "sqlx-sqlite",
+    "sqlx-postgres",
 ] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v7", "serde"] }

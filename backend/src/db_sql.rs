@@ -291,12 +291,22 @@ fn like_keyword_at(sql: &str, i: usize) -> bool {
 }
 
 /// Execute a statement against either pool. Returns `rows_affected`.
+/// sqlx 0.9 audit marker for the macro layer.
+///
+/// Every user-supplied value reaches the database through bind parameters;
+/// the only dynamically-composed SQL fragments are constant prefixes built
+/// inside this crate (e.g. `ACCOUNT_SELECT ... WHERE` concatenation), which
+/// were audited when this seam was written.
+pub(crate) fn audited_sql(sql: &str) -> sqlx::AssertSqlSafe<&str> {
+    sqlx::AssertSqlSafe(sql)
+}
+
 #[macro_export]
 macro_rules! db_execute {
     ($db:expr, $sql:expr $(, $bind:expr)* $(,)?) => {{
         match $db {
             $crate::storage::DbPool::Sqlite(pool) => {
-                sqlx::query($sql)
+                sqlx::query($crate::db_sql::audited_sql($sql))
                     $(.bind($bind))*
                     .execute(pool)
                     .await
@@ -305,7 +315,7 @@ macro_rules! db_execute {
             #[cfg(feature = "postgres")]
             $crate::storage::DbPool::Postgres(pool) => {
                 let __sql = $crate::db_sql::to_postgres($sql);
-                sqlx::query(&__sql)
+                sqlx::query($crate::db_sql::audited_sql(&__sql))
                     $(.bind($bind))*
                     .execute(pool)
                     .await
@@ -321,7 +331,7 @@ macro_rules! db_fetch_all {
     ($db:expr, $sql:expr, |$row:ident| $map:expr $(, $bind:expr)* $(,)?) => {{
         match $db {
             $crate::storage::DbPool::Sqlite(pool) => {
-                sqlx::query($sql)
+                sqlx::query($crate::db_sql::audited_sql($sql))
                     $(.bind($bind))*
                     .fetch_all(pool)
                     .await
@@ -330,7 +340,7 @@ macro_rules! db_fetch_all {
             #[cfg(feature = "postgres")]
             $crate::storage::DbPool::Postgres(pool) => {
                 let __sql = $crate::db_sql::to_postgres($sql);
-                sqlx::query(&__sql)
+                sqlx::query($crate::db_sql::audited_sql(&__sql))
                     $(.bind($bind))*
                     .fetch_all(pool)
                     .await
@@ -346,7 +356,7 @@ macro_rules! db_fetch_optional {
     ($db:expr, $sql:expr, |$row:ident| $map:expr $(, $bind:expr)* $(,)?) => {{
         match $db {
             $crate::storage::DbPool::Sqlite(pool) => {
-                sqlx::query($sql)
+                sqlx::query($crate::db_sql::audited_sql($sql))
                     $(.bind($bind))*
                     .fetch_optional(pool)
                     .await
@@ -355,7 +365,7 @@ macro_rules! db_fetch_optional {
             #[cfg(feature = "postgres")]
             $crate::storage::DbPool::Postgres(pool) => {
                 let __sql = $crate::db_sql::to_postgres($sql);
-                sqlx::query(&__sql)
+                sqlx::query($crate::db_sql::audited_sql(&__sql))
                     $(.bind($bind))*
                     .fetch_optional(pool)
                     .await
@@ -371,7 +381,7 @@ macro_rules! db_fetch_one {
     ($db:expr, $sql:expr, |$row:ident| $map:expr $(, $bind:expr)* $(,)?) => {{
         match $db {
             $crate::storage::DbPool::Sqlite(pool) => {
-                sqlx::query($sql)
+                sqlx::query($crate::db_sql::audited_sql($sql))
                     $(.bind($bind))*
                     .fetch_one(pool)
                     .await
@@ -380,7 +390,7 @@ macro_rules! db_fetch_one {
             #[cfg(feature = "postgres")]
             $crate::storage::DbPool::Postgres(pool) => {
                 let __sql = $crate::db_sql::to_postgres($sql);
-                sqlx::query(&__sql)
+                sqlx::query($crate::db_sql::audited_sql(&__sql))
                     $(.bind($bind))*
                     .fetch_one(pool)
                     .await
@@ -396,7 +406,7 @@ macro_rules! db_scalar_optional {
     ($db:expr, $ty:ty, $sql:expr $(, $bind:expr)* $(,)?) => {{
         match $db {
             $crate::storage::DbPool::Sqlite(pool) => {
-                sqlx::query_scalar::<_, $ty>($sql)
+                sqlx::query_scalar::<_, $ty>($crate::db_sql::audited_sql($sql))
                     $(.bind($bind))*
                     .fetch_optional(pool)
                     .await
@@ -404,7 +414,7 @@ macro_rules! db_scalar_optional {
             #[cfg(feature = "postgres")]
             $crate::storage::DbPool::Postgres(pool) => {
                 let __sql = $crate::db_sql::to_postgres($sql);
-                sqlx::query_scalar::<_, $ty>(&__sql)
+                sqlx::query_scalar::<_, $ty>($crate::db_sql::audited_sql(&__sql))
                     $(.bind($bind))*
                     .fetch_optional(pool)
                     .await
@@ -419,7 +429,7 @@ macro_rules! db_scalar {
     ($db:expr, $ty:ty, $sql:expr $(, $bind:expr)* $(,)?) => {{
         match $db {
             $crate::storage::DbPool::Sqlite(pool) => {
-                sqlx::query_scalar::<_, $ty>($sql)
+                sqlx::query_scalar::<_, $ty>($crate::db_sql::audited_sql($sql))
                     $(.bind($bind))*
                     .fetch_one(pool)
                     .await
@@ -427,7 +437,7 @@ macro_rules! db_scalar {
             #[cfg(feature = "postgres")]
             $crate::storage::DbPool::Postgres(pool) => {
                 let __sql = $crate::db_sql::to_postgres($sql);
-                sqlx::query_scalar::<_, $ty>(&__sql)
+                sqlx::query_scalar::<_, $ty>($crate::db_sql::audited_sql(&__sql))
                     $(.bind($bind))*
                     .fetch_one(pool)
                     .await
@@ -442,7 +452,7 @@ macro_rules! db_id_optional {
     ($db:expr, $sql:expr $(, $bind:expr)* $(,)?) => {{
         match $db {
             $crate::storage::DbPool::Sqlite(pool) => {
-                sqlx::query_scalar::<_, String>($sql)
+                sqlx::query_scalar::<_, String>($crate::db_sql::audited_sql($sql))
                     $(.bind($bind))*
                     .fetch_optional(pool)
                     .await
@@ -450,7 +460,7 @@ macro_rules! db_id_optional {
             #[cfg(feature = "postgres")]
             $crate::storage::DbPool::Postgres(pool) => {
                 let __sql = $crate::db_sql::to_postgres($sql);
-                sqlx::query_scalar::<_, ::uuid::Uuid>(&__sql)
+                sqlx::query_scalar::<_, ::uuid::Uuid>($crate::db_sql::audited_sql(&__sql))
                     $(.bind($bind))*
                     .fetch_optional(pool)
                     .await
@@ -466,7 +476,7 @@ macro_rules! db_execute_binds {
     ($db:expr, $sql:expr, $binds:expr) => {{
         match $db {
             $crate::storage::DbPool::Sqlite(pool) => {
-                let mut query = sqlx::query($sql);
+                let mut query = sqlx::query($crate::db_sql::audited_sql($sql));
                 for value in $binds {
                     query = query.bind(value);
                 }
@@ -475,7 +485,7 @@ macro_rules! db_execute_binds {
             #[cfg(feature = "postgres")]
             $crate::storage::DbPool::Postgres(pool) => {
                 let __sql = $crate::db_sql::to_postgres($sql);
-                let mut query = sqlx::query(&__sql);
+                let mut query = sqlx::query($crate::db_sql::audited_sql(&__sql));
                 for value in $binds {
                     query = query.bind(value);
                 }
@@ -490,7 +500,7 @@ macro_rules! db_execute_binds {
 macro_rules! db_txn_execute {
     ($tx:expr, $sql:expr $(, $bind:expr)* $(,)?) => {{
         match $tx {
-            $crate::storage::DbTxn::Sqlite(tx) => sqlx::query($sql)
+            $crate::storage::DbTxn::Sqlite(tx) => sqlx::query($crate::db_sql::audited_sql($sql))
                 $(.bind($bind))*
                 .execute(&mut **tx)
                 .await
@@ -498,7 +508,7 @@ macro_rules! db_txn_execute {
             #[cfg(feature = "postgres")]
             $crate::storage::DbTxn::Postgres(tx) => {
                 let __sql = $crate::db_sql::to_postgres($sql);
-                sqlx::query(&__sql)
+                sqlx::query($crate::db_sql::audited_sql(&__sql))
                     $(.bind($bind))*
                     .execute(&mut **tx)
                     .await
@@ -514,7 +524,7 @@ macro_rules! db_txn_id_optional {
     ($tx:expr, $sql:expr $(, $bind:expr)* $(,)?) => {{
         match $tx {
             $crate::storage::DbTxn::Sqlite(tx) => {
-                sqlx::query_scalar::<_, String>($sql)
+                sqlx::query_scalar::<_, String>($crate::db_sql::audited_sql($sql))
                     $(.bind($bind))*
                     .fetch_optional(&mut **tx)
                     .await
@@ -522,7 +532,7 @@ macro_rules! db_txn_id_optional {
             #[cfg(feature = "postgres")]
             $crate::storage::DbTxn::Postgres(tx) => {
                 let __sql = $crate::db_sql::to_postgres($sql);
-                sqlx::query_scalar::<_, ::uuid::Uuid>(&__sql)
+                sqlx::query_scalar::<_, ::uuid::Uuid>($crate::db_sql::audited_sql(&__sql))
                     $(.bind($bind))*
                     .fetch_optional(&mut **tx)
                     .await
@@ -538,7 +548,7 @@ macro_rules! db_txn_scalar {
     ($tx:expr, $ty:ty, $sql:expr $(, $bind:expr)* $(,)?) => {{
         match $tx {
             $crate::storage::DbTxn::Sqlite(tx) => {
-                sqlx::query_scalar::<_, $ty>($sql)
+                sqlx::query_scalar::<_, $ty>($crate::db_sql::audited_sql($sql))
                     $(.bind($bind))*
                     .fetch_one(&mut **tx)
                     .await
@@ -546,7 +556,7 @@ macro_rules! db_txn_scalar {
             #[cfg(feature = "postgres")]
             $crate::storage::DbTxn::Postgres(tx) => {
                 let __sql = $crate::db_sql::to_postgres($sql);
-                sqlx::query_scalar::<_, $ty>(&__sql)
+                sqlx::query_scalar::<_, $ty>($crate::db_sql::audited_sql(&__sql))
                     $(.bind($bind))*
                     .fetch_one(&mut **tx)
                     .await
