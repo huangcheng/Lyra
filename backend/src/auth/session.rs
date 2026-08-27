@@ -4,10 +4,14 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
-use crate::db_row::id_param;
+use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, DerivePartialModel, EntityTrait, ExprTrait, QueryFilter};
+
+use crate::entities::lyra_user;
 use crate::kv::KvStore;
 use crate::storage::DbPool;
 
+use super::db::id_bind_value;
 use super::types::AuthError;
 use super::{PENDING_TTL_SECS, RATE_LIMIT_MAX_ATTEMPTS, RATE_LIMIT_WINDOW_SECS, SESSION_TTL_SECS};
 
@@ -114,34 +118,27 @@ pub(crate) async fn note_failed_attempt(
     Ok(())
 }
 
+/// `sess_epoch` projection — the entity column is `i32` on both dialects,
+/// which is exactly what the old per-dialect decode had to emulate.
+#[derive(DerivePartialModel)]
+#[sea_orm(entity = "lyra_user::Entity")]
+struct SessEpochRow {
+    sess_epoch: i32,
+}
+
 pub(crate) async fn fetch_sess_epoch(db: &DbPool, user_id: &str) -> Result<i64, StatusCode> {
-    let id = id_param(db, user_id).map_err(|_| StatusCode::NOT_FOUND)?;
-    let epoch: i64 = match db {
-        DbPool::Sqlite(pool) => sqlx::query_scalar("SELECT sess_epoch FROM lyra_user WHERE id = ?")
-            .bind(&id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| {
-                tracing::error!("fetch sess_epoch failed: {e}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
-            .ok_or(StatusCode::NOT_FOUND)?,
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(pool) => {
-            // PG INTEGER is INT4; sqlx i64 is INT8. Decode i32, widen.
-            let epoch: i32 = sqlx::query_scalar("SELECT sess_epoch FROM lyra_user WHERE id = $1")
-                .bind(&id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| {
-                    tracing::error!("fetch sess_epoch failed: {e}");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?
-                .ok_or(StatusCode::NOT_FOUND)?;
-            i64::from(epoch)
-        }
-    };
-    Ok(epoch)
+    let id = id_bind_value(db, user_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let row = lyra_user::Entity::find()
+        .filter(lyra_user::Column::Id.eq(id))
+        .into_partial_model::<SessEpochRow>()
+        .one(&db.orm())
+        .await
+        .map_err(|e| {
+            tracing::error!("fetch sess_epoch failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(i64::from(row.sess_epoch))
 }
 
 /// Bump `sess_epoch` and delete session keys for the previous epoch.
@@ -151,17 +148,19 @@ pub async fn invalidate_user_sessions(
     user_id: &str,
 ) -> Result<(), StatusCode> {
     let old_epoch = fetch_sess_epoch(pool, user_id).await?;
-    let id = id_param(pool, user_id).map_err(|_| StatusCode::NOT_FOUND)?;
-    // Split per dialect so we do not unify SqliteQueryResult with PgQueryResult.
-    db_execute!(
-        pool,
-        "UPDATE lyra_user SET sess_epoch = sess_epoch + 1 WHERE id = ?",
-        &id
-    )
-    .map_err(|e| {
-        tracing::error!("bump sess_epoch failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let id = id_bind_value(pool, user_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    lyra_user::Entity::update_many()
+        .col_expr(
+            lyra_user::Column::SessEpoch,
+            Expr::col((lyra_user::Entity, lyra_user::Column::SessEpoch)).add(1i32),
+        )
+        .filter(lyra_user::Column::Id.eq(id))
+        .exec(&pool.orm())
+        .await
+        .map_err(|e| {
+            tracing::error!("bump sess_epoch failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     kv.del_prefix(&format!("sess:{old_epoch}:"))
         .await

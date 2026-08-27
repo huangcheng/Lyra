@@ -2,11 +2,14 @@
 
 use zeroize::Zeroizing;
 
-use crate::crypto::{self, CryptoError};
-use crate::db_row::{id_from_row, id_param};
-use crate::storage::DbPool;
-use sqlx::Row;
+use sea_orm::sea_query::{Alias, Expr};
+use sea_orm::{ColumnTrait, DerivePartialModel, EntityTrait, ExprTrait, QueryFilter};
 
+use crate::crypto::{self, CryptoError};
+use crate::entities::{lyra_user, mail_account};
+use crate::storage::DbPool;
+
+use super::db::id_bind_value;
 use super::totp::encrypt_totp_secret;
 use super::types::AuthError;
 
@@ -53,27 +56,24 @@ pub(crate) fn install_test_master_key() {
     install_master_key(TEST_MASTER_KEY);
 }
 
+/// `encrypted_dek` projection.
+#[derive(DerivePartialModel)]
+#[sea_orm(entity = "lyra_user::Entity")]
+struct EncryptedDekRow {
+    encrypted_dek: Option<String>,
+}
+
 /// Fetch the wrapped DEK blob from `lyra_user.encrypted_dek`.
 pub(crate) async fn fetch_encrypted_dek(db: &DbPool, user_id: &str) -> Result<String, CryptoError> {
-    let id = id_param(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
-    let wrapped: Option<String> = match db {
-        DbPool::Sqlite(pool) => {
-            sqlx::query_scalar("SELECT encrypted_dek FROM lyra_user WHERE id = ?")
-                .bind(&id)
-                .fetch_optional(pool)
-                .await
-        }
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(pool) => {
-            sqlx::query_scalar("SELECT encrypted_dek FROM lyra_user WHERE id = $1")
-                .bind(&id)
-                .fetch_optional(pool)
-                .await
-        }
-    }
-    .map_err(|e| CryptoError::Storage(e.to_string()))?
-    .flatten();
-    wrapped.ok_or(CryptoError::MissingDek)
+    let id = id_bind_value(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
+    let row = lyra_user::Entity::find()
+        .filter(lyra_user::Column::Id.eq(id))
+        .into_partial_model::<EncryptedDekRow>()
+        .one(&db.orm())
+        .await
+        .map_err(|e| CryptoError::Storage(e.to_string()))?;
+    row.and_then(|r| r.encrypted_dek)
+        .ok_or(CryptoError::MissingDek)
 }
 
 /// Persist a wrapped DEK only when the user exists and has none yet.
@@ -82,15 +82,16 @@ async fn store_wrapped_dek_if_missing(
     user_id: &str,
     wrapped: &str,
 ) -> Result<u64, CryptoError> {
-    let id = id_param(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
-    db_execute!(
-        db,
-        "UPDATE lyra_user SET encrypted_dek = ?, updated_at = datetime('now') \
-         WHERE id = ? AND encrypted_dek IS NULL",
-        wrapped,
-        &id
-    )
-    .map_err(|e| CryptoError::Storage(e.to_string()))
+    let id = id_bind_value(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
+    let result = lyra_user::Entity::update_many()
+        .col_expr(lyra_user::Column::EncryptedDek, Expr::val(wrapped))
+        .col_expr(lyra_user::Column::UpdatedAt, Expr::current_timestamp())
+        .filter(lyra_user::Column::Id.eq(id))
+        .filter(lyra_user::Column::EncryptedDek.is_null())
+        .exec(&db.orm())
+        .await
+        .map_err(|e| CryptoError::Storage(e.to_string()))?;
+    Ok(result.rows_affected)
 }
 
 /// Mint a DEK for a pre-hierarchy user and re-encrypt secrets that still use
@@ -135,18 +136,29 @@ async fn rotate_legacy_secrets(db: &DbPool, user_id: &str, dek: &[u8]) -> Result
     Ok(())
 }
 
+/// `mail_account` credential projection with the id read as text.
+#[derive(DerivePartialModel)]
+#[sea_orm(entity = "mail_account::Entity")]
+struct AccountCredentialRow {
+    #[sea_orm(
+        from_expr = "Expr::col((mail_account::Entity, mail_account::Column::Id)).cast_as(Alias::new(\"text\"))"
+    )]
+    id: String,
+    credential: String,
+}
+
 async fn fetch_account_credentials(
     db: &DbPool,
     user_id: &str,
 ) -> Result<Vec<(String, String)>, CryptoError> {
-    let id = id_param(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
-    db_fetch_all!(
-        db,
-        "SELECT id, credential FROM mail_account WHERE user_id = ?",
-        |row| (id_from_row(row, "id"), row.get::<String, _>("credential")),
-        &id
-    )
-    .map_err(|e| CryptoError::Storage(e.to_string()))
+    let user = id_bind_value(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
+    let rows = mail_account::Entity::find()
+        .filter(mail_account::Column::UserId.eq(user))
+        .into_partial_model::<AccountCredentialRow>()
+        .all(&db.orm())
+        .await
+        .map_err(|e| CryptoError::Storage(e.to_string()))?;
+    Ok(rows.into_iter().map(|r| (r.id, r.credential)).collect())
 }
 
 async fn update_account_credential(
@@ -154,15 +166,22 @@ async fn update_account_credential(
     account_id: &str,
     credential: &str,
 ) -> Result<(), CryptoError> {
-    let id = id_param(db, account_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
-    db_execute!(
-        db,
-        "UPDATE mail_account SET credential = ?, updated_at = datetime('now') WHERE id = ?",
-        credential,
-        &id
-    )
-    .map_err(|e| CryptoError::Storage(e.to_string()))?;
+    let id = id_bind_value(db, account_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
+    mail_account::Entity::update_many()
+        .col_expr(mail_account::Column::Credential, Expr::val(credential))
+        .col_expr(mail_account::Column::UpdatedAt, Expr::current_timestamp())
+        .filter(mail_account::Column::Id.eq(id))
+        .exec(&db.orm())
+        .await
+        .map_err(|e| CryptoError::Storage(e.to_string()))?;
     Ok(())
+}
+
+/// `totp_secret` projection.
+#[derive(DerivePartialModel)]
+#[sea_orm(entity = "lyra_user::Entity")]
+struct TotpSecretRow {
+    totp_secret: Option<String>,
 }
 
 async fn rotate_legacy_totp_secret(
@@ -171,15 +190,14 @@ async fn rotate_legacy_totp_secret(
     dek: &[u8],
     master: &[u8],
 ) -> Result<(), CryptoError> {
-    let id = id_param(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
-    let stored: Option<Option<String>> = db_scalar_optional!(
-        db,
-        Option<String>,
-        "SELECT totp_secret FROM lyra_user WHERE id = ?",
-        &id
-    )
-    .map_err(|e| CryptoError::Storage(e.to_string()))?;
-    let Some(stored) = stored.flatten() else {
+    let id = id_bind_value(db, user_id).map_err(|e| CryptoError::Storage(e.to_string()))?;
+    let row = lyra_user::Entity::find()
+        .filter(lyra_user::Column::Id.eq(id.clone()))
+        .into_partial_model::<TotpSecretRow>()
+        .one(&db.orm())
+        .await
+        .map_err(|e| CryptoError::Storage(e.to_string()))?;
+    let Some(stored) = row.and_then(|r| r.totp_secret) else {
         return Ok(());
     };
     let plaintext = if let Ok(blob) = serde_json::from_str::<crypto::EncryptedCredential>(&stored) {
@@ -191,13 +209,12 @@ async fn rotate_legacy_totp_secret(
         Zeroizing::new(stored)
     };
     let rotated = encrypt_totp_secret(dek, &plaintext)?;
-    db_execute!(
-        db,
-        "UPDATE lyra_user SET totp_secret = ? WHERE id = ?",
-        &rotated,
-        &id
-    )
-    .map_err(|e| CryptoError::Storage(e.to_string()))?;
+    lyra_user::Entity::update_many()
+        .col_expr(lyra_user::Column::TotpSecret, Expr::val(rotated))
+        .filter(lyra_user::Column::Id.eq(id))
+        .exec(&db.orm())
+        .await
+        .map_err(|e| CryptoError::Storage(e.to_string()))?;
     Ok(())
 }
 

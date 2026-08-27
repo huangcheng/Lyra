@@ -8,11 +8,13 @@ use axum::{
     extract::{Query, State},
     routing::get,
 };
+use sea_orm::sea_query::{Alias, Expr, JoinType, Order, Query as Sq, SelectStatement};
+use sea_orm::{ConnectionTrait, Value};
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 
 use crate::auth::{AuthState, AuthUser};
-use crate::db_row::{IdParam, TsParam, id_param, json_text_from_row};
+use crate::db_row::{IdParam, id_param};
+use crate::entities::{folder, mail_account, message};
 use crate::privacy::sender_email_from_json;
 use crate::storage::DbPool;
 use crate::sync::SyncError;
@@ -84,6 +86,41 @@ pub(crate) async fn message_stats(
     Ok(Json(response))
 }
 
+/// Unwrap the driver error SeaORM wraps so `SyncError::Database` keeps
+/// reporting the underlying `sqlx::Error`; non-driver SeaORM errors become
+/// `sqlx::Error::Protocol` with the original message.
+fn orm_err(err: sea_orm::DbErr) -> SyncError {
+    use sea_orm::RuntimeErr;
+    let sqlx_err = match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    };
+    SyncError::Database(sqlx_err)
+}
+
+/// Dialect-aware bind for a UUID-column value: TEXT on SQLite, native UUID on
+/// Postgres — the same duality `IdParam` implements for the macro layer.
+fn id_value(db: &DbPool, id: &str) -> Result<Value, SyncError> {
+    Ok(match id_param(db, id)? {
+        IdParam::Text(s) => Value::String(Some(s)),
+        IdParam::Uuid(u) => Value::Uuid(Some(u)),
+    })
+}
+
+/// Dialect-aware bind for the window cutoff: SQLite stores `message.date` as
+/// `YYYY-MM-DD HH:MM:SS` text (lexicographic == chronological); Postgres
+/// compares TIMESTAMPTZ natively.
+fn cutoff_value(db: &DbPool, cutoff: chrono::DateTime<chrono::Utc>) -> Value {
+    match db {
+        DbPool::Sqlite(_) => Value::String(Some(cutoff.format("%Y-%m-%d %H:%M:%S").to_string())),
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => Value::ChronoDateTimeUtc(Some(cutoff)),
+    }
+}
+
 /// Aggregate daily received counts, top senders, and totals for a user.
 ///
 /// "Received" excludes sent/drafts folders and soft-deleted rows; `sent`
@@ -94,15 +131,43 @@ pub(crate) async fn query_message_stats(
     user_id: &str,
     days: i64,
 ) -> Result<MessageStatsResponse, SyncError> {
-    let user_bind = id_param(db, user_id)?;
-    let cutoff = TsParam::from_utc(db, chrono::Utc::now() - chrono::Duration::days(days));
+    let user = id_value(db, user_id)?;
+    let cutoff = cutoff_value(db, chrono::Utc::now() - chrono::Duration::days(days));
 
     Ok(MessageStatsResponse {
         days,
-        daily: query_daily(db, &user_bind, &cutoff).await?,
-        top_senders: query_top_senders(db, &user_bind, &cutoff).await?,
-        totals: query_totals(db, &user_bind, &cutoff).await?,
+        daily: query_daily(db, &user, &cutoff).await?,
+        top_senders: query_top_senders(db, &user, &cutoff).await?,
+        totals: query_totals(db, &user, &cutoff).await?,
     })
+}
+
+/// `message → folder → mail_account` joins shared by every aggregate.
+fn add_message_joins(query: &mut SelectStatement) {
+    query
+        .from_as(message::Entity, Alias::new("m"))
+        .join_as(
+            JoinType::InnerJoin,
+            folder::Entity,
+            Alias::new("f"),
+            Expr::cust("m.folder_id = f.id"),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            mail_account::Entity,
+            Alias::new("a"),
+            Expr::cust("m.account_id = a.id"),
+        );
+}
+
+/// Window scope: owned by `user`, not soft-deleted, dated, within `cutoff`.
+fn add_window_scope(query: &mut SelectStatement, user: &Value, cutoff: &Value) {
+    add_message_joins(query);
+    query
+        .and_where(Expr::cust_with_values("a.user_id = ?", [user.clone()]))
+        .and_where(Expr::cust_with_values("m.is_deleted = ?", [false]))
+        .and_where(Expr::cust("m.date IS NOT NULL"))
+        .and_where(Expr::cust_with_values("m.date >= ?", [cutoff.clone()]));
 }
 
 /// Per-day received counts over the window, ascending by date.
@@ -113,67 +178,65 @@ pub(crate) async fn query_message_stats(
 /// to `TIME ZONE UTC` at connect (see `storage.rs`).
 async fn query_daily(
     db: &DbPool,
-    user_bind: &IdParam,
-    cutoff: &TsParam,
+    user: &Value,
+    cutoff: &Value,
 ) -> Result<Vec<DailyCount>, SyncError> {
-    db_fetch_all!(
-        db,
-        r"
-        SELECT CAST(date(m.date) AS TEXT) AS d, COUNT(*) AS c
-        FROM message m
-        JOIN folder f ON m.folder_id = f.id
-        JOIN mail_account a ON m.account_id = a.id
-        WHERE a.user_id = ?
-          AND m.is_deleted = ?
-          AND m.date IS NOT NULL
-          AND m.date >= ?
-          AND (f.role IS NULL OR f.role NOT IN ('sent', 'drafts'))
-        GROUP BY d
-        ORDER BY d
-        ",
-        |row| DailyCount {
-            date: row.get("d"),
-            received: row.get("c"),
-        },
-        user_bind,
-        false,
-        cutoff
-    )
-    .map_err(SyncError::from)
+    let mut query = Sq::select();
+    query
+        .expr_as(Expr::cust("CAST(date(m.date) AS TEXT)"), Alias::new("d"))
+        .expr_as(Expr::cust("COUNT(*)"), Alias::new("c"));
+    add_window_scope(&mut query, user, cutoff);
+    query
+        .and_where(Expr::cust(
+            "(f.role IS NULL OR f.role NOT IN ('sent', 'drafts'))",
+        ))
+        .add_group_by([Expr::cust("CAST(date(m.date) AS TEXT)")])
+        .order_by_expr(Expr::cust("d"), Order::Asc);
+
+    let rows = db.orm().query_all(&query).await.map_err(orm_err)?;
+    rows.iter()
+        .map(|row| {
+            Ok(DailyCount {
+                date: row.try_get("", "d").map_err(orm_err)?,
+                received: row.try_get("", "c").map_err(orm_err)?,
+            })
+        })
+        .collect()
 }
 
 /// Top 5 senders by received count over the window.
 ///
-/// Groups by the raw JSON address object so the decode seam
-/// (`json_text_from_row`) handles TEXT vs JSONB; name/email extraction
-/// happens in Rust.
+/// Groups by the raw JSON address object (TEXT on SQLite, JSONB on
+/// Postgres — both decode as `serde_json::Value` through the entity layer);
+/// name/email extraction happens in Rust.
 async fn query_top_senders(
     db: &DbPool,
-    user_bind: &IdParam,
-    cutoff: &TsParam,
+    user: &Value,
+    cutoff: &Value,
 ) -> Result<Vec<SenderCount>, SyncError> {
-    let rows = db_fetch_all!(
-        db,
-        r"
-        SELECT m.from_address AS fa, COUNT(*) AS c
-        FROM message m
-        JOIN folder f ON m.folder_id = f.id
-        JOIN mail_account a ON m.account_id = a.id
-        WHERE a.user_id = ?
-          AND m.is_deleted = ?
-          AND m.date IS NOT NULL
-          AND m.date >= ?
-          AND (f.role IS NULL OR f.role NOT IN ('sent', 'drafts'))
-          AND m.from_address IS NOT NULL
-        GROUP BY m.from_address
-        ORDER BY c DESC
-        LIMIT 5
-        ",
-        |row| (json_text_from_row(row, "fa"), row.get::<i64, _>("c")),
-        user_bind,
-        false,
-        cutoff
-    )?;
+    let mut query = Sq::select();
+    query
+        .expr_as(Expr::cust("m.from_address"), Alias::new("fa"))
+        .expr_as(Expr::cust("COUNT(*)"), Alias::new("c"));
+    add_window_scope(&mut query, user, cutoff);
+    query
+        .and_where(Expr::cust(
+            "(f.role IS NULL OR f.role NOT IN ('sent', 'drafts'))",
+        ))
+        .and_where(Expr::cust("m.from_address IS NOT NULL"))
+        .add_group_by([Expr::cust("m.from_address")])
+        .order_by_expr(Expr::cust("c"), Order::Desc)
+        .limit(5);
+
+    let rows = db.orm().query_all(&query).await.map_err(orm_err)?;
+    let rows = rows
+        .iter()
+        .map(|row| {
+            let from_json: Option<serde_json::Value> = row.try_get("", "fa").map_err(orm_err)?;
+            let count: i64 = row.try_get("", "c").map_err(orm_err)?;
+            Ok((from_json.map(|v| v.to_string()), count))
+        })
+        .collect::<Result<Vec<_>, SyncError>>()?;
 
     Ok(rows
         .into_iter()
@@ -188,70 +251,59 @@ async fn query_top_senders(
         .collect())
 }
 
-/// Window totals for received/sent plus the current unread inbox snapshot.
-async fn query_totals(
+/// `SELECT COUNT(*)` with the caller's scope applied.
+async fn count_rows(
     db: &DbPool,
-    user_bind: &IdParam,
-    cutoff: &TsParam,
-) -> Result<StatsTotals, SyncError> {
-    let received = db_scalar!(
-        db,
-        i64,
-        r"
-        SELECT COUNT(*)
-        FROM message m
-        JOIN folder f ON m.folder_id = f.id
-        JOIN mail_account a ON m.account_id = a.id
-        WHERE a.user_id = ?
-          AND m.is_deleted = ?
-          AND m.date IS NOT NULL
-          AND m.date >= ?
-          AND (f.role IS NULL OR f.role NOT IN ('sent', 'drafts'))
-        ",
-        user_bind,
-        false,
-        cutoff
-    )?;
+    build: impl FnOnce(&mut SelectStatement),
+) -> Result<i64, SyncError> {
+    let mut query = Sq::select();
+    query.expr_as(Expr::cust("COUNT(*)"), Alias::new("c"));
+    build(&mut query);
+    let row = db
+        .orm()
+        .query_one(&query)
+        .await
+        .map_err(orm_err)?
+        .ok_or_else(|| SyncError::Internal("count query returned no rows".into()))?;
+    row.try_get::<i64>("", "c").map_err(orm_err)
+}
 
-    let sent = db_scalar!(
-        db,
-        i64,
-        r"
-        SELECT COUNT(*)
-        FROM message m
-        JOIN folder f ON m.folder_id = f.id
-        JOIN mail_account a ON m.account_id = a.id
-        WHERE a.user_id = ?
-          AND m.is_deleted = ?
-          AND m.date IS NOT NULL
-          AND m.date >= ?
-          AND f.role = 'sent'
-        ",
-        user_bind,
-        false,
-        cutoff
-    )?;
+/// Window totals for received/sent plus the current unread inbox snapshot.
+async fn query_totals(db: &DbPool, user: &Value, cutoff: &Value) -> Result<StatsTotals, SyncError> {
+    let received = count_rows(db, |query| {
+        add_window_scope(query, user, cutoff);
+        query.and_where(Expr::cust(
+            "(f.role IS NULL OR f.role NOT IN ('sent', 'drafts'))",
+        ));
+    })
+    .await?;
+
+    let sent = count_rows(db, |query| {
+        add_window_scope(query, user, cutoff);
+        query.and_where(Expr::cust("f.role = 'sent'"));
+    })
+    .await?;
 
     // Unread snapshot: inbox role, read flag unset, not deleted, not snoozed —
-    // the same visibility filters the /messages list handlers apply.
-    let unread = db_scalar!(
-        db,
-        i64,
-        r"
-        SELECT COUNT(*)
-        FROM message m
-        JOIN folder f ON m.folder_id = f.id
-        JOIN mail_account a ON m.account_id = a.id
-        WHERE a.user_id = ?
-          AND f.role = 'inbox'
-          AND m.is_read = ?
-          AND m.is_deleted = ?
-          AND (m.snoozed_until IS NULL OR m.snoozed_until <= datetime('now'))
-        ",
-        user_bind,
-        false,
-        false
-    )?;
+    // the same visibility filters the /messages list handlers apply. The
+    // "now" comparison is the one genuine dialect branch: SQLite writes
+    // `datetime('now')` text, Postgres uses NOW().
+    let now_expr = match db {
+        DbPool::Sqlite(_) => "datetime('now')",
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => "NOW()",
+    };
+    let unread = count_rows(db, |query| {
+        add_message_joins(query);
+        let snooze_cmp = format!("(m.snoozed_until IS NULL OR m.snoozed_until <= {now_expr})");
+        query
+            .and_where(Expr::cust_with_values("a.user_id = ?", [user.clone()]))
+            .and_where(Expr::cust("f.role = 'inbox'"))
+            .and_where(Expr::cust_with_values("m.is_read = ?", [false]))
+            .and_where(Expr::cust_with_values("m.is_deleted = ?", [false]))
+            .and_where(Expr::cust(snooze_cmp));
+    })
+    .await?;
 
     Ok(StatsTotals {
         received,

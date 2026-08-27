@@ -9,10 +9,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sqlx::Row;
+use sea_orm::sea_query::Query;
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder};
 use tokio::sync::Mutex;
 
-use crate::db_row::id_from_row;
+use crate::entities::{jobs, mail_account};
 use crate::jobs::{JobPayload, enqueue};
 use crate::storage::DbPool;
 
@@ -112,6 +113,31 @@ struct ActiveAccount {
     user_id: String,
 }
 
+/// Unwrap the driver error SeaORM wraps so this module keeps reporting
+/// `sqlx::Error` (SeaORM errors that are not driver errors become
+/// `sqlx::Error::Protocol` with the original message).
+fn orm_err(err: sea_orm::DbErr) -> sqlx::Error {
+    use sea_orm::RuntimeErr;
+    match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
+/// Decode a UUID/TEXT id column: `String` on SQLite, native UUID on Postgres.
+fn row_id(row: &sea_orm::QueryResult, col: &str) -> Result<String, sqlx::Error> {
+    if let Some(s) = row.try_get::<Option<String>>("", col).ok().flatten() {
+        return Ok(s);
+    }
+    row.try_get::<Option<uuid::Uuid>>("", col)
+        .map_err(orm_err)?
+        .map(|u| u.to_string())
+        .ok_or_else(|| sqlx::Error::Protocol(format!("missing id column {col}")))
+}
+
 /// One poll pass: enqueue `SyncAccount` for due active accounts not already queued.
 ///
 /// Returns how many jobs were enqueued.
@@ -148,19 +174,23 @@ pub async fn poll_tick(db: &DbPool, backoff: &mut Backoff) -> Result<usize, sqlx
 }
 
 async fn list_active_accounts(db: &DbPool) -> Result<Vec<ActiveAccount>, sqlx::Error> {
-    db_fetch_all!(
-        db,
-        r"
-        SELECT id, user_id FROM mail_account
-        WHERE is_active = ? AND sync_enabled = ?
-        ",
-        |row| ActiveAccount {
-            id: id_from_row(row, "id"),
-            user_id: id_from_row(row, "user_id"),
-        },
-        true,
-        true
-    )
+    let mut query = Query::select();
+    query
+        .column(mail_account::Column::Id)
+        .column(mail_account::Column::UserId)
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::IsActive.eq(true))
+        .and_where(mail_account::Column::SyncEnabled.eq(true));
+
+    let rows = db.orm().query_all(&query).await.map_err(orm_err)?;
+    let mut accounts = Vec::with_capacity(rows.len());
+    for row in &rows {
+        accounts.push(ActiveAccount {
+            id: row_id(row, "id")?,
+            user_id: row_id(row, "user_id")?,
+        });
+    }
+    Ok(accounts)
 }
 
 /// Id of a pending/running `sync_account` job for this account, if any.
@@ -168,21 +198,15 @@ pub async fn pending_or_running_sync_job_id(
     db: &DbPool,
     account_id: &str,
 ) -> Result<Option<String>, sqlx::Error> {
-    let rows = db_fetch_all!(
-        db,
-        r"
-        SELECT id, payload FROM jobs
-        WHERE kind = 'sync_account' AND status IN ('pending', 'running')
-        ",
-        |row| {
-            let id: String = row.get("id");
-            let payload_json: String = row.get("payload");
-            (id, payload_json)
-        }
-    )?;
+    let rows = jobs::Entity::find()
+        .filter(jobs::Column::Kind.eq("sync_account"))
+        .filter(jobs::Column::Status.is_in(["pending", "running"]))
+        .all(&db.orm())
+        .await
+        .map_err(orm_err)?;
 
-    for (id, payload_json) in rows {
-        let Ok(payload) = serde_json::from_str::<JobPayload>(&payload_json) else {
+    for job in rows {
+        let Ok(payload) = serde_json::from_str::<JobPayload>(&job.payload) else {
             continue;
         };
         if let JobPayload::SyncAccount {
@@ -190,7 +214,7 @@ pub async fn pending_or_running_sync_job_id(
         } = payload
             && aid == account_id
         {
-            return Ok(Some(id));
+            return Ok(Some(job.id));
         }
     }
     Ok(None)
@@ -211,23 +235,17 @@ async fn latest_terminal_sync(
     db: &DbPool,
     account_id: &str,
 ) -> Result<Option<(String, String)>, sqlx::Error> {
-    let rows = db_fetch_all!(
-        db,
-        r"
-        SELECT id, payload, status FROM jobs
-        WHERE kind = 'sync_account' AND status IN ('completed', 'failed')
-        ORDER BY updated_at DESC, created_at DESC
-        ",
-        |row| {
-            let id: String = row.get("id");
-            let payload_json: String = row.get("payload");
-            let status: String = row.get("status");
-            (id, payload_json, status)
-        }
-    )?;
+    let rows = jobs::Entity::find()
+        .filter(jobs::Column::Kind.eq("sync_account"))
+        .filter(jobs::Column::Status.is_in(["completed", "failed"]))
+        .order_by_desc(jobs::Column::UpdatedAt)
+        .order_by_desc(jobs::Column::CreatedAt)
+        .all(&db.orm())
+        .await
+        .map_err(orm_err)?;
 
-    for (job_id, payload_json, status) in rows {
-        let Ok(payload) = serde_json::from_str::<JobPayload>(&payload_json) else {
+    for job in rows {
+        let Ok(payload) = serde_json::from_str::<JobPayload>(&job.payload) else {
             continue;
         };
         if let JobPayload::SyncAccount {
@@ -235,7 +253,7 @@ async fn latest_terminal_sync(
         } = payload
             && aid == account_id
         {
-            return Ok(Some((job_id, status)));
+            return Ok(Some((job.id, job.status)));
         }
     }
     Ok(None)

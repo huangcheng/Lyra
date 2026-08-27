@@ -11,8 +11,11 @@ use super::microsoft::{MsOAuthConfig, MsOAuthError, refresh_access_token as refr
 use super::yandex::{YandexOAuthConfig, refresh_access_token as refresh_yandex};
 use crate::accounts::{is_microsoft_mail_host, is_yandex_mail_host};
 use crate::crypto::{self, EncryptedCredential};
-use crate::db_row::id_param;
+use crate::db_row::InvalidIdError;
+use crate::entities::mail_account;
 use crate::storage::DbPool;
+use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, DerivePartialModel, EntityTrait, QueryFilter, Value};
 
 /// Refresh when the access token expires within this window.
 const REFRESH_SKEW_SECS: i64 = 120;
@@ -115,22 +118,42 @@ fn decrypt_password(credential_json: &str, dek: &[u8]) -> Result<Zeroizing<Strin
     Ok(Zeroizing::new(s))
 }
 
+/// Bind an account id for the UUID-typed `mail_account` PK: TEXT on SQLite
+/// (legacy id storage), native UUID on Postgres — the same split
+/// `db_row::id_param` makes for the macro layer.
+pub(super) fn account_id_value(db: &DbPool, id: &str) -> Result<Value, InvalidIdError> {
+    match db {
+        DbPool::Sqlite(_) => Ok(Value::String(Some(id.to_owned()))),
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => Ok(Value::Uuid(Some(
+            uuid::Uuid::parse_str(id).map_err(|_| InvalidIdError)?,
+        ))),
+    }
+}
+
 /// Persist an updated (refreshed) credential blob.
 pub async fn update_account_credential(
     db: &DbPool,
     account_id: &str,
     credential_json: &str,
 ) -> Result<(), MsOAuthError> {
-    let id = id_param(db, account_id)
+    let id = account_id_value(db, account_id)
         .map_err(|_| MsOAuthError::Internal("invalid account id".into()))?;
-    db_execute!(
-        db,
-        "UPDATE mail_account SET credential = ?, updated_at = datetime('now') WHERE id = ?",
-        credential_json,
-        &id
-    )
-    .map_err(|e| MsOAuthError::Internal(format!("update credential: {e}")))?;
+    mail_account::Entity::update_many()
+        .col_expr(mail_account::Column::Credential, Expr::val(credential_json))
+        .col_expr(mail_account::Column::UpdatedAt, Expr::current_timestamp())
+        .filter(mail_account::Column::Id.eq(id))
+        .exec(&db.orm())
+        .await
+        .map_err(|e| MsOAuthError::Internal(format!("update credential: {e}")))?;
     Ok(())
+}
+
+/// `mail_account` credential projection.
+#[derive(DerivePartialModel)]
+#[sea_orm(entity = "mail_account::Entity")]
+struct CredentialRow {
+    credential: String,
 }
 
 /// Re-read the stored credential blob (single-flight re-check).
@@ -138,16 +161,15 @@ async fn load_credential_blob(
     db: &DbPool,
     account_id: &str,
 ) -> Result<Option<String>, MsOAuthError> {
-    let id = id_param(db, account_id)
+    let id = account_id_value(db, account_id)
         .map_err(|_| MsOAuthError::Internal("invalid account id".into()))?;
-    let row = db_scalar_optional!(
-        db,
-        String,
-        "SELECT credential FROM mail_account WHERE id = ?",
-        &id
-    )
-    .map_err(|e| MsOAuthError::Internal(format!("load credential: {e}")))?;
-    Ok(row)
+    let row = mail_account::Entity::find()
+        .filter(mail_account::Column::Id.eq(id))
+        .into_partial_model::<CredentialRow>()
+        .one(&db.orm())
+        .await
+        .map_err(|e| MsOAuthError::Internal(format!("load credential: {e}")))?;
+    Ok(row.map(|r| r.credential))
 }
 
 /// Decrypt account credential; refresh OAuth access token when near expiry.

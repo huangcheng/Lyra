@@ -15,14 +15,18 @@ use super::microsoft::{
     exchange_code as exchange_microsoft_code, generate_pkce, generate_state,
 };
 use super::providers::{self, MICROSOFT, MailServerDefaults, YANDEX};
-use super::tokens::{OAuthTokenSet, encrypt_oauth_tokens};
+use super::tokens::{OAuthTokenSet, account_id_value, encrypt_oauth_tokens};
 use super::yandex::{
     build_authorize_url as build_yandex_authorize_url, exchange_code as exchange_yandex_code,
 };
 use crate::api_error::ApiErrorBody;
 use crate::auth::{AuthState, AuthUser};
-use crate::db_row::id_param;
+use crate::entities::mail_account;
 use crate::storage::DbPool;
+use sea_orm::sea_query::{Alias, Expr, Func, InsertStatement};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DerivePartialModel, EntityTrait, ExprTrait, QueryFilter,
+};
 
 const PENDING_TTL_SECS: u64 = 600;
 
@@ -279,61 +283,92 @@ async fn persist_oauth_account(
     credential: &str,
     servers: &MailServerDefaults,
 ) -> Result<bool, MsOAuthError> {
-    let user_bind = id_param(db, user_id).map_err(|_| MsOAuthError::Internal("user id".into()))?;
+    let user =
+        account_id_value(db, user_id).map_err(|_| MsOAuthError::Internal("user id".into()))?;
 
     if let Some(existing) = find_oauth_account(db, user_id, email).await? {
-        db_execute!(
-            db,
-            r"
-            UPDATE mail_account SET
-                credential = ?, auth_type = 'oauth2',
-                imap_host = ?, imap_port = ?, imap_security = 'tls',
-                smtp_host = ?, smtp_port = ?, smtp_security = ?,
-                protocol = 'imap', receive_protocol = 'imap', send_protocol = 'smtp',
-                is_active = 1, sync_enabled = 1,
-                updated_at = datetime('now')
-            WHERE id = ?
-            ",
-            credential,
-            servers.imap_host,
-            servers.imap_port,
-            servers.smtp_host,
-            servers.smtp_port,
-            servers.smtp_security,
-            &id_param(db, &existing).map_err(|_| MsOAuthError::Internal("existing id".into()))?
-        )
-        .map_err(|e| MsOAuthError::Internal(e.to_string()))?;
+        let id = account_id_value(db, &existing)
+            .map_err(|_| MsOAuthError::Internal("existing id".into()))?;
+        mail_account::Entity::update_many()
+            .col_expr(mail_account::Column::Credential, Expr::val(credential))
+            .col_expr(mail_account::Column::AuthType, Expr::val("oauth2"))
+            .col_expr(mail_account::Column::ImapHost, Expr::val(servers.imap_host))
+            .col_expr(mail_account::Column::ImapPort, Expr::val(servers.imap_port))
+            .col_expr(mail_account::Column::ImapSecurity, Expr::val("tls"))
+            .col_expr(mail_account::Column::SmtpHost, Expr::val(servers.smtp_host))
+            .col_expr(mail_account::Column::SmtpPort, Expr::val(servers.smtp_port))
+            .col_expr(
+                mail_account::Column::SmtpSecurity,
+                Expr::val(servers.smtp_security),
+            )
+            .col_expr(mail_account::Column::Protocol, Expr::val("imap"))
+            .col_expr(mail_account::Column::ReceiveProtocol, Expr::val("imap"))
+            .col_expr(mail_account::Column::SendProtocol, Expr::val("smtp"))
+            .col_expr(mail_account::Column::IsActive, Expr::val(true))
+            .col_expr(mail_account::Column::SyncEnabled, Expr::val(true))
+            .col_expr(mail_account::Column::UpdatedAt, Expr::current_timestamp())
+            .filter(mail_account::Column::Id.eq(id))
+            .exec(&db.orm())
+            .await
+            .map_err(|e| MsOAuthError::Internal(e.to_string()))?;
         return Ok(true);
     }
 
     let account_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-    let id_bind =
-        id_param(db, &account_id).map_err(|_| MsOAuthError::Internal("account id".into()))?;
+    let id = account_id_value(db, &account_id)
+        .map_err(|_| MsOAuthError::Internal("account id".into()))?;
     let display = email.split('@').next().unwrap_or("Mail").to_string();
 
-    db_execute!(
-        db,
-        r"
-        INSERT INTO mail_account (
-            id, user_id, display_name, email_address, protocol, auth_type,
-            credential, imap_host, imap_port, imap_security,
-            smtp_host, smtp_port, smtp_security,
-            receive_protocol, send_protocol,
-            is_active, sync_enabled
-        ) VALUES (?, ?, ?, ?, 'imap', 'oauth2', ?, ?, ?, 'tls', ?, ?, ?, 'imap', 'smtp', 1, 1)
-        ",
-        &id_bind,
-        &user_bind,
-        &display,
-        email,
-        credential,
-        servers.imap_host,
-        servers.imap_port,
-        servers.smtp_host,
-        servers.smtp_port,
-        servers.smtp_security
-    )
-    .map_err(|e| MsOAuthError::Internal(e.to_string()))?;
+    // Column-level insert (not an ActiveModel): the entity PK is `Uuid`,
+    // while SQLite rows carry legacy TEXT ids that only a raw value can
+    // express. Columns and table come from the entity, so the statement
+    // cannot drift from the schema.
+    let insert = InsertStatement::new()
+        .into_table(mail_account::Entity)
+        .columns([
+            mail_account::Column::Id,
+            mail_account::Column::UserId,
+            mail_account::Column::DisplayName,
+            mail_account::Column::EmailAddress,
+            mail_account::Column::Protocol,
+            mail_account::Column::AuthType,
+            mail_account::Column::Credential,
+            mail_account::Column::ImapHost,
+            mail_account::Column::ImapPort,
+            mail_account::Column::ImapSecurity,
+            mail_account::Column::SmtpHost,
+            mail_account::Column::SmtpPort,
+            mail_account::Column::SmtpSecurity,
+            mail_account::Column::ReceiveProtocol,
+            mail_account::Column::SendProtocol,
+            mail_account::Column::IsActive,
+            mail_account::Column::SyncEnabled,
+        ])
+        .values([
+            Expr::val(id),
+            Expr::val(user),
+            Expr::val(display),
+            Expr::val(email),
+            Expr::val("imap"),
+            Expr::val("oauth2"),
+            Expr::val(credential),
+            Expr::val(servers.imap_host),
+            Expr::val(servers.imap_port),
+            Expr::val("tls"),
+            Expr::val(servers.smtp_host),
+            Expr::val(servers.smtp_port),
+            Expr::val(servers.smtp_security),
+            Expr::val("imap"),
+            Expr::val("smtp"),
+            Expr::val(true),
+            Expr::val(true),
+        ])
+        .map_err(|e| MsOAuthError::Internal(e.to_string()))?
+        .to_owned();
+    db.orm()
+        .execute(&insert)
+        .await
+        .map_err(|e| MsOAuthError::Internal(e.to_string()))?;
     Ok(false)
 }
 
@@ -373,22 +408,36 @@ fn redirect_settings(status: &str, detail: &str) -> Response {
     Redirect::temporary(&loc).into_response()
 }
 
+/// `mail_account` id projection, read as text for both dialects.
+#[derive(DerivePartialModel)]
+#[sea_orm(entity = "mail_account::Entity")]
+struct AccountIdRow {
+    #[sea_orm(
+        from_expr = "Expr::col((mail_account::Entity, mail_account::Column::Id)).cast_as(Alias::new(\"text\"))"
+    )]
+    id: String,
+}
+
 async fn find_oauth_account(
     db: &DbPool,
     user_id: &str,
     email: &str,
 ) -> Result<Option<String>, MsOAuthError> {
-    let user_bind = id_param(db, user_id).map_err(|_| MsOAuthError::Internal("user id".into()))?;
-    let row = db_fetch_optional!(
-        db,
-        r"
-        SELECT id FROM mail_account
-        WHERE user_id = ? AND lower(email_address) = lower(?) AND auth_type = 'oauth2'
-        ",
-        |row| crate::db_row::id_from_row(&row, "id"),
-        &user_bind,
-        email
-    )
-    .map_err(|e| MsOAuthError::Internal(e.to_string()))?;
-    Ok(row)
+    let user =
+        account_id_value(db, user_id).map_err(|_| MsOAuthError::Internal("user id".into()))?;
+    let row = mail_account::Entity::find()
+        .filter(mail_account::Column::UserId.eq(user))
+        .filter(
+            Expr::expr(Func::lower(Expr::col((
+                mail_account::Entity,
+                mail_account::Column::EmailAddress,
+            ))))
+            .eq(email.to_lowercase()),
+        )
+        .filter(mail_account::Column::AuthType.eq("oauth2"))
+        .into_partial_model::<AccountIdRow>()
+        .one(&db.orm())
+        .await
+        .map_err(|e| MsOAuthError::Internal(e.to_string()))?;
+    Ok(row.map(|r| r.id))
 }

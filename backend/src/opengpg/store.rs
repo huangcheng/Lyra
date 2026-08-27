@@ -1,10 +1,13 @@
 //! Persist OpenGPG keys (armored, passphrase-locked secrets at rest).
 
-use sqlx::Row;
+use chrono::{DateTime, Utc};
+use sea_orm::sea_query::{Expr, Order, Query, SelectStatement};
+use sea_orm::{ColumnTrait, ConnectionTrait, QueryResult, Value};
 use uuid::Uuid;
 
 use super::keys::{OpengpgError, ParsedKey, parse_armored_key, public_armored_from_stored};
-use crate::db_row::{id_from_row, id_param, json_text_from_row, opt_json_param, opt_ts_from_row};
+use crate::db_row::{IdParam, id_param};
+use crate::entities::opengpg_key;
 use crate::storage::DbPool;
 
 /// Stored key row (never includes unlocked secret material).
@@ -35,6 +38,120 @@ fn map_db_err(e: sqlx::Error) -> OpengpgError {
     OpengpgError::Database(e)
 }
 
+/// Map a SeaORM error onto [`OpengpgError`].
+///
+/// SeaORM's portable unique-violation classification keeps the conflict
+/// mapping the old sqlx-message sniffing implemented (including when the
+/// wrapped driver error cannot be unwrapped); everything else falls through
+/// to [`map_db_err`] with the recovered `sqlx::Error`.
+fn orm_err(err: sea_orm::DbErr) -> OpengpgError {
+    if matches!(
+        err.sql_err(),
+        Some(sea_orm::SqlErr::UniqueConstraintViolation(_))
+    ) {
+        return OpengpgError::Conflict("fingerprint already imported".into());
+    }
+    let sqlx_err = unwrap_sqlx_err(err);
+    map_db_err(sqlx_err)
+}
+
+/// Recover the `sqlx::Error` SeaORM wrapped, so existing sqlx-based error
+/// reporting (including `map_db_err`'s message sniffing) keeps working.
+fn unwrap_sqlx_err(err: sea_orm::DbErr) -> sqlx::Error {
+    use sea_orm::RuntimeErr;
+    match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
+/// Dialect-aware bind for a UUID-column value: TEXT on SQLite, native UUID on
+/// Postgres (`IdParam` holds the parse semantics — any text on SQLite).
+fn id_value(db: &DbPool, id: &str, what: &str) -> Result<Value, OpengpgError> {
+    let bind = id_param(db, id).map_err(|_| OpengpgError::InvalidInput(format!("{what} id")))?;
+    Ok(match bind {
+        IdParam::Text(s) => Value::String(Some(s)),
+        IdParam::Uuid(u) => Value::Uuid(Some(u)),
+    })
+}
+
+/// `updated_at` write, shaped like the legacy `datetime('now')` / `NOW()`
+/// defaults so sqlite rows keep their `YYYY-MM-DD HH:MM:SS` text format.
+fn now_value(db: &DbPool) -> Value {
+    match db {
+        DbPool::Sqlite(_) => {
+            Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+        }
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => Value::ChronoDateTimeUtc(Some(Utc::now())),
+    }
+}
+
+/// Decode a UUID/TEXT id column: `String` on SQLite, native UUID on Postgres.
+fn row_id(row: &QueryResult, col: &str) -> Result<String, sea_orm::DbErr> {
+    if let Some(s) = row.try_get::<Option<String>>("", col).ok().flatten() {
+        return Ok(s);
+    }
+    row.try_get::<Option<Uuid>>("", col)?
+        .map(|u| u.to_string())
+        .ok_or_else(|| missing_column(col))
+}
+
+/// Nullable timestamp column: stored text on SQLite, RFC3339 on Postgres.
+fn row_opt_ts(row: &QueryResult, col: &str) -> Result<Option<String>, sea_orm::DbErr> {
+    if let Ok(text) = row.try_get::<Option<String>>("", col) {
+        return Ok(text);
+    }
+    row.try_get::<Option<DateTime<Utc>>>("", col)
+        .map(|opt| opt.map(|t| t.to_rfc3339()))
+}
+
+fn missing_column(col: &str) -> sea_orm::DbErr {
+    sea_orm::DbErr::Query(sea_orm::RuntimeErr::Internal(format!(
+        "missing column {col}"
+    )))
+}
+
+/// Add every `opengpg_key` column `StoredKey` needs to a select statement.
+fn add_key_columns(query: &mut SelectStatement) {
+    query
+        .column(opengpg_key::Column::Id)
+        .column(opengpg_key::Column::UserId)
+        .column(opengpg_key::Column::Fingerprint)
+        .column(opengpg_key::Column::PrimaryEmail)
+        .column(opengpg_key::Column::Emails)
+        .column(opengpg_key::Column::IsSecret)
+        .column(opengpg_key::Column::IsPrimary)
+        .column(opengpg_key::Column::Revoked)
+        .column(opengpg_key::Column::KeyData)
+        .column(opengpg_key::Column::CreatedAt)
+        .column(opengpg_key::Column::UpdatedAt);
+}
+
+fn stored_key_from_row(row: &QueryResult) -> Result<StoredKey, sea_orm::DbErr> {
+    let emails_json = row
+        .try_get::<Option<serde_json::Value>>("", "emails")
+        .ok()
+        .flatten()
+        .unwrap_or(serde_json::Value::Array(vec![]));
+    Ok(StoredKey {
+        id: row_id(row, "id")?,
+        user_id: row_id(row, "user_id")?,
+        fingerprint: row.try_get("", "fingerprint")?,
+        primary_email: row.try_get("", "primary_email")?,
+        emails: serde_json::from_value(emails_json).unwrap_or_default(),
+        is_secret: row.try_get("", "is_secret")?,
+        is_primary: row.try_get("", "is_primary")?,
+        revoked: row.try_get("", "revoked")?,
+        key_data: row.try_get("", "key_data")?,
+        created_at: row_opt_ts(row, "created_at")?,
+        updated_at: row_opt_ts(row, "updated_at")?,
+    })
+}
+
 /// Insert a newly parsed key for `user_id`.
 pub async fn insert_key(
     db: &DbPool,
@@ -43,41 +160,55 @@ pub async fn insert_key(
     is_primary: bool,
 ) -> Result<StoredKey, OpengpgError> {
     let id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-    let emails_json = serde_json::to_string(&parsed.emails)
-        .map_err(|e| OpengpgError::InvalidInput(e.to_string()))?;
-    let user_bind =
-        id_param(db, user_id).map_err(|_| OpengpgError::InvalidInput("user id".into()))?;
-    let id_bind = id_param(db, &id).map_err(|_| OpengpgError::InvalidInput("key id".into()))?;
-    let emails_bind = opt_json_param(db, Some(emails_json.as_str()));
+    let user = id_value(db, user_id, "user")?;
+    let key = id_value(db, &id, "key")?;
+    let emails = serde_json::Value::Array(
+        parsed
+            .emails
+            .iter()
+            .cloned()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
+    let conn = db.orm();
 
     if is_primary {
-        db_execute!(
-            db,
-            "UPDATE opengpg_key SET is_primary = ?, updated_at = datetime('now') WHERE user_id = ?",
-            false,
-            &user_bind
-        )?;
+        // Demote any current primary before inserting the new one.
+        let mut demote = Query::update();
+        demote
+            .table(opengpg_key::Entity)
+            .value(opengpg_key::Column::IsPrimary, false)
+            .value(opengpg_key::Column::UpdatedAt, now_value(db))
+            .and_where(opengpg_key::Column::UserId.eq(user.clone()));
+        conn.execute(&demote).await.map_err(orm_err)?;
     }
 
-    db_execute!(
-        db,
-        r"
-        INSERT INTO opengpg_key (
-            id, user_id, fingerprint, primary_email, emails,
-            is_secret, is_primary, revoked, key_data
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ",
-        &id_bind,
-        &user_bind,
-        &parsed.fingerprint,
-        &parsed.primary_email,
-        &emails_bind,
-        parsed.is_secret,
-        is_primary,
-        parsed.revoked,
-        &parsed.key_data
-    )
-    .map_err(map_db_err)?;
+    let mut insert = Query::insert();
+    insert
+        .into_table(opengpg_key::Entity)
+        .columns([
+            opengpg_key::Column::Id,
+            opengpg_key::Column::UserId,
+            opengpg_key::Column::Fingerprint,
+            opengpg_key::Column::PrimaryEmail,
+            opengpg_key::Column::Emails,
+            opengpg_key::Column::IsSecret,
+            opengpg_key::Column::IsPrimary,
+            opengpg_key::Column::Revoked,
+            opengpg_key::Column::KeyData,
+        ])
+        .values_panic([
+            key.into(),
+            user.into(),
+            parsed.fingerprint.clone().into(),
+            parsed.primary_email.clone().into(),
+            Expr::val(Value::Json(Some(Box::new(emails)))),
+            parsed.is_secret.into(),
+            is_primary.into(),
+            parsed.revoked.into(),
+            parsed.key_data.clone().into(),
+        ]);
+    conn.execute(&insert).await.map_err(orm_err)?;
 
     get_key(db, user_id, &id)
         .await?
@@ -96,37 +227,20 @@ pub async fn import_armored(
 }
 
 pub async fn list_keys(db: &DbPool, user_id: &str) -> Result<Vec<StoredKey>, OpengpgError> {
-    let user_bind =
-        id_param(db, user_id).map_err(|_| OpengpgError::InvalidInput("user id".into()))?;
-    let rows = db_fetch_all!(
-        db,
-        r"
-        SELECT id, user_id, fingerprint, primary_email, emails,
-               is_secret, is_primary, revoked, key_data, created_at, updated_at
-        FROM opengpg_key
-        WHERE user_id = ?
-        ORDER BY is_primary DESC, primary_email ASC
-        ",
-        |row| {
-            let emails_raw = json_text_from_row(&row, "emails").unwrap_or_else(|| "[]".into());
-            let emails: Vec<String> = serde_json::from_str(&emails_raw).unwrap_or_default();
-            StoredKey {
-                id: id_from_row(&row, "id"),
-                user_id: id_from_row(&row, "user_id"),
-                fingerprint: row.get("fingerprint"),
-                primary_email: row.get("primary_email"),
-                emails,
-                is_secret: row.get("is_secret"),
-                is_primary: row.get("is_primary"),
-                revoked: row.get("revoked"),
-                key_data: row.get("key_data"),
-                created_at: opt_ts_from_row(&row, "created_at"),
-                updated_at: opt_ts_from_row(&row, "updated_at"),
-            }
-        },
-        &user_bind
-    )?;
-    Ok(rows)
+    let user = id_value(db, user_id, "user")?;
+    let mut query = Query::select();
+    add_key_columns(&mut query);
+    query
+        .from(opengpg_key::Entity)
+        .and_where(opengpg_key::Column::UserId.eq(user))
+        .order_by(opengpg_key::Column::IsPrimary, Order::Desc)
+        .order_by(opengpg_key::Column::PrimaryEmail, Order::Asc);
+
+    let rows = db.orm().query_all(&query).await.map_err(orm_err)?;
+    rows.iter()
+        .map(stored_key_from_row)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(orm_err)
 }
 
 pub async fn get_key(
@@ -134,38 +248,19 @@ pub async fn get_key(
     user_id: &str,
     key_id: &str,
 ) -> Result<Option<StoredKey>, OpengpgError> {
-    let user_bind =
-        id_param(db, user_id).map_err(|_| OpengpgError::InvalidInput("user id".into()))?;
-    let key_bind = id_param(db, key_id).map_err(|_| OpengpgError::InvalidInput("key id".into()))?;
-    let row = db_fetch_optional!(
-        db,
-        r"
-        SELECT id, user_id, fingerprint, primary_email, emails,
-               is_secret, is_primary, revoked, key_data, created_at, updated_at
-        FROM opengpg_key
-        WHERE id = ? AND user_id = ?
-        ",
-        |row| {
-            let emails_raw = json_text_from_row(&row, "emails").unwrap_or_else(|| "[]".into());
-            let emails: Vec<String> = serde_json::from_str(&emails_raw).unwrap_or_default();
-            StoredKey {
-                id: id_from_row(&row, "id"),
-                user_id: id_from_row(&row, "user_id"),
-                fingerprint: row.get("fingerprint"),
-                primary_email: row.get("primary_email"),
-                emails,
-                is_secret: row.get("is_secret"),
-                is_primary: row.get("is_primary"),
-                revoked: row.get("revoked"),
-                key_data: row.get("key_data"),
-                created_at: opt_ts_from_row(&row, "created_at"),
-                updated_at: opt_ts_from_row(&row, "updated_at"),
-            }
-        },
-        &key_bind,
-        &user_bind
-    )?;
-    Ok(row)
+    let user = id_value(db, user_id, "user")?;
+    let key = id_value(db, key_id, "key")?;
+    let mut query = Query::select();
+    add_key_columns(&mut query);
+    query
+        .from(opengpg_key::Entity)
+        .and_where(opengpg_key::Column::Id.eq(key))
+        .and_where(opengpg_key::Column::UserId.eq(user));
+
+    let row = db.orm().query_one(&query).await.map_err(orm_err)?;
+    row.map(|r| stored_key_from_row(&r))
+        .transpose()
+        .map_err(orm_err)
 }
 
 /// Return armored key_data for export (caller enforces re-auth for secrets).
@@ -201,22 +296,27 @@ pub async fn set_primary(
     let _ = get_key(db, user_id, key_id)
         .await?
         .ok_or(OpengpgError::NotFound)?;
-    let user_bind =
-        id_param(db, user_id).map_err(|_| OpengpgError::InvalidInput("user id".into()))?;
-    let key_bind = id_param(db, key_id).map_err(|_| OpengpgError::InvalidInput("key id".into()))?;
-    db_execute!(
-        db,
-        "UPDATE opengpg_key SET is_primary = ?, updated_at = datetime('now') WHERE user_id = ?",
-        false,
-        &user_bind
-    )?;
-    db_execute!(
-        db,
-        "UPDATE opengpg_key SET is_primary = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?",
-        true,
-        &key_bind,
-        &user_bind
-    )?;
+    let user = id_value(db, user_id, "user")?;
+    let key = id_value(db, key_id, "key")?;
+    let conn = db.orm();
+
+    let mut demote = Query::update();
+    demote
+        .table(opengpg_key::Entity)
+        .value(opengpg_key::Column::IsPrimary, false)
+        .value(opengpg_key::Column::UpdatedAt, now_value(db))
+        .and_where(opengpg_key::Column::UserId.eq(user.clone()));
+    conn.execute(&demote).await.map_err(orm_err)?;
+
+    let mut promote = Query::update();
+    promote
+        .table(opengpg_key::Entity)
+        .value(opengpg_key::Column::IsPrimary, true)
+        .value(opengpg_key::Column::UpdatedAt, now_value(db))
+        .and_where(opengpg_key::Column::Id.eq(key))
+        .and_where(opengpg_key::Column::UserId.eq(user));
+    conn.execute(&promote).await.map_err(orm_err)?;
+
     get_key(db, user_id, key_id)
         .await?
         .ok_or(OpengpgError::NotFound)
@@ -231,15 +331,14 @@ pub async fn delete_key(db: &DbPool, user_id: &str, key_id: &str) -> Result<(), 
             "refuse deleting primary key; promote another first".into(),
         ));
     }
-    let user_bind =
-        id_param(db, user_id).map_err(|_| OpengpgError::InvalidInput("user id".into()))?;
-    let key_bind = id_param(db, key_id).map_err(|_| OpengpgError::InvalidInput("key id".into()))?;
-    db_execute!(
-        db,
-        "DELETE FROM opengpg_key WHERE id = ? AND user_id = ?",
-        &key_bind,
-        &user_bind
-    )?;
+    let user = id_value(db, user_id, "user")?;
+    let key = id_value(db, key_id, "key")?;
+    let mut delete = Query::delete();
+    delete
+        .from_table(opengpg_key::Entity)
+        .and_where(opengpg_key::Column::Id.eq(key))
+        .and_where(opengpg_key::Column::UserId.eq(user));
+    db.orm().execute(&delete).await.map_err(orm_err)?;
     Ok(())
 }
 

@@ -14,15 +14,16 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use chrono::{DateTime, Utc};
+use sea_orm::sea_query::{Alias, Expr, Order, Query as Sq, SelectStatement};
+use sea_orm::{ColumnTrait, ConnectionTrait, QueryResult, Value};
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 
 use crate::api_error::ApiErrorBody;
 use crate::auth::{AuthState, AuthUser};
-use crate::db_row::{
-    InvalidIdError, id_from_row, id_param, json_text_from_row, opt_id_from_row, opt_json_param,
-    opt_ts_from_row, opt_ts_param, ts_from_row,
-};
+use crate::db_row::{IdParam, InvalidIdError, TsParam, id_param, opt_ts_param};
+use crate::entities::{calendar, calendar_event, contact, mail_account};
+use crate::storage::DbPool;
 
 /// Routes for PIM endpoints.
 pub fn routes() -> Router<AuthState> {
@@ -163,57 +164,202 @@ impl IntoResponse for PimError {
     }
 }
 
-macro_rules! contact_from_row {
-    ($row:expr) => {{
-        let emails = json_text_from_row(&$row, "email_addresses");
-        let phones = json_text_from_row(&$row, "phone_numbers");
-        Contact {
-            id: id_from_row(&$row, "id"),
-            account_id: id_from_row(&$row, "account_id"),
-            display_name: $row.get("display_name"),
-            email_addresses: parse_json_array(emails.as_deref()),
-            phone_numbers: parse_json_array(phones.as_deref()),
-            organisation: $row.get("organisation"),
-            photo_path: $row.get("photo_path"),
-            created_at: ts_from_row(&$row, "created_at"),
-            updated_at: ts_from_row(&$row, "updated_at"),
-        }
-    }};
+// ── SeaORM helpers (entity queries on `db.orm()`) ─────────────────────
+//
+// Ids are TEXT on SQLite and native UUID on Postgres; `IdParam` keeps the
+// parse semantics the macro layer used (any text on SQLite, strict UUID on
+// Postgres) and these helpers carry them into entity-built statements.
+
+/// Unwrap the driver error SeaORM wraps so `PimError::Database` keeps
+/// reporting the underlying `sqlx::Error`; non-driver SeaORM errors become
+/// `sqlx::Error::Protocol` with the original message.
+fn orm_err(err: sea_orm::DbErr) -> PimError {
+    use sea_orm::RuntimeErr;
+    let sqlx_err = match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    };
+    PimError::Database(sqlx_err)
 }
 
-macro_rules! calendar_from_row {
-    ($row:expr) => {{
-        Calendar {
-            id: id_from_row(&$row, "id"),
-            account_id: id_from_row(&$row, "account_id"),
-            name: $row.get("name"),
-            color: $row.get("color"),
-            description: $row.get("description"),
-            timezone: $row.get("timezone"),
-            is_active: $row.get::<bool, _>("is_active"),
-            created_at: ts_from_row(&$row, "created_at"),
-            updated_at: ts_from_row(&$row, "updated_at"),
-        }
-    }};
+/// Dialect-aware bind for a UUID-column value.
+fn id_value(db: &DbPool, id: &str) -> Result<Value, PimError> {
+    Ok(match id_param(db, id)? {
+        IdParam::Text(s) => Value::String(Some(s)),
+        IdParam::Uuid(u) => Value::Uuid(Some(u)),
+    })
 }
 
-macro_rules! event_from_row {
-    ($row:expr) => {{
-        CalendarEvent {
-            id: id_from_row(&$row, "id"),
-            calendar_id: opt_id_from_row(&$row, "calendar_id"),
-            summary: $row.get("summary"),
-            description: $row.get("description"),
-            dtstart: opt_ts_from_row(&$row, "dtstart"),
-            dtend: opt_ts_from_row(&$row, "dtend"),
-            location: $row.get("location"),
-            is_all_day: $row.get::<bool, _>("is_all_day"),
-            status: $row.get("status"),
-            recurrence_rule: $row.get("recurrence_rule"),
-            created_at: ts_from_row(&$row, "created_at"),
-            updated_at: ts_from_row(&$row, "updated_at"),
+/// Timestamp-shaped bind for `dtstart` / `dtend` (WHERE and SET alike):
+/// raw text on SQLite, parsed UTC on Postgres; absent or unparseable input
+/// binds a typed NULL, which disables the filter in WHERE and stores NULL.
+fn ts_value(db: &DbPool, raw: Option<&str>) -> Value {
+    match opt_ts_param(db, raw) {
+        Some(TsParam::Text(s)) => Value::String(Some(s)),
+        Some(TsParam::Utc(dt)) => Value::ChronoDateTimeUtc(Some(dt)),
+        // SQLite never lands here with text in hand (any raw text binds as
+        // is), so this arm is the dialect-correct typed NULL for Postgres —
+        // and the plain NULL for a missing SQLite value.
+        None => match db {
+            DbPool::Sqlite(_) => Value::String(None),
+            #[cfg(feature = "postgres")]
+            DbPool::Postgres(_) => Value::ChronoDateTimeUtc(None),
+        },
+    }
+}
+
+/// `updated_at` write, shaped like the legacy `datetime('now')` / `NOW()`
+/// defaults so sqlite rows keep their `YYYY-MM-DD HH:MM:SS` text format.
+fn now_value(db: &DbPool) -> Value {
+    match db {
+        DbPool::Sqlite(_) => {
+            Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
         }
-    }};
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => Value::ChronoDateTimeUtc(Some(Utc::now())),
+    }
+}
+
+fn missing_column(col: &str) -> PimError {
+    PimError::Database(sqlx::Error::Protocol(format!("missing column {col}")))
+}
+
+/// Nullable UUID/TEXT id column: `String` on SQLite, native UUID on Postgres.
+fn row_opt_id(row: &QueryResult, col: &str) -> Result<Option<String>, PimError> {
+    if let Ok(text) = row.try_get::<Option<String>>("", col) {
+        return Ok(text);
+    }
+    row.try_get::<Option<uuid::Uuid>>("", col)
+        .map(|opt| opt.map(|u| u.to_string()))
+        .map_err(orm_err)
+}
+
+/// Decode a UUID/TEXT id column: `String` on SQLite, native UUID on Postgres.
+fn row_id(row: &QueryResult, col: &str) -> Result<String, PimError> {
+    row_opt_id(row, col)?.ok_or_else(|| missing_column(col))
+}
+
+/// Nullable timestamp column: stored text on SQLite, RFC3339 on Postgres.
+fn row_opt_ts(row: &QueryResult, col: &str) -> Result<Option<String>, PimError> {
+    if let Ok(text) = row.try_get::<Option<String>>("", col) {
+        return Ok(text);
+    }
+    row.try_get::<Option<DateTime<Utc>>>("", col)
+        .map(|opt| opt.map(|t| t.to_rfc3339()))
+        .map_err(orm_err)
+}
+
+fn row_ts(row: &QueryResult, col: &str) -> Result<String, PimError> {
+    row_opt_ts(row, col)?.ok_or_else(|| missing_column(col))
+}
+
+/// Ids of the mail accounts owned by `user` — the scope the old
+/// `JOIN mail_account … WHERE a.user_id = ?` enforced.
+fn accounts_of_user(user: Value) -> SelectStatement {
+    let mut sub = Sq::select();
+    sub.column(mail_account::Column::Id)
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::UserId.eq(user));
+    sub
+}
+
+/// JSON array column → `Vec<String>`; corrupt or missing JSON yields `[]`.
+fn json_array(row: &QueryResult, col: &str) -> Vec<String> {
+    row.try_get::<Option<serde_json::Value>>("", col)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+fn contact_from_row(row: &QueryResult) -> Result<Contact, PimError> {
+    Ok(Contact {
+        id: row_id(row, "id")?,
+        account_id: row_id(row, "account_id")?,
+        display_name: row.try_get("", "display_name").map_err(orm_err)?,
+        email_addresses: json_array(row, "email_addresses"),
+        phone_numbers: json_array(row, "phone_numbers"),
+        organisation: row.try_get("", "organisation").map_err(orm_err)?,
+        photo_path: row.try_get("", "photo_path").map_err(orm_err)?,
+        created_at: row_ts(row, "created_at")?,
+        updated_at: row_ts(row, "updated_at")?,
+    })
+}
+
+fn calendar_from_row(row: &QueryResult) -> Result<Calendar, PimError> {
+    Ok(Calendar {
+        id: row_id(row, "id")?,
+        account_id: row_id(row, "account_id")?,
+        name: row.try_get("", "name").map_err(orm_err)?,
+        color: row.try_get("", "color").map_err(orm_err)?,
+        description: row.try_get("", "description").map_err(orm_err)?,
+        timezone: row.try_get("", "timezone").map_err(orm_err)?,
+        is_active: row.try_get("", "is_active").map_err(orm_err)?,
+        created_at: row_ts(row, "created_at")?,
+        updated_at: row_ts(row, "updated_at")?,
+    })
+}
+
+fn event_from_row(row: &QueryResult) -> Result<CalendarEvent, PimError> {
+    Ok(CalendarEvent {
+        id: row_id(row, "id")?,
+        calendar_id: row_opt_id(row, "calendar_id")?,
+        summary: row.try_get("", "summary").map_err(orm_err)?,
+        description: row.try_get("", "description").map_err(orm_err)?,
+        dtstart: row_opt_ts(row, "dtstart")?,
+        dtend: row_opt_ts(row, "dtend")?,
+        location: row.try_get("", "location").map_err(orm_err)?,
+        is_all_day: row.try_get("", "is_all_day").map_err(orm_err)?,
+        status: row.try_get("", "status").map_err(orm_err)?,
+        recurrence_rule: row.try_get("", "recurrence_rule").map_err(orm_err)?,
+        created_at: row_ts(row, "created_at")?,
+        updated_at: row_ts(row, "updated_at")?,
+    })
+}
+
+fn add_contact_columns(query: &mut SelectStatement) {
+    query
+        .column(contact::Column::Id)
+        .column(contact::Column::AccountId)
+        .column(contact::Column::DisplayName)
+        .column(contact::Column::EmailAddresses)
+        .column(contact::Column::PhoneNumbers)
+        .column(contact::Column::Organisation)
+        .column(contact::Column::PhotoPath)
+        .column(contact::Column::CreatedAt)
+        .column(contact::Column::UpdatedAt);
+}
+
+fn add_calendar_columns(query: &mut SelectStatement) {
+    query
+        .column(calendar::Column::Id)
+        .column(calendar::Column::AccountId)
+        .column(calendar::Column::Name)
+        .column(calendar::Column::Color)
+        .column(calendar::Column::Description)
+        .column(calendar::Column::Timezone)
+        .column(calendar::Column::IsActive)
+        .column(calendar::Column::CreatedAt)
+        .column(calendar::Column::UpdatedAt);
+}
+
+fn add_event_columns(query: &mut SelectStatement) {
+    query
+        .column(calendar_event::Column::Id)
+        .column(calendar_event::Column::CalendarId)
+        .column(calendar_event::Column::Summary)
+        .column(calendar_event::Column::Description)
+        .column(calendar_event::Column::Dtstart)
+        .column(calendar_event::Column::Dtend)
+        .column(calendar_event::Column::Location)
+        .column(calendar_event::Column::IsAllDay)
+        .column(calendar_event::Column::Status)
+        .column(calendar_event::Column::RecurrenceRule)
+        .column(calendar_event::Column::CreatedAt)
+        .column(calendar_event::Column::UpdatedAt);
 }
 
 /// List contacts, optionally filtered by account.
@@ -225,69 +371,38 @@ async fn list_contacts(
     let db = state.db();
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
-    let user_bind = id_param(db, &user_id)?;
+    let user = id_value(db, &user_id)?;
 
-    let contacts = if let Some(account_id) = &query.account_id {
-        let account_bind = id_param(db, account_id)?;
-        db_fetch_all!(
-            db,
-            r"
-            SELECT c.id, c.account_id, c.display_name, c.email_addresses,
-                   c.phone_numbers, c.organisation, c.photo_path,
-                   c.created_at, c.updated_at
-            FROM contact c
-            JOIN mail_account a ON c.account_id = a.id
-            WHERE a.user_id = ? AND c.account_id = ?
-            ORDER BY c.display_name
-            LIMIT ? OFFSET ?
-            ",
-            |row| contact_from_row!(row),
-            &user_bind,
-            &account_bind,
-            limit,
-            offset
-        )?
+    let mut stmt = Sq::select();
+    add_contact_columns(&mut stmt);
+    stmt.from(contact::Entity)
+        .and_where(contact::Column::AccountId.in_subquery(accounts_of_user(user.clone())))
+        .order_by(contact::Column::DisplayName, Order::Asc);
+
+    if let Some(account_id) = &query.account_id {
+        stmt.and_where(contact::Column::AccountId.eq(id_value(db, account_id)?));
     } else if let Some(search) = &query.q {
+        // Postgres needs a JSONB text cast for the address search; SQLite's
+        // LIKE is already ASCII case-insensitive like ILIKE.
+        let (op, email_col) = match db.backend() {
+            sea_orm::DbBackend::Postgres => ("ILIKE", "email_addresses::text"),
+            _ => ("LIKE", "email_addresses"),
+        };
         let pattern = format!("%{search}%");
-        db_fetch_all!(
-            db,
-            r"
-            SELECT c.id, c.account_id, c.display_name, c.email_addresses,
-                   c.phone_numbers, c.organisation, c.photo_path,
-                   c.created_at, c.updated_at
-            FROM contact c
-            JOIN mail_account a ON c.account_id = a.id
-            WHERE a.user_id = ? AND (c.display_name LIKE ? OR c.email_addresses LIKE ?)
-            ORDER BY c.display_name
-            LIMIT ? OFFSET ?
-            ",
-            |row| contact_from_row!(row),
-            &user_bind,
-            &pattern,
-            &pattern,
-            limit,
-            offset
-        )?
-    } else {
-        db_fetch_all!(
-            db,
-            r"
-            SELECT c.id, c.account_id, c.display_name, c.email_addresses,
-                   c.phone_numbers, c.organisation, c.photo_path,
-                   c.created_at, c.updated_at
-            FROM contact c
-            JOIN mail_account a ON c.account_id = a.id
-            WHERE a.user_id = ?
-            ORDER BY c.display_name
-            LIMIT ? OFFSET ?
-            ",
-            |row| contact_from_row!(row),
-            &user_bind,
-            limit,
-            offset
-        )?
-    };
+        stmt.and_where(Expr::cust_with_values(
+            format!("(display_name {op} ? OR {email_col} {op} ?)"),
+            [pattern.clone(), pattern],
+        ));
+    }
 
+    stmt.limit(u64::try_from(limit).unwrap_or(u64::MAX))
+        .offset(u64::try_from(offset).unwrap_or(0));
+
+    let rows = db.orm().query_all(&stmt).await.map_err(orm_err)?;
+    let contacts = rows
+        .iter()
+        .map(contact_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(contacts))
 }
 
@@ -298,23 +413,18 @@ async fn get_contact(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Contact>, PimError> {
     let db = state.db();
-    let id = id_param(db, &id)?;
-    let user_id = id_param(db, &user_id)?;
-    let contact = db_fetch_optional!(
-        db,
-        r"
-        SELECT c.id, c.account_id, c.display_name, c.email_addresses,
-               c.phone_numbers, c.organisation, c.photo_path,
-               c.created_at, c.updated_at
-        FROM contact c
-        JOIN mail_account a ON c.account_id = a.id
-        WHERE c.id = ? AND a.user_id = ?
-        ",
-        |row| contact_from_row!(&row),
-        &id,
-        &user_id
-    )?
-    .ok_or(PimError::NotFound)?;
+    let id = id_value(db, &id)?;
+    let user = id_value(db, &user_id)?;
+    let mut stmt = Sq::select();
+    add_contact_columns(&mut stmt);
+    stmt.from(contact::Entity)
+        .and_where(contact::Column::Id.eq(id))
+        .and_where(contact::Column::AccountId.in_subquery(accounts_of_user(user)));
+    let row = db.orm().query_one(&stmt).await.map_err(orm_err)?;
+    let contact = row
+        .map(|r| contact_from_row(&r))
+        .transpose()?
+        .ok_or(PimError::NotFound)?;
     Ok(Json(contact))
 }
 
@@ -325,42 +435,23 @@ async fn list_calendars(
     Query(query): Query<ListCalendarsQuery>,
 ) -> Result<Json<Vec<Calendar>>, PimError> {
     let db = state.db();
-    let user_bind = id_param(db, &user_id)?;
+    let user = id_value(db, &user_id)?;
 
-    let calendars = if let Some(account_id) = &query.account_id {
-        let account_bind = id_param(db, account_id)?;
-        db_fetch_all!(
-            db,
-            r"
-            SELECT cal.id, cal.account_id, cal.name, cal.description,
-                   cal.color, cal.timezone, cal.is_active,
-                   cal.created_at, cal.updated_at
-            FROM calendar cal
-            JOIN mail_account a ON cal.account_id = a.id
-            WHERE a.user_id = ? AND cal.account_id = ?
-            ORDER BY cal.name
-            ",
-            |row| calendar_from_row!(row),
-            &user_bind,
-            &account_bind
-        )?
-    } else {
-        db_fetch_all!(
-            db,
-            r"
-            SELECT cal.id, cal.account_id, cal.name, cal.description,
-                   cal.color, cal.timezone, cal.is_active,
-                   cal.created_at, cal.updated_at
-            FROM calendar cal
-            JOIN mail_account a ON cal.account_id = a.id
-            WHERE a.user_id = ?
-            ORDER BY cal.name
-            ",
-            |row| calendar_from_row!(row),
-            &user_bind
-        )?
-    };
+    let mut stmt = Sq::select();
+    add_calendar_columns(&mut stmt);
+    stmt.from(calendar::Entity)
+        .and_where(calendar::Column::AccountId.in_subquery(accounts_of_user(user)))
+        .order_by(calendar::Column::Name, Order::Asc);
 
+    if let Some(account_id) = &query.account_id {
+        stmt.and_where(calendar::Column::AccountId.eq(id_value(db, account_id)?));
+    }
+
+    let rows = db.orm().query_all(&stmt).await.map_err(orm_err)?;
+    let calendars = rows
+        .iter()
+        .map(calendar_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(calendars))
 }
 
@@ -371,24 +462,19 @@ async fn get_calendar(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Calendar>, PimError> {
     let db = state.db();
-    let id = id_param(db, &id)?;
-    let user_id = id_param(db, &user_id)?;
-    let calendar = db_fetch_optional!(
-        db,
-        r"
-        SELECT cal.id, cal.account_id, cal.name, cal.description,
-               cal.color, cal.timezone, cal.is_active,
-               cal.created_at, cal.updated_at
-        FROM calendar cal
-        JOIN mail_account a ON cal.account_id = a.id
-        WHERE cal.id = ? AND a.user_id = ?
-        ",
-        |row| calendar_from_row!(&row),
-        &id,
-        &user_id
-    )?
-    .ok_or(PimError::NotFound)?;
-    Ok(Json(calendar))
+    let id = id_value(db, &id)?;
+    let user = id_value(db, &user_id)?;
+    let mut stmt = Sq::select();
+    add_calendar_columns(&mut stmt);
+    stmt.from(calendar::Entity)
+        .and_where(calendar::Column::Id.eq(id))
+        .and_where(calendar::Column::AccountId.in_subquery(accounts_of_user(user)));
+    let row = db.orm().query_one(&stmt).await.map_err(orm_err)?;
+    let cal = row
+        .map(|r| calendar_from_row(&r))
+        .transpose()?
+        .ok_or(PimError::NotFound)?;
+    Ok(Json(cal))
 }
 
 /// List events for a specific calendar.
@@ -399,63 +485,37 @@ async fn list_events(
     Query(query): Query<ListEventsQuery>,
 ) -> Result<Json<Vec<CalendarEvent>>, PimError> {
     let db = state.db();
-    let calendar_bind = id_param(db, &calendar_id)?;
-    let user_bind = id_param(db, &user_id)?;
+    let calendar = id_value(db, &calendar_id)?;
+    let user = id_value(db, &user_id)?;
 
     // Verify calendar belongs to user
-    let calendar: Option<String> = db_id_optional!(
-        db,
-        r"
-        SELECT cal.id
-        FROM calendar cal
-        JOIN mail_account a ON cal.account_id = a.id
-        WHERE cal.id = ? AND a.user_id = ?
-        ",
-        &calendar_bind,
-        &user_bind
-    )?;
-    if calendar.is_none() {
+    let mut cal = Sq::select();
+    cal.column(calendar::Column::Id)
+        .from(calendar::Entity)
+        .and_where(calendar::Column::Id.eq(calendar.clone()))
+        .and_where(calendar::Column::AccountId.in_subquery(accounts_of_user(user)));
+    let owned = db.orm().query_one(&cal).await.map_err(orm_err)?;
+    if owned.is_none() {
         return Err(PimError::NotFound);
     }
 
-    let start = opt_ts_param(db, query.start.as_deref());
-    let end = opt_ts_param(db, query.end.as_deref());
-    let events = if query.start.is_some() || query.end.is_some() {
-        db_fetch_all!(
-            db,
-            r"
-            SELECT id, calendar_id, summary, description, dtstart, dtend,
-                   location, is_all_day, status, recurrence_rule,
-                   created_at, updated_at
-            FROM calendar_event
-            WHERE calendar_id = ?
-              AND (dtstart >= ? OR ? IS NULL)
-              AND (dtend <= ? OR ? IS NULL)
-            ORDER BY dtstart
-            ",
-            |row| event_from_row!(row),
-            &calendar_bind,
-            &start,
-            &start,
-            &end,
-            &end
-        )?
-    } else {
-        db_fetch_all!(
-            db,
-            r"
-            SELECT id, calendar_id, summary, description, dtstart, dtend,
-                   location, is_all_day, status, recurrence_rule,
-                   created_at, updated_at
-            FROM calendar_event
-            WHERE calendar_id = ?
-            ORDER BY dtstart
-            ",
-            |row| event_from_row!(row),
-            &calendar_bind
-        )?
-    };
+    let mut stmt = Sq::select();
+    add_event_columns(&mut stmt);
+    stmt.from(calendar_event::Entity)
+        .and_where(calendar_event::Column::CalendarId.eq(calendar));
+    if query.start.is_some() {
+        stmt.and_where(calendar_event::Column::Dtstart.gte(ts_value(db, query.start.as_deref())));
+    }
+    if query.end.is_some() {
+        stmt.and_where(calendar_event::Column::Dtend.lte(ts_value(db, query.end.as_deref())));
+    }
+    stmt.order_by(calendar_event::Column::Dtstart, Order::Asc);
 
+    let rows = db.orm().query_all(&stmt).await.map_err(orm_err)?;
+    let events = rows
+        .iter()
+        .map(event_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(events))
 }
 
@@ -466,24 +526,27 @@ async fn get_event(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<CalendarEvent>, PimError> {
     let db = state.db();
-    let id = id_param(db, &id)?;
-    let user_id = id_param(db, &user_id)?;
-    let event = db_fetch_optional!(
-        db,
-        r"
-        SELECT e.id, e.calendar_id, e.summary, e.description, e.dtstart, e.dtend,
-               e.location, e.is_all_day, e.status, e.recurrence_rule,
-               e.created_at, e.updated_at
-        FROM calendar_event e
-        JOIN calendar cal ON e.calendar_id = cal.id
-        JOIN mail_account a ON cal.account_id = a.id
-        WHERE e.id = ? AND a.user_id = ?
-        ",
-        |row| event_from_row!(&row),
-        &id,
-        &user_id
-    )?
-    .ok_or(PimError::NotFound)?;
+    let id = id_value(db, &id)?;
+    let user = id_value(db, &user_id)?;
+
+    // Events are only reachable through a calendar owned by the user —
+    // the old INNER JOIN chain (event → calendar → mail_account).
+    let mut calendars_of_user = Sq::select();
+    calendars_of_user
+        .column(calendar::Column::Id)
+        .from(calendar::Entity)
+        .and_where(calendar::Column::AccountId.in_subquery(accounts_of_user(user)));
+
+    let mut stmt = Sq::select();
+    add_event_columns(&mut stmt);
+    stmt.from(calendar_event::Entity)
+        .and_where(calendar_event::Column::Id.eq(id))
+        .and_where(calendar_event::Column::CalendarId.in_subquery(calendars_of_user));
+    let row = db.orm().query_one(&stmt).await.map_err(orm_err)?;
+    let event = row
+        .map(|r| event_from_row(&r))
+        .transpose()?
+        .ok_or(PimError::NotFound)?;
     Ok(Json(event))
 }
 
@@ -495,27 +558,24 @@ async fn sync_contacts(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, PimError> {
     let db = state.db();
-    let account_bind = id_param(db, &account_id)?;
-    let user_bind = id_param(db, &user_id)?;
+    let account = id_value(db, &account_id)?;
+    let user = id_value(db, &user_id)?;
 
-    let row = db_fetch_optional!(
-        db,
-        r"
-        SELECT id, email_address, carddav_url
-        FROM mail_account
-        WHERE id = ? AND user_id = ?
-        ",
-        |row| {
-            let carddav_url: Option<String> = row.get("carddav_url");
-            let email: String = row.get("email_address");
-            (carddav_url, email)
-        },
-        &account_bind,
-        &user_bind
-    )?
-    .ok_or(PimError::AccountNotFound)?;
+    let mut acct = Sq::select();
+    acct.column(Alias::new("carddav_url"))
+        .column(mail_account::Column::EmailAddress)
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::Id.eq(account.clone()))
+        .and_where(mail_account::Column::UserId.eq(user));
+    let row = db
+        .orm()
+        .query_one(&acct)
+        .await
+        .map_err(orm_err)?
+        .ok_or(PimError::AccountNotFound)?;
+    let carddav_url: Option<String> = row.try_get("", "carddav_url").map_err(orm_err)?;
+    let email: String = row.try_get("", "email_address").map_err(orm_err)?;
 
-    let (carddav_url, email) = row;
     let Some(base_url) = carddav_url.filter(|s| !s.is_empty()) else {
         return Ok(Json(serde_json::json!({
             "status": "skipped",
@@ -537,6 +597,7 @@ async fn sync_contacts(
         .await
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 
+    let conn = db.orm();
     let mut synced = 0u32;
     for href in hrefs {
         if !href.to_lowercase().contains(".vcf") {
@@ -547,55 +608,66 @@ async fn sync_contacts(
             continue;
         };
         let (display_name, emails, phones, org) = crate::dav::parse_vcard_fields(&vcard);
-        let emails_json = serde_json::to_string(&emails).unwrap_or_else(|_| "[]".into());
-        let phones_json = serde_json::to_string(&phones).unwrap_or_else(|_| "[]".into());
+        let emails_json = serde_json::json!(emails);
+        let phones_json = serde_json::json!(phones);
         let external_id = href.clone();
 
-        let existing: Option<String> = db_id_optional!(
-            db,
-            "SELECT id FROM contact WHERE account_id = ? AND external_id = ?",
-            &account_bind,
-            &external_id
-        )?;
+        let mut existing = Sq::select();
+        existing
+            .column(contact::Column::Id)
+            .from(contact::Entity)
+            .and_where(contact::Column::AccountId.eq(account.clone()))
+            .and_where(contact::Column::ExternalId.eq(external_id.clone()));
+        let row = conn.query_one(&existing).await.map_err(orm_err)?;
 
-        if let Some(id) = existing {
-            db_execute!(
-                db,
-                r"
-                UPDATE contact SET
-                  vcard_blob = ?, display_name = ?, email_addresses = ?,
-                  phone_numbers = ?, organisation = ?, addressbook_url = ?,
-                  updated_at = datetime('now')
-                WHERE id = ?
-                ",
-                &vcard,
-                &display_name,
-                opt_json_param(db, Some(emails_json.as_str())),
-                opt_json_param(db, Some(phones_json.as_str())),
-                &org,
-                &base_url,
-                &id_param(db, &id)?
-            )?;
+        if let Some(row) = row {
+            let id = row_id(&row, "id")?;
+            let mut update = Sq::update();
+            update
+                .table(contact::Entity)
+                .value(contact::Column::VcardBlob, vcard.clone())
+                .value(contact::Column::DisplayName, display_name.clone())
+                .value(
+                    contact::Column::EmailAddresses,
+                    Expr::val(Value::Json(Some(Box::new(emails_json.clone())))),
+                )
+                .value(
+                    contact::Column::PhoneNumbers,
+                    Expr::val(Value::Json(Some(Box::new(phones_json.clone())))),
+                )
+                .value(contact::Column::Organisation, org.clone())
+                .value(contact::Column::AddressbookUrl, base_url.clone())
+                .value(contact::Column::UpdatedAt, now_value(db))
+                .and_where(contact::Column::Id.eq(id_value(db, &id)?));
+            conn.execute(&update).await.map_err(orm_err)?;
         } else {
             let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-            db_execute!(
-                db,
-                r"
-                INSERT INTO contact (
-                  id, account_id, external_id, vcard_blob, display_name,
-                  email_addresses, phone_numbers, organisation, addressbook_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ",
-                &id_param(db, &id)?,
-                &account_bind,
-                &external_id,
-                &vcard,
-                &display_name,
-                opt_json_param(db, Some(emails_json.as_str())),
-                opt_json_param(db, Some(phones_json.as_str())),
-                &org,
-                &base_url
-            )?;
+            let mut insert = Sq::insert();
+            insert
+                .into_table(contact::Entity)
+                .columns([
+                    contact::Column::Id,
+                    contact::Column::AccountId,
+                    contact::Column::ExternalId,
+                    contact::Column::VcardBlob,
+                    contact::Column::DisplayName,
+                    contact::Column::EmailAddresses,
+                    contact::Column::PhoneNumbers,
+                    contact::Column::Organisation,
+                    contact::Column::AddressbookUrl,
+                ])
+                .values_panic([
+                    id_value(db, &id)?.into(),
+                    account.clone().into(),
+                    external_id.into(),
+                    vcard.into(),
+                    display_name.into(),
+                    Expr::val(Value::Json(Some(Box::new(emails_json)))),
+                    Expr::val(Value::Json(Some(Box::new(phones_json)))),
+                    org.into(),
+                    base_url.clone().into(),
+                ]);
+            conn.execute(&insert).await.map_err(orm_err)?;
         }
         synced += 1;
     }
@@ -614,27 +686,24 @@ async fn sync_calendars(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, PimError> {
     let db = state.db();
-    let account_bind = id_param(db, &account_id)?;
-    let user_bind = id_param(db, &user_id)?;
+    let account = id_value(db, &account_id)?;
+    let user = id_value(db, &user_id)?;
 
-    let row = db_fetch_optional!(
-        db,
-        r"
-        SELECT id, email_address, caldav_url
-        FROM mail_account
-        WHERE id = ? AND user_id = ?
-        ",
-        |row| {
-            let caldav_url: Option<String> = row.get("caldav_url");
-            let email: String = row.get("email_address");
-            (caldav_url, email)
-        },
-        &account_bind,
-        &user_bind
-    )?
-    .ok_or(PimError::AccountNotFound)?;
+    let mut acct = Sq::select();
+    acct.column(Alias::new("caldav_url"))
+        .column(mail_account::Column::EmailAddress)
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::Id.eq(account.clone()))
+        .and_where(mail_account::Column::UserId.eq(user));
+    let row = db
+        .orm()
+        .query_one(&acct)
+        .await
+        .map_err(orm_err)?
+        .ok_or(PimError::AccountNotFound)?;
+    let caldav_url: Option<String> = row.try_get("", "caldav_url").map_err(orm_err)?;
+    let email: String = row.try_get("", "email_address").map_err(orm_err)?;
 
-    let (caldav_url, email) = row;
     let Some(base_url) = caldav_url.filter(|s| !s.is_empty()) else {
         return Ok(Json(serde_json::json!({
             "status": "skipped",
@@ -656,33 +725,43 @@ async fn sync_calendars(
         .await
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 
+    let conn = db.orm();
+
     // Ensure a local calendar row exists for this URL.
     let calendar_id: String = {
-        let existing: Option<String> = db_id_optional!(
-            db,
-            "SELECT id FROM calendar WHERE account_id = ? AND calendar_url = ?",
-            &account_bind,
-            &base_url
-        )?;
-        if let Some(id) = existing {
-            id
+        let mut existing = Sq::select();
+        existing
+            .column(calendar::Column::Id)
+            .from(calendar::Entity)
+            .and_where(calendar::Column::AccountId.eq(account.clone()))
+            .and_where(calendar::Column::CalendarUrl.eq(base_url.clone()));
+        let row = conn.query_one(&existing).await.map_err(orm_err)?;
+        if let Some(row) = row {
+            row_id(&row, "id")?
         } else {
             let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-            db_execute!(
-                db,
-                r"
-                INSERT INTO calendar (id, account_id, name, calendar_url, is_active)
-                VALUES (?, ?, ?, ?, ?)
-                ",
-                &id_param(db, &id)?,
-                &account_bind,
-                "Calendar",
-                &base_url,
-                true
-            )?;
+            let mut insert = Sq::insert();
+            insert
+                .into_table(calendar::Entity)
+                .columns([
+                    calendar::Column::Id,
+                    calendar::Column::AccountId,
+                    calendar::Column::Name,
+                    calendar::Column::CalendarUrl,
+                    calendar::Column::IsActive,
+                ])
+                .values_panic([
+                    id_value(db, &id)?.into(),
+                    account.clone().into(),
+                    "Calendar".into(),
+                    base_url.clone().into(),
+                    true.into(),
+                ]);
+            conn.execute(&insert).await.map_err(orm_err)?;
             id
         }
     };
+    let calendar_bind = id_value(db, &calendar_id)?;
 
     let mut synced = 0u32;
     for href in hrefs {
@@ -707,57 +786,71 @@ async fn sync_calendars(
             crate::dav::parse_vevent_fields(&ical);
         let external_id = href.clone();
 
-        let existing: Option<String> = db_id_optional!(
-            db,
-            "SELECT id FROM calendar_event WHERE account_id = ? AND external_id = ?",
-            &account_bind,
-            &external_id
-        )?;
+        let mut existing = Sq::select();
+        existing
+            .column(calendar_event::Column::Id)
+            .from(calendar_event::Entity)
+            .and_where(calendar_event::Column::AccountId.eq(account.clone()))
+            .and_where(calendar_event::Column::ExternalId.eq(external_id.clone()));
+        let row = conn.query_one(&existing).await.map_err(orm_err)?;
 
-        if let Some(id) = existing {
-            db_execute!(
-                db,
-                r"
-                UPDATE calendar_event SET
-                  calendar_id = ?, icalendar_blob = ?, summary = ?, description = ?,
-                  dtstart = ?, dtend = ?, location = ?, is_all_day = ?,
-                  calendar_url = ?, updated_at = datetime('now')
-                WHERE id = ?
-                ",
-                &id_param(db, &calendar_id)?,
-                &ical,
-                &summary,
-                &description,
-                opt_ts_param(db, dtstart.as_deref()),
-                opt_ts_param(db, dtend.as_deref()),
-                &location,
-                is_all_day,
-                &base_url,
-                &id_param(db, &id)?
-            )?;
+        if let Some(row) = row {
+            let id = row_id(&row, "id")?;
+            let mut update = Sq::update();
+            update
+                .table(calendar_event::Entity)
+                .value(calendar_event::Column::CalendarId, calendar_bind.clone())
+                .value(calendar_event::Column::IcalendarBlob, ical.clone())
+                .value(calendar_event::Column::Summary, summary.clone())
+                .value(calendar_event::Column::Description, description.clone())
+                .value(
+                    calendar_event::Column::Dtstart,
+                    ts_value(db, dtstart.as_deref()),
+                )
+                .value(
+                    calendar_event::Column::Dtend,
+                    ts_value(db, dtend.as_deref()),
+                )
+                .value(calendar_event::Column::Location, location.clone())
+                .value(calendar_event::Column::IsAllDay, is_all_day)
+                .value(calendar_event::Column::CalendarUrl, base_url.clone())
+                .value(calendar_event::Column::UpdatedAt, now_value(db))
+                .and_where(calendar_event::Column::Id.eq(id_value(db, &id)?));
+            conn.execute(&update).await.map_err(orm_err)?;
         } else {
             let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-            db_execute!(
-                db,
-                r"
-                INSERT INTO calendar_event (
-                  id, account_id, calendar_id, external_id, icalendar_blob,
-                  summary, description, dtstart, dtend, location, is_all_day, calendar_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ",
-                &id_param(db, &id)?,
-                &account_bind,
-                &id_param(db, &calendar_id)?,
-                &external_id,
-                &ical,
-                &summary,
-                &description,
-                opt_ts_param(db, dtstart.as_deref()),
-                opt_ts_param(db, dtend.as_deref()),
-                &location,
-                is_all_day,
-                &base_url
-            )?;
+            let mut insert = Sq::insert();
+            insert
+                .into_table(calendar_event::Entity)
+                .columns([
+                    calendar_event::Column::Id,
+                    calendar_event::Column::AccountId,
+                    calendar_event::Column::CalendarId,
+                    calendar_event::Column::ExternalId,
+                    calendar_event::Column::IcalendarBlob,
+                    calendar_event::Column::Summary,
+                    calendar_event::Column::Description,
+                    calendar_event::Column::Dtstart,
+                    calendar_event::Column::Dtend,
+                    calendar_event::Column::Location,
+                    calendar_event::Column::IsAllDay,
+                    calendar_event::Column::CalendarUrl,
+                ])
+                .values_panic([
+                    id_value(db, &id)?.into(),
+                    account.clone().into(),
+                    calendar_bind.clone().into(),
+                    external_id.into(),
+                    ical.into(),
+                    summary.into(),
+                    description.into(),
+                    ts_value(db, dtstart.as_deref()).into(),
+                    ts_value(db, dtend.as_deref()).into(),
+                    location.into(),
+                    is_all_day.into(),
+                    base_url.clone().into(),
+                ]);
+            conn.execute(&insert).await.map_err(orm_err)?;
         }
         synced += 1;
     }
@@ -767,12 +860,6 @@ async fn sync_calendars(
         "synced": synced,
         "calendarId": calendar_id,
     })))
-}
-
-/// Parse a JSON array string into `Vec<String>`.
-fn parse_json_array(json: Option<&str>) -> Vec<String> {
-    json.and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
