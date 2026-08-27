@@ -60,10 +60,10 @@ function selectUnifiedRole(role: StandardFolderRole) {
   setSelectedFolderRole(role);
 }
 
-function selectAccountFolder(accountId: string, folderId: string) {
-  const { setSelectedAccount, setSelectedFolder } = useUIStore.getState();
-  setSelectedAccount(accountId);
-  setSelectedFolder(folderId);
+function selectAccountFolder(_accountId: string, folderId: string) {
+  // Folder ids are globally unique: show the folder without switching the
+  // account selector (macOS Mail behavior in the unified sidebar).
+  useUIStore.getState().setSelectedFolder(folderId);
 }
 
 function UnifiedRow({ folder, active }: { folder: UnifiedFolder; active: boolean }) {
@@ -166,12 +166,10 @@ function CustomFolderBranch({
 
 function AccountSection({
   account,
-  selectedAccountId,
   selectedFolderId,
   bare = false,
 }: {
   account: MailAccount;
-  selectedAccountId: string;
   selectedFolderId: string | null;
   /** Single-account view: header omitted (the switcher already names the account). */
   bare?: boolean;
@@ -196,8 +194,6 @@ function AccountSection({
       return next;
     });
   };
-
-  const isSelectedAccount = selectedAccountId === account.id;
 
   return (
     <div>
@@ -230,7 +226,7 @@ function AccountSection({
             const children = buildRoleChildren(folder.id, accountFolders);
             const hasChildren = children.length > 0;
             const childrenExpanded = expandedIds.has(folder.id);
-            const active = isSelectedAccount && selectedFolderId === folder.id;
+            const active = selectedFolderId === folder.id;
             return (
               <div key={folder.id}>
                 <div
@@ -277,7 +273,7 @@ function AccountSection({
                         node={child}
                         depth={1}
                         accountId={account.id}
-                        selectedFolderId={isSelectedAccount ? selectedFolderId : null}
+                        selectedFolderId={selectedFolderId}
                         expandedIds={expandedIds}
                         toggleExpanded={toggleExpanded}
                       />
@@ -292,7 +288,7 @@ function AccountSection({
               node={node}
               depth={0}
               accountId={account.id}
-              selectedFolderId={isSelectedAccount ? selectedFolderId : null}
+              selectedFolderId={selectedFolderId}
               expandedIds={expandedIds}
               toggleExpanded={toggleExpanded}
             />
@@ -370,7 +366,6 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
         <div className="grid gap-0.5 pt-2">
           <AccountSection
             account={selectedAccount}
-            selectedAccountId={selectedAccountId}
             selectedFolderId={selectedFolderId}
             bare
           />
@@ -397,7 +392,6 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
           <AccountSection
             key={account.id}
             account={account}
-            selectedAccountId={selectedAccountId}
             selectedFolderId={selectedFolderId}
           />
         ))}
