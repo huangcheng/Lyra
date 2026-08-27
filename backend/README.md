@@ -93,8 +93,8 @@ Migrations run automatically when the server starts. To run them manually:
 # SQLite (creates data/lyra.db if it doesn't exist)
 DATABASE_URL=sqlite:./data/lyra.db cargo run
 
-# PostgreSQL (requires postgres feature)
-DATABASE_URL=postgres://localhost/lyra cargo run --features postgres
+# PostgreSQL (both backends compile by default; DATABASE_URL chooses)
+DATABASE_URL=postgres://localhost/lyra cargo run
 ```
 
 ### Verifying SQLite migrations
@@ -123,9 +123,8 @@ docker run -d --name lyra-pg \
   -p 5432:5432 \
   postgres:16-alpine
 
-# Run with PostgreSQL (requires postgres feature)
-DATABASE_URL=postgres://lyra:lyra@localhost:5432/lyra \
-  cargo run --features postgres
+# Run with PostgreSQL (both backends compile by default)
+DATABASE_URL=postgres://lyra:lyra@localhost:5432/lyra cargo run
 
 # Check the database
 docker exec -it lyra-pg psql -U lyra -d lyra -c "\dt"
@@ -142,11 +141,27 @@ src/
   main.rs       ← Axum app, health + version + SPA, entry point
   config.rs     ← Environment-based configuration
   auth.rs       ← Username/password + optional TOTP; bearer sessions in kv
-  storage.rs    ← Storage seam (SQLite + PostgreSQL, transactions)
+  storage.rs    ← Storage seam (SQLite + PostgreSQL on one sea-orm pool; WAL)
+  entities/     ← SeaORM entity per table (schema truth for all queries)
+  db_sql.rs     ← Legacy macro layer (transition-only; being removed)
+  db_row.rs     ← Legacy row/binding adapters (transition-only)
   sync/         ← HTTP, IMAP/JMAP loops, persist batches, SMTP send
   imap.rs / jmap.rs / smtp.rs
   jobs.rs / scheduler.rs / kernel/
 ```
+
+### Data access layer
+
+Queries go through **SeaORM 2.0** over one runtime-selected pool: `DATABASE_URL`
+picks SQLite or PostgreSQL at deploy time (both drivers compile into the binary).
+Entities in `src/entities/` are the compile-checked schema truth. Dialect-aware
+id binds (TEXT on SQLite, native UUID on PostgreSQL) live in one seam
+(`auth/db.rs::id_bind_value`). Raw `Statement`s remain only where engines
+genuinely differ: full-text search (FTS5 vs tsvector) and the job-claim
+`UPDATE … RETURNING`.
+
+SQLite databases run in **WAL mode** with a 5 s busy timeout (single-writer
+concurrency safe under parallel sync jobs).
 
 This is a **binary crate**. Run tests with `cargo test --bin lyra_backend` (not `--lib`).
 

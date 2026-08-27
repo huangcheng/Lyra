@@ -99,7 +99,8 @@ Lyra/
       main.rs                   ← health + version routes, SPA, entry point
       config.rs                 ← env-based configuration (`LYRA_MASTER_KEY` required)
       auth.rs                   ← username/password + optional TOTP, bearer sessions
-      storage.rs                ← storage seam (SQLite + PostgreSQL, migrations)
+      storage.rs                ← storage seam (sea-orm 2.0 pool; SQLite + PostgreSQL by DATABASE_URL; migrations)
+      entities/                 ← SeaORM entity per table (schema truth for data-layer code)
       sync/                     ← sync HTTP, IMAP/JMAP loops, persist transactions
       imap.rs / jmap.rs / smtp.rs
       oauth/ ← Microsoft mail OAuth (PKCE) + XOAUTH2 token resolve

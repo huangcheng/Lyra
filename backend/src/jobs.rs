@@ -10,11 +10,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sea_orm::sea_query::{Expr, Order, Query as Sq};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement, Value,
+};
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
-use crate::db_row::id_param;
+use crate::entities::{jobs, mail_account, message};
 use crate::kernel::App;
 use crate::storage::DbPool;
 use crate::sync::SyncError;
@@ -45,17 +48,62 @@ pub struct ClaimedJob {
     pub payload: JobPayload,
 }
 
-macro_rules! row_to_claimed {
-    ($row:expr) => {{
-        let payload_json: String = $row.try_get("payload")?;
-        let payload =
-            serde_json::from_str(&payload_json).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
-        Ok::<_, sqlx::Error>(ClaimedJob {
-            id: $row.try_get("id")?,
-            status: $row.try_get("status")?,
-            payload,
-        })
-    }};
+// ── SeaORM plumbing ──────────────────────────────────────────────────
+//
+// `jobs` ids are TEXT in both dialects (UUIDv7 strings, not native UUID
+// columns), so no Uuid/TEXT split applies here. Timestamp columns are also
+// TEXT on both engines — the Postgres default even casts NOW() to ::TEXT —
+// so stamps bind as UTC text rather than an engine-side expression, which
+// keeps the assignment type valid on Postgres.
+
+/// Unwrap the driver error SeaORM wraps so callers keep a `sqlx::Error`;
+/// non-driver SeaORM errors become `sqlx::Error::Protocol`.
+fn orm_err(err: sea_orm::DbErr) -> sqlx::Error {
+    use sea_orm::RuntimeErr;
+    match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
+/// Decode a `RETURNING id, payload, status` row into a claimed job. Payload
+/// JSON that fails to parse surfaces as `sqlx::Error::Decode`, exactly like
+/// the macro-layer row mapping did.
+fn claimed_from_row(row: &sea_orm::QueryResult) -> Result<ClaimedJob, sqlx::Error> {
+    let id: String = row.try_get("", "id").map_err(orm_err)?;
+    let status: String = row.try_get("", "status").map_err(orm_err)?;
+    let payload_json: String = row.try_get("", "payload").map_err(orm_err)?;
+    let payload =
+        serde_json::from_str(&payload_json).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+    Ok(ClaimedJob {
+        id,
+        status,
+        payload,
+    })
+}
+
+/// TEXT stamp shaped like the legacy writers: `datetime('now')`-style second
+/// precision on SQLite; the migration-default `(NOW() AT TIME ZONE 'UTC')
+/// ::TEXT` shape (micro precision) on Postgres.
+fn updated_at_value(db: &DbPool) -> Value {
+    let fmt = match db {
+        DbPool::Sqlite(_) => "%Y-%m-%d %H:%M:%S",
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => "%Y-%m-%d %H:%M:%S%.6f",
+    };
+    Value::String(Some(chrono::Utc::now().format(fmt).to_string()))
+}
+
+/// Dialect-aware bind for UUID-typed foreign-key ids (`message`, `mail_account`).
+fn fk_id_value(db: &DbPool, id: &str) -> Result<Value, sqlx::Error> {
+    use crate::db_row::{IdParam, id_param};
+    Ok(match id_param(db, id).map_err(sqlx::Error::from)? {
+        IdParam::Text(s) => Value::String(Some(s)),
+        IdParam::Uuid(u) => Value::Uuid(Some(u)),
+    })
 }
 
 /// Per-account in-flight set so a second sync is skipped while one is running.
@@ -100,28 +148,33 @@ pub async fn enqueue(
     let id = uuid::Uuid::now_v7().to_string();
     let kind = payload_kind(payload);
     let json = serde_json::to_string(payload).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-    db_execute!(
-        db,
-        r"
-        INSERT INTO jobs (id, kind, run_at, payload, status)
-        VALUES (?, ?, ?, ?, 'pending')
-        ",
-        &id,
-        kind,
-        run_at,
-        &json
-    )?;
+    let mut insert = Sq::insert();
+    insert
+        .into_table(jobs::Entity)
+        .columns([
+            jobs::Column::Id,
+            jobs::Column::Kind,
+            jobs::Column::RunAt,
+            jobs::Column::Payload,
+            jobs::Column::Status,
+        ])
+        .values_panic([
+            Expr::val(id.as_str()),
+            Expr::val(kind),
+            Expr::val(run_at),
+            Expr::val(json.as_str()),
+            Expr::val("pending"),
+        ]);
+    db.orm().execute(&insert).await.map_err(orm_err)?;
     Ok(id)
 }
 
-/// Atomically claim the oldest due pending job and mark it `running`.
-#[allow(dead_code)]
-pub async fn claim_due(db: &DbPool, now: &str) -> Result<Option<ClaimedJob>, sqlx::Error> {
-    let claimed = db_fetch_optional!(
-        db,
-        r"
+/// SQL for [`claim_due`] per engine. The updated stamp is bound (not a
+/// literal) because the column is TEXT on both engines; only placeholders
+/// differ.
+const CLAIM_DUE_SQL_SQLITE: &str = r"
         UPDATE jobs
-        SET status = 'running', updated_at = datetime('now')
+        SET status = 'running', updated_at = ?
         WHERE id = (
             SELECT id FROM jobs
             WHERE status = 'pending' AND run_at <= ?
@@ -129,11 +182,47 @@ pub async fn claim_due(db: &DbPool, now: &str) -> Result<Option<ClaimedJob>, sql
             LIMIT 1
         )
         RETURNING id, payload, status
-        ",
-        |row| row_to_claimed!(&row),
-        now
-    )?;
-    claimed.transpose()
+        ";
+
+#[cfg(feature = "postgres")]
+const CLAIM_DUE_SQL_POSTGRES: &str = r"
+        UPDATE jobs
+        SET status = 'running', updated_at = $2
+        WHERE id = (
+            SELECT id FROM jobs
+            WHERE status = 'pending' AND run_at <= $1
+            ORDER BY run_at ASC, created_at ASC
+            LIMIT 1
+        )
+        RETURNING id, payload, status
+        ";
+
+/// Atomically claim the oldest due pending job and mark it `running`.
+///
+/// Single-statement UPDATE…RETURNING (valid on both engines), executed as a
+/// raw parameterized statement on the SeaORM connection.
+#[allow(dead_code)]
+pub async fn claim_due(db: &DbPool, now: &str) -> Result<Option<ClaimedJob>, sqlx::Error> {
+    let stmt = match db.backend() {
+        DbBackend::Sqlite => Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            CLAIM_DUE_SQL_SQLITE,
+            [updated_at_value(db), Value::from(now)],
+        ),
+        #[cfg(feature = "postgres")]
+        DbBackend::Postgres => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            CLAIM_DUE_SQL_POSTGRES,
+            [Value::from(now), updated_at_value(db)],
+        ),
+        other => {
+            return Err(sqlx::Error::Protocol(format!(
+                "jobs: unsupported backend {other:?}"
+            )));
+        }
+    };
+    let row = db.orm().query_one_raw(stmt).await.map_err(orm_err)?;
+    row.as_ref().map(claimed_from_row).transpose()
 }
 
 /// Claim the next due job whose account is not already in-flight.
@@ -142,22 +231,18 @@ pub async fn claim_next(
     now: &str,
     inflight: &InFlight,
 ) -> Result<Option<ClaimedJob>, sqlx::Error> {
-    let rows = db_fetch_all!(
-        db,
-        r"
-        SELECT id, payload FROM jobs
-        WHERE status = 'pending' AND run_at <= ?
-        ORDER BY run_at ASC, created_at ASC
-        ",
-        |row| {
-            let id: String = row.get("id");
-            let payload_json: String = row.get("payload");
-            (id, payload_json)
-        },
-        now
-    )?;
+    let mut stmt = Sq::select();
+    stmt.columns([jobs::Column::Id, jobs::Column::Payload])
+        .from(jobs::Entity)
+        .and_where(jobs::Column::Status.eq("pending"))
+        .and_where(jobs::Column::RunAt.lte(now.to_owned()))
+        .order_by(jobs::Column::RunAt, Order::Asc)
+        .order_by(jobs::Column::CreatedAt, Order::Asc);
+    let rows = db.orm().query_all(&stmt).await.map_err(orm_err)?;
 
-    for (id, payload_json) in rows {
+    for row in &rows {
+        let id: String = row.try_get("", "id").map_err(orm_err)?;
+        let payload_json: String = row.try_get("", "payload").map_err(orm_err)?;
         let Ok(payload) = serde_json::from_str::<JobPayload>(&payload_json) else {
             continue;
         };
@@ -166,16 +251,19 @@ pub async fn claim_next(
         {
             continue;
         }
-        let updated = db_execute!(
-            db,
-            r"
-            UPDATE jobs
-            SET status = 'running', updated_at = datetime('now')
-            WHERE id = ? AND status = 'pending'
-            ",
-            &id
-        )?;
-        if updated == 1 {
+        // CAS claim: exactly one worker flips `pending` → `running`.
+        let claimed = jobs::Entity::update_many()
+            .col_expr(jobs::Column::Status, Expr::val("running"))
+            .col_expr(jobs::Column::UpdatedAt, Expr::val(updated_at_value(db)))
+            .filter(
+                sea_orm::Condition::all()
+                    .add(jobs::Column::Id.eq(id.clone()))
+                    .add(jobs::Column::Status.eq("pending")),
+            )
+            .exec(&db.orm())
+            .await
+            .map_err(orm_err)?;
+        if claimed.rows_affected == 1 {
             return Ok(Some(ClaimedJob {
                 id,
                 status: "running".into(),
@@ -188,14 +276,14 @@ pub async fn claim_next(
 
 /// Reset leftover `running` rows so a restarted worker can claim them.
 pub async fn reclaim_stale_running(db: &DbPool) -> Result<u64, sqlx::Error> {
-    db_execute!(
-        db,
-        r"
-        UPDATE jobs
-        SET status = 'pending', updated_at = datetime('now')
-        WHERE status = 'running'
-        "
-    )
+    let result = jobs::Entity::update_many()
+        .col_expr(jobs::Column::Status, Expr::val("pending"))
+        .col_expr(jobs::Column::UpdatedAt, Expr::val(updated_at_value(db)))
+        .filter(jobs::Column::Status.eq("running"))
+        .exec(&db.orm())
+        .await
+        .map_err(orm_err)?;
+    Ok(result.rows_affected)
 }
 
 /// Acquire a worker permit, then claim. The permit is held for the job's
@@ -235,30 +323,33 @@ fn sanitize_error(err: &SyncError) -> &'static str {
 }
 
 async fn mark_completed(db: &DbPool, id: &str) -> Result<(), sqlx::Error> {
-    db_execute!(
-        db,
-        r"
-        UPDATE jobs
-        SET status = 'completed', last_error = NULL, updated_at = datetime('now')
-        WHERE id = ?
-        ",
-        id
-    )?;
+    jobs::Entity::update_many()
+        .col_expr(jobs::Column::Status, Expr::val("completed"))
+        .col_expr(jobs::Column::LastError, Expr::val(Value::String(None)))
+        .col_expr(jobs::Column::UpdatedAt, Expr::val(updated_at_value(db)))
+        .filter(jobs::Column::Id.eq(id))
+        .exec(&db.orm())
+        .await
+        .map_err(orm_err)?;
     Ok(())
 }
 
 async fn mark_failed(db: &DbPool, id: &str, last_error: &str) -> Result<(), sqlx::Error> {
-    db_execute!(
-        db,
-        r"
-        UPDATE jobs
-        SET status = 'failed', last_error = ?, attempts = attempts + 1,
-            updated_at = datetime('now')
-        WHERE id = ?
-        ",
-        last_error,
-        id
-    )?;
+    // Scoped: blanket `ExprTrait` (for `.add`) shadows integer-inherent
+    // `.min` / `.max`, so it must not leak into the whole module.
+    use sea_orm::sea_query::ExprTrait;
+    jobs::Entity::update_many()
+        .col_expr(jobs::Column::Status, Expr::val("failed"))
+        .col_expr(jobs::Column::LastError, Expr::val(last_error))
+        .col_expr(
+            jobs::Column::Attempts,
+            Expr::col(jobs::Column::Attempts).add(1),
+        )
+        .col_expr(jobs::Column::UpdatedAt, Expr::val(updated_at_value(db)))
+        .filter(jobs::Column::Id.eq(id))
+        .exec(&db.orm())
+        .await
+        .map_err(orm_err)?;
     Ok(())
 }
 
@@ -269,37 +360,34 @@ async fn reschedule_transient(
     last_error: &str,
     delay_secs: i64,
 ) -> Result<(), sqlx::Error> {
+    use sea_orm::sea_query::ExprTrait;
     let run_at = (chrono::Utc::now() + chrono::Duration::seconds(delay_secs)).to_rfc3339();
-    db_execute!(
-        db,
-        r"
-        UPDATE jobs
-        SET status = 'pending',
-            last_error = ?,
-            attempts = attempts + 1,
-            run_at = ?,
-            updated_at = datetime('now')
-        WHERE id = ?
-        ",
-        last_error,
-        &run_at,
-        id
-    )?;
+    jobs::Entity::update_many()
+        .col_expr(jobs::Column::Status, Expr::val("pending"))
+        .col_expr(jobs::Column::LastError, Expr::val(last_error))
+        .col_expr(
+            jobs::Column::Attempts,
+            Expr::col(jobs::Column::Attempts).add(1),
+        )
+        .col_expr(jobs::Column::RunAt, Expr::val(run_at.as_str()))
+        .col_expr(jobs::Column::UpdatedAt, Expr::val(updated_at_value(db)))
+        .filter(jobs::Column::Id.eq(id))
+        .exec(&db.orm())
+        .await
+        .map_err(orm_err)?;
     Ok(())
 }
 
 const SMTP_TRANSIENT_MAX_ATTEMPTS: i64 = 3;
 
 async fn revert_pending(db: &DbPool, id: &str) -> Result<(), sqlx::Error> {
-    db_execute!(
-        db,
-        r"
-        UPDATE jobs
-        SET status = 'pending', updated_at = datetime('now')
-        WHERE id = ?
-        ",
-        id
-    )?;
+    jobs::Entity::update_many()
+        .col_expr(jobs::Column::Status, Expr::val("pending"))
+        .col_expr(jobs::Column::UpdatedAt, Expr::val(updated_at_value(db)))
+        .filter(jobs::Column::Id.eq(id))
+        .exec(&db.orm())
+        .await
+        .map_err(orm_err)?;
     Ok(())
 }
 
@@ -345,65 +433,91 @@ pub async fn process_job(
             }
         }
         JobPayload::UnsnoozeMessage { message_id } => {
-            db_execute!(
-                db,
-                "UPDATE message SET snoozed_until = NULL WHERE id = ?",
-                &id_param(db, &message_id)?
-            )?;
+            // Not part of the audit: absent fields keep stored values, and the
+            // original write did not touch `updated_at`.
+            message::Entity::update_many()
+                .col_expr(
+                    message::Column::SnoozedUntil,
+                    Expr::val(Value::ChronoDateTimeUtc(None)),
+                )
+                .filter(message::Column::Id.eq(fk_id_value(db, &message_id)?))
+                .exec(&db.orm())
+                .await
+                .map_err(orm_err)?;
             mark_completed(db, &job.id).await?;
         }
         JobPayload::SendMessage {
             account_id,
             outbound,
         } => {
-            let Ok(raw) = serde_json::to_string(&outbound) else {
-                mark_failed(db, &job.id, "invalid outbound payload").await?;
-                return Ok(());
+            handle_send_message(db, app, &job.id, &account_id, &outbound).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Run one `SendMessage` payload through the account's configured send plugin.
+///
+/// Terminal failures mark the job `failed` with a sanitized category;
+/// `SMTP transient` / `JMAP transient` categories are rescheduled with
+/// capped exponential backoff while attempts remain.
+async fn handle_send_message(
+    db: &DbPool,
+    app: &App,
+    job_id: &str,
+    account_id: &str,
+    outbound: &serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    let Ok(raw) = serde_json::to_string(outbound) else {
+        mark_failed(db, job_id, "invalid outbound payload").await?;
+        return Ok(());
+    };
+    let mut probe = Sq::select();
+    probe
+        .column(mail_account::Column::SendProtocol)
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::Id.eq(fk_id_value(db, account_id)?));
+    let protocol: Option<String> = match db.orm().query_one(&probe).await.map_err(orm_err)? {
+        Some(row) => row.try_get("", "send_protocol").map_err(orm_err)?,
+        None => None,
+    };
+    let Some(protocol) = protocol.filter(|p| !p.is_empty()) else {
+        mark_failed(db, job_id, "send protocol not configured").await?;
+        return Ok(());
+    };
+    let Ok(plugin) = app.send(&protocol) else {
+        mark_failed(db, job_id, "unknown send protocol").await?;
+        return Ok(());
+    };
+    match plugin.send(account_id, &raw).await {
+        Ok(()) => mark_completed(db, job_id).await?,
+        Err(err_cat) => {
+            let mut sel = Sq::select();
+            sel.column(jobs::Column::Attempts)
+                .from(jobs::Entity)
+                .and_where(jobs::Column::Id.eq(job_id));
+            let attempts: i64 = match db.orm().query_one(&sel).await.map_err(orm_err)? {
+                Some(row) => row.try_get("", "attempts").map_err(orm_err)?,
+                None => 0,
             };
-            let protocol: Option<String> = db_scalar_optional!(
-                db,
-                String,
-                "SELECT send_protocol FROM mail_account WHERE id = ?",
-                &id_param(db, &account_id)?
-            )?;
-            let Some(protocol) = protocol.filter(|p| !p.is_empty()) else {
-                mark_failed(db, &job.id, "send protocol not configured").await?;
-                return Ok(());
-            };
-            let Ok(plugin) = app.send(&protocol) else {
-                mark_failed(db, &job.id, "unknown send protocol").await?;
-                return Ok(());
-            };
-            match plugin.send(&account_id, &raw).await {
-                Ok(()) => mark_completed(db, &job.id).await?,
-                Err(err_cat) => {
-                    let attempts: i64 = db_scalar_optional!(
-                        db,
-                        i64,
-                        "SELECT attempts FROM jobs WHERE id = ?",
-                        &job.id
-                    )?
-                    .unwrap_or(0);
-                    let is_transient = err_cat == "SMTP transient" || err_cat == "JMAP transient";
-                    if is_transient && attempts + 1 < SMTP_TRANSIENT_MAX_ATTEMPTS {
-                        let delay = 30i64 * (1i64 << attempts.min(4));
-                        tracing::warn!(
-                            job_id = %job.id,
-                            attempts,
-                            delay_secs = delay,
-                            "send job transient failure — reschedule"
-                        );
-                        reschedule_transient(db, &job.id, &err_cat, delay).await?;
-                    } else {
-                        let safe = if err_cat.starts_with("SMTP ") || err_cat.starts_with("JMAP ") {
-                            err_cat.as_str()
-                        } else {
-                            "send error"
-                        };
-                        tracing::warn!(job_id = %job.id, error = %safe, "send job failed");
-                        mark_failed(db, &job.id, safe).await?;
-                    }
-                }
+            let is_transient = err_cat == "SMTP transient" || err_cat == "JMAP transient";
+            if is_transient && attempts + 1 < SMTP_TRANSIENT_MAX_ATTEMPTS {
+                let delay = 30i64 * (1i64 << attempts.min(4));
+                tracing::warn!(
+                    job_id = %job_id,
+                    attempts,
+                    delay_secs = delay,
+                    "send job transient failure — reschedule"
+                );
+                reschedule_transient(db, job_id, &err_cat, delay).await?;
+            } else {
+                let safe = if err_cat.starts_with("SMTP ") || err_cat.starts_with("JMAP ") {
+                    err_cat.as_str()
+                } else {
+                    "send error"
+                };
+                tracing::warn!(job_id = %job_id, error = %safe, "send job failed");
+                mark_failed(db, job_id, safe).await?;
             }
         }
     }

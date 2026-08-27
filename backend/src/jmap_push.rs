@@ -13,11 +13,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sqlx::Row;
+use sea_orm::sea_query::{Query as Sq, SelectStatement};
+use sea_orm::{ColumnTrait, ConnectionTrait, QueryResult};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::db_row::id_from_row;
+use crate::entities::mail_account;
 use crate::jmap::{EventSourceOutcome, JmapClient};
 use crate::jobs::{JobPayload, enqueue};
 use crate::scheduler::has_pending_or_running_sync;
@@ -95,31 +96,63 @@ async fn reconcile_watchers(
     Ok(())
 }
 
-async fn list_jmap_push_candidates(db: &DbPool) -> Result<Vec<PushAccount>, sqlx::Error> {
-    let rows = db_fetch_all!(
-        db,
-        r"
-        SELECT id, user_id, email_address, credential, jmap_base_url
-        FROM mail_account
-        WHERE is_active = ? AND sync_enabled = ?
-          AND receive_protocol = ?
-        ",
-        |row| {
-            let jmap_base_url: Option<String> = row.get("jmap_base_url");
-            (
-                id_from_row(row, "id"),
-                id_from_row(row, "user_id"),
-                row.get::<String, _>("email_address"),
-                row.get::<String, _>("credential"),
-                jmap_base_url,
-            )
-        },
-        true,
-        true,
-        "jmap"
-    )?;
+// ── SeaORM plumbing (entity query on `db.orm()`) ─────────────────────
+//
+// Ids are TEXT on SQLite and native UUID on Postgres; row helpers decode
+// both shapes where the macro layer used `id_from_row`.
 
-    Ok(rows
+/// Unwrap the driver error SeaORM wraps so callers keep a `sqlx::Error`;
+/// non-driver SeaORM errors become `sqlx::Error::Protocol`.
+fn orm_err(err: sea_orm::DbErr) -> sqlx::Error {
+    use sea_orm::RuntimeErr;
+    match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
+/// Decode an id column from either engine (TEXT on SQLite, UUID on Postgres).
+fn row_id(row: &QueryResult, col: &str) -> Result<String, sqlx::Error> {
+    if let Ok(text) = row.try_get::<Option<String>>("", col) {
+        return Ok(text.unwrap_or_default());
+    }
+    row.try_get::<Option<uuid::Uuid>>("", col)
+        .map_err(orm_err)
+        .map(|opt| opt.map_or_else(String::new, |u| u.to_string()))
+}
+
+async fn list_jmap_push_candidates(db: &DbPool) -> Result<Vec<PushAccount>, sqlx::Error> {
+    let mut stmt: SelectStatement = Sq::select();
+    stmt.columns([
+        mail_account::Column::Id,
+        mail_account::Column::UserId,
+        mail_account::Column::EmailAddress,
+        mail_account::Column::Credential,
+        mail_account::Column::JmapBaseUrl,
+    ])
+    .from(mail_account::Entity)
+    .and_where(mail_account::Column::IsActive.eq(true))
+    .and_where(mail_account::Column::SyncEnabled.eq(true))
+    .and_where(mail_account::Column::ReceiveProtocol.eq("jmap"));
+
+    let rows = db.orm().query_all(&stmt).await.map_err(orm_err)?;
+    let tuples: Vec<(String, String, String, String, Option<String>)> = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row_id(row, "id")?,
+                row_id(row, "user_id")?,
+                row.try_get("", "email_address").map_err(orm_err)?,
+                row.try_get("", "credential").map_err(orm_err)?,
+                row.try_get("", "jmap_base_url").map_err(orm_err)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
+    Ok(tuples
         .into_iter()
         .filter_map(|(id, user_id, email_address, credential, jmap_base_url)| {
             let jmap_base_url = jmap_base_url.filter(|u| !u.is_empty())?;

@@ -1,19 +1,63 @@
 //! SMTP send helpers and the compose HTTP handler.
 
 use axum::{Json, extract::State};
+use sea_orm::sea_query::Query as Sq;
+use sea_orm::{ColumnTrait, ConnectionTrait, QueryResult, Value};
 use serde::Serialize;
 use uuid::Uuid;
 
 use super::types::SyncError;
 use crate::auth::{AuthSession, AuthState};
-use crate::db_row::{id_from_row, id_param};
+use crate::entities::mail_account;
 use crate::kernel::App;
 use crate::opengpg::keys::OpengpgError;
 use crate::opengpg::send::{OpengpgSendOptions, collect_recipient_emails, wrap_outbound_opengpg};
 use crate::protocol::SendHandle;
 use crate::smtp::{OutboundMessage, SmtpAdapter, SmtpConfig, SmtpSecurity};
 use crate::storage::DbPool;
-use sqlx::Row;
+
+// ── SeaORM plumbing (entity queries on `db.orm()`) ──────────────────
+//
+// Account ids are TEXT on SQLite and native UUID on Postgres; `IdParam`
+// keeps the parse semantics the macro layer used.
+
+/// Unwrap the driver error SeaORM wraps so [`SyncError::Database`] keeps
+/// reporting the underlying `sqlx::Error`; non-driver SeaORM errors become
+/// `sqlx::Error::Protocol` with the original message.
+fn orm_err(err: sea_orm::DbErr) -> SyncError {
+    use sea_orm::RuntimeErr;
+    let sqlx_err = match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    };
+    SyncError::Database(sqlx_err)
+}
+
+/// Dialect-aware bind for a UUID-column id.
+fn id_value(db: &DbPool, id: &str) -> Result<Value, SyncError> {
+    Ok(
+        match crate::db_row::id_param(db, id)
+            .map_err(|e| SyncError::Database(sqlx::Error::from(e)))?
+        {
+            crate::db_row::IdParam::Text(s) => Value::String(Some(s)),
+            crate::db_row::IdParam::Uuid(u) => Value::Uuid(Some(u)),
+        },
+    )
+}
+
+/// Decode an id column from either engine (TEXT on SQLite, UUID on Postgres).
+fn row_id(row: &QueryResult, col: &str) -> Result<String, SyncError> {
+    if let Some(text) = row.try_get::<Option<String>>("", col).map_err(orm_err)? {
+        return Ok(text);
+    }
+    row.try_get::<Option<uuid::Uuid>>("", col)
+        .map_err(orm_err)?
+        .map(|u| u.to_string())
+        .ok_or_else(|| orm_err(sea_orm::DbErr::RecordNotFound("id column was NULL".into())))
+}
 
 /// Look up a send plugin by `send_protocol`. Unknown ids map to HTTP 400.
 pub(crate) fn resolve_send_plugin(app: &App, send_protocol: &str) -> Result<SendHandle, SyncError> {
@@ -57,28 +101,33 @@ pub(crate) async fn send_message(
 ) -> Result<Json<SendMessageResponse>, SyncError> {
     let db = state.db();
     let user_id = session.user_id;
-    let account_bind = id_param(db, &body.account_id)?;
-    let user_bind = id_param(db, &user_id)?;
+    let account_bind = id_value(db, &body.account_id)?;
+    let user_bind = id_value(db, &user_id)?;
 
-    let row = db_fetch_optional!(
-        db,
-        r"
-        SELECT email_address, send_protocol, is_active
-        FROM mail_account
-        WHERE id = ? AND user_id = ?
-        ",
-        |row| {
-            let is_active: bool = row.get("is_active");
-            let send_protocol: String = row.get("send_protocol");
-            let email_address: String = row.get("email_address");
-            (is_active, send_protocol, email_address)
-        },
-        &account_bind,
-        &user_bind
-    )?
-    .ok_or(SyncError::AccountNotFound)?;
+    let mut probe = Sq::select();
+    probe
+        .columns([
+            mail_account::Column::EmailAddress,
+            mail_account::Column::SendProtocol,
+            mail_account::Column::IsActive,
+        ])
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::Id.eq(account_bind))
+        .and_where(mail_account::Column::UserId.eq(user_bind));
+    let row = db
+        .orm()
+        .query_one(&probe)
+        .await
+        .map_err(orm_err)?
+        .ok_or(SyncError::AccountNotFound)?;
 
-    let (is_active, send_protocol, email_address) = row;
+    let (is_active, send_protocol, email_address) = (
+        row.try_get::<bool>("", "is_active").map_err(orm_err)?,
+        row.try_get::<String>("", "send_protocol")
+            .map_err(orm_err)?,
+        row.try_get::<String>("", "email_address")
+            .map_err(orm_err)?,
+    );
     if !is_active {
         return Err(SyncError::AccountDisabled);
     }
@@ -212,25 +261,31 @@ pub(crate) async fn prepare_jmap_send(
     account_id: &str,
     raw: &str,
 ) -> Result<(String, String, String, OutboundMessage), SyncError> {
-    let row = db_fetch_optional!(
-        db,
-        r"
-        SELECT email_address, user_id, jmap_base_url, is_active
-        FROM mail_account
-        WHERE id = ?
-        ",
-        |row| {
-            let is_active: bool = row.get("is_active");
-            let jmap_base_url: Option<String> = row.get("jmap_base_url");
-            let email_address: String = row.get("email_address");
-            let user_id = id_from_row(&row, "user_id");
-            (is_active, jmap_base_url, email_address, user_id)
-        },
-        &id_param(db, account_id)?
-    )?
-    .ok_or(SyncError::AccountNotFound)?;
+    let mut probe = Sq::select();
+    probe
+        .columns([
+            mail_account::Column::EmailAddress,
+            mail_account::Column::UserId,
+            mail_account::Column::JmapBaseUrl,
+            mail_account::Column::IsActive,
+        ])
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::Id.eq(id_value(db, account_id)?));
+    let row = db
+        .orm()
+        .query_one(&probe)
+        .await
+        .map_err(orm_err)?
+        .ok_or(SyncError::AccountNotFound)?;
 
-    let (is_active, jmap_base_url, email_address, user_id) = row;
+    let (is_active, jmap_base_url, email_address, user_id) = (
+        row.try_get::<bool>("", "is_active").map_err(orm_err)?,
+        row.try_get::<Option<String>>("", "jmap_base_url")
+            .map_err(orm_err)?,
+        row.try_get::<String>("", "email_address")
+            .map_err(orm_err)?,
+        row_id(&row, "user_id")?,
+    );
     if !is_active {
         return Err(SyncError::AccountDisabled);
     }
@@ -256,37 +311,39 @@ pub(crate) async fn prepare_smtp_send(
     account_id: &str,
     raw: &str,
 ) -> Result<(SmtpConfig, OutboundMessage), SyncError> {
-    let row = db_fetch_optional!(
-        db,
-        r"
-        SELECT email_address, user_id, auth_type,
-               smtp_host, smtp_port, smtp_security, is_active
-        FROM mail_account
-        WHERE id = ?
-        ",
-        |row| {
-            let is_active: bool = row.get("is_active");
-            let smtp_host: Option<String> = row.get("smtp_host");
-            let smtp_port: Option<i32> = row.get("smtp_port");
-            let smtp_security: Option<String> = row.get("smtp_security");
-            let email_address: String = row.get("email_address");
-            let auth_type: String = row.get("auth_type");
-            let user_id = id_from_row(&row, "user_id");
-            (
-                is_active,
-                smtp_host,
-                smtp_port,
-                smtp_security,
-                email_address,
-                auth_type,
-                user_id,
-            )
-        },
-        &id_param(db, account_id)?
-    )?
-    .ok_or(SyncError::AccountNotFound)?;
+    let mut probe = Sq::select();
+    probe
+        .columns([
+            mail_account::Column::EmailAddress,
+            mail_account::Column::UserId,
+            mail_account::Column::AuthType,
+            mail_account::Column::SmtpHost,
+            mail_account::Column::SmtpPort,
+            mail_account::Column::SmtpSecurity,
+            mail_account::Column::IsActive,
+        ])
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::Id.eq(id_value(db, account_id)?));
+    let row = db
+        .orm()
+        .query_one(&probe)
+        .await
+        .map_err(orm_err)?
+        .ok_or(SyncError::AccountNotFound)?;
 
-    let (is_active, smtp_host, smtp_port, smtp_security, email_address, auth_type, user_id) = row;
+    let (is_active, smtp_host, smtp_port, smtp_security, email_address, auth_type, user_id) = (
+        row.try_get::<bool>("", "is_active").map_err(orm_err)?,
+        row.try_get::<Option<String>>("", "smtp_host")
+            .map_err(orm_err)?,
+        row.try_get::<Option<i32>>("", "smtp_port")
+            .map_err(orm_err)?,
+        row.try_get::<Option<String>>("", "smtp_security")
+            .map_err(orm_err)?,
+        row.try_get::<String>("", "email_address")
+            .map_err(orm_err)?,
+        row.try_get::<String>("", "auth_type").map_err(orm_err)?,
+        row_id(&row, "user_id")?,
+    );
     if !is_active {
         return Err(SyncError::AccountDisabled);
     }

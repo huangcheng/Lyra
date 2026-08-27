@@ -1,5 +1,8 @@
 # Lyra — Data Model Spec (Dual-DB)
 
+> **Data access:** all queries go through SeaORM 2.0 entities (`backend/src/entities/`) over one runtime pool selected by `DATABASE_URL` (SQLite or PostgreSQL; both compile in). Ids are app-generated UUIDv7 stored as TEXT on SQLite and native UUID on PostgreSQL; dialect differences bind in one seam. FTS (migration 0009) stays engine-specific raw SQL by design.
+
+
 **Date:** 2026-08-20  
 **Status:** Draft  
 **Companion:** Product spec (`docs/product/2026-08-20-lyra-v1-product-spec.md`), Engineering standards (`docs/specs/2026-08-20-lyra-engineering-standards.md`)

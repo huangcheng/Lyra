@@ -53,6 +53,7 @@ Rules:
 
 - Axum handlers stay thin; business logic lives in modules behind seams.
 - Migrations and schema must work on both **SQLite** and **PostgreSQL**.
+- Data access goes through SeaORM 2.0 entities (`backend/src/entities/`) — the CI postgres job enforces the dual-DB invariant on every PR; dialect-specific raw SQL is allowed only for FTS and engine-unique statements, behind an explicit backend tag.
 - Shape data for single-user now, with ownership keys (or equivalent) so multi-user can land later — without building multi-user UX in v1.
 
 ## Protocol standards compliance

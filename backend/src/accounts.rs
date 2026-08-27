@@ -15,14 +15,20 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
+use sea_orm::sea_query::{Expr, Order, Query as Sq, SelectStatement};
+use sea_orm::{
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter, QueryResult, Value,
+};
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use uuid::Uuid;
 
 use crate::api_error::ApiErrorBody;
 use crate::auth::{AuthState, AuthUser};
 use crate::crypto;
-use crate::db_row::{InvalidIdError, id_from_row, id_param, opt_ts_from_row, ts_from_row};
+use crate::db_row::{IdParam, InvalidIdError, id_param};
+use crate::entities::mail_account;
+use crate::storage::DbPool;
 
 /// Routes for account management.
 pub fn routes() -> Router<AuthState> {
@@ -163,41 +169,130 @@ impl IntoResponse for AccountError {
     }
 }
 
-macro_rules! account_from_row {
-    ($row:expr) => {{
-        Account {
-            id: id_from_row(&$row, "id"),
-            display_name: $row
-                .get::<Option<String>, _>("display_name")
-                .unwrap_or_default(),
-            email_address: $row.get("email_address"),
-            protocol: $row.get("protocol"),
-            imap_host: $row.get("imap_host"),
-            imap_port: $row.get("imap_port"),
-            imap_security: $row.get("imap_security"),
-            smtp_host: $row.get("smtp_host"),
-            smtp_port: $row.get("smtp_port"),
-            smtp_security: $row.get("smtp_security"),
-            carddav_url: $row.get("carddav_url"),
-            caldav_url: $row.get("caldav_url"),
-            is_active: $row.get::<bool, _>("is_active"),
-            sync_enabled: $row.get::<bool, _>("sync_enabled"),
-            last_sync_at: opt_ts_from_row(&$row, "last_sync_at"),
-            created_at: ts_from_row(&$row, "created_at"),
-            updated_at: ts_from_row(&$row, "updated_at"),
-        }
-    }};
+// ── SeaORM plumbing (entity queries on `db.orm()`) ──────────────────
+//
+// Entity PKs are `Uuid`, but SQLite rows carry legacy TEXT ids (tests use
+// `"user-1"` etc.), so ids bind as strings on SQLite and native UUIDs on
+// Postgres — the same split `db_row::id_param` makes — and read back through
+// dialect-tolerant decoders below. Timestamps mirror that split: SQLite text
+// is returned verbatim, Postgres `TIMESTAMPTZ` becomes RFC3339.
+
+/// Unwrap the driver error SeaORM wraps so [`AccountError::Database`] keeps
+/// reporting the underlying `sqlx::Error`; non-driver SeaORM errors become
+/// `sqlx::Error::Protocol` with the original message.
+fn orm_err(err: sea_orm::DbErr) -> AccountError {
+    use sea_orm::RuntimeErr;
+    let sqlx_err = match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    };
+    AccountError::from(sqlx_err)
 }
 
-const ACCOUNT_SELECT: &str = r"
-        SELECT id, display_name, email_address, protocol,
-               imap_host, imap_port, imap_security,
-               smtp_host, smtp_port, smtp_security,
-               carddav_url, caldav_url,
-               is_active, sync_enabled, last_sync_at,
-               created_at, updated_at
-        FROM mail_account
-";
+/// Dialect-aware bind for a UUID-column id: TEXT on SQLite, native UUID on
+/// Postgres. An unparseable id maps to [`AccountError::NotFound`] exactly as
+/// `InvalidIdError` did through the macro layer.
+fn id_value(db: &DbPool, id: &str) -> Result<Value, AccountError> {
+    Ok(match id_param(db, id)? {
+        IdParam::Text(s) => Value::String(Some(s)),
+        IdParam::Uuid(u) => Value::Uuid(Some(u)),
+    })
+}
+
+/// Nullable id column decode: `String` on SQLite, native UUID on Postgres.
+fn row_opt_id(row: &QueryResult, col: &str) -> Result<Option<String>, AccountError> {
+    if let Ok(text) = row.try_get::<Option<String>>("", col) {
+        return Ok(text);
+    }
+    row.try_get::<Option<uuid::Uuid>>("", col)
+        .map(|opt| opt.map(|u| u.to_string()))
+        .map_err(orm_err)
+}
+
+fn row_id(row: &QueryResult, col: &str) -> Result<String, AccountError> {
+    row_opt_id(row, col)?.ok_or_else(|| {
+        AccountError::Database(sqlx::Error::Protocol(format!("missing column {col}")))
+    })
+}
+fn row_opt_ts(row: &QueryResult, col: &str) -> Result<Option<String>, AccountError> {
+    if let Ok(text) = row.try_get::<Option<String>>("", col) {
+        return Ok(text);
+    }
+    row.try_get::<Option<DateTime<Utc>>>("", col)
+        .map(|opt| opt.map(|t| t.to_rfc3339()))
+        .map_err(orm_err)
+}
+
+fn row_ts(row: &QueryResult, col: &str) -> Result<String, AccountError> {
+    Ok(row_opt_ts(row, col)?.unwrap_or_default())
+}
+
+/// The shared `mail_account` projection (old `ACCOUNT_SELECT` columns),
+/// sourced from entity Columns so it cannot drift from the schema.
+fn add_account_columns(query: &mut SelectStatement) {
+    query.columns([
+        mail_account::Column::Id,
+        mail_account::Column::DisplayName,
+        mail_account::Column::EmailAddress,
+        mail_account::Column::Protocol,
+        mail_account::Column::ImapHost,
+        mail_account::Column::ImapPort,
+        mail_account::Column::ImapSecurity,
+        mail_account::Column::SmtpHost,
+        mail_account::Column::SmtpPort,
+        mail_account::Column::SmtpSecurity,
+        mail_account::Column::CarddavUrl,
+        mail_account::Column::CaldavUrl,
+        mail_account::Column::IsActive,
+        mail_account::Column::SyncEnabled,
+        mail_account::Column::LastSyncAt,
+        mail_account::Column::CreatedAt,
+        mail_account::Column::UpdatedAt,
+    ]);
+}
+
+fn account_from_row(row: &QueryResult) -> Result<Account, AccountError> {
+    Ok(Account {
+        id: row_id(row, "id")?,
+        display_name: row
+            .try_get::<Option<String>>("", "display_name")
+            .map_err(orm_err)?
+            .unwrap_or_default(),
+        email_address: row.try_get("", "email_address").map_err(orm_err)?,
+        protocol: row.try_get("", "protocol").map_err(orm_err)?,
+        imap_host: row.try_get("", "imap_host").map_err(orm_err)?,
+        imap_port: row.try_get("", "imap_port").map_err(orm_err)?,
+        imap_security: row.try_get("", "imap_security").map_err(orm_err)?,
+        smtp_host: row.try_get("", "smtp_host").map_err(orm_err)?,
+        smtp_port: row.try_get("", "smtp_port").map_err(orm_err)?,
+        smtp_security: row.try_get("", "smtp_security").map_err(orm_err)?,
+        carddav_url: row.try_get("", "carddav_url").map_err(orm_err)?,
+        caldav_url: row.try_get("", "caldav_url").map_err(orm_err)?,
+        is_active: row.try_get("", "is_active").map_err(orm_err)?,
+        sync_enabled: row.try_get("", "sync_enabled").map_err(orm_err)?,
+        last_sync_at: row_opt_ts(row, "last_sync_at")?,
+        created_at: row_ts(row, "created_at")?,
+        updated_at: row_ts(row, "updated_at")?,
+    })
+}
+
+/// Fetch one account scoped to `(id, user_id)`; absence means not found.
+async fn find_account(db: &DbPool, id: Value, user: Value) -> Result<Account, AccountError> {
+    let conn = db.orm();
+    let mut stmt = Sq::select();
+    add_account_columns(&mut stmt);
+    stmt.from(mail_account::Entity)
+        .and_where(mail_account::Column::Id.eq(id))
+        .and_where(mail_account::Column::UserId.eq(user));
+    let row = conn.query_one(&stmt).await.map_err(orm_err)?;
+    match row {
+        Some(r) => account_from_row(&r),
+        None => Err(AccountError::NotFound),
+    }
+}
 
 /// List all mail accounts for the authenticated user.
 async fn list_accounts(
@@ -205,11 +300,19 @@ async fn list_accounts(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<Account>>, AccountError> {
     let db = state.db();
-    let user_id = id_param(db, &user_id)?;
-    let sql = format!(
-        "{ACCOUNT_SELECT}        WHERE user_id = ?\n        ORDER BY created_at DESC\n        "
-    );
-    let accounts = db_fetch_all!(db, &sql, |row| account_from_row!(row), &user_id)?;
+    let conn = db.orm();
+    let user = id_value(db, &user_id)?;
+    let mut stmt = Sq::select();
+    add_account_columns(&mut stmt);
+    stmt.from(mail_account::Entity)
+        .and_where(mail_account::Column::UserId.eq(user))
+        .order_by(mail_account::Column::CreatedAt, Order::Desc);
+
+    let rows = conn.query_all(&stmt).await.map_err(orm_err)?;
+    let accounts = rows
+        .iter()
+        .map(account_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(accounts))
 }
 
@@ -220,11 +323,7 @@ async fn get_account(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Account>, AccountError> {
     let db = state.db();
-    let id = id_param(db, &id)?;
-    let user_id = id_param(db, &user_id)?;
-    let sql = format!("{ACCOUNT_SELECT}        WHERE id = ? AND user_id = ?\n        ");
-    let account = db_fetch_optional!(db, &sql, |row| account_from_row!(&row), &id, &user_id)?
-        .ok_or(AccountError::NotFound)?;
+    let account = find_account(db, id_value(db, &id)?, id_value(db, &user_id)?).await?;
     Ok(Json(account))
 }
 
@@ -284,38 +383,56 @@ async fn create_account(
     )
     .await;
     let auth_type = body.auth_type.unwrap_or_else(|| "password".into());
-    let id_bind = id_param(db, &id)?;
-    let user_bind = id_param(db, &user_id)?;
+    let id_bind = id_value(db, &id)?;
+    let user_bind = id_value(db, &user_id)?;
 
-    db_execute!(
-        db,
-        r"
-        INSERT INTO mail_account (
-            id, user_id, display_name, email_address, protocol, auth_type,
-            credential, imap_host, imap_port, imap_security,
-            smtp_host, smtp_port, smtp_security, jmap_base_url,
-            is_active, sync_enabled, receive_protocol, send_protocol
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ",
-        &id_bind,
-        &user_bind,
-        &body.display_name,
-        &body.email_address,
-        &protocol,
-        &auth_type,
-        &credential_json,
-        &body.imap_host,
-        body.imap_port,
-        &imap_security,
-        &body.smtp_host,
-        body.smtp_port,
-        &smtp_security,
-        &jmap_base_url,
-        true,
-        true,
-        &receive_protocol,
-        &send_protocol
-    )?;
+    // Column-level insert (not an ActiveModel): the entity PK is `Uuid`,
+    // while SQLite rows carry legacy TEXT ids that only a raw value can
+    // express. `created_at` / `updated_at` keep the table defaults, as before.
+    let mut insert = Sq::insert();
+    insert
+        .into_table(mail_account::Entity)
+        .columns([
+            mail_account::Column::Id,
+            mail_account::Column::UserId,
+            mail_account::Column::DisplayName,
+            mail_account::Column::EmailAddress,
+            mail_account::Column::Protocol,
+            mail_account::Column::AuthType,
+            mail_account::Column::Credential,
+            mail_account::Column::ImapHost,
+            mail_account::Column::ImapPort,
+            mail_account::Column::ImapSecurity,
+            mail_account::Column::SmtpHost,
+            mail_account::Column::SmtpPort,
+            mail_account::Column::SmtpSecurity,
+            mail_account::Column::JmapBaseUrl,
+            mail_account::Column::IsActive,
+            mail_account::Column::SyncEnabled,
+            mail_account::Column::ReceiveProtocol,
+            mail_account::Column::SendProtocol,
+        ])
+        .values_panic([
+            Expr::val(id_bind),
+            Expr::val(user_bind),
+            Expr::val(body.display_name.as_str()),
+            Expr::val(body.email_address.as_str()),
+            Expr::val(protocol.as_str()),
+            Expr::val(auth_type.as_str()),
+            Expr::val(credential_json.as_str()),
+            Expr::val(body.imap_host.clone()),
+            Expr::val(body.imap_port),
+            Expr::val(imap_security.clone()),
+            Expr::val(body.smtp_host.clone()),
+            Expr::val(body.smtp_port),
+            Expr::val(smtp_security.clone()),
+            Expr::val(jmap_base_url.clone()),
+            Expr::val(true),
+            Expr::val(true),
+            Expr::val(receive_protocol.as_str()),
+            Expr::val(send_protocol.as_str()),
+        ]);
+    db.orm().execute(&insert).await.map_err(orm_err)?;
 
     let now = chrono::Utc::now().to_rfc3339();
     if let Err(error) = crate::jobs::enqueue(
@@ -364,18 +481,19 @@ async fn update_account(
     Json(body): Json<UpdateAccountRequest>,
 ) -> Result<Json<Account>, AccountError> {
     let db = state.db();
+    let conn = db.orm();
 
-    let id_bind = id_param(db, &id)?;
-    let user_bind = id_param(db, &user_id)?;
+    let id_bind = id_value(db, &id)?;
+    let user_bind = id_value(db, &user_id)?;
 
     // Verify account exists and belongs to user
-    let existing: Option<String> = db_id_optional!(
-        db,
-        "SELECT id FROM mail_account WHERE id = ? AND user_id = ?",
-        &id_bind,
-        &user_bind
-    )?;
-    if existing.is_none() {
+    let mut probe = Sq::select();
+    probe
+        .column(mail_account::Column::Id)
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::Id.eq(id_bind.clone()))
+        .and_where(mail_account::Column::UserId.eq(user_bind.clone()));
+    if conn.query_one(&probe).await.map_err(orm_err)?.is_none() {
         return Err(AccountError::NotFound);
     }
 
@@ -430,51 +548,61 @@ async fn update_account(
         None
     };
 
-    db_execute!(
-        db,
-        r"
-        UPDATE mail_account SET
-            display_name = IFNULL(?, display_name),
-            email_address = IFNULL(?, email_address),
-            is_active = IFNULL(?, is_active),
-            sync_enabled = IFNULL(?, sync_enabled),
-            credential = IFNULL(?, credential),
-            imap_host = IFNULL(?, imap_host),
-            imap_port = IFNULL(?, imap_port),
-            imap_security = IFNULL(?, imap_security),
-            carddav_url = IFNULL(?, carddav_url),
-            caldav_url = IFNULL(?, caldav_url),
-            smtp_host = IFNULL(?, smtp_host),
-            smtp_port = IFNULL(?, smtp_port),
-            smtp_security = IFNULL(?, smtp_security),
-            updated_at = datetime('now')
-        WHERE id = ? AND user_id = ?
-        ",
-        body.display_name.as_ref(),
-        body.email_address.as_ref(),
-        body.is_active,
-        body.sync_enabled,
-        credential_json.as_ref(),
-        body.imap_host.as_ref(),
-        body.imap_port,
-        imap_security.as_ref(),
-        body.carddav_url.as_ref(),
-        body.caldav_url.as_ref(),
-        body.smtp_host.as_ref(),
-        body.smtp_port,
-        smtp_security.as_ref(),
-        &id_bind,
-        &user_bind
-    )?;
+    // Partial update: `NotSet` skip equals the old `IFNULL(?, col)` semantics —
+    // absent request fields leave the stored value untouched. `updated_at`
+    // stamps on every update exactly as `datetime('now')` did.
+    let mut updater = mail_account::Entity::update_many();
+    if let Some(v) = &body.display_name {
+        updater = updater.col_expr(mail_account::Column::DisplayName, Expr::val(v.as_str()));
+    }
+    if let Some(v) = &body.email_address {
+        updater = updater.col_expr(mail_account::Column::EmailAddress, Expr::val(v.as_str()));
+    }
+    if let Some(v) = body.is_active {
+        updater = updater.col_expr(mail_account::Column::IsActive, Expr::val(v));
+    }
+    if let Some(v) = body.sync_enabled {
+        updater = updater.col_expr(mail_account::Column::SyncEnabled, Expr::val(v));
+    }
+    if let Some(v) = &credential_json {
+        updater = updater.col_expr(mail_account::Column::Credential, Expr::val(v.as_str()));
+    }
+    if let Some(v) = &body.imap_host {
+        updater = updater.col_expr(mail_account::Column::ImapHost, Expr::val(v.as_str()));
+    }
+    if let Some(v) = body.imap_port {
+        updater = updater.col_expr(mail_account::Column::ImapPort, Expr::val(v));
+    }
+    if let Some(v) = &imap_security {
+        updater = updater.col_expr(mail_account::Column::ImapSecurity, Expr::val(v.as_str()));
+    }
+    if let Some(v) = &body.carddav_url {
+        updater = updater.col_expr(mail_account::Column::CarddavUrl, Expr::val(v.as_str()));
+    }
+    if let Some(v) = &body.caldav_url {
+        updater = updater.col_expr(mail_account::Column::CaldavUrl, Expr::val(v.as_str()));
+    }
+    if let Some(v) = &body.smtp_host {
+        updater = updater.col_expr(mail_account::Column::SmtpHost, Expr::val(v.as_str()));
+    }
+    if let Some(v) = body.smtp_port {
+        updater = updater.col_expr(mail_account::Column::SmtpPort, Expr::val(v));
+    }
+    if let Some(v) = &smtp_security {
+        updater = updater.col_expr(mail_account::Column::SmtpSecurity, Expr::val(v.as_str()));
+    }
+    updater = updater.col_expr(mail_account::Column::UpdatedAt, Expr::current_timestamp());
+    updater
+        .filter(
+            Condition::all()
+                .add(mail_account::Column::Id.eq(id_bind.clone()))
+                .add(mail_account::Column::UserId.eq(user_bind.clone())),
+        )
+        .exec(&conn)
+        .await
+        .map_err(orm_err)?;
 
-    let select_sql = format!("{ACCOUNT_SELECT}        WHERE id = ? AND user_id = ?\n        ");
-    let account = db_fetch_one!(
-        db,
-        &select_sql,
-        |row| account_from_row!(&row),
-        &id_bind,
-        &user_bind
-    )?;
+    let account = find_account(db, id_bind, user_bind).await?;
     Ok(Json(account))
 }
 
@@ -486,16 +614,19 @@ async fn delete_account(
 ) -> Result<StatusCode, AccountError> {
     let db = state.db();
 
-    let id = id_param(db, &id)?;
-    let user_id = id_param(db, &user_id)?;
-    let affected = db_execute!(
-        db,
-        "DELETE FROM mail_account WHERE id = ? AND user_id = ?",
-        &id,
-        &user_id
-    )?;
+    let id = id_value(db, &id)?;
+    let user_id = id_value(db, &user_id)?;
+    let result = mail_account::Entity::delete_many()
+        .filter(
+            Condition::all()
+                .add(mail_account::Column::Id.eq(id))
+                .add(mail_account::Column::UserId.eq(user_id)),
+        )
+        .exec(&db.orm())
+        .await
+        .map_err(orm_err)?;
 
-    if affected == 0 {
+    if result.rows_affected == 0 {
         return Err(AccountError::NotFound);
     }
 

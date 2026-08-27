@@ -5,11 +5,11 @@
 #![allow(dead_code)] // seam wired in main; index/search callers land incrementally
 
 use async_trait::async_trait;
-use sqlx::Row;
+use sea_orm::{ConnectionTrait, DbBackend, QueryResult, Statement, Value};
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::db_row::{InvalidIdError, id_param, opt_id_param};
+use crate::db_row::id_param;
 use crate::storage::DbPool;
 
 /// One ranked search hit.
@@ -36,7 +36,75 @@ pub enum SearchError {
     #[error("invalid search query")]
     InvalidQuery,
     #[error("invalid id")]
-    InvalidId(#[from] InvalidIdError),
+    InvalidId(#[from] crate::db_row::InvalidIdError),
+}
+
+// ── SeaORM plumbing ──────────────────────────────────────────────────
+//
+// The engine-specific FTS SQL (FTS5 / tsvector) stays verbatim, but every
+// statement is now built with an explicit backend tag and executed on the
+// SeaORM connection (`db.orm()`), so the module no longer routes around the
+// pool itself. Message ids are TEXT on SQLite and native UUID on Postgres;
+// ids bind dialect-aware via `id_param`'s split.
+
+/// Unwrap the driver error SeaORM wraps so [`SearchError::Database`] keeps
+/// reporting the underlying `sqlx::Error`; non-driver SeaORM errors become
+/// `sqlx::Error::Protocol` with the original message.
+fn dberr_to_sqlx(err: sea_orm::DbErr) -> sqlx::Error {
+    use sea_orm::RuntimeErr;
+    match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
+fn orm_err(err: sea_orm::DbErr) -> SearchError {
+    SearchError::from(dberr_to_sqlx(err))
+}
+
+/// Dialect-aware bind for a UUID-column value: TEXT on SQLite, native UUID on
+/// Postgres.
+fn id_value(db: &DbPool, id: &str) -> Result<Value, crate::db_row::InvalidIdError> {
+    Ok(match id_param(db, id)? {
+        crate::db_row::IdParam::Text(s) => Value::String(Some(s)),
+        crate::db_row::IdParam::Uuid(u) => Value::Uuid(Some(u)),
+    })
+}
+
+/// Optional variant of [`id_value`]; `None` binds a typed NULL so the
+/// `(? IS NULL OR …)` filters stay usable.
+fn opt_id_value(
+    db: &DbPool,
+    id: Option<&str>,
+) -> Result<Option<Value>, crate::db_row::InvalidIdError> {
+    id.map(|s| id_value(db, s)).transpose()
+}
+
+/// A bound-NULL stand-in when an optional id filter is absent.
+fn value_or_null(v: Option<&Value>) -> Value {
+    match v {
+        Some(v) => v.clone(),
+        None => Value::String(None),
+    }
+}
+
+/// Decode a `message.id` column from either engine (TEXT on SQLite, UUID on
+/// Postgres).
+fn hit_from_row(row: &QueryResult) -> Result<SearchHit, SearchError> {
+    let message_id = if let Ok(text) = row.try_get::<String>("", "message_id") {
+        text
+    } else {
+        row.try_get::<uuid::Uuid>("", "message_id")
+            .map_err(orm_err)?
+            .to_string()
+    };
+    Ok(SearchHit {
+        message_id,
+        rank: row.try_get("", "rank").map_err(orm_err)?,
+    })
 }
 
 /// Engine-specific full-text search seam.
@@ -61,33 +129,40 @@ pub fn search_index_for(db: &DbPool) -> Arc<dyn SearchIndex> {
     }
 }
 
-/// Whether migration 0009 has been applied (FTS table / tsvector column present).
-pub async fn fts_available(db: &DbPool) -> Result<bool, sqlx::Error> {
-    match db {
-        DbPool::Sqlite(pool) => {
-            let count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'message_fts'",
-            )
-            .fetch_one(pool)
-            .await?;
-            Ok(count > 0)
-        }
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(pool) => {
-            let count: i64 = sqlx::query_scalar(
-                r"
-                SELECT COUNT(*)
+const FTS_AVAILABLE_SQL_SQLITE: &str =
+    "SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name = 'message_fts'";
+
+#[cfg(feature = "postgres")]
+const FTS_AVAILABLE_SQL_POSTGRES: &str = r"
+                SELECT COUNT(*) AS c
                 FROM information_schema.columns
                 WHERE table_schema = 'public'
                   AND table_name = 'message'
                   AND column_name = 'search_vector'
-                ",
-            )
-            .fetch_one(pool)
-            .await?;
-            Ok(count > 0)
+                ";
+
+/// Whether migration 0009 has been applied (FTS table / tsvector column present).
+pub async fn fts_available(db: &DbPool) -> Result<bool, sqlx::Error> {
+    let stmt = match db.backend() {
+        DbBackend::Sqlite => Statement::from_string(DbBackend::Sqlite, FTS_AVAILABLE_SQL_SQLITE),
+        #[cfg(feature = "postgres")]
+        DbBackend::Postgres => {
+            Statement::from_string(DbBackend::Postgres, FTS_AVAILABLE_SQL_POSTGRES)
         }
-    }
+        other => {
+            return Err(sqlx::Error::Protocol(format!(
+                "fts availability probe: unsupported backend {other:?}"
+            )));
+        }
+    };
+    let row = db
+        .orm()
+        .query_one_raw(stmt)
+        .await
+        .map_err(dberr_to_sqlx)?
+        .ok_or_else(|| sqlx::Error::Protocol("fts probe returned no rows".to_owned()))?;
+    let count: i64 = row.try_get("", "c").map_err(dberr_to_sqlx)?;
+    Ok(count > 0)
 }
 
 /// Search messages for a user, optionally scoped to account/folder. Returns message ids in rank order.
@@ -99,56 +174,40 @@ pub async fn search_message_ids(
     folder_id: Option<&str>,
     limit: i64,
 ) -> Result<Vec<String>, SearchError> {
-    let user_bind = id_param(db, user_id)?;
-    let account_bind = opt_id_param(db, account_id)?;
-    let folder_bind = opt_id_param(db, folder_id)?;
+    let user = id_value(db, user_id)?;
+    let account = opt_id_value(db, account_id)?;
+    let folder = opt_id_value(db, folder_id)?;
     let limit = limit.clamp(1, 500);
 
-    match db {
-        DbPool::Sqlite(_) => {
-            sqlite_search_message_ids(
-                db,
-                query,
-                &user_bind,
-                &account_bind,
-                &account_bind,
-                &folder_bind,
-                &folder_bind,
-                limit,
-            )
-            .await
+    let hits = match db.backend() {
+        DbBackend::Sqlite => {
+            sqlite_search_message_ids(db, query, &user, &account, &folder, limit).await?
         }
         #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => {
-            postgres_search_message_ids(
-                db,
-                query,
-                &user_bind,
-                &account_bind,
-                &account_bind,
-                &folder_bind,
-                &folder_bind,
-                limit,
-            )
-            .await
+        DbBackend::Postgres => {
+            postgres_search_message_ids(db, query, &user, &account, &folder, limit).await?
         }
-    }
+        other => {
+            return Err(SearchError::from(sqlx::Error::Protocol(format!(
+                "unsupported backend {other:?}"
+            ))));
+        }
+    };
+    Ok(hits.into_iter().map(|hit| hit.message_id).collect())
 }
 
-#[allow(clippy::too_many_arguments, clippy::ref_option)]
+#[allow(clippy::ref_option)]
 async fn sqlite_search_message_ids(
     db: &DbPool,
     query: &str,
-    user_bind: &crate::db_row::IdParam,
-    account_bind: &Option<crate::db_row::IdParam>,
-    account_bind_dup: &Option<crate::db_row::IdParam>,
-    folder_bind: &Option<crate::db_row::IdParam>,
-    folder_bind_dup: &Option<crate::db_row::IdParam>,
+    user: &Value,
+    account: &Option<Value>,
+    folder: &Option<Value>,
     limit: i64,
-) -> Result<Vec<String>, SearchError> {
+) -> Result<Vec<SearchHit>, SearchError> {
     let fts_query = prepare_fts5_query(query).ok_or(SearchError::InvalidQuery)?;
-    let rows = db_fetch_all!(
-        db,
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
         r"
         SELECT m.id AS message_id, bm25(message_fts) AS rank
         FROM message_fts
@@ -162,62 +221,57 @@ async fn sqlite_search_message_ids(
         ORDER BY rank
         LIMIT ?
         ",
-        |row| SearchHit {
-            message_id: row.get::<String, _>("message_id"),
-            rank: row.get::<f64, _>("rank"),
-        },
-        &fts_query,
-        user_bind,
-        account_bind,
-        account_bind_dup,
-        folder_bind,
-        folder_bind_dup,
-        limit
-    )?;
-    Ok(rows.into_iter().map(|hit| hit.message_id).collect())
+        [
+            Value::from(fts_query.as_str()),
+            user.clone(),
+            value_or_null(account.as_ref()),
+            value_or_null(account.as_ref()),
+            value_or_null(folder.as_ref()),
+            value_or_null(folder.as_ref()),
+            Value::from(limit),
+        ],
+    );
+    let rows = db.orm().query_all_raw(stmt).await.map_err(orm_err)?;
+    rows.iter().map(hit_from_row).collect()
 }
 
 #[cfg(feature = "postgres")]
-#[allow(clippy::too_many_arguments, clippy::ref_option)]
+#[allow(clippy::ref_option)]
 async fn postgres_search_message_ids(
     db: &DbPool,
     query: &str,
-    user_bind: &crate::db_row::IdParam,
-    account_bind: &Option<crate::db_row::IdParam>,
-    account_bind_dup: &Option<crate::db_row::IdParam>,
-    folder_bind: &Option<crate::db_row::IdParam>,
-    folder_bind_dup: &Option<crate::db_row::IdParam>,
+    user: &Value,
+    account: &Option<Value>,
+    folder: &Option<Value>,
     limit: i64,
-) -> Result<Vec<String>, SearchError> {
-    let rows = db_fetch_all!(
-        db,
+) -> Result<Vec<SearchHit>, SearchError> {
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r"
         SELECT m.id AS message_id,
-               ts_rank(m.search_vector, plainto_tsquery('simple', ?)) AS rank
+               ts_rank(m.search_vector, plainto_tsquery('simple', $1)) AS rank
         FROM message m
         JOIN mail_account a ON m.account_id = a.id
-        WHERE a.user_id = ?
-          AND m.is_deleted = 0
-          AND m.search_vector @@ plainto_tsquery('simple', ?)
-          AND (? IS NULL OR m.account_id = ?)
-          AND (? IS NULL OR m.folder_id = ?)
+        WHERE a.user_id = $2
+          AND m.is_deleted = FALSE
+          AND m.search_vector @@ plainto_tsquery('simple', $1)
+          AND ($3 IS NULL OR m.account_id = $4)
+          AND ($5 IS NULL OR m.folder_id = $6)
         ORDER BY rank DESC
-        LIMIT ?
+        LIMIT $7
         ",
-        |row| SearchHit {
-            message_id: crate::db_row::id_from_row(row, "message_id"),
-            rank: row.get::<f64, _>("rank"),
-        },
-        query,
-        user_bind,
-        query,
-        account_bind,
-        account_bind_dup,
-        folder_bind,
-        folder_bind_dup,
-        limit
-    )?;
-    Ok(rows.into_iter().map(|hit| hit.message_id).collect())
+        [
+            Value::from(query),
+            user.clone(),
+            value_or_null(account.as_ref()),
+            value_or_null(account.as_ref()),
+            value_or_null(folder.as_ref()),
+            value_or_null(folder.as_ref()),
+            Value::from(limit),
+        ],
+    );
+    let rows = db.orm().query_all_raw(stmt).await.map_err(orm_err)?;
+    rows.iter().map(hit_from_row).collect()
 }
 
 struct SqliteSearchIndex {
@@ -231,35 +285,46 @@ struct PostgresSearchIndex {
 #[async_trait]
 impl SearchIndex for SqliteSearchIndex {
     async fn index_message(&self, msg: &MessageSearchDoc) -> Result<(), SearchError> {
-        let id_bind = id_param(&self.db, &msg.id)?;
-        let account_bind = id_param(&self.db, &msg.account_id)?;
-        db_execute!(
-            &self.db,
+        let id = id_value(&self.db, &msg.id)?;
+        let account = id_value(&self.db, &msg.account_id)?;
+        let conn = self.db.orm();
+        conn.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
             "DELETE FROM message_fts WHERE message_id = ?",
-            &id_bind
-        )?;
-        db_execute!(
-            &self.db,
+            [id.clone()],
+        ))
+        .await
+        .map_err(orm_err)?;
+        conn.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
             r"
             INSERT INTO message_fts (message_id, account_id, subject, body_text, from_address)
             VALUES (?, ?, ?, ?, ?)
             ",
-            &id_bind,
-            &account_bind,
-            msg.subject.as_deref().unwrap_or(""),
-            msg.body_text.as_deref().unwrap_or(""),
-            msg.from_address.as_deref().unwrap_or("")
-        )?;
+            [
+                id,
+                account,
+                Value::from(msg.subject.as_deref().unwrap_or("")),
+                Value::from(msg.body_text.as_deref().unwrap_or("")),
+                Value::from(msg.from_address.as_deref().unwrap_or("")),
+            ],
+        ))
+        .await
+        .map_err(orm_err)?;
         Ok(())
     }
 
     async fn remove_message(&self, id: &str) -> Result<(), SearchError> {
-        let id_bind = id_param(&self.db, id)?;
-        db_execute!(
-            &self.db,
-            "DELETE FROM message_fts WHERE message_id = ?",
-            &id_bind
-        )?;
+        let id = id_value(&self.db, id)?;
+        self.db
+            .orm()
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "DELETE FROM message_fts WHERE message_id = ?",
+                [id],
+            ))
+            .await
+            .map_err(orm_err)?;
         Ok(())
     }
 
@@ -270,17 +335,22 @@ impl SearchIndex for SqliteSearchIndex {
         limit: usize,
     ) -> Result<Vec<SearchHit>, SearchError> {
         let fts_query = prepare_fts5_query(query).ok_or(SearchError::InvalidQuery)?;
-        let account_bind = if account_id.is_empty() {
+        let account = if account_id.is_empty() {
             None
         } else {
-            Some(id_param(&self.db, account_id)?)
+            Some(id_value(&self.db, account_id)?)
         };
         let limit = i64::try_from(limit).unwrap_or(500);
 
-        let rows = match &account_bind {
-            Some(account) => db_fetch_all!(
-                &self.db,
-                r"
+        // The FTS5 MATCH text and bm25 ranking stay verbatim; only the
+        // optional account scope branches.
+        let rows = match &account {
+            Some(account) => self
+                .db
+                .orm()
+                .query_all_raw(Statement::from_sql_and_values(
+                    DbBackend::Sqlite,
+                    r"
                     SELECT message_id, bm25(message_fts) AS rank
                     FROM message_fts
                     WHERE message_fts MATCH ?
@@ -288,32 +358,32 @@ impl SearchIndex for SqliteSearchIndex {
                     ORDER BY rank
                     LIMIT ?
                     ",
-                |row| SearchHit {
-                    message_id: row.get::<String, _>("message_id"),
-                    rank: row.get::<f64, _>("rank"),
-                },
-                &fts_query,
-                account,
-                limit
-            )?,
-            None => db_fetch_all!(
-                &self.db,
-                r"
-                SELECT message_id, bm25(message_fts) AS rank
-                FROM message_fts
-                WHERE message_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-                ",
-                |row| SearchHit {
-                    message_id: row.get::<String, _>("message_id"),
-                    rank: row.get::<f64, _>("rank"),
-                },
-                &fts_query,
-                limit
-            )?,
+                    [
+                        Value::from(fts_query.as_str()),
+                        account.clone(),
+                        Value::from(limit),
+                    ],
+                ))
+                .await
+                .map_err(orm_err)?,
+            None => self
+                .db
+                .orm()
+                .query_all_raw(Statement::from_sql_and_values(
+                    DbBackend::Sqlite,
+                    r"
+                    SELECT message_id, bm25(message_fts) AS rank
+                    FROM message_fts
+                    WHERE message_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                    ",
+                    [Value::from(fts_query.as_str()), Value::from(limit)],
+                ))
+                .await
+                .map_err(orm_err)?,
         };
-        Ok(rows)
+        rows.iter().map(hit_from_row).collect()
     }
 }
 
@@ -321,36 +391,46 @@ impl SearchIndex for SqliteSearchIndex {
 #[async_trait]
 impl SearchIndex for PostgresSearchIndex {
     async fn index_message(&self, msg: &MessageSearchDoc) -> Result<(), SearchError> {
-        let id_bind = id_param(&self.db, &msg.id)?;
-        db_execute!(
-            &self.db,
-            r"
-            UPDATE message
-            SET subject = COALESCE(?, subject),
-                body_text = COALESCE(?, body_text),
-                from_address = COALESCE(?::jsonb, from_address),
-                updated_at = datetime('now')
-            WHERE id = ?
-            ",
-            msg.subject.as_deref(),
-            msg.body_text.as_deref(),
-            msg.from_address.as_deref(),
-            &id_bind
-        )?;
+        let id = id_value(&self.db, &msg.id)?;
+        self.db
+            .orm()
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r"
+                UPDATE message
+                SET subject = COALESCE($1, subject),
+                    body_text = COALESCE($2, body_text),
+                    from_address = COALESCE($3::jsonb, from_address),
+                    updated_at = NOW()
+                WHERE id = $4
+                ",
+                [
+                    Value::from(msg.subject.as_deref()),
+                    Value::from(msg.body_text.as_deref()),
+                    Value::from(msg.from_address.as_deref()),
+                    id,
+                ],
+            ))
+            .await
+            .map_err(orm_err)?;
         Ok(())
     }
 
     async fn remove_message(&self, id: &str) -> Result<(), SearchError> {
-        let id_bind = id_param(&self.db, id)?;
-        db_execute!(
-            &self.db,
-            r"
-            UPDATE message
-            SET search_vector = NULL, updated_at = datetime('now')
-            WHERE id = ?
-            ",
-            &id_bind
-        )?;
+        let id = id_value(&self.db, id)?;
+        self.db
+            .orm()
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r"
+                UPDATE message
+                SET search_vector = NULL, updated_at = NOW()
+                WHERE id = $1
+                ",
+                [id],
+            ))
+            .await
+            .map_err(orm_err)?;
         Ok(())
     }
 
@@ -361,55 +441,53 @@ impl SearchIndex for PostgresSearchIndex {
         limit: usize,
     ) -> Result<Vec<SearchHit>, SearchError> {
         let limit = i64::try_from(limit).unwrap_or(500);
-        let account_bind = if account_id.is_empty() {
+        let account = if account_id.is_empty() {
             None
         } else {
-            Some(id_param(&self.db, account_id)?)
+            Some(id_value(&self.db, account_id)?)
         };
 
-        let rows = match &account_bind {
-            Some(account) => db_fetch_all!(
-                &self.db,
-                r"
-                SELECT id AS message_id,
-                       ts_rank(search_vector, plainto_tsquery('simple', ?)) AS rank
-                FROM message
-                WHERE is_deleted = 0
-                  AND search_vector @@ plainto_tsquery('simple', ?)
-                  AND account_id = ?
-                ORDER BY rank DESC
-                LIMIT ?
-                ",
-                |row| SearchHit {
-                    message_id: crate::db_row::id_from_row(row, "message_id"),
-                    rank: row.get::<f64, _>("rank"),
-                },
-                query,
-                query,
-                account,
-                limit
-            )?,
-            None => db_fetch_all!(
-                &self.db,
-                r"
-                SELECT id AS message_id,
-                       ts_rank(search_vector, plainto_tsquery('simple', ?)) AS rank
-                FROM message
-                WHERE is_deleted = 0
-                  AND search_vector @@ plainto_tsquery('simple', ?)
-                ORDER BY rank DESC
-                LIMIT ?
-                ",
-                |row| SearchHit {
-                    message_id: crate::db_row::id_from_row(row, "message_id"),
-                    rank: row.get::<f64, _>("rank"),
-                },
-                query,
-                query,
-                limit
-            )?,
+        // tsvector @@ plainto_tsquery / ts_rank stay verbatim.
+        let rows = match &account {
+            Some(account) => self
+                .db
+                .orm()
+                .query_all_raw(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    r"
+                    SELECT id AS message_id,
+                           ts_rank(search_vector, plainto_tsquery('simple', $1)) AS rank
+                    FROM message
+                    WHERE is_deleted = FALSE
+                      AND search_vector @@ plainto_tsquery('simple', $1)
+                      AND account_id = $2
+                    ORDER BY rank DESC
+                    LIMIT $3
+                    ",
+                    [Value::from(query), account.clone(), Value::from(limit)],
+                ))
+                .await
+                .map_err(orm_err)?,
+            None => self
+                .db
+                .orm()
+                .query_all_raw(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    r"
+                    SELECT id AS message_id,
+                           ts_rank(search_vector, plainto_tsquery('simple', $1)) AS rank
+                    FROM message
+                    WHERE is_deleted = FALSE
+                      AND search_vector @@ plainto_tsquery('simple', $1)
+                    ORDER BY rank DESC
+                    LIMIT $2
+                    ",
+                    [Value::from(query), Value::from(limit)],
+                ))
+                .await
+                .map_err(orm_err)?,
         };
-        Ok(rows)
+        rows.iter().map(hit_from_row).collect()
     }
 }
 

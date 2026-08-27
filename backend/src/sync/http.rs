@@ -11,18 +11,23 @@ use axum::{
     },
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
+use sea_orm::sea_query::{
+    Alias, Condition, Expr, ExprTrait, Func, JoinType, Order, Query as Sq, SelectStatement,
+};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, IdenStatic, QueryFilter, QueryResult, QuerySelect,
+    Value,
+};
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use uuid::Uuid;
 
 use super::send::send_message;
 use super::store::{effective_folder_role, parse_imap_uid, update_folder_counts};
 use super::types::{EnqueuedSync, SyncError, SyncStatus};
 use crate::auth::{AuthState, AuthUser};
-use crate::db_row::{
-    TsParam, id_from_row, id_param, json_text_from_row, message_date_param, opt_id_from_row,
-    opt_id_param, opt_json_param, opt_ts_from_row,
-};
+use crate::db_row::{IdParam, id_param, parse_ts};
+use crate::entities::{attachment, folder, jobs, mail_account, message};
 use crate::imap::{ImapClient, ImapConfig, ImapSecurity};
 use crate::kernel::AppEvent;
 use crate::privacy::{
@@ -71,6 +76,272 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/v1/messages/{message_id}/snooze", post(snooze_message))
 }
 
+// ── SeaORM seam ─────────────────────────────────────────────────────
+//
+// Handlers build sea_query statements over entity Columns so the SQL cannot
+// drift from the schema. Entity PKs are `Uuid`, but SQLite rows carry legacy
+// TEXT ids (tests use `"user-1"` etc.), so ids bind as strings on SQLite and
+// native UUIDs on Postgres — the same split `db_row::id_param` makes — and
+// read back through dialect-tolerant row decoders below.
+
+/// Unwrap the driver error SeaORM wraps so [`SyncError::Database`] keeps
+/// reporting the underlying `sqlx::Error`; non-driver SeaORM errors become
+/// `sqlx::Error::Protocol` with the original message.
+fn orm_err(err: sea_orm::DbErr) -> SyncError {
+    use sea_orm::RuntimeErr;
+    let sqlx_err = match err {
+        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
+        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
+            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
+        other => sqlx::Error::Protocol(other.to_string()),
+    };
+    SyncError::Database(sqlx_err)
+}
+
+/// Dialect-aware bind for a UUID-column value: TEXT on SQLite, native UUID on
+/// Postgres.
+fn id_value(db: &DbPool, id: &str) -> Result<Value, SyncError> {
+    Ok(match id_param(db, id)? {
+        IdParam::Text(s) => Value::String(Some(s)),
+        IdParam::Uuid(u) => Value::Uuid(Some(u)),
+    })
+}
+
+/// Optional id bind (`InvalidIdError` still maps to 400 on Postgres).
+fn opt_id_value(db: &DbPool, id: Option<&str>) -> Result<Option<Value>, SyncError> {
+    id.map(|s| id_value(db, s)).transpose()
+}
+
+/// Plain text value (`None` becomes a typed NULL).
+fn text_value(raw: Option<&str>) -> Value {
+    Value::String(raw.map(str::to_owned))
+}
+
+/// Owned-string variant of [`text_value`].
+fn owned_text_value(raw: Option<String>) -> Value {
+    Value::String(raw)
+}
+
+/// Typed JSON NULL matching the dialect (TEXT vs JSONB).
+fn json_null_value(db: &DbPool) -> Value {
+    match db {
+        DbPool::Sqlite(_) => Value::String(None),
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => Value::Json(None),
+    }
+}
+
+/// Bind optional JSON text for JSONB/TEXT columns (lenient like the macro
+/// layer's [`crate::db_row::JsonParam`]: non-JSON strings stay raw on SQLite
+/// and become string scalars on Postgres).
+fn opt_json_value(db: &DbPool, raw: Option<&str>) -> Value {
+    let Some(raw) = raw else {
+        return json_null_value(db);
+    };
+    match db {
+        DbPool::Sqlite(_) => Value::String(Some(raw.to_owned())),
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => Value::Json(Some(Box::new(
+            serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_owned())),
+        ))),
+    }
+}
+
+/// Bind an optional UTC instant for `TIMESTAMPTZ` / TEXT timestamp columns,
+/// shaped like the legacy `datetime()` writers.
+fn ts_value(db: &DbPool, dt: Option<DateTime<Utc>>) -> Value {
+    match db {
+        DbPool::Sqlite(_) => Value::String(dt.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())),
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => Value::ChronoDateTimeUtc(dt),
+    }
+}
+
+/// `updated_at` write, shaped like the legacy `datetime('now')` / `NOW()`
+/// defaults so sqlite rows keep their `YYYY-MM-DD HH:MM:SS` text format.
+fn now_value(db: &DbPool) -> Value {
+    match db {
+        DbPool::Sqlite(_) => {
+            Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+        }
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => Value::ChronoDateTimeUtc(Some(Utc::now())),
+    }
+}
+
+fn missing_column(col: &str) -> sea_orm::DbErr {
+    sea_orm::DbErr::Query(sea_orm::RuntimeErr::Internal(format!(
+        "missing column {col}"
+    )))
+}
+
+/// Decode a UUID/TEXT id column: `String` on SQLite, native UUID on Postgres.
+fn row_id(row: &QueryResult, col: &str) -> Result<String, sea_orm::DbErr> {
+    if let Some(s) = row.try_get::<Option<String>>("", col).ok().flatten() {
+        return Ok(s);
+    }
+    row.try_get::<Option<Uuid>>("", col)?
+        .map(|u| u.to_string())
+        .ok_or_else(|| missing_column(col))
+}
+
+/// Nullable id column ([`row_id`] semantics).
+fn row_opt_id(row: &QueryResult, col: &str) -> Result<Option<String>, sea_orm::DbErr> {
+    if let Ok(text) = row.try_get::<Option<String>>("", col) {
+        return Ok(text);
+    }
+    Ok(row.try_get::<Option<Uuid>>("", col)?.map(|u| u.to_string()))
+}
+
+/// Nullable timestamp column: stored text on SQLite, RFC3339 on Postgres.
+fn row_opt_ts(row: &QueryResult, col: &str) -> Result<Option<String>, sea_orm::DbErr> {
+    if let Ok(text) = row.try_get::<Option<String>>("", col) {
+        return Ok(text);
+    }
+    row.try_get::<Option<DateTime<Utc>>>("", col)
+        .map(|opt| opt.map(|t| t.to_rfc3339()))
+}
+
+/// JSONB / TEXT json → JSON text for the API (`from_address`, …).
+///
+/// Stored TEXT is returned verbatim when present (SQLite keeps raw header
+/// text too); Postgres falls back to native JSONB decode.
+fn row_json_text(row: &QueryResult, col: &str) -> Result<Option<String>, sea_orm::DbErr> {
+    if let Ok(text) = row.try_get::<Option<String>>("", col) {
+        return Ok(text);
+    }
+    let value: Option<serde_json::Value> = row.try_get("", col)?;
+    Ok(value.filter(|v| !v.is_null()).map(|v| v.to_string()))
+}
+
+/// Qualified projection expression for the aliased message table (`m.<col>`).
+fn m_col(col: message::Column) -> Expr {
+    Expr::col((Alias::new("m"), Alias::new(col.as_str())))
+}
+
+/// Message columns shared by every listing handler, projected as
+/// `m.<col> AS <col>` with entity-owned names.
+const MESSAGE_LIST_COLS: &[message::Column] = &[
+    message::Column::Id,
+    message::Column::AccountId,
+    message::Column::FolderId,
+    message::Column::Subject,
+    message::Column::FromAddress,
+    message::Column::ToAddresses,
+    message::Column::CcAddresses,
+    message::Column::Date,
+    message::Column::Snippet,
+    message::Column::BodyText,
+    message::Column::BodyHtml,
+    message::Column::IsRead,
+    message::Column::IsStarred,
+    message::Column::HasAttachments,
+];
+
+fn add_message_list_columns(query: &mut SelectStatement) {
+    for col in MESSAGE_LIST_COLS {
+        query.expr_as(m_col(*col), Alias::new(col.as_str()));
+    }
+}
+
+/// `FROM message AS m JOIN mail_account AS a ON m.account_id = a.id`.
+fn add_message_account_join(query: &mut SelectStatement) {
+    query.from_as(message::Entity, Alias::new("m")).join_as(
+        JoinType::InnerJoin,
+        mail_account::Entity,
+        Alias::new("a"),
+        Expr::cust("m.account_id = a.id"),
+    );
+}
+
+/// Additionally `JOIN folder AS f ON m.folder_id = f.id`.
+fn add_message_folder_join(query: &mut SelectStatement) {
+    query.join_as(
+        JoinType::InnerJoin,
+        folder::Entity,
+        Alias::new("f"),
+        Expr::cust("m.folder_id = f.id"),
+    );
+}
+
+/// Soft-deleted filter, bound through the entity-shaped column name.
+const NOT_DELETED_SQL: &str = "m.is_deleted = ?";
+
+fn not_deleted_clause() -> Expr {
+    Expr::cust_with_values(NOT_DELETED_SQL, [false])
+}
+
+/// Snooze visibility kept explicitly dialect-branched: SQLite compares
+/// `snoozed_until` text against `datetime('now')`; Postgres compares
+/// TIMESTAMPTZ against NOW().
+const SNOOZE_VISIBLE_SQLITE: &str =
+    "(m.snoozed_until IS NULL OR m.snoozed_until <= datetime('now'))";
+#[cfg(feature = "postgres")]
+const SNOOZE_VISIBLE_POSTGRES: &str = "(m.snoozed_until IS NULL OR m.snoozed_until <= NOW())";
+
+fn snooze_visible_clause(db: &DbPool) -> Expr {
+    match db {
+        DbPool::Sqlite(_) => Expr::cust(SNOOZE_VISIBLE_SQLITE),
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => Expr::cust(SNOOZE_VISIBLE_POSTGRES),
+    }
+}
+
+fn message_response_from_query_row(row: &QueryResult) -> Result<MessageResponse, sea_orm::DbErr> {
+    Ok(MessageResponse {
+        id: row_id(row, "id")?,
+        account_id: row_id(row, "account_id")?,
+        folder_id: row_id(row, "folder_id")?,
+        subject: row
+            .try_get::<Option<String>>("", "subject")?
+            .map(|s| crate::imap::decode_mime_header(&s)),
+        from_address: row_json_text(row, "from_address")?
+            .map(|s| crate::imap::decode_mime_header(&s)),
+        to_addresses: row_json_text(row, "to_addresses")?
+            .map(|s| crate::imap::decode_mime_header(&s)),
+        cc_addresses: row_json_text(row, "cc_addresses")?
+            .map(|s| crate::imap::decode_mime_header(&s)),
+        date: row_opt_ts(row, "date")?,
+        snippet: row
+            .try_get::<Option<String>>("", "snippet")?
+            .map(|s| crate::imap::decode_mime_header(&s)),
+        body_text: row.try_get("", "body_text")?,
+        body_html: row.try_get("", "body_html")?,
+        is_read: row.try_get("", "is_read")?,
+        is_starred: row.try_get("", "is_starred")?,
+        has_attachments: row.try_get("", "has_attachments")?,
+        remote_content_blocked: false,
+        opengpg: None,
+    })
+}
+
+/// Build + run one of the listing queries and map rows to the API DTO.
+async fn run_message_list(
+    db: &DbPool,
+    build: impl FnOnce(&mut SelectStatement),
+) -> Result<Vec<MessageResponse>, SyncError> {
+    let mut query = Sq::select();
+    add_message_list_columns(&mut query);
+    build(&mut query);
+
+    let rows = db.orm().query_all(&query).await.map_err(orm_err)?;
+    rows.iter()
+        .map(message_response_from_query_row)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(orm_err)
+}
+
+/// Fetch the first row of a probe/aggregating statement, or `None`.
+async fn query_first(
+    db: &DbPool,
+    build: impl FnOnce(&mut SelectStatement),
+) -> Result<Option<QueryResult>, SyncError> {
+    let mut query = Sq::select();
+    build(&mut query);
+    db.orm().query_one(&query).await.map_err(orm_err)
+}
+
 // ── Handlers ────────────────────────────────────────────────────────
 
 /// Get sync status.
@@ -79,16 +350,18 @@ pub(crate) async fn sync_status(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<SyncStatus>, SyncError> {
     let db = state.db();
-    let user_bind = id_param(db, &user_id)?;
+    let user_value = id_value(db, &user_id)?;
 
-    let count: i64 = db_scalar!(
-        db,
-        i64,
-        "SELECT COUNT(*) FROM mail_account WHERE user_id = ? AND is_active = ? AND sync_enabled = ?",
-        &user_bind,
-        true,
-        true
-    )?;
+    let row = query_first(db, |q| {
+        q.expr_as(Expr::cust("COUNT(*)"), Alias::new("c"))
+            .from(mail_account::Entity)
+            .and_where(Expr::col(mail_account::Column::UserId).eq(user_value.clone()))
+            .and_where(Expr::col(mail_account::Column::IsActive).eq(true))
+            .and_where(Expr::col(mail_account::Column::SyncEnabled).eq(true));
+    })
+    .await?
+    .ok_or_else(|| SyncError::Internal("count query returned no rows".into()))?;
+    let count: i64 = row.try_get("", "c").map_err(orm_err)?;
 
     // Pending or running sync_account jobs for this user (payload JSON has user_id).
     let syncing = user_has_active_sync_job(db, &user_id).await?;
@@ -146,16 +419,18 @@ pub(crate) async fn user_has_active_sync_job(
     db: &DbPool,
     user_id: &str,
 ) -> Result<bool, SyncError> {
-    let rows = db_fetch_all!(
-        db,
-        r"
-        SELECT payload FROM jobs
-        WHERE kind = 'sync_account' AND status IN ('pending', 'running')
-        ",
-        |row| row.get::<String, _>("payload")
-    )?;
+    // `jobs.id` is TEXT in both dialects, so this entity supports direct use.
+    let payloads: Vec<String> = jobs::Entity::find()
+        .filter(jobs::Column::Kind.eq("sync_account"))
+        .filter(jobs::Column::Status.is_in(["pending", "running"]))
+        .select_only()
+        .column(jobs::Column::Payload)
+        .into_tuple::<String>()
+        .all(&db.orm())
+        .await
+        .map_err(orm_err)?;
 
-    for payload_json in rows {
+    for payload_json in payloads {
         let Ok(payload) = serde_json::from_str::<crate::jobs::JobPayload>(&payload_json) else {
             continue;
         };
@@ -177,15 +452,16 @@ pub(crate) async fn trigger_sync(
     AuthUser(user_id): AuthUser,
 ) -> Result<(StatusCode, Json<EnqueuedSync>), SyncError> {
     let db = state.db();
-    let account_bind = id_param(db, &account_id)?;
-    let user_bind = id_param(db, &user_id)?;
+    let account_value = id_value(db, &account_id)?;
+    let user_value = id_value(db, &user_id)?;
 
-    let exists: Option<String> = db_id_optional!(
-        db,
-        "SELECT id FROM mail_account WHERE id = ? AND user_id = ?",
-        &account_bind,
-        &user_bind
-    )?;
+    let exists = query_first(db, |q| {
+        q.expr_as(Expr::col(mail_account::Column::Id), Alias::new("id"))
+            .from(mail_account::Entity)
+            .and_where(Expr::col(mail_account::Column::Id).eq(account_value.clone()))
+            .and_where(Expr::col(mail_account::Column::UserId).eq(user_value.clone()));
+    })
+    .await?;
     if exists.is_none() {
         return Err(SyncError::AccountNotFound);
     }
@@ -265,34 +541,42 @@ pub struct MessageResponse {
     pub opengpg: Option<crate::opengpg::OpengpgMessageStatus>,
 }
 
-macro_rules! message_response_from_sql {
-    ($row:expr) => {{
-        MessageResponse {
-            id: id_from_row(&$row, "id"),
-            account_id: id_from_row(&$row, "account_id"),
-            folder_id: id_from_row(&$row, "folder_id"),
-            subject: $row
-                .get::<Option<String>, _>("subject")
-                .map(|s| crate::imap::decode_mime_header(&s)),
-            from_address: json_text_from_row(&$row, "from_address")
-                .map(|s| crate::imap::decode_mime_header(&s)),
-            to_addresses: json_text_from_row(&$row, "to_addresses")
-                .map(|s| crate::imap::decode_mime_header(&s)),
-            cc_addresses: json_text_from_row(&$row, "cc_addresses")
-                .map(|s| crate::imap::decode_mime_header(&s)),
-            date: opt_ts_from_row(&$row, "date"),
-            snippet: $row
-                .get::<Option<String>, _>("snippet")
-                .map(|s| crate::imap::decode_mime_header(&s)),
-            body_text: $row.get("body_text"),
-            body_html: $row.get("body_html"),
-            is_read: $row.get::<bool, _>("is_read"),
-            is_starred: $row.get::<bool, _>("is_starred"),
-            has_attachments: $row.get::<bool, _>("has_attachments"),
-            remote_content_blocked: false,
-            opengpg: None,
-        }
-    }};
+/// Folder columns needed by [`FolderResponse`], projected from alias `f`.
+const FOLDER_COLS: &[folder::Column] = &[
+    folder::Column::Id,
+    folder::Column::AccountId,
+    folder::Column::Name,
+    folder::Column::Role,
+    folder::Column::RoleOverride,
+    folder::Column::ParentId,
+    folder::Column::SortOrder,
+    folder::Column::TotalMessages,
+    folder::Column::UnreadMessages,
+];
+
+fn add_folder_columns(query: &mut SelectStatement) {
+    for col in FOLDER_COLS {
+        query.expr_as(
+            Expr::col((Alias::new("f"), Alias::new(col.as_str()))),
+            Alias::new(col.as_str()),
+        );
+    }
+}
+
+fn folder_response_from_row(row: &QueryResult) -> Result<FolderResponse, sea_orm::DbErr> {
+    let detected: Option<String> = row.try_get("", "role")?;
+    let override_role: Option<String> = row.try_get("", "role_override")?;
+    Ok(FolderResponse {
+        id: row_id(row, "id")?,
+        account_id: row_id(row, "account_id")?,
+        name: row.try_get("", "name")?,
+        role: effective_folder_role(detected.as_deref(), override_role.as_deref()),
+        role_override: override_role,
+        parent_id: row_opt_id(row, "parent_id")?,
+        sort_order: row.try_get("", "sort_order")?,
+        total_messages: row.try_get("", "total_messages")?,
+        unread_messages: row.try_get("", "unread_messages")?,
+    })
 }
 
 /// List all folders for the authenticated user.
@@ -301,35 +585,31 @@ pub(crate) async fn list_folders(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<FolderResponse>>, SyncError> {
     let db = state.db();
-    let user_bind = id_param(db, &user_id)?;
+    let user_value = id_value(db, &user_id)?;
 
-    let folders = db_fetch_all!(
-        db,
-        r"
-        SELECT f.id, f.account_id, f.name, f.role, f.role_override, f.parent_id, f.sort_order,
-               f.total_messages, f.unread_messages
-        FROM folder f
-        JOIN mail_account a ON f.account_id = a.id
-        WHERE a.user_id = ?
-        ORDER BY f.sort_order, f.name
-        ",
-        |row| {
-            let detected: Option<String> = row.get("role");
-            let override_role: Option<String> = row.get("role_override");
-            FolderResponse {
-                id: id_from_row(row, "id"),
-                account_id: id_from_row(row, "account_id"),
-                name: row.get("name"),
-                role: effective_folder_role(detected.as_deref(), override_role.as_deref()),
-                role_override: override_role,
-                parent_id: opt_id_from_row(row, "parent_id"),
-                sort_order: row.get("sort_order"),
-                total_messages: row.get("total_messages"),
-                unread_messages: row.get("unread_messages"),
-            }
-        },
-        &user_bind
-    )?;
+    let mut query = Sq::select();
+    add_folder_columns(&mut query);
+    query
+        .from_as(folder::Entity, Alias::new("f"))
+        .join_as(
+            JoinType::InnerJoin,
+            mail_account::Entity,
+            Alias::new("a"),
+            Expr::cust("f.account_id = a.id"),
+        )
+        .and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
+        .order_by_expr(
+            Expr::col((Alias::new("f"), Alias::new("sort_order"))),
+            Order::Asc,
+        )
+        .order_by_expr(Expr::col((Alias::new("f"), Alias::new("name"))), Order::Asc);
+
+    let rows = db.orm().query_all(&query).await.map_err(orm_err)?;
+    let folders = rows
+        .iter()
+        .map(folder_response_from_row)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(orm_err)?;
 
     Ok(Json(folders))
 }
@@ -347,6 +627,7 @@ pub struct PatchFolderRequest {
 }
 
 /// PATCH /api/v1/folders/{folder_id} — set or clear a local role override.
+#[allow(clippy::too_many_lines)] // three-way override mutation + re-fetch, mirroring the SQL shape
 pub(crate) async fn patch_folder(
     State(state): State<AuthState>,
     Path(folder_id): Path<String>,
@@ -354,22 +635,30 @@ pub(crate) async fn patch_folder(
     Json(body): Json<PatchFolderRequest>,
 ) -> Result<Json<FolderResponse>, SyncError> {
     let db = state.db();
-    let folder_bind = id_param(db, &folder_id)?;
-    let user_bind = id_param(db, &user_id)?;
+    let folder_value = id_value(db, &folder_id)?;
+    let user_value = id_value(db, &user_id)?;
 
-    let Some(account_id) = db_id_optional!(
-        db,
-        r"
-        SELECT f.account_id FROM folder f
-        JOIN mail_account a ON f.account_id = a.id
-        WHERE f.id = ? AND a.user_id = ?
-        ",
-        &folder_bind,
-        &user_bind
-    )?
-    else {
-        return Err(SyncError::InvalidInput("folder not found".into()));
-    };
+    let account_row = query_first(db, |q| {
+        q.expr_as(
+            Expr::col((
+                Alias::new("f"),
+                Alias::new(folder::Column::AccountId.as_str()),
+            )),
+            Alias::new("account_id"),
+        )
+        .from_as(folder::Entity, Alias::new("f"))
+        .join_as(
+            JoinType::InnerJoin,
+            mail_account::Entity,
+            Alias::new("a"),
+            Expr::cust("f.account_id = a.id"),
+        )
+        .and_where(Expr::cust_with_values("f.id = ?", [folder_value.clone()]))
+        .and_where(Expr::cust_with_values("a.user_id = ?", [user_value]));
+    })
+    .await?
+    .ok_or(SyncError::InvalidInput("folder not found".into()))?;
+    let account_id = row_id(&account_row, "account_id").map_err(orm_err)?;
 
     if !body.clear_role_override && body.role_override.is_none() {
         return Err(SyncError::InvalidInput(
@@ -378,14 +667,13 @@ pub(crate) async fn patch_folder(
     }
 
     let pushed_override: Option<Option<String>> = if body.clear_role_override {
-        db_execute!(
-            db,
-            r"
-            UPDATE folder SET role_override = NULL, updated_at = datetime('now')
-            WHERE id = ?
-            ",
-            &folder_bind
-        )?;
+        let mut update = Sq::update();
+        update
+            .table(folder::Entity)
+            .value(folder::Column::RoleOverride, Value::String(None))
+            .value(folder::Column::UpdatedAt, now_value(db))
+            .and_where(Expr::col(folder::Column::Id).eq(folder_value.clone()));
+        db.orm().execute(&update).await.map_err(orm_err)?;
         Some(None)
     } else if let Some(ref role) = body.role_override {
         if !OVERRIDE_ROLES.contains(&role.as_str()) {
@@ -395,25 +683,22 @@ pub(crate) async fn patch_folder(
             )));
         }
         // One folder per override role per account.
-        db_execute!(
-            db,
-            r"
-            UPDATE folder SET role_override = NULL, updated_at = datetime('now')
-            WHERE account_id = ? AND role_override = ? AND id != ?
-            ",
-            &id_param(db, &account_id)?,
-            role,
-            &folder_bind
-        )?;
-        db_execute!(
-            db,
-            r"
-            UPDATE folder SET role_override = ?, updated_at = datetime('now')
-            WHERE id = ?
-            ",
-            role,
-            &folder_bind
-        )?;
+        let mut demote = Sq::update();
+        demote
+            .table(folder::Entity)
+            .value(folder::Column::RoleOverride, Value::String(None))
+            .value(folder::Column::UpdatedAt, now_value(db))
+            .and_where(Expr::col(folder::Column::AccountId).eq(id_value(db, &account_id)?))
+            .and_where(Expr::col(folder::Column::RoleOverride).eq(role.as_str()))
+            .and_where(Expr::col(folder::Column::Id).ne(folder_value.clone()));
+        db.orm().execute(&demote).await.map_err(orm_err)?;
+        let mut promote = Sq::update();
+        promote
+            .table(folder::Entity)
+            .value(folder::Column::RoleOverride, text_value(Some(role)))
+            .value(folder::Column::UpdatedAt, now_value(db))
+            .and_where(Expr::col(folder::Column::Id).eq(folder_value.clone()));
+        db.orm().execute(&promote).await.map_err(orm_err)?;
         Some(Some(role.clone()))
     } else {
         None
@@ -430,32 +715,19 @@ pub(crate) async fn patch_folder(
         .await;
     }
 
-    let folder = db_fetch_optional!(
-        db,
-        r"
-        SELECT f.id, f.account_id, f.name, f.role, f.role_override, f.parent_id, f.sort_order,
-               f.total_messages, f.unread_messages
-        FROM folder f
-        WHERE f.id = ?
-        ",
-        |row| {
-            let detected: Option<String> = row.get("role");
-            let override_role: Option<String> = row.get("role_override");
-            FolderResponse {
-                id: id_from_row(&row, "id"),
-                account_id: id_from_row(&row, "account_id"),
-                name: row.get("name"),
-                role: effective_folder_role(detected.as_deref(), override_role.as_deref()),
-                role_override: override_role,
-                parent_id: opt_id_from_row(&row, "parent_id"),
-                sort_order: row.get("sort_order"),
-                total_messages: row.get("total_messages"),
-                unread_messages: row.get("unread_messages"),
-            }
-        },
-        &folder_bind
-    )?
-    .ok_or_else(|| SyncError::InvalidInput("folder not found".into()))?;
+    let mut select = Sq::select();
+    add_folder_columns(&mut select);
+    select
+        .from_as(folder::Entity, Alias::new("f"))
+        .and_where(Expr::cust_with_values("f.id = ?", [folder_value]));
+
+    let row = db
+        .orm()
+        .query_one(&select)
+        .await
+        .map_err(orm_err)?
+        .ok_or_else(|| SyncError::InvalidInput("folder not found".into()))?;
+    let folder = folder_response_from_row(&row).map_err(orm_err)?;
 
     Ok(Json(folder))
 }
@@ -471,15 +743,26 @@ async fn best_effort_push_specialuse(
     folder_id: &str,
     role_override: Option<&str>,
 ) {
-    let Ok(folder_bind) = id_param(db, folder_id) else {
+    let Ok(folder_value) = id_value(db, folder_id) else {
         return;
     };
-    let Ok(Some(external_id)) = (db_fetch_optional!(
-        db,
-        "SELECT external_id FROM folder WHERE id = ?",
-        |row| row.get::<String, _>("external_id"),
-        &folder_bind
-    )) else {
+    let external_id = query_first(db, |q| {
+        q.expr_as(
+            Expr::col(folder::Column::ExternalId),
+            Alias::new("external_id"),
+        )
+        .from(folder::Entity)
+        .and_where(Expr::col(folder::Column::Id).eq(folder_value));
+    })
+    .await
+    .ok()
+    .flatten()
+    .and_then(|row| {
+        row.try_get::<Option<String>>("", "external_id")
+            .ok()
+            .flatten()
+    });
+    let Some(external_id) = external_id else {
         return;
     };
 
@@ -499,40 +782,39 @@ pub(crate) async fn list_messages(
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Vec<MessageResponse>>, SyncError> {
     let db = state.db();
-    let folder_bind = id_param(db, &folder_id)?;
-    let user_bind = id_param(db, &user_id)?;
+    let folder_value = id_value(db, &folder_id)?;
+    let user_value = id_value(db, &user_id)?;
 
     // Verify folder belongs to the user
-    let check: Option<String> = db_id_optional!(
-        db,
-        r"
-        SELECT f.id FROM folder f
-        JOIN mail_account a ON f.account_id = a.id
-        WHERE f.id = ? AND a.user_id = ?
-        ",
-        &folder_bind,
-        &user_bind
-    )?;
+    let check = query_first(db, |q| {
+        q.expr_as(
+            Expr::col((Alias::new("f"), Alias::new(folder::Column::Id.as_str()))),
+            Alias::new("id"),
+        )
+        .from_as(folder::Entity, Alias::new("f"))
+        .join_as(
+            JoinType::InnerJoin,
+            mail_account::Entity,
+            Alias::new("a"),
+            Expr::cust("f.account_id = a.id"),
+        )
+        .and_where(Expr::cust_with_values("f.id = ?", [folder_value.clone()]))
+        .and_where(Expr::cust_with_values("a.user_id = ?", [user_value]));
+    })
+    .await?;
     if check.is_none() {
         return Err(SyncError::AccountNotFound);
     }
 
-    let messages = db_fetch_all!(
-        db,
-        r"
-        SELECT id, account_id, folder_id, subject, from_address,
-               to_addresses, cc_addresses, date, snippet,
-               body_text, body_html, is_read, is_starred, has_attachments
-        FROM message
-        WHERE folder_id = ? AND is_deleted = ?
-          AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
-        ORDER BY date DESC
-        LIMIT 500
-        ",
-        |row| message_response_from_sql!(row),
-        &folder_bind,
-        false
-    )?;
+    let messages = run_message_list(db, |q| {
+        q.from_as(message::Entity, Alias::new("m"))
+            .and_where(Expr::cust_with_values("m.folder_id = ?", [folder_value]))
+            .and_where(not_deleted_clause())
+            .and_where(snooze_visible_clause(db))
+            .order_by_expr(Expr::cust("m.date"), Order::Desc)
+            .limit(500);
+    })
+    .await?;
 
     Ok(Json(messages))
 }
@@ -563,40 +845,37 @@ pub(crate) async fn list_messages_query(
 }
 
 /// List messages for a user, optionally filtered by folder role and account.
+///
+/// Optional filters become conditional `WHERE`s instead of the legacy
+/// `(? IS NULL OR … = ?)` duality — the resulting predicate set is identical.
 pub(crate) async fn query_user_messages(
     db: &DbPool,
     user_id: &str,
     role: Option<&str>,
     account_id: Option<&str>,
 ) -> Result<Vec<MessageResponse>, SyncError> {
-    let user_bind = id_param(db, user_id)?;
-    let account_bind = opt_id_param(db, account_id)?;
-    db_fetch_all!(
-        db,
-        r"
-        SELECT m.id, m.account_id, m.folder_id, m.subject, m.from_address,
-               m.to_addresses, m.cc_addresses, m.date, m.snippet,
-               m.body_text, m.body_html, m.is_read, m.is_starred, m.has_attachments
-        FROM message m
-        JOIN folder f ON m.folder_id = f.id
-        JOIN mail_account a ON m.account_id = a.id
-        WHERE a.user_id = ?
-          AND m.is_deleted = ?
-          AND (m.snoozed_until IS NULL OR m.snoozed_until <= datetime('now'))
-          AND (? IS NULL OR COALESCE(f.role_override, f.role) = ?)
-          AND (? IS NULL OR m.account_id = ?)
-        ORDER BY m.date DESC
-        LIMIT 500
-        ",
-        |row| message_response_from_sql!(row),
-        &user_bind,
-        false,
-        role,
-        role,
-        &account_bind,
-        &account_bind
-    )
-    .map_err(SyncError::from)
+    let user_value = id_value(db, user_id)?;
+    let account_value = opt_id_value(db, account_id)?;
+
+    run_message_list(db, |q| {
+        add_message_account_join(q);
+        add_message_folder_join(q);
+        q.and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
+            .and_where(not_deleted_clause())
+            .and_where(snooze_visible_clause(db));
+        if let Some(role) = role {
+            q.and_where(Expr::cust_with_values(
+                "COALESCE(f.role_override, f.role) = ?",
+                [role],
+            ));
+        }
+        if let Some(account_value) = account_value {
+            q.and_where(Expr::cust_with_values("m.account_id = ?", [account_value]));
+        }
+        q.order_by_expr(Expr::cust("m.date"), Order::Desc)
+            .limit(500);
+    })
+    .await
 }
 
 /// Query for GET /api/v1/messages/search.
@@ -628,9 +907,8 @@ pub(crate) async fn search_messages(
     }
 
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let user_bind = id_param(db, &user_id)?;
-    let account_bind = opt_id_param(db, query.account_id.as_deref())?;
-    let folder_bind = opt_id_param(db, query.folder_id.as_deref())?;
+    let user_value = id_value(db, &user_id)?;
+    let account_value = opt_id_value(db, query.account_id.as_deref())?;
 
     let messages = if fts_available(db).await? {
         let ids = search_message_ids(
@@ -651,73 +929,106 @@ pub(crate) async fn search_messages(
         if ids.is_empty() {
             Vec::new()
         } else {
-            fetch_messages_by_ids(db, &ids, &user_bind).await?
+            fetch_messages_by_ids(db, &ids, &user_id).await?
         }
     } else {
-        let pattern = format!("%{q}%");
-        db_fetch_all!(
+        search_like_fallback(
             db,
-            r"
-            SELECT m.id, m.account_id, m.folder_id, m.subject, m.from_address,
-                   m.to_addresses, m.cc_addresses, m.date, m.snippet,
-                   m.body_text, m.body_html, m.is_read, m.is_starred, m.has_attachments
-            FROM message m
-            JOIN mail_account a ON m.account_id = a.id
-            WHERE a.user_id = ?
-              AND m.is_deleted = ?
-              AND (? IS NULL OR m.account_id = ?)
-              AND (? IS NULL OR m.folder_id = ?)
-              AND (
-                IFNULL(m.subject, '') LIKE ?
-                OR IFNULL(m.snippet, '') LIKE ?
-                OR IFNULL(m.body_text, '') LIKE ?
-                OR IFNULL(m.from_address, '') LIKE ?
-              )
-            ORDER BY m.date DESC
-            LIMIT ?
-            ",
-            |row| message_response_from_sql!(row),
-            &user_bind,
-            false,
-            &account_bind,
-            &account_bind,
-            &folder_bind,
-            &folder_bind,
-            &pattern,
-            &pattern,
-            &pattern,
-            &pattern,
-            limit
-        )?
+            q,
+            user_value,
+            account_value,
+            query.folder_id.as_deref(),
+            limit,
+        )
+        .await?
     };
 
     Ok(Json(messages))
 }
 
+/// LIKE fallback branch (used only when the FTS index is unavailable).
+///
+/// The keyword spelling follows the legacy rewrite exactly (SQLite `LIKE`,
+/// already case-insensitive for ASCII; Postgres `ILIKE`), so the templates are
+/// static strings chosen by dialect; the pattern binds through the trailing
+/// placeholder.
+async fn search_like_fallback(
+    db: &DbPool,
+    q: &str,
+    user_value: Value,
+    account_value: Option<Value>,
+    folder_id: Option<&str>,
+    limit: i64,
+) -> Result<Vec<MessageResponse>, SyncError> {
+    const LIKE_SQLITE: [&str; 4] = [
+        "COALESCE(m.subject, '') LIKE ?",
+        "COALESCE(m.snippet, '') LIKE ?",
+        "COALESCE(m.body_text, '') LIKE ?",
+        "COALESCE(m.from_address, '') LIKE ?",
+    ];
+    #[cfg(feature = "postgres")]
+    const LIKE_POSTGRES: [&str; 4] = [
+        "COALESCE(m.subject, '') ILIKE ?",
+        "COALESCE(m.snippet, '') ILIKE ?",
+        "COALESCE(m.body_text, '') ILIKE ?",
+        "COALESCE(m.from_address, '') ILIKE ?",
+    ];
+
+    let templates: &[&str] = match db {
+        DbPool::Sqlite(_) => &LIKE_SQLITE,
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => &LIKE_POSTGRES,
+    };
+
+    let folder_value = opt_id_value(db, folder_id)?;
+    let pattern = format!("%{q}%");
+
+    let mut any = Condition::any();
+    for template in templates {
+        any = any.add(Expr::cust_with_values(*template, [pattern.clone()]));
+    }
+
+    run_message_list(db, |sel| {
+        add_message_account_join(sel);
+        sel.and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
+            .and_where(not_deleted_clause());
+        if let Some(account_value) = account_value {
+            sel.and_where(Expr::cust_with_values("m.account_id = ?", [account_value]));
+        }
+        if let Some(folder_value) = folder_value {
+            sel.and_where(Expr::cust_with_values("m.folder_id = ?", [folder_value]));
+        }
+        sel.cond_where(any)
+            .order_by_expr(Expr::cust("m.date"), Order::Desc)
+            .limit(u64::try_from(limit).unwrap_or(500));
+    })
+    .await
+}
+
+/// Fetch FTS hits (in rank order), mapping each to a response the requesting
+/// user owns and that is not soft-deleted.
 async fn fetch_messages_by_ids(
     db: &DbPool,
     ids: &[String],
-    user_bind: &crate::db_row::IdParam,
+    user_id: &str,
 ) -> Result<Vec<MessageResponse>, SyncError> {
+    let user_value = id_value(db, user_id)?;
     let mut messages = Vec::with_capacity(ids.len());
     for id in ids {
-        let id_bind = id_param(db, id)?;
-        if let Some(message) = db_fetch_optional!(
-            db,
-            r"
-            SELECT m.id, m.account_id, m.folder_id, m.subject, m.from_address,
-                   m.to_addresses, m.cc_addresses, m.date, m.snippet,
-                   m.body_text, m.body_html, m.is_read, m.is_starred, m.has_attachments
-            FROM message m
-            JOIN mail_account a ON m.account_id = a.id
-            WHERE m.id = ? AND a.user_id = ? AND m.is_deleted = ?
-            ",
-            |row| message_response_from_sql!(row),
-            &id_bind,
-            user_bind,
-            false
-        )? {
-            messages.push(message);
+        let msg_value = id_value(db, id)?;
+        let row = query_first(db, |q| {
+            add_message_list_columns(q);
+            add_message_account_join(q);
+            q.and_where(Expr::cust_with_values("m.id = ?", [msg_value.clone()]))
+                .and_where(Expr::cust_with_values(
+                    "a.user_id = ?",
+                    [user_value.clone()],
+                ))
+                .and_where(not_deleted_clause());
+        })
+        .await?;
+        if let Some(row) = row {
+            messages.push(message_response_from_query_row(&row).map_err(orm_err)?);
         }
     }
     Ok(messages)
@@ -742,27 +1053,44 @@ pub(crate) async fn list_attachments(
 ) -> Result<Json<Vec<AttachmentResponse>>, SyncError> {
     let db = state.db();
     let _ = load_message_row(db, &user_id, &message_id).await?;
+    let message_value = id_value(db, &message_id)?;
 
-    let rows = db_fetch_all!(
-        db,
-        r"
-        SELECT id, message_id, filename, content_type, size_bytes, is_inline
-        FROM attachment
-        WHERE message_id = ?
-        ORDER BY created_at ASC
-        ",
-        |row| AttachmentResponse {
-            id: id_from_row(row, "id"),
-            message_id: id_from_row(row, "message_id"),
-            filename: row.get("filename"),
-            content_type: row.get("content_type"),
-            size_bytes: row.get("size_bytes"),
-            is_inline: row.get("is_inline"),
-        },
-        &id_param(db, &message_id)?
-    )?;
+    let rows = db
+        .orm()
+        .query_all(&{
+            let mut q = Sq::select();
+            q.columns([
+                attachment::Column::Id,
+                attachment::Column::MessageId,
+                attachment::Column::Filename,
+                attachment::Column::ContentType,
+                attachment::Column::SizeBytes,
+                attachment::Column::IsInline,
+            ])
+            .from(attachment::Entity)
+            .and_where(Expr::col(attachment::Column::MessageId).eq(message_value))
+            .order_by_expr(Expr::col(attachment::Column::CreatedAt), Order::Asc);
+            q
+        })
+        .await
+        .map_err(orm_err)?;
 
-    Ok(Json(rows))
+    let attachments = rows
+        .iter()
+        .map(|row| {
+            Ok(AttachmentResponse {
+                id: row_id(row, "id")?,
+                message_id: row_id(row, "message_id")?,
+                filename: row.try_get("", "filename")?,
+                content_type: row.try_get("", "content_type")?,
+                size_bytes: row.try_get("", "size_bytes")?,
+                is_inline: row.try_get("", "is_inline")?,
+            })
+        })
+        .collect::<Result<Vec<_>, sea_orm::DbErr>>()
+        .map_err(orm_err)?;
+
+    Ok(Json(attachments))
 }
 
 pub(crate) async fn download_attachment(
@@ -771,28 +1099,44 @@ pub(crate) async fn download_attachment(
     AuthUser(user_id): AuthUser,
 ) -> Result<Response, SyncError> {
     let db = state.db();
+    let att_value = id_value(db, &attachment_id)?;
+    let user_value = id_value(db, &user_id)?;
 
-    let row = db_fetch_optional!(
-        db,
-        r"
-        SELECT a.id, a.filename, a.content_type, a.storage_path, a.message_id
-        FROM attachment a
-        JOIN message m ON a.message_id = m.id
-        JOIN mail_account acc ON m.account_id = acc.id
-        WHERE a.id = ? AND acc.user_id = ?
-        ",
-        |row| {
-            let storage_path: String = row.get("storage_path");
-            let filename: Option<String> = row.get("filename");
-            let content_type: Option<String> = row.get("content_type");
-            (storage_path, filename, content_type)
-        },
-        &id_param(db, &attachment_id)?,
-        &id_param(db, &user_id)?
-    )?
+    let row = query_first(db, |q| {
+        q.expr_as(
+            Expr::col((Alias::new("a"), Alias::new("storage_path"))),
+            Alias::new("storage_path"),
+        )
+        .expr_as(
+            Expr::col((Alias::new("a"), Alias::new("filename"))),
+            Alias::new("filename"),
+        )
+        .expr_as(
+            Expr::col((Alias::new("a"), Alias::new("content_type"))),
+            Alias::new("content_type"),
+        )
+        .from_as(attachment::Entity, Alias::new("a"))
+        .join_as(
+            JoinType::InnerJoin,
+            message::Entity,
+            Alias::new("m"),
+            Expr::cust("a.message_id = m.id"),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            mail_account::Entity,
+            Alias::new("acc"),
+            Expr::cust("m.account_id = acc.id"),
+        )
+        .and_where(Expr::cust_with_values("a.id = ?", [att_value]))
+        .and_where(Expr::cust_with_values("acc.user_id = ?", [user_value]));
+    })
+    .await?
     .ok_or(SyncError::MessageNotFound)?;
 
-    let (storage_path, filename, content_type) = row;
+    let storage_path: String = row.try_get("", "storage_path").map_err(orm_err)?;
+    let filename: Option<String> = row.try_get("", "filename").map_err(orm_err)?;
+    let content_type: Option<String> = row.try_get("", "content_type").map_err(orm_err)?;
 
     let bytes = crate::blobs::read(&state.data_dir, &storage_path)
         .await
@@ -829,14 +1173,19 @@ pub(crate) async fn persist_attachments(
     if attachments.is_empty() {
         return Ok(());
     }
-    let message_bind = id_param(db, message_id)?;
+    let message_value = id_value(db, message_id)?;
+    let conn = db.orm();
 
     // Replace prior attachment rows for this message (re-fetch).
-    db_execute!(
-        db,
-        "DELETE FROM attachment WHERE message_id = ?",
-        &message_bind
-    )?;
+    //
+    // Deliberately kept non-transactional exactly as before: wrapping the
+    // DELETE + blob-writing INSERTs in a transaction would hold the write lock
+    // across blob I/O and change mid-backfill failure visibility.
+    let mut delete = Sq::delete();
+    delete
+        .from_table(attachment::Entity)
+        .and_where(Expr::col(attachment::Column::MessageId).eq(message_value.clone()));
+    conn.execute(&delete).await.map_err(orm_err)?;
 
     for att in attachments {
         let id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
@@ -845,31 +1194,39 @@ pub(crate) async fn persist_attachments(
             .map_err(|e| SyncError::InvalidInput(format!("cannot write attachment blob: {e}")))?;
 
         let size = i64::try_from(att.data.len()).unwrap_or(i64::MAX);
-        db_execute!(
-            db,
-            r"
-            INSERT INTO attachment (
-                id, message_id, filename, content_type, size_bytes,
-                storage_path, content_id, is_inline
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ",
-            &id_param(db, &id)?,
-            &message_bind,
-            &att.filename,
-            &att.content_type,
-            size,
-            &storage_path,
-            &att.content_id,
-            att.is_inline
-        )?;
+        let mut insert = Sq::insert();
+        insert
+            .into_table(attachment::Entity)
+            .columns([
+                attachment::Column::Id,
+                attachment::Column::MessageId,
+                attachment::Column::Filename,
+                attachment::Column::ContentType,
+                attachment::Column::SizeBytes,
+                attachment::Column::StoragePath,
+                attachment::Column::ContentId,
+                attachment::Column::IsInline,
+            ])
+            .values_panic([
+                id_value(db, &id)?.into(),
+                message_value.clone().into(),
+                Value::String(Some(att.filename.clone())).into(),
+                Value::String(Some(att.content_type.clone())).into(),
+                Value::BigInt(Some(size)).into(),
+                Value::String(Some(storage_path)).into(),
+                text_value(att.content_id.as_deref()).into(),
+                Value::Bool(Some(att.is_inline)).into(),
+            ]);
+        conn.execute(&insert).await.map_err(orm_err)?;
     }
 
-    db_execute!(
-        db,
-        "UPDATE message SET has_attachments = ?, updated_at = datetime('now') WHERE id = ?",
-        true,
-        &message_bind
-    )?;
+    let mut touch = Sq::update();
+    touch
+        .table(message::Entity)
+        .value(message::Column::HasAttachments, true)
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(message_value));
+    conn.execute(&touch).await.map_err(orm_err)?;
 
     Ok(())
 }
@@ -1006,50 +1363,76 @@ pub(crate) async fn finalize_message_response_with_opengpg(
     Ok(response)
 }
 
+/// Message columns loaded by [`load_message_row`] (plus `f.external_id AS
+/// folder_name` and `a.protocol` joined below).
+const MESSAGE_LOAD_COLS: &[message::Column] = &[
+    message::Column::Id,
+    message::Column::AccountId,
+    message::Column::FolderId,
+    message::Column::ExternalId,
+    message::Column::Subject,
+    message::Column::FromAddress,
+    message::Column::ToAddresses,
+    message::Column::CcAddresses,
+    message::Column::Date,
+    message::Column::Snippet,
+    message::Column::BodyText,
+    message::Column::BodyHtml,
+    message::Column::IsRead,
+    message::Column::IsStarred,
+    message::Column::HasAttachments,
+    message::Column::SizeBytes,
+];
+
 pub(crate) async fn load_message_row(
     db: &DbPool,
     user_id: &str,
     message_id: &str,
 ) -> Result<MessageRow, SyncError> {
-    db_fetch_optional!(
-        db,
-        r"
-        SELECT m.id, m.account_id, m.folder_id, m.external_id,
-               m.subject, m.from_address, m.to_addresses, m.cc_addresses,
-               m.date, m.snippet, m.body_text, m.body_html,
-               m.is_read, m.is_starred, m.has_attachments, m.size_bytes,
-               f.external_id AS folder_name,
-               a.protocol
-        FROM message m
-        JOIN folder f ON m.folder_id = f.id
-        JOIN mail_account a ON m.account_id = a.id
-        WHERE m.id = ? AND a.user_id = ? AND m.is_deleted = ?
-        ",
-        |row| MessageRow {
-            id: id_from_row(&row, "id"),
-            account_id: id_from_row(&row, "account_id"),
-            folder_id: id_from_row(&row, "folder_id"),
-            folder_name: row.get("folder_name"),
-            external_id: row.get("external_id"),
-            protocol: row.get("protocol"),
-            body_text: row.get("body_text"),
-            body_html: row.get("body_html"),
-            is_read: row.get("is_read"),
-            is_starred: row.get("is_starred"),
-            subject: row.get("subject"),
-            from_address: json_text_from_row(&row, "from_address"),
-            to_addresses: json_text_from_row(&row, "to_addresses"),
-            cc_addresses: json_text_from_row(&row, "cc_addresses"),
-            date: opt_ts_from_row(&row, "date"),
-            snippet: row.get("snippet"),
-            has_attachments: row.get("has_attachments"),
-            size_bytes: row.get("size_bytes"),
-        },
-        &id_param(db, message_id)?,
-        &id_param(db, user_id)?,
-        false
-    )?
-    .ok_or(SyncError::MessageNotFound)
+    let msg_value = id_value(db, message_id)?;
+    let user_value = id_value(db, user_id)?;
+
+    let mut query = Sq::select();
+    for col in MESSAGE_LOAD_COLS {
+        query.expr_as(m_col(*col), Alias::new(col.as_str()));
+    }
+    query
+        .expr_as(Expr::cust("f.external_id"), Alias::new("folder_name"))
+        .expr_as(Expr::cust("a.protocol"), Alias::new("protocol"));
+    add_message_account_join(&mut query);
+    add_message_folder_join(&mut query);
+    query
+        .and_where(Expr::cust_with_values("m.id = ?", [msg_value]))
+        .and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
+        .and_where(not_deleted_clause());
+
+    let row = db
+        .orm()
+        .query_one(&query)
+        .await
+        .map_err(orm_err)?
+        .ok_or(SyncError::MessageNotFound)?;
+
+    Ok(MessageRow {
+        id: row_id(&row, "id").map_err(orm_err)?,
+        account_id: row_id(&row, "account_id").map_err(orm_err)?,
+        folder_id: row_id(&row, "folder_id").map_err(orm_err)?,
+        folder_name: row.try_get("", "folder_name").map_err(orm_err)?,
+        external_id: row.try_get("", "external_id").map_err(orm_err)?,
+        protocol: row.try_get("", "protocol").map_err(orm_err)?,
+        body_text: row.try_get("", "body_text").map_err(orm_err)?,
+        body_html: row.try_get("", "body_html").map_err(orm_err)?,
+        is_read: row.try_get("", "is_read").map_err(orm_err)?,
+        is_starred: row.try_get("", "is_starred").map_err(orm_err)?,
+        subject: row.try_get("", "subject").map_err(orm_err)?,
+        from_address: row_json_text(&row, "from_address").map_err(orm_err)?,
+        to_addresses: row_json_text(&row, "to_addresses").map_err(orm_err)?,
+        cc_addresses: row_json_text(&row, "cc_addresses").map_err(orm_err)?,
+        date: row_opt_ts(&row, "date").map_err(orm_err)?,
+        snippet: row.try_get("", "snippet").map_err(orm_err)?,
+        has_attachments: row.try_get("", "has_attachments").map_err(orm_err)?,
+        size_bytes: row.try_get("", "size_bytes").map_err(orm_err)?,
+    })
 }
 
 pub(crate) async fn connect_imap_for_account(
@@ -1061,36 +1444,49 @@ pub(crate) async fn connect_imap_for_account(
         crate::auth::AuthState::get_user_dek_and_credential(db, user_id, account_id)
             .await
             .map_err(|e| SyncError::Crypto(e.to_string()))?;
-    let row = db_fetch_optional!(
-        db,
-        r"
-        SELECT email_address, imap_host, imap_port, imap_security, protocol, auth_type
-        FROM mail_account
-        WHERE id = ? AND user_id = ? AND is_active = ?
-        ",
-        |row| {
-            let protocol: String = row.get("protocol");
-            let imap_host: Option<String> = row.get("imap_host");
-            let imap_port: Option<i32> = row.get("imap_port");
-            let imap_security: Option<String> = row.get("imap_security");
-            let email_address: String = row.get("email_address");
-            let auth_type: String = row.get("auth_type");
-            (
-                protocol,
-                imap_host,
-                imap_port,
-                imap_security,
-                email_address,
-                auth_type,
-            )
-        },
-        &id_param(db, account_id)?,
-        &id_param(db, user_id)?,
-        true
-    )?
+    let acct_value = id_value(db, account_id)?;
+    let user_value = id_value(db, user_id)?;
+
+    let row = query_first(db, |q| {
+        q.expr_as(
+            Expr::col(mail_account::Column::Protocol),
+            Alias::new("protocol"),
+        )
+        .expr_as(
+            Expr::col(mail_account::Column::ImapHost),
+            Alias::new("imap_host"),
+        )
+        .expr_as(
+            Expr::col(mail_account::Column::ImapPort),
+            Alias::new("imap_port"),
+        )
+        .expr_as(
+            Expr::col(mail_account::Column::ImapSecurity),
+            Alias::new("imap_security"),
+        )
+        .expr_as(
+            Expr::col(mail_account::Column::EmailAddress),
+            Alias::new("email_address"),
+        )
+        .expr_as(
+            Expr::col(mail_account::Column::AuthType),
+            Alias::new("auth_type"),
+        )
+        .from(mail_account::Entity)
+        .and_where(Expr::col(mail_account::Column::Id).eq(acct_value))
+        .and_where(Expr::col(mail_account::Column::UserId).eq(user_value))
+        .and_where(Expr::col(mail_account::Column::IsActive).eq(true));
+    })
+    .await?
     .ok_or(SyncError::AccountNotFound)?;
 
-    let (protocol, imap_host, imap_port, imap_security, email_address, auth_type) = row;
+    let protocol: String = row.try_get("", "protocol").map_err(orm_err)?;
+    let imap_host: Option<String> = row.try_get("", "imap_host").map_err(orm_err)?;
+    let imap_port: Option<i32> = row.try_get("", "imap_port").map_err(orm_err)?;
+    let imap_security: Option<String> = row.try_get("", "imap_security").map_err(orm_err)?;
+    let email_address: String = row.try_get("", "email_address").map_err(orm_err)?;
+    let auth_type: String = row.try_get("", "auth_type").map_err(orm_err)?;
+
     if protocol != "imap" {
         return Err(SyncError::InvalidInput(
             "remote flag/move ops require an IMAP account in v1".into(),
@@ -1171,6 +1567,24 @@ pub(crate) async fn get_message(
     Ok(Json(response))
 }
 
+/// RHS for `SET col = COALESCE(col, <bound>)`; UPDATE statements carry no
+/// aliases, so the bare column reference resolves locally.
+fn coalesce_existing(column: message::Column, val: Value) -> sea_orm::sea_query::FunctionCall {
+    Func::coalesce([Expr::col(column), Expr::val(val)])
+}
+
+/// Encoded-word sniffing RHS: refresh fields that are empty or still contain
+/// `=?…?=` markers (the legacy `%=?%?=%` LIKE pattern).
+fn refresh_if_stale(column: message::Column, replacement: Value) -> Expr {
+    let stale = Condition::any()
+        .add(Expr::col(column).is_null())
+        .add(Expr::col(column).eq(""))
+        .add(Expr::col(column).like("%=?%?=%"));
+    Expr::case(stale, Expr::val(replacement))
+        .finally(Expr::col(column))
+        .into()
+}
+
 #[allow(clippy::too_many_lines)]
 async fn maybe_fill_imap_body(
     db: &DbPool,
@@ -1235,39 +1649,61 @@ async fn maybe_fill_imap_body(
                 .map(|t| t.chars().take(120).collect())
         });
     let body_html = persist_body_html(fetched.body_html.as_deref());
-    db_execute!(
-        db,
-        r"
-            UPDATE message
-            SET body_text = ?, body_html = ?, has_attachments = ?,
-                snippet = CASE
-                    WHEN snippet IS NULL OR snippet = '' OR snippet LIKE '%=?%?=%'
-                    THEN ?
-                    ELSE snippet
-                END,
-                subject = CASE
-                    WHEN subject IS NULL OR subject = '' OR subject LIKE '%=?%?=%'
-                    THEN ?
-                    ELSE subject
-                END,
-                from_address = COALESCE(from_address, ?),
-                to_addresses = COALESCE(to_addresses, ?),
-                date = COALESCE(date, ?),
-                message_id_header = COALESCE(message_id_header, ?),
-                updated_at = datetime('now')
-            WHERE id = ?
-            ",
-        &fetched.body_text,
-        &body_html,
-        fetched.has_attachments,
-        &snippet,
-        &fetched.subject,
-        opt_json_param(db, from_json.as_deref()),
-        opt_json_param(db, to_json.as_deref()),
-        message_date_param(db, fetched.date.as_deref()),
-        &fetched.message_id,
-        &id_param(db, &row.id)?
-    )?;
+
+    let mut update = Sq::update();
+    update
+        .table(message::Entity)
+        .value(
+            message::Column::BodyText,
+            owned_text_value(fetched.body_text.clone()),
+        )
+        .value(
+            message::Column::BodyHtml,
+            owned_text_value(body_html.clone()),
+        )
+        .value(message::Column::HasAttachments, fetched.has_attachments)
+        .value(
+            message::Column::Snippet,
+            refresh_if_stale(message::Column::Snippet, owned_text_value(snippet.clone())),
+        )
+        .value(
+            message::Column::Subject,
+            refresh_if_stale(
+                message::Column::Subject,
+                text_value(fetched.subject.as_deref()),
+            ),
+        )
+        .value(
+            message::Column::FromAddress,
+            coalesce_existing(
+                message::Column::FromAddress,
+                opt_json_value(db, from_json.as_deref()),
+            ),
+        )
+        .value(
+            message::Column::ToAddresses,
+            coalesce_existing(
+                message::Column::ToAddresses,
+                opt_json_value(db, to_json.as_deref()),
+            ),
+        )
+        .value(
+            message::Column::Date,
+            coalesce_existing(
+                message::Column::Date,
+                ts_value(db, fetched.date.as_deref().and_then(parse_ts)),
+            ),
+        )
+        .value(
+            message::Column::MessageIdHeader,
+            coalesce_existing(
+                message::Column::MessageIdHeader,
+                text_value(fetched.message_id.as_deref()),
+            ),
+        )
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
+    db.orm().execute(&update).await.map_err(orm_err)?;
 
     row.body_text = fetched.body_text;
     row.body_html = body_html;
@@ -1332,17 +1768,14 @@ pub(crate) async fn patch_message(
         }
     }
 
-    db_execute!(
-        db,
-        r"
-        UPDATE message
-        SET is_read = ?, is_starred = ?, updated_at = datetime('now')
-        WHERE id = ?
-        ",
-        next_read,
-        next_star,
-        &id_param(db, &row.id)?
-    )?;
+    let mut update = Sq::update();
+    update
+        .table(message::Entity)
+        .value(message::Column::IsRead, next_read)
+        .value(message::Column::IsStarred, next_star)
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
+    db.orm().execute(&update).await.map_err(orm_err)?;
 
     row.is_read = next_read;
     row.is_starred = next_star;
@@ -1412,18 +1845,14 @@ pub(crate) async fn snooze_message(
         .map_err(|_| SyncError::InvalidInput("until must be RFC3339".into()))?
         .to_utc();
     let until_api = until_utc.to_rfc3339();
-    let until_sql = TsParam::from_utc(db, until_utc);
 
-    db_execute!(
-        db,
-        r"
-        UPDATE message
-        SET snoozed_until = CAST(? AS TIMESTAMP), updated_at = datetime('now')
-        WHERE id = ?
-        ",
-        &until_sql,
-        &id_param(db, &row.id)?
-    )?;
+    let mut update = Sq::update();
+    update
+        .table(message::Entity)
+        .value(message::Column::SnoozedUntil, ts_value(db, Some(until_utc)))
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
+    db.orm().execute(&update).await.map_err(orm_err)?;
 
     // Job claim compares `run_at` to RFC3339 `now` from chrono — keep that format.
     crate::jobs::enqueue(
@@ -1441,6 +1870,7 @@ pub(crate) async fn snooze_message(
     })))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn move_message_to_role(
     state: AuthState,
     message_id: String,
@@ -1450,33 +1880,34 @@ pub(crate) async fn move_message_to_role(
     let db = state.db();
     let row = load_message_row(db, &user_id, &message_id).await?;
 
-    let dest = db_fetch_optional!(
-        db,
-        r"
-        SELECT id, external_id, name FROM folder
-        WHERE account_id = ? AND COALESCE(role_override, role) = ?
-        ORDER BY sort_order ASC
-        LIMIT 1
-        ",
-        |dest| {
-            let dest_id = id_from_row(&dest, "id");
-            let dest_name: String = dest
-                .get::<Option<String>, _>("external_id")
-                .unwrap_or_else(|| dest.get("name"));
-            (dest_id, dest_name)
-        },
-        &id_param(db, &row.account_id)?,
-        role
-    )?;
+    let account_value = id_value(db, &row.account_id)?;
+    let dest = query_first(db, |q| {
+        q.expr_as(Expr::col(folder::Column::Id), Alias::new("id"))
+            .expr_as(
+                Expr::col(folder::Column::ExternalId),
+                Alias::new("external_id"),
+            )
+            .expr_as(Expr::col(folder::Column::Name), Alias::new("name"))
+            .from(folder::Entity)
+            .and_where(Expr::col(folder::Column::AccountId).eq(account_value))
+            .and_where(Expr::cust_with_values(
+                "COALESCE(role_override, role) = ?",
+                [role],
+            ))
+            .order_by_expr(Expr::col(folder::Column::SortOrder), Order::Asc)
+            .limit(1);
+    })
+    .await?;
 
-    let Some((dest_id, dest_name)) = dest else {
+    let Some(dest) = dest else {
         // No destination folder: soft-delete locally.
-        db_execute!(
-            db,
-            "UPDATE message SET is_deleted = ?, updated_at = datetime('now') WHERE id = ?",
-            true,
-            &id_param(db, &row.id)?
-        )?;
+        let mut update = Sq::update();
+        update
+            .table(message::Entity)
+            .value(message::Column::IsDeleted, true)
+            .value(message::Column::UpdatedAt, now_value(db))
+            .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
+        db.orm().execute(&update).await.map_err(orm_err)?;
         update_folder_counts(db, &row.folder_id).await?;
         return Ok(Json(serde_json::json!({
             "status": "ok",
@@ -1485,6 +1916,11 @@ pub(crate) async fn move_message_to_role(
         })));
     };
 
+    let dest_id = row_id(&dest, "id").map_err(orm_err)?;
+    let external_id: Option<String> = dest.try_get("", "external_id").map_err(orm_err)?;
+    let name: String = dest.try_get("", "name").map_err(orm_err)?;
+    let dest_name = external_id.unwrap_or(name);
+
     if row.protocol == "imap" {
         let uid = parse_imap_uid(row.external_id.as_deref())?;
         let (mut client, _) = connect_imap_for_account(db, &user_id, &row.account_id).await?;
@@ -1492,16 +1928,13 @@ pub(crate) async fn move_message_to_role(
         client.move_uid(uid, &dest_name).await?;
     }
 
-    db_execute!(
-        db,
-        r"
-        UPDATE message
-        SET folder_id = ?, updated_at = datetime('now')
-        WHERE id = ?
-        ",
-        &id_param(db, &dest_id)?,
-        &id_param(db, &row.id)?
-    )?;
+    let mut move_update = Sq::update();
+    move_update
+        .table(message::Entity)
+        .value(message::Column::FolderId, id_value(db, &dest_id)?)
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
+    db.orm().execute(&move_update).await.map_err(orm_err)?;
 
     update_folder_counts(db, &row.folder_id).await?;
     update_folder_counts(db, &dest_id).await?;
