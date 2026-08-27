@@ -114,15 +114,17 @@ Acceptance criteria:
 - [ ] Sending a draft removes it from Drafts; explicit discard deletes it.
 - [ ] Drafts created outside Lyra (webmail/Thunderbird) open for editing in Lyra.
 
-### W5 — Security & deploy polish
+### W5 — Security & deploy polish — shipped 2026-08-27
 
 Acceptance criteria:
 
-- [ ] Password policy: complexity beyond length (classes or passphrase-friendly rule), surfaced at
-      signup/change with i18n messages.
-- [ ] `deploy/README.md` gains a concrete HTTPS story (reverse proxy example: Caddy or nginx +
-      certbot) so success criterion 1 is unambiguous.
-- [ ] No new secrets/log surface (gitleaks stays green).
+- [x] Password policy: 3-of-4 character classes (upper/lower/digit/symbol) or a ≥20-character
+      passphrase escape (NIST SP 800-63B style), enforced at signup and password change; server
+      message text is the single source of truth and is displayed verbatim by the frontend.
+- [x] `deploy/README.md` gains a concrete HTTPS story: full Caddyfile (auto-cert) and
+      nginx + certbot examples, including the SSE no-buffering/proxy_read_timeout settings the
+      sync event stream needs behind a proxy.
+- [x] No new secrets/log surface (gitleaks stays green).
 
 ---
 

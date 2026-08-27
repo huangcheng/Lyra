@@ -33,9 +33,65 @@ The same migrations run on both backends.
 
 ### HTTPS
 
-Terminate TLS at a reverse proxy (Caddy, Traefik, or nginx) in front of port 3000. Do not expose the app plain-HTTP on the public internet.
+Lyra does not terminate TLS itself — put a reverse proxy in front of port 3000.
+**Do not expose the app plain-HTTP on the public internet**: sessions are bearer
+tokens, and mail account credentials are only encrypted at rest after they
+reach the server.
 
-Sessions are bearer tokens in kv (memory or Redis). They are not cookie-signed; `SESSION_SECRET` is unused.
+#### Option A — Caddy (automatic certificates)
+
+`Caddyfile`:
+
+```caddyfile
+mail.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+Caddy obtains and renews Let's Encrypt certificates automatically. Point your
+domain's DNS at the box, install Caddy, done. Set
+`LYRA_PUBLIC_URL=https://mail.example.com` in Lyra's `.env` so OAuth redirects
+and absolute URLs match.
+
+#### Option B — nginx + certbot
+
+```bash
+sudo certbot --nginx -d mail.example.com
+```
+
+```nginx
+server {
+    server_name mail.example.com;
+    listen 443 ssl http2;
+    ssl_certificate     /etc/letsencrypt/live/mail.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mail.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # SSE (sync event stream at /api/v1/sync/events): disable buffering
+        # and raise read timeouts, or events stall behind the proxy.
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+}
+server {
+    listen 80;
+    server_name mail.example.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+#### Notes
+
+- Both examples must proxy **upgraded/streamed** responses untouched — the SSE
+  endpoint is long-lived; buffering proxies will appear to "hang" sync updates.
+- Keep `LYRA_PUBLIC_URL` set to the public HTTPS URL (required at boot).
+- Sessions are bearer tokens in kv (memory or Redis). They are not
+  cookie-signed; `SESSION_SECRET` is unused.
 
 ## Alternative: install script (Linux + systemd)
 

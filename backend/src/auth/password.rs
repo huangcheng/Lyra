@@ -55,17 +55,26 @@ pub(crate) fn validate_password(password: &str, min_length: usize) -> Result<(),
             "Password must be at most {MAX_PASSWORD_LENGTH} characters"
         ));
     }
-    if password.len() < min_length {
+    let chars = password.chars().count();
+    if chars < min_length {
         return Err(format!("Password must be at least {min_length} characters"));
     }
-    if !password.chars().any(|c| c.is_ascii_uppercase()) {
-        return Err("Password must contain at least one uppercase letter".to_string());
-    }
-    if !password.chars().any(|c| c.is_ascii_lowercase()) {
-        return Err("Password must contain at least one lowercase letter".to_string());
-    }
-    if !password.chars().any(|c| c.is_ascii_digit()) {
-        return Err("Password must contain at least one digit".to_string());
+    // 3-of-4 character classes, with a passphrase escape: a long enough
+    // password is accepted on length alone (NIST SP 800-63B style).
+    let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = password.chars().any(|c| c.is_ascii_lowercase());
+    let has_digit = password.chars().any(|c| c.is_ascii_digit());
+    let has_symbol = password.chars().any(|c| !c.is_ascii_alphanumeric());
+    let classes = [has_upper, has_lower, has_digit, has_symbol]
+        .iter()
+        .filter(|b| **b)
+        .count();
+    if classes < 3 && chars < 20 {
+        return Err(
+            "Password must combine at least 3 of uppercase, lowercase, digits, symbols \
+             — or be at least 20 characters (passphrase)"
+                .to_string(),
+        );
     }
     Ok(())
 }

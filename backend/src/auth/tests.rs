@@ -38,6 +38,13 @@ fn password_validation() {
     assert!(validate_password("Abcdefgh", 8).is_err());
     assert!(validate_password("Abcdefg1", 8).is_ok());
     assert!(validate_password("Abcdefg1!@#", 8).is_ok());
+    // Symbol class counts toward 3-of-4.
+    assert!(validate_password("pencil-tuesday-7", 8).is_ok());
+    // Passphrase escape: length alone (≥20) with a single class.
+    assert!(validate_password("correct-horse-battery", 8).is_ok());
+    assert!(validate_password("aaaaaaaaaaaaaaaaaaaaa", 8).is_ok());
+    // …but not below 20 with a single class.
+    assert!(validate_password("aaaaaaaaaaaaaaa", 8).is_err());
 }
 
 #[tokio::test]
