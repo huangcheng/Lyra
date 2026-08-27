@@ -18,6 +18,7 @@ mod config;
 mod crypto;
 mod dav;
 mod db_row;
+mod entities;
 mod imap;
 mod imap_idle;
 mod jmap;
