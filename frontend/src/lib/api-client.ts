@@ -128,6 +128,36 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   return JSON.parse(text) as T;
 }
 
+/**
+ * Authenticated binary fetch (attachments, blobs). Same auth/401 handling
+ * as {@link api} but resolves the response body as a `Blob`.
+ */
+export async function apiBlob(path: string): Promise<Blob> {
+  const headers = new Headers();
+  const token = bearerToken();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+
+  let res: Response;
+  try {
+    res = await fetch(apiUrl(path), { headers });
+  } catch {
+    throw new ApiError(0, 'network', 'Network error');
+  }
+
+  if (res.status === 401) {
+    const { message, code } = await errorBody(res);
+    if (isSessionExpiry(message, code)) {
+      clearSessionAndRedirect();
+    }
+    throw new ApiError(401, 'unauthorized', message);
+  }
+  if (!res.ok) {
+    const { message } = await errorBody(res);
+    throw new ApiError(res.status, 'http', message);
+  }
+  return res.blob();
+}
+
 /** Authenticated GET/POST SSE (EventSource cannot send Authorization). */
 export async function apiStream(path: string, signal?: AbortSignal): Promise<Response> {
   const headers = new Headers({ Accept: 'text/event-stream' });

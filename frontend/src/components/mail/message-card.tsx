@@ -8,7 +8,7 @@
  */
 
 import { format } from 'date-fns';
-import { Shield } from 'lucide-react';
+import { File, Paperclip, Shield } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import { OpengpgMessageBanner } from '@/components/mail/opengpg-message-banner';
@@ -16,6 +16,7 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { t } from '@/i18n';
 import { api } from '@/lib/api-client';
+import { downloadAttachment, formatBytes, resolveInlineImages } from '@/lib/attachments';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
@@ -48,6 +49,9 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
   const [bodyLoading, setBodyLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  /** Sanitized body HTML with inline `cid:` images resolved to object URLs. */
+  const [renderHtml, setRenderHtml] = useState<string | null>(null);
   const mailBodyRef = useRef<HTMLDivElement>(null);
   const autoMarkedRef = useRef(false);
 
@@ -97,6 +101,30 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
     return () => window.clearTimeout(timer);
   }, [expanded, isSelected, mail, markReadPolicy, messageId, markMessageRead]);
 
+  // Sanitize the body, then resolve inline cid: parts against the detail
+  // payload's attachment metadata (bytes go through apiBlob for auth).
+  useEffect(() => {
+    if (!mail?.bodyHtml) {
+      setRenderHtml(null);
+      return;
+    }
+    let revoke: (() => void) | null = null;
+    let cancelled = false;
+    const sanitized = sanitizeEmailHtml(mail.bodyHtml);
+    void resolveInlineImages(sanitized, mail.attachments).then((resolved) => {
+      if (cancelled) {
+        resolved.revoke();
+        return;
+      }
+      revoke = resolved.revoke;
+      setRenderHtml(resolved.html);
+    });
+    return () => {
+      cancelled = true;
+      if (revoke) revoke();
+    };
+  }, [mail?.id, mail?.bodyHtml, mail?.attachments]);
+
   // Tracking-pixel advisory on the rendered body.
   useEffect(() => {
     setPixelAdvisory(false);
@@ -123,12 +151,13 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
     root.querySelectorAll('img').forEach((img) => markIfPixel(img));
     root.addEventListener('load', onLoad, true);
     return () => root.removeEventListener('load', onLoad, true);
-  }, [expanded, mail?.id, mail?.bodyHtml, allowRemoteContent]);
+  }, [expanded, mail?.id, renderHtml, allowRemoteContent]);
 
   if (!mail) return null;
 
   const fromLabel = mail.from.name ?? mail.from.email;
   const snippet = (mail.snippet || mail.bodyText || '').replace(/\s+/g, ' ').trim();
+  const visibleAttachments = (mail.attachments ?? []).filter((a) => !a.isInline);
 
   const handleHeaderClick = () => {
     setSelectedMessage(messageId);
@@ -255,8 +284,11 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
           <div
             ref={mailBodyRef}
             className="mail-body animate-in fade-in duration-150"
-            // Sanitized via sanitizeEmailHtml (class/style-tag stripped).
-            dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(mail.bodyHtml) }}
+            // Sanitized via sanitizeEmailHtml (class/style-tag stripped);
+            // inline cid: images resolved to object URLs after sanitize.
+            dangerouslySetInnerHTML={{
+              __html: renderHtml ?? sanitizeEmailHtml(mail.bodyHtml),
+            }}
           />
         ) : mail.bodyText ? (
           <div className="whitespace-pre-wrap">{mail.bodyText}</div>
@@ -268,6 +300,43 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
             </Button>
           </div>
         )}
+        {visibleAttachments.length > 0 ? (
+          <div className="mt-4 space-y-1.5">
+            <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-ter-foreground">
+              <Paperclip className="size-3" aria-hidden />
+              {t(locale, 'mail.attachments')}
+            </div>
+            <ul className="flex flex-wrap gap-1.5">
+              {visibleAttachments.map((att) => (
+                <li key={att.id}>
+                  <button
+                    type="button"
+                    title={att.filename}
+                    onClick={() =>
+                      void downloadAttachment(att).catch(() =>
+                        setAttachmentError(t(locale, 'mail.attachmentDownloadError')),
+                      )
+                    }
+                    className="flex max-w-xs items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-accent"
+                  >
+                    <File className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                    <span className="min-w-0">
+                      <span className="block truncate font-medium">
+                        {att.filename || t(locale, 'mail.attachmentUnnamed')}
+                      </span>
+                      {att.sizeBytes != null ? (
+                        <span className="block text-ter-foreground">
+                          {formatBytes(att.sizeBytes)}
+                        </span>
+                      ) : null}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {attachmentError ? <p className="text-xs text-destructive">{attachmentError}</p> : null}
+          </div>
+        ) : null}
       </div>
     </article>
   );

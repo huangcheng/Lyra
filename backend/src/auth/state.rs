@@ -22,6 +22,8 @@ pub struct AuthState {
     pub sessions: SessionStore,
     pub min_password_length: usize,
     pub data_dir: std::path::PathBuf,
+    /// Per-outgoing-attachment byte cap (`LYRA_MAX_ATTACHMENT_BYTES`).
+    pub max_attachment_bytes: u64,
     pub app: Arc<App>,
     /// Per-auth-session OpenGPG unlock cache (passphrases only; never persisted).
     pub opengpg_unlock: Arc<crate::opengpg::UnlockRing>,
@@ -45,6 +47,7 @@ impl AuthState {
             sessions: SessionStore::new(db, kv),
             min_password_length: config.min_password_length,
             data_dir: std::path::PathBuf::from(&config.data_dir),
+            max_attachment_bytes: config.max_attachment_bytes,
             app,
             opengpg_unlock: Arc::new(crate::opengpg::UnlockRing::new()),
             ms_oauth: config.ms_oauth.clone(),

@@ -131,6 +131,15 @@ async fn main() -> anyhow::Result<()> {
 
 /// Public HTTP surface: unversioned `/health` and `/version`, everything else under `/api/v1`.
 fn api_router(auth_state: auth::AuthState) -> Router {
+    // Raise axum's 2 MiB default so multipart sends can carry attachments
+    // (per-attachment cap × count + header slack). The per-file limit itself
+    // is enforced by the send extractor.
+    let body_limit = axum::extract::DefaultBodyLimit::max(
+        usize::try_from(auth_state.max_attachment_bytes)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(sync::MAX_ATTACHMENTS_PER_SEND)
+            .saturating_add(1024 * 1024),
+    );
     Router::new()
         .route("/health", axum::routing::get(health))
         .route("/version", axum::routing::get(version))
@@ -143,6 +152,7 @@ fn api_router(auth_state: auth::AuthState) -> Router {
         .merge(opengpg::routes())
         .merge(oauth::routes())
         .merge(auth::routes())
+        .layer(body_limit)
         .with_state(auth_state)
 }
 
@@ -234,6 +244,7 @@ mod tests {
             min_password_length: 8,
             sync_max_concurrent: 3,
             sync_poll_secs: 300,
+            max_attachment_bytes: 25 * 1024 * 1024,
             redis_url: None,
             master_key: auth::TEST_MASTER_KEY.to_vec(),
             ms_oauth: None,

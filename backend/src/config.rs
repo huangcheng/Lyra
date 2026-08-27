@@ -23,6 +23,8 @@ pub struct Config {
     pub sync_max_concurrent: usize,
     /// Seconds between active-account poll ticks (`SYNC_POLL_SECS`, default 300).
     pub sync_poll_secs: u64,
+    /// Per-outgoing-attachment byte cap (`LYRA_MAX_ATTACHMENT_BYTES`, default 25 MiB).
+    pub max_attachment_bytes: u64,
     /// Redis URL for session/kv store (`REDIS_URL`). When unset, boot uses in-memory kv.
     pub redis_url: Option<String>,
     /// Master key for the per-user DEK hierarchy (`LYRA_MASTER_KEY`, 32+ bytes).
@@ -126,6 +128,12 @@ impl Config {
             .filter(|&n| n > 0)
             .unwrap_or(300);
 
+        let max_attachment_bytes: u64 = env::var("LYRA_MAX_ATTACHMENT_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n >= 1024)
+            .unwrap_or(25 * 1024 * 1024);
+
         let redis_url = env::var("REDIS_URL").ok().filter(|s| !s.is_empty());
 
         let master_key = master_key_from_env()?;
@@ -150,6 +158,7 @@ impl Config {
             min_password_length,
             sync_max_concurrent,
             sync_poll_secs,
+            max_attachment_bytes,
             redis_url,
             master_key,
             ms_oauth,

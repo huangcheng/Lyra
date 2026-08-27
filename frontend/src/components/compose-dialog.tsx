@@ -2,7 +2,9 @@
  * Compose dialog for writing new emails.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+
+import { Paperclip, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -16,7 +18,8 @@ import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { t } from '@/i18n';
-import { api } from '@/lib/api-client';
+import { api, apiBlob } from '@/lib/api-client';
+import { formatBytes } from '@/lib/attachments';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
 import {
   listOpengpgKeys,
@@ -35,6 +38,10 @@ interface ComposeForm {
   subject: string;
   body: string;
 }
+
+/** Mirrors the backend's per-file cap and count limit (LYRA_MAX_ATTACHMENT_BYTES). */
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const MAX_ATTACHMENTS = 10;
 
 export function ComposeDialog() {
   const locale = useUIStore((s) => s.locale);
@@ -62,6 +69,10 @@ export function ComposeDialog() {
   const [recipientKeys, setRecipientKeys] = useState<RecipientKeyLookup[]>([]);
   const [recipientKeyIds, setRecipientKeyIds] = useState<Record<string, string>>({});
   const [keys, setKeys] = useState<OpengpgKey[] | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Forward drafts load their original attachments once, not per rerender. */
+  const forwardLoadedRef = useRef<unknown>(null);
 
   /** The From account owns a secret (identity) key → sign/encrypt available. */
   const fromAccountHasKey = useMemo(
@@ -100,7 +111,61 @@ export function ComposeDialog() {
     setAttachPublicKey(false);
     setRecipientKeys([]);
     setRecipientKeyIds({});
+    setFiles([]);
   }, [composeOpen, composeDraft, selectedAccountId, accounts]);
+
+  // Forwarding carries the original's (non-inline) attachments: fetch bytes
+  // once per draft and seed the file list.
+  useEffect(() => {
+    if (!composeOpen || composeDraft?.mode !== 'forward') return;
+    if (forwardLoadedRef.current === composeDraft) return;
+    forwardLoadedRef.current = composeDraft;
+    const originals = composeDraft.forwardAttachments ?? [];
+    if (originals.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      const loaded: File[] = [];
+      for (const att of originals) {
+        try {
+          const blob = await apiBlob(`/attachments/${att.id}/download`);
+          loaded.push(
+            new File([blob], att.filename || 'attachment', {
+              type: att.contentType || 'application/octet-stream',
+            }),
+          );
+        } catch {
+          // Broken originals are skipped; the send still goes out.
+        }
+      }
+      if (!cancelled && loaded.length > 0) {
+        setFiles((prev) => [...loaded, ...prev].slice(0, MAX_ATTACHMENTS));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [composeOpen, composeDraft]);
+
+  function addFiles(list: FileList | null) {
+    if (!list || list.length === 0) return;
+    const incoming = Array.from(list);
+    const tooBig = incoming.filter((f) => f.size > MAX_ATTACHMENT_BYTES);
+    if (tooBig.length > 0) {
+      setError(t(locale, 'mail.attachmentTooLarge', { name: tooBig[0].name }));
+    }
+    const ok = incoming.filter((f) => f.size <= MAX_ATTACHMENT_BYTES);
+    setFiles((prev) => {
+      if (prev.length + ok.length > MAX_ATTACHMENTS) {
+        setError(t(locale, 'mail.attachmentCountLimit', { count: String(MAX_ATTACHMENTS) }));
+        return [...prev, ...ok].slice(0, MAX_ATTACHMENTS);
+      }
+      return [...prev, ...ok];
+    });
+  }
+
+  function removeFile(index: number) {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  }
 
   useEffect(() => {
     if (!composeOpen) {
@@ -173,6 +238,7 @@ export function ComposeDialog() {
     setSignMessage(false);
     setEncryptMessage(false);
     setAttachPublicKey(false);
+    setFiles([]);
   };
 
   const handleSend = async () => {
@@ -211,19 +277,29 @@ export function ComposeDialog() {
             }
           : undefined;
 
-      await api('/messages/send', {
-        method: 'POST',
-        body: JSON.stringify({
-          accountId: fromAccountId,
-          to: split(form.to),
-          cc: split(form.cc),
-          bcc: split(form.bcc),
-          subject: form.subject,
-          bodyText: form.body,
-          bodyHtml: null,
-          opengpg,
-        }),
-      });
+      const payload = {
+        accountId: fromAccountId,
+        to: split(form.to),
+        cc: split(form.cc),
+        bcc: split(form.bcc),
+        subject: form.subject,
+        bodyText: form.body,
+        bodyHtml: null,
+        opengpg,
+      };
+
+      if (files.length > 0) {
+        // Multipart: `payload` JSON part + `files` parts (backend contract).
+        const fd = new FormData();
+        fd.append('payload', new Blob([JSON.stringify(payload)], { type: 'application/json' }));
+        for (const f of files) fd.append('files', f, f.name);
+        await api('/messages/send', { method: 'POST', body: fd });
+      } else {
+        await api('/messages/send', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      }
 
       setSuccess(true);
       window.setTimeout(() => handleClose(), 1500);
@@ -296,6 +372,51 @@ export function ComposeDialog() {
               onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))}
               placeholder={t(locale, 'mail.bodyPlaceholder')}
             />
+          </Field>
+          <Field className="gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={sending || files.length >= MAX_ATTACHMENTS}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Paperclip className="size-3.5" />
+                {t(locale, 'mail.addAttachment')}
+              </Button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  addFiles(e.target.files);
+                  e.target.value = '';
+                }}
+              />
+              {files.length > 0
+                ? files.map((f, i) => (
+                    <span
+                      key={`${f.name}-${i}`}
+                      className="flex max-w-[200px] items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{f.name}</span>
+                        <span className="block text-ter-foreground">{formatBytes(f.size)}</span>
+                      </span>
+                      <button
+                        type="button"
+                        aria-label={t(locale, 'mail.removeAttachment', { name: f.name })}
+                        className="shrink-0 rounded p-0.5 hover:bg-accent"
+                        onClick={() => removeFile(i)}
+                      >
+                        <X className="size-3" aria-hidden />
+                      </button>
+                    </span>
+                  ))
+                : null}
+            </div>
           </Field>
           <Field className="gap-3 rounded-md border border-border/60 p-3">
             <p className="text-sm font-medium">{t(locale, 'mail.opengpg.composeTitle')}</p>

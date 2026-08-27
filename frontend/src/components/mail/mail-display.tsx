@@ -198,11 +198,17 @@ export function MailDisplay() {
 
   const handleForward = () => {
     if (!mail) return;
+    // Forward carries the original's regular attachments (inline images stay
+    // in the quoted body). Reply intentionally drops them.
+    const forwardAttachments = (mail.attachments ?? [])
+      .filter((a) => !a.isInline)
+      .map((a) => ({ id: a.id, filename: a.filename, contentType: a.contentType }));
     openCompose({
       mode: 'forward',
       to: '',
       subject: mail.subject.startsWith('Fwd:') ? mail.subject : `Fwd: ${mail.subject}`,
       body: quoteBody(mail),
+      forwardAttachments: forwardAttachments.length > 0 ? forwardAttachments : undefined,
     });
   };
 

@@ -1,6 +1,6 @@
 //! SMTP send helpers and the compose HTTP handler.
 
-use axum::{Json, extract::State};
+use axum::{Json, extract::FromRequest, extract::State};
 use sea_orm::sea_query::Query as Sq;
 use sea_orm::{ColumnTrait, ConnectionTrait, QueryResult, Value};
 use serde::Serialize;
@@ -15,7 +15,7 @@ use crate::opengpg::send::{
     OpengpgSendOptions, OutboundDraft, collect_recipient_emails, wrap_outbound_opengpg,
 };
 use crate::protocol::SendHandle;
-use crate::smtp::{OutboundMessage, SmtpAdapter, SmtpConfig, SmtpSecurity};
+use crate::smtp::{OutboundAttachment, OutboundMessage, SmtpAdapter, SmtpConfig, SmtpSecurity};
 use crate::storage::DbPool;
 
 // ── SeaORM plumbing (entity queries on `db.orm()`) ──────────────────
@@ -104,6 +104,103 @@ fn opengpg_recipient_emails(body: &SendMessageRequest) -> Vec<String> {
     recipients
 }
 
+/// Max attachments accepted in one send request. Together with
+/// `LYRA_MAX_ATTACHMENT_BYTES` this bounds the route's request-body limit.
+pub(crate) const MAX_ATTACHMENTS_PER_SEND: usize = 10;
+
+/// Send request on the wire: JSON (no attachments) or `multipart/form-data`
+/// with one `payload` JSON part plus `files` parts.
+pub(crate) struct SendRequest {
+    pub json: SendMessageRequest,
+    pub files: Vec<OutboundAttachment>,
+}
+
+impl FromRequest<AuthState> for SendRequest {
+    type Rejection = SyncError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &AuthState,
+    ) -> Result<Self, Self::Rejection> {
+        let is_multipart = req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("multipart/form-data"));
+
+        if !is_multipart {
+            let Json(json) = Json::<SendMessageRequest>::from_request(req, state)
+                .await
+                .map_err(|e| SyncError::InvalidInput(e.body_text()))?;
+            return Ok(Self {
+                json,
+                files: Vec::new(),
+            });
+        }
+
+        let mut multipart = axum::extract::Multipart::from_request(req, state)
+            .await
+            .map_err(|e| SyncError::InvalidInput(e.to_string()))?;
+        let mut payload: Option<SendMessageRequest> = None;
+        let mut files = Vec::new();
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|e| SyncError::InvalidInput(e.to_string()))?
+        {
+            match field.name() {
+                Some("payload") => {
+                    let text = field
+                        .text()
+                        .await
+                        .map_err(|e| SyncError::InvalidInput(e.to_string()))?;
+                    payload = Some(
+                        serde_json::from_str(&text)
+                            .map_err(|e| SyncError::InvalidInput(format!("payload: {e}")))?,
+                    );
+                }
+                Some("files") => {
+                    if files.len() >= MAX_ATTACHMENTS_PER_SEND {
+                        return Err(SyncError::InvalidInput(format!(
+                            "at most {MAX_ATTACHMENTS_PER_SEND} attachments per message"
+                        )));
+                    }
+                    let filename = field
+                        .file_name()
+                        .map(str::to_owned)
+                        .filter(|n| !n.trim().is_empty())
+                        .unwrap_or_else(|| format!("attachment-{}", files.len() + 1));
+                    let content_type = field
+                        .content_type()
+                        .map_or_else(|| "application/octet-stream".into(), str::to_owned);
+                    let bytes = field
+                        .bytes()
+                        .await
+                        .map_err(|e| SyncError::InvalidInput(e.to_string()))?;
+                    if bytes.len() as u64 > state.max_attachment_bytes {
+                        return Err(SyncError::InvalidInput(format!(
+                            "attachment {filename} exceeds {} bytes",
+                            state.max_attachment_bytes
+                        )));
+                    }
+                    files.push(OutboundAttachment::from_bytes(
+                        &filename,
+                        &content_type,
+                        &bytes,
+                    ));
+                }
+                _ => {} // tolerate unknown parts (forward-compatible)
+            }
+        }
+        Ok(Self {
+            json: payload.ok_or_else(|| {
+                SyncError::InvalidInput("multipart send requires a payload part".into())
+            })?,
+            files,
+        })
+    }
+}
+
 /// Send a message through the account's `SendPlugin` (SMTP today).
 ///
 /// Mailbox sync is queued for workers; single-message SMTP stays request-scoped
@@ -111,7 +208,7 @@ fn opengpg_recipient_emails(body: &SendMessageRequest) -> Vec<String> {
 pub(crate) async fn send_message(
     State(state): State<AuthState>,
     session: AuthSession,
-    Json(body): Json<SendMessageRequest>,
+    SendRequest { json: body, files }: SendRequest,
 ) -> Result<Json<SendMessageResponse>, SyncError> {
     let db = state.db();
     let user_id = session.user_id;
@@ -205,6 +302,7 @@ pub(crate) async fn send_message(
         references: body.references,
         mime_content_type,
         mime_body,
+        attachments: files,
     };
 
     let raw = serde_json::to_string(&outbound)
@@ -445,6 +543,7 @@ pub(crate) fn outbound_from_raw(
         references: None,
         mime_content_type: None,
         mime_body: None,
+        attachments: Vec::new(),
     })
 }
 

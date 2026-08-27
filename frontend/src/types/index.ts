@@ -11,6 +11,17 @@ export interface MailAddress {
   email: string;
 }
 
+/** Attachment metadata from the message detail payload. */
+export interface MailAttachment {
+  id: string;
+  filename?: string;
+  contentType?: string;
+  sizeBytes?: number;
+  isInline: boolean;
+  /** CID for inline images (`src="cid:…"` in the HTML body). */
+  contentId?: string;
+}
+
 export interface MailMessage {
   id: string;
   accountId: string;
@@ -30,6 +41,8 @@ export interface MailMessage {
   isStarred: boolean;
   isDraft: boolean;
   hasAttachments: boolean;
+  /** Attachment metadata; only the detail payload carries it. */
+  attachments?: MailAttachment[];
   remoteContentBlocked?: boolean;
   /** OpenGPG decrypt/verify status from GET message (when present). */
   opengpg?: MailOpengpgStatus;

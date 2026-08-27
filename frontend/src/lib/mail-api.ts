@@ -2,7 +2,7 @@
  * Map backend mail JSON onto frontend types.
  */
 
-import type { MailAddress, MailFolder, MailMessage } from '@/types';
+import type { MailAddress, MailAttachment, MailFolder, MailMessage } from '@/types';
 
 export interface ApiFolder {
   id: string;
@@ -14,6 +14,15 @@ export interface ApiFolder {
   sortOrder: number;
   totalMessages: number;
   unreadMessages: number;
+}
+
+export interface ApiAttachment {
+  id: string;
+  filename?: string;
+  contentType?: string;
+  sizeBytes?: number;
+  isInline: boolean;
+  contentId?: string;
 }
 
 export interface ApiMessage {
@@ -32,6 +41,7 @@ export interface ApiMessage {
   isRead: boolean;
   isStarred: boolean;
   hasAttachments: boolean;
+  attachments?: ApiAttachment[];
   remoteContentBlocked?: boolean;
   opengpg?: {
     encrypted: boolean;
@@ -111,6 +121,18 @@ export function mapApiFolder(folder: ApiFolder): MailFolder {
   };
 }
 
+export function mapApiAttachments(rows: ApiAttachment[] | undefined): MailAttachment[] | undefined {
+  if (!rows) return undefined;
+  return rows.map((a) => ({
+    id: String(a.id),
+    filename: a.filename,
+    contentType: a.contentType,
+    sizeBytes: a.sizeBytes,
+    isInline: Boolean(a.isInline),
+    contentId: a.contentId,
+  }));
+}
+
 export function mapApiMessage(msg: ApiMessage | Record<string, unknown>): MailMessage {
   const row = msg as ApiMessage;
   return {
@@ -130,6 +152,7 @@ export function mapApiMessage(msg: ApiMessage | Record<string, unknown>): MailMe
     isStarred: Boolean(row.isStarred),
     isDraft: false,
     hasAttachments: Boolean(row.hasAttachments),
+    attachments: mapApiAttachments(row.attachments),
     remoteContentBlocked: Boolean(row.remoteContentBlocked),
     opengpg: row.opengpg
       ? {

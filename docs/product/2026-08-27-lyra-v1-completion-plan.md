@@ -47,16 +47,26 @@ without once feeling "this is a demo".
 
 ### W1 — Attachments (read + compose) — the blocker
 
+Status 2026-08-27: shipped except JMAP-receive metadata (see note below).
+
 Backend list/download endpoints already exist (`GET /messages/{id}/attachments[/{attachmentId}]`).
 
 Acceptance criteria:
 
-- [ ] Reading pane lists attachments (name, size, icon) and downloads via the existing endpoints.
-- [ ] Inline images in HTML bodies render (cid/inline parts), not just attachments.
-- [ ] Compose supports attaching files; SMTP path sends proper MIME `multipart/mixed`
-      (+ `multipart/alternative` inner body); JMAP path sets attachments per protocol.
-- [ ] Reply/forward carries original attachments (or explicitly documents dropping them — pick one, do it).
-- [ ] Attachment size cap enforced server-side with a typed error; i18n'd everywhere.
+- [x] Reading pane lists attachments (name, size, icon) and downloads via the existing endpoints.
+- [x] Inline images in HTML bodies render (cid/inline parts), not just attachments.
+- [x] Compose supports attaching files; SMTP path sends proper MIME `multipart/mixed`
+      (+ `multipart/alternative` inner body); JMAP path sets attachments per protocol
+      (blob upload → `Email/set` `attachments`).
+- [x] Reply/forward carries original attachments: **forward carries the original's
+      non-inline attachments (fetched client-side and re-attached); reply drops them**
+      (Thunderbird default behavior).
+- [x] Attachment size cap enforced server-side with a typed error (`LYRA_MAX_ATTACHMENT_BYTES`,
+      default 25 MiB per file, max 10 per send; request-body limit raised accordingly); i18n'd.
+- [ ] **Deferred:** JMAP *receive* attachment metadata persistence + on-demand
+      `Blob/download` proxy (needs `attachment.external_blob_id` migration + session
+      `downloadUrl`). Until then JMAP accounts show the has-attachments flag only.
+      IMAP accounts (metadata persisted at lazy body-fill) are fully covered.
 
 ### W2 — Move to folder
 

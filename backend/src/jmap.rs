@@ -74,7 +74,6 @@ pub struct JmapSession {
     pub event_source_url: Option<String>,
     /// URL for uploading blobs.
     #[serde(rename = "uploadUrl")]
-    #[allow(dead_code)]
     pub upload_url: Option<String>,
 }
 
@@ -618,7 +617,27 @@ impl JmapClient {
         let drafts_id = mailbox_id_for_role(&mailboxes, "drafts");
         let sent_id = mailbox_id_for_role(&mailboxes, "sent");
 
-        let email_create = build_email_create(outbound, drafts_id.as_deref())?;
+        // Attachments travel as blobs: upload first, then reference by id in
+        // `Email/set` (RFC 8621 §4.1.3).
+        let mut uploaded = Vec::new();
+        for att in &outbound.attachments {
+            let bytes = att.decode().map_err(|e| {
+                JmapError::InvalidResponse(format!("attachment {}: {}", att.filename, e))
+            })?;
+            let blob_id = self
+                .upload_blob(bytes, &att.content_type)
+                .await
+                .map_err(|e| {
+                    JmapError::InvalidResponse(format!("attachment {}: {e}", att.filename))
+                })?;
+            uploaded.push(UploadedAttachment {
+                blob_id,
+                r#type: att.content_type.clone(),
+                name: att.filename.clone(),
+            });
+        }
+
+        let email_create = build_email_create(outbound, drafts_id.as_deref(), &uploaded)?;
 
         let mut on_success_update = serde_json::Map::new();
         if let Some(ref drafts) = drafts_id {
@@ -692,6 +711,51 @@ impl JmapClient {
     }
 
     // ── Internal helpers ────────────────────────────────────────
+
+    /// Upload raw bytes via the session's `uploadUrl` (RFC 8620 blob upload)
+    /// and return the server-assigned blob id.
+    pub async fn upload_blob(
+        &self,
+        data: Vec<u8>,
+        content_type: &str,
+    ) -> Result<String, JmapError> {
+        let template = self.session.upload_url.as_deref().ok_or_else(|| {
+            JmapError::SessionDiscovery("JMAP session provides no uploadUrl".into())
+        })?;
+        let url = template.replace("{accountId}", &self.account_id);
+
+        // Same pinned-origin guarantee as `send_request`: never replay the
+        // bearer token to a host discovery did not vouch for.
+        let target = crate::netsec::origin_of(&url).map_err(JmapError::InvalidServerUrl)?;
+        if target != self.origin {
+            tracing::warn!(
+                target_origin = %target,
+                expected_origin = %self.origin,
+                "JMAP: refusing cross-origin blob upload"
+            );
+            return Err(JmapError::CrossOrigin(url));
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", &self.auth_token)
+            .header("Content-Type", content_type)
+            .body(data)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(JmapError::InvalidResponse(format!(
+                "blob upload failed: {status}"
+            )));
+        }
+        let body: serde_json::Value = resp.json().await?;
+        body.get("blobId")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| JmapError::InvalidResponse("blob upload response missing blobId".into()))
+    }
 
     /// Send a JMAP request to the API endpoint.
     async fn send_request(&self, request: &JmapRequest) -> Result<JmapResponse, JmapError> {
@@ -809,10 +873,19 @@ fn mailbox_id_for_role(mailboxes: &[JmapMailbox], role: &str) -> Option<String> 
         .map(|m| m.id.clone())
 }
 
+/// An attachment already uploaded to the server, referenced by blob id.
+#[derive(Debug, Clone)]
+struct UploadedAttachment {
+    blob_id: String,
+    r#type: String,
+    name: String,
+}
+
 /// Build the Email object for `Email/set` create (RFC 8621 §4.7).
 fn build_email_create(
     outbound: &OutboundMessage,
     drafts_id: Option<&str>,
+    attachments: &[UploadedAttachment],
 ) -> Result<serde_json::Value, JmapError> {
     let mut mailbox_ids = serde_json::Map::new();
     if let Some(id) = drafts_id {
@@ -861,6 +934,20 @@ fn build_email_create(
     if let Some(ref refs) = outbound.references {
         let list: Vec<&str> = refs.split_whitespace().collect();
         email["references"] = serde_json::json!(list);
+    }
+
+    if !attachments.is_empty() {
+        email["attachments"] = serde_json::json!(
+            attachments
+                .iter()
+                .map(|a| serde_json::json!({
+                    "blobId": a.blob_id,
+                    "type": a.r#type,
+                    "name": a.name,
+                    "isInline": false,
+                }))
+                .collect::<Vec<_>>()
+        );
     }
 
     Ok(email)
@@ -1468,13 +1555,42 @@ mod tests {
             references: None,
             mime_content_type: None,
             mime_body: None,
+            attachments: Vec::new(),
         };
-        let email = build_email_create(&outbound, Some("mb-drafts")).unwrap();
+        let email = build_email_create(&outbound, Some("mb-drafts"), &[]).unwrap();
         assert_eq!(email["subject"], "Hi");
         assert_eq!(email["keywords"]["$draft"], true);
         assert_eq!(email["mailboxIds"]["mb-drafts"], true);
         assert_eq!(email["to"][0]["email"], "you@example.com");
         assert_eq!(email["bodyValues"]["bd1"]["value"], "Hello");
+    }
+
+    #[test]
+    fn build_email_create_references_uploaded_attachments() {
+        let outbound = OutboundMessage {
+            from_email: "me@example.com".into(),
+            from_name: None,
+            to: vec![(None, "you@example.com".into())],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Files".into(),
+            body_text: Some("see files".into()),
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+            mime_content_type: None,
+            mime_body: None,
+            attachments: Vec::new(),
+        };
+        let uploaded = vec![UploadedAttachment {
+            blob_id: "blob-1".into(),
+            r#type: "application/pdf".into(),
+            name: "invoice.pdf".into(),
+        }];
+        let email = build_email_create(&outbound, None, &uploaded).unwrap();
+        assert_eq!(email["attachments"][0]["blobId"], "blob-1");
+        assert_eq!(email["attachments"][0]["name"], "invoice.pdf");
+        assert_eq!(email["attachments"][0]["isInline"], false);
     }
 
     #[test]

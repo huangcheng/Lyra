@@ -315,6 +315,7 @@ fn message_response_from_query_row(row: &QueryResult) -> Result<MessageResponse,
         has_attachments: row.try_get("", "has_attachments")?,
         remote_content_blocked: false,
         opengpg: None,
+        attachments: None,
     })
 }
 
@@ -544,6 +545,10 @@ pub struct MessageResponse {
     /// OpenGPG decrypt/verify status when the message looks encrypted or signed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opengpg: Option<crate::opengpg::OpengpgMessageStatus>,
+    /// Attachment metadata; set by the detail endpoint only (lists carry
+    /// `has_attachments` instead).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<AttachmentResponse>>,
 }
 
 /// Folder columns needed by [`FolderResponse`], projected from alias `f`.
@@ -1049,6 +1054,9 @@ pub(crate) struct AttachmentResponse {
     content_type: Option<String>,
     size_bytes: Option<i64>,
     is_inline: bool,
+    /// CID for inline parts (`<image.png@…>` in HTML `src="cid:…"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
 }
 
 pub(crate) async fn list_attachments(
@@ -1058,7 +1066,15 @@ pub(crate) async fn list_attachments(
 ) -> Result<Json<Vec<AttachmentResponse>>, SyncError> {
     let db = state.db();
     let _ = load_message_row(db, &user_id, &message_id).await?;
-    let message_value = id_value(db, &message_id)?;
+    Ok(Json(load_attachment_meta(db, &message_id).await?))
+}
+
+/// Attachment metadata for one message, oldest first.
+pub(crate) async fn load_attachment_meta(
+    db: &DbPool,
+    message_id: &str,
+) -> Result<Vec<AttachmentResponse>, SyncError> {
+    let message_value = id_value(db, message_id)?;
 
     let rows = db
         .orm()
@@ -1071,6 +1087,7 @@ pub(crate) async fn list_attachments(
                 attachment::Column::ContentType,
                 attachment::Column::SizeBytes,
                 attachment::Column::IsInline,
+                attachment::Column::ContentId,
             ])
             .from(attachment::Entity)
             .and_where(Expr::col(attachment::Column::MessageId).eq(message_value))
@@ -1080,8 +1097,7 @@ pub(crate) async fn list_attachments(
         .await
         .map_err(orm_err)?;
 
-    let attachments = rows
-        .iter()
+    rows.iter()
         .map(|row| {
             Ok(AttachmentResponse {
                 id: row_id(row, "id")?,
@@ -1090,12 +1106,11 @@ pub(crate) async fn list_attachments(
                 content_type: row.try_get("", "content_type")?,
                 size_bytes: row.try_get("", "size_bytes")?,
                 is_inline: row.try_get("", "is_inline")?,
+                content_id: row.try_get("", "content_id")?,
             })
         })
         .collect::<Result<Vec<_>, sea_orm::DbErr>>()
-        .map_err(orm_err)?;
-
-    Ok(Json(attachments))
+        .map_err(orm_err)
 }
 
 pub(crate) async fn download_attachment(
@@ -1295,6 +1310,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         has_attachments: row.has_attachments,
         remote_content_blocked: false,
         opengpg: None,
+        attachments: None,
     }
 }
 
@@ -1565,7 +1581,7 @@ pub(crate) async fn get_message(
     maybe_fill_imap_body(db, &state.data_dir, &session.user_id, &mut row).await?;
 
     let allow_remote = query.remote_content.as_deref() == Some("allow");
-    let response = finalize_message_response_with_opengpg(
+    let mut response = finalize_message_response_with_opengpg(
         &state,
         &session.user_id,
         Some(&session.token),
@@ -1573,6 +1589,8 @@ pub(crate) async fn get_message(
         allow_remote,
     )
     .await?;
+    // Detail payload carries attachment metadata (lists use has_attachments).
+    response.attachments = Some(load_attachment_meta(db, &message_id).await?);
     Ok(Json(response))
 }
 

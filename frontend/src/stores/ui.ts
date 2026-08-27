@@ -13,6 +13,8 @@ export interface ComposeDraft {
   subject: string;
   body: string;
   mode: 'new' | 'reply' | 'forward';
+  /** Forwarding carries the original's non-inline attachments (metadata). */
+  forwardAttachments?: Array<{ id: string; filename?: string; contentType?: string }>;
 }
 
 interface UIState {

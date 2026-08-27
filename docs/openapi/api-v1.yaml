@@ -465,7 +465,7 @@ paths:
   /api/v1/messages/send:
     post:
       tags: [messages]
-      summary: Send a message via SMTP
+      summary: Send a message (SMTP or JMAP submission)
       requestBody:
         required: true
         content:
@@ -473,6 +473,28 @@ paths:
             schema:
               type: object
               description: Outbound message draft (see sync module)
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                payload:
+                  type: object
+                  description: >
+                    Same JSON body as the application/json variant, sent as a
+                    part named `payload` (Content-Type application/json).
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  description: >
+                    Attachment parts named `files` (max 10; each ≤
+                    LYRA_MAX_ATTACHMENT_BYTES, default 25 MiB). Sent as
+                    multipart/mixed on SMTP; uploaded as blobs + Email/set
+                    attachments on JMAP.
+            encoding:
+              payload:
+                contentType: application/json
       responses:
         "200":
           description: Send accepted
@@ -487,7 +509,18 @@ paths:
       summary: Get one message (body fetched lazily when missing)
       responses:
         "200":
-          description: Full message
+          description: >
+            Full message; the detail payload additionally carries
+            `attachments` (metadata incl. `contentId` for inline parts).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  attachments:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Attachment"
         "404":
           $ref: "#/components/responses/Error"
     patch:
@@ -557,6 +590,56 @@ paths:
       responses:
         "204":
           description: Snoozed
+
+  /api/v1/messages/{message_id}/attachments:
+    get:
+      tags: [messages, attachments]
+      summary: List attachment metadata for a message
+      parameters:
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "200":
+          description: Attachment list (oldest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Attachment"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/attachments/{attachment_id}:
+    get:
+      tags: [attachments]
+      summary: Download attachment bytes (alias of /download)
+      parameters:
+        - name: attachment_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Raw bytes (stored Content-Type; attachment disposition)
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/attachments/{attachment_id}/download:
+    get:
+      tags: [attachments]
+      summary: Download attachment bytes
+      parameters:
+        - name: attachment_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Raw bytes (stored Content-Type; attachment disposition)
+        "404":
+          $ref: "#/components/responses/Error"
 
   /api/v1/folders:
     get:
@@ -1146,6 +1229,30 @@ components:
           type: boolean
         revoked:
           type: boolean
+
+    Attachment:
+      type: object
+      properties:
+        id:
+          type: string
+        messageId:
+          type: string
+        filename:
+          nullable: true
+          type: string
+        contentType:
+          nullable: true
+          type: string
+        sizeBytes:
+          nullable: true
+          type: integer
+          format: int64
+        isInline:
+          type: boolean
+        contentId:
+          nullable: true
+          type: string
+          description: CID of inline parts, for `src="cid:…"` resolution
 
 security:
   - bearerAuth: []

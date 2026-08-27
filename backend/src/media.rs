@@ -594,6 +594,7 @@ mod tests {
             min_password_length: 8,
             sync_max_concurrent: 3,
             sync_poll_secs: 300,
+            max_attachment_bytes: 25 * 1024 * 1024,
             redis_url: None,
             master_key: TEST_MASTER_KEY.to_vec(),
             ms_oauth: None,

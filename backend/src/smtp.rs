@@ -15,7 +15,7 @@
 #![allow(clippy::doc_markdown)]
 
 use lettre::message::header::ContentType;
-use lettre::message::{Mailbox, Message, MultiPart, SinglePart};
+use lettre::message::{Attachment, Mailbox, Message, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use serde::{Deserialize, Serialize};
@@ -113,6 +113,38 @@ pub struct SmtpConfig {
     pub xoauth2: bool,
 }
 
+/// An outgoing attachment carried on [`OutboundMessage`].
+///
+/// `data_base64` keeps the plugin/job JSON wire self-contained; SMTP builds
+/// decode it back to bytes before MIME assembly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboundAttachment {
+    pub filename: String,
+    pub content_type: String,
+    pub data_base64: String,
+}
+
+impl OutboundAttachment {
+    #[must_use]
+    pub fn from_bytes(filename: &str, content_type: &str, data: &[u8]) -> Self {
+        use base64::Engine as _;
+        Self {
+            filename: filename.to_owned(),
+            content_type: content_type.to_owned(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+        }
+    }
+
+    /// Decode the payload; an invalid base64 string is a programming error on
+    /// the producer side, so it maps to a permanent SMTP error.
+    pub fn decode(&self) -> Result<Vec<u8>, SmtpError> {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(self.data_base64.as_bytes())
+            .map_err(|e| SmtpError::Permanent(format!("attachment {}: {e}", self.filename)))
+    }
+}
+
 /// An outbound email message to be sent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutboundMessage {
@@ -141,6 +173,10 @@ pub struct OutboundMessage {
     pub mime_content_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_body: Option<String>,
+    /// Attachments; non-empty forces a `multipart/mixed` wrapper around the
+    /// body part (RFC 2046).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<OutboundAttachment>,
 }
 
 impl OutboundMessage {
@@ -283,6 +319,67 @@ impl SmtpAdapter {
     }
 }
 
+/// The message body as a MIME part: single part or `multipart/alternative`.
+enum BodyPart {
+    Single(SinglePart),
+    Alternative(MultiPart),
+}
+
+/// Build the body part: OpenGPG MIME wrapper, multipart text+html, or a
+/// single text/html part.
+fn build_body_part(msg: &OutboundMessage) -> Result<BodyPart, SmtpError> {
+    if let (Some(ct), Some(body)) = (&msg.mime_content_type, &msg.mime_body) {
+        let content_type = ContentType::parse(ct)
+            .map_err(|e| SmtpError::Permanent(format!("invalid Content-Type: {e}")))?;
+        return Ok(BodyPart::Single(
+            SinglePart::builder()
+                .header(content_type)
+                .body(body.clone()),
+        ));
+    }
+    Ok(match (&msg.body_text, &msg.body_html) {
+        (Some(text), Some(html)) => {
+            let text_part = SinglePart::builder()
+                .header(ContentType::TEXT_PLAIN)
+                .body(text.clone());
+
+            let html_part = SinglePart::builder()
+                .header(ContentType::TEXT_HTML)
+                .body(html.clone());
+
+            BodyPart::Alternative(
+                MultiPart::alternative()
+                    .singlepart(text_part)
+                    .singlepart(html_part),
+            )
+        }
+        (Some(text), None) => BodyPart::Single(
+            SinglePart::builder()
+                .header(ContentType::TEXT_PLAIN)
+                .body(text.clone()),
+        ),
+        (None, Some(html)) => BodyPart::Single(
+            SinglePart::builder()
+                .header(ContentType::TEXT_HTML)
+                .body(html.clone()),
+        ),
+        (None, None) => BodyPart::Single(
+            SinglePart::builder()
+                .header(ContentType::TEXT_PLAIN)
+                .body(String::new()),
+        ),
+    })
+}
+
+/// Attachment → lettre part (base64 body, `attachment` disposition).
+fn attachment_part(att: &OutboundAttachment) -> Result<SinglePart, SmtpError> {
+    let bytes = att.decode()?;
+    let content_type = ContentType::parse(&att.content_type).unwrap_or_else(|_| {
+        ContentType::parse("application/octet-stream").expect("static MIME type parses")
+    });
+    Ok(Attachment::new(att.filename.clone()).body(bytes, content_type))
+}
+
 /// Build a `lettre::Message` from an `OutboundMessage`.
 fn build_message(msg: &OutboundMessage) -> Result<Message, SmtpError> {
     let from_mailbox = Mailbox::new(msg.from_name.clone(), msg.from_email.parse()?);
@@ -317,34 +414,22 @@ fn build_message(msg: &OutboundMessage) -> Result<Message, SmtpError> {
         builder = builder.bcc(mailbox);
     }
 
-    // Build body: OpenGPG MIME wrapper, multipart text+html, or single part.
-    let message = if let (Some(ct), Some(body)) = (&msg.mime_content_type, &msg.mime_body) {
-        let content_type = ContentType::parse(ct)
-            .map_err(|e| SmtpError::Permanent(format!("invalid Content-Type: {e}")))?;
-        builder.header(content_type).body(body.clone())?
-    } else {
-        match (&msg.body_text, &msg.body_html) {
-            (Some(text), Some(html)) => {
-                let text_part = SinglePart::builder()
-                    .header(ContentType::TEXT_PLAIN)
-                    .body(text.clone());
-
-                let html_part = SinglePart::builder()
-                    .header(ContentType::TEXT_HTML)
-                    .body(html.clone());
-
-                builder.multipart(
-                    MultiPart::alternative()
-                        .singlepart(text_part)
-                        .singlepart(html_part),
-                )?
-            }
-            (Some(text), None) => builder.header(ContentType::TEXT_PLAIN).body(text.clone())?,
-            (None, Some(html)) => builder.header(ContentType::TEXT_HTML).body(html.clone())?,
-            (None, None) => builder
-                .header(ContentType::TEXT_PLAIN)
-                .body(String::new())?,
+    let body_part = build_body_part(msg)?;
+    let message = if msg.attachments.is_empty() {
+        match body_part {
+            BodyPart::Single(sp) => builder.singlepart(sp)?,
+            BodyPart::Alternative(mp) => builder.multipart(mp)?,
         }
+    } else {
+        // RFC 2046 multipart/mixed: body first, then attachments.
+        let mut mixed = match body_part {
+            BodyPart::Single(sp) => MultiPart::mixed().singlepart(sp),
+            BodyPart::Alternative(mp) => MultiPart::mixed().multipart(mp),
+        };
+        for att in &msg.attachments {
+            mixed = mixed.singlepart(attachment_part(att)?);
+        }
+        builder.multipart(mixed)?
     };
 
     Ok(message)
@@ -430,6 +515,7 @@ mod tests {
             references: None,
             mime_content_type: None,
             mime_body: None,
+            attachments: Vec::new(),
         };
         assert!(caps.allows_message(&msg).is_ok());
     }
@@ -451,6 +537,7 @@ mod tests {
             references: None,
             mime_content_type: None,
             mime_body: None,
+            attachments: Vec::new(),
         };
         assert!(msg.needs_smtputf8());
         assert!(caps.allows_message(&msg).is_err());
@@ -472,6 +559,7 @@ mod tests {
             references: None,
             mime_content_type: None,
             mime_body: None,
+            attachments: Vec::new(),
         };
         assert!(msg.needs_8bitmime());
         assert!(caps.allows_message(&msg).is_err());
@@ -505,6 +593,7 @@ mod tests {
             references: None,
             mime_content_type: None,
             mime_body: None,
+            attachments: Vec::new(),
         };
 
         let message = build_message(&msg).unwrap();
@@ -526,6 +615,7 @@ mod tests {
             references: None,
             mime_content_type: None,
             mime_body: None,
+            attachments: Vec::new(),
         };
 
         let message = build_message(&msg).unwrap();
@@ -550,6 +640,7 @@ mod tests {
             references: Some("<original@example.com>".into()),
             mime_content_type: None,
             mime_body: None,
+            attachments: Vec::new(),
         };
 
         let message = build_message(&msg).unwrap();
@@ -573,9 +664,77 @@ mod tests {
             ),
             mime_content_type: None,
             mime_body: None,
+            attachments: Vec::new(),
         };
 
         let message = build_message(&msg).unwrap();
         assert_eq!(message.envelope().to().len(), 1);
+    }
+
+    #[test]
+    fn build_message_with_attachments_is_multipart_mixed() {
+        let att = OutboundAttachment::from_bytes("notes.txt", "text/plain", b"hello attachment");
+        let msg = OutboundMessage {
+            from_email: "sender@example.com".into(),
+            from_name: None,
+            to: vec![(None, "recipient@example.com".into())],
+            cc: vec![],
+            bcc: vec![],
+            subject: "With attachment".into(),
+            body_text: Some("Plain".into()),
+            body_html: Some("<p>HTML</p>".into()),
+            in_reply_to: None,
+            references: None,
+            mime_content_type: None,
+            mime_body: None,
+            attachments: vec![att],
+        };
+
+        let message = build_message(&msg).unwrap();
+        let raw = String::from_utf8_lossy(&message.formatted()).into_owned();
+        assert!(raw.contains("multipart/mixed"), "outer wrapper missing");
+        assert!(
+            raw.contains("multipart/alternative"),
+            "inner body alternative missing"
+        );
+        assert!(raw.contains("filename=\"notes.txt\""));
+        // lettre picks the transfer encoding (QP for ASCII text, base64 for
+        // binary); assert the payload itself made it into the part.
+        assert!(raw.contains("hello attachment"));
+    }
+
+    #[test]
+    fn build_message_openpgpg_mime_with_attachments_keeps_wrapper() {
+        let att =
+            OutboundAttachment::from_bytes("data.bin", "application/octet-stream", &[1, 2, 3]);
+        let msg = OutboundMessage {
+            from_email: "sender@example.com".into(),
+            from_name: None,
+            to: vec![(None, "recipient@example.com".into())],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Signed + attachment".into(),
+            body_text: None,
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+            mime_content_type: Some(
+                "multipart/signed; protocol=\"application/pgp-signature\"".into(),
+            ),
+            mime_body: Some("signed payload".into()),
+            attachments: vec![att],
+        };
+
+        let message = build_message(&msg).unwrap();
+        let raw = String::from_utf8_lossy(&message.formatted()).into_owned();
+        assert!(raw.contains("multipart/mixed"));
+        assert!(raw.contains("application/pgp-signature"));
+        assert!(raw.contains("filename=\"data.bin\""));
+    }
+
+    #[test]
+    fn outbound_attachment_base64_roundtrip() {
+        let att = OutboundAttachment::from_bytes("f", "application/pdf", b"%PDF-1.7");
+        assert_eq!(att.decode().unwrap(), b"%PDF-1.7");
     }
 }
