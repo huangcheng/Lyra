@@ -59,6 +59,7 @@ Detail lives in specs; this file stays short and accurate.
 | When | Read |
 |------|------|
 | Scoping features, v1 boundaries, non-goals | `docs/product/2026-08-20-lyra-v1-product-spec.md` |
+| **v1 finish line** — remaining scope, acceptance criteria, deferred list | `docs/product/2026-08-27-lyra-v1-completion-plan.md` |
 | Far-horizon multi-client order (API → desktop → mobile) | `docs/product/2026-08-20-lyra-multi-client-roadmap.md` |
 | Post-v1 AI assist (BYOK; draft → categorize → spam → calendar) | `docs/product/2026-08-21-lyra-ai-assist-roadmap.md` |
 | Clean/robust code, deep modules, state roles, verification | `docs/specs/2026-08-20-lyra-engineering-standards.md` |
