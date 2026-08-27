@@ -14,6 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { t } from '@/i18n';
 import { ApiError, api } from '@/lib/api-client';
+import { groupIntoConversations } from '@/lib/conversation';
 import { fetchMessagesForView } from '@/lib/load-mail-messages';
 import { ALL_ACCOUNTS, mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { getInitials, cn } from '@/lib/utils';
@@ -174,6 +175,8 @@ export function MailList() {
   const filtered = (listTab === 'unread' ? source.filter((item) => !item.isRead) : source).filter(
     (item) => !mutedMessageIds.includes(item.id),
   );
+  // One row per conversation; the latest message drives the row.
+  const conversations = useMemo(() => groupIntoConversations(filtered), [filtered]);
 
   if (loading && filtered.length === 0 && !fetchError) {
     return (
@@ -210,12 +213,14 @@ export function MailList() {
       ) : null}
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col px-2 pb-2">
-          {filtered.map((item) => {
+          {conversations.map((convo) => {
+            const item = convo.latest;
             const account = accounts.find((a) => a.id === item.accountId);
             const accountLabel = account?.displayName || account?.emailAddress;
             const labels = messageLabels(item);
             const fromLabel = item.from.name ?? item.from.email;
-            const isSelected = selectedMessageId === item.id;
+            const isSelected = convo.messages.some((m) => m.id === selectedMessageId);
+            const isUnread = convo.unreadCount > 0;
             let relative = '';
             try {
               relative = formatDistanceToNow(new Date(item.date), { addSuffix: true });
@@ -229,17 +234,20 @@ export function MailList() {
               (subjectNorm.length === 0 || !snippet.startsWith(subjectNorm.slice(0, 60)));
             return (
               <button
-                key={item.id}
+                key={convo.key}
                 type="button"
                 className={cn(
                   'flex w-full gap-3 border-b border-border/70 px-2 py-3 text-left text-sm transition-colors hover:bg-accent/60',
                   isSelected &&
                     'rounded-lg border border-input bg-card shadow-whisper hover:bg-card',
                 )}
-                onClick={() => setSelectedMessage(item.id)}
+                onClick={() => {
+                  const target = convo.messages.find((m) => !m.isRead) ?? convo.latest;
+                  setSelectedMessage(target.id);
+                }}
               >
                 <div className="flex w-3 shrink-0 items-start justify-center pt-1.5">
-                  {item.isReplied ? (
+                  {convo.anyReplied ? (
                     <CornerUpLeft
                       className={cn(
                         'h-3 w-3',
@@ -247,7 +255,7 @@ export function MailList() {
                       )}
                       aria-hidden
                     />
-                  ) : !item.isRead ? (
+                  ) : isUnread ? (
                     <span className="size-1.5 rounded-full bg-unread" aria-hidden />
                   ) : null}
                 </div>
@@ -258,9 +266,19 @@ export function MailList() {
                 </Avatar>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <div className={cn('min-w-0 truncate', !item.isRead && 'font-semibold')}>
+                    <div className={cn('min-w-0 truncate', isUnread && 'font-semibold')}>
                       {fromLabel}
                     </div>
+                    {convo.messages.length > 1 ? (
+                      <span
+                        className="shrink-0 rounded-full border border-border px-1.5 text-[11px] leading-4 tabular-nums text-muted-foreground"
+                        aria-label={t(locale, 'mail.conversationCount', {
+                          count: convo.messages.length,
+                        })}
+                      >
+                        {convo.messages.length}
+                      </span>
+                    ) : null}
                     {showAccountBadge && accountLabel ? (
                       <Badge
                         variant="outline"
@@ -281,7 +299,7 @@ export function MailList() {
                   <div
                     className={cn(
                       'mt-0.5 truncate text-[13px] leading-snug',
-                      !item.isRead ? 'font-medium text-foreground' : 'text-foreground/90',
+                      isUnread ? 'font-medium text-foreground' : 'text-foreground/90',
                     )}
                   >
                     {item.subject || '—'}

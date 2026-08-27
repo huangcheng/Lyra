@@ -1,0 +1,274 @@
+/**
+ * One message inside the reader's conversation stack.
+ *
+ * Owns its full-body fetch (list payloads carry no body), remote-content
+ * gating, OpenGPG banner, and tracking-pixel advisory. Collapsed cards
+ * render a single header row with a snippet; expanding selects the
+ * message so the toolbar and reply box act on it.
+ */
+
+import { format } from 'date-fns';
+import { Shield } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+
+import { OpengpgMessageBanner } from '@/components/mail/opengpg-message-banner';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Button } from '@/components/ui/button';
+import { t } from '@/i18n';
+import { api } from '@/lib/api-client';
+import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
+import { markMessageReadOnServer } from '@/lib/mark-message-read';
+import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
+import { allowSenderPrivacy } from '@/lib/privacy-api';
+import { sanitizeEmailHtml } from '@/lib/sanitize-email-html';
+import { cn, getInitials } from '@/lib/utils';
+import { useAuthStore } from '@/stores/auth';
+import { useMailStore } from '@/stores/mail';
+import { useUIStore } from '@/stores/ui';
+
+interface MessageCardProps {
+  messageId: string;
+  expanded: boolean;
+  /** Hide the subject line (redundant when the stack has a shared title). */
+  hideSubject?: boolean;
+  onToggle: () => void;
+}
+
+export function MessageCard({ messageId, expanded, hideSubject, onToggle }: MessageCardProps) {
+  const locale = useUIStore((s) => s.locale);
+  const markReadPolicy = useUIStore((s) => s.markReadPolicy);
+  const setSelectedMessage = useUIStore((s) => s.setSelectedMessage);
+  const token = useAuthStore((s) => s.token);
+  const mail = useMailStore((s) => s.messages[messageId]);
+  const upsertMessage = useMailStore((s) => s.upsertMessage);
+  const markMessageRead = useMailStore((s) => s.markMessageRead);
+
+  const [allowRemoteContent, setAllowRemoteContent] = useState(false);
+  const [pixelAdvisory, setPixelAdvisory] = useState(false);
+  const [bodyLoading, setBodyLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const mailBodyRef = useRef<HTMLDivElement>(null);
+  const autoMarkedRef = useRef(false);
+
+  // Always fetch the detail payload on expand (mirrors the old reader):
+  // only GET /messages/:id sets remoteContentBlocked / opengpg, and list
+  // payloads carry no body. Refetch once when remote content is allowed.
+  const fetchedWithRemoteRef = useRef(false);
+  const fetchedDetailRef = useRef(false);
+  useEffect(() => {
+    if (!expanded || !token) return;
+    if (fetchedDetailRef.current && !(allowRemoteContent && !fetchedWithRemoteRef.current)) return;
+    let cancelled = false;
+    const load = async () => {
+      setLoadError(null);
+      setBodyLoading(true);
+      try {
+        const qs = allowRemoteContent ? '?remote_content=allow' : '';
+        const msg = await api<ApiMessage>(`/messages/${messageId}${qs}`);
+        if (cancelled) return;
+        fetchedDetailRef.current = true;
+        if (allowRemoteContent) fetchedWithRemoteRef.current = true;
+        upsertMessage(mapApiMessage(msg));
+      } catch (err: unknown) {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : 'Failed to load message');
+      } finally {
+        if (!cancelled) setBodyLoading(false);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, messageId, token, upsertMessage, allowRemoteContent, reloadNonce]);
+
+  // on_open mark-read for expanded cards. The selected message is already
+  // handled by MailDisplay (both policies), so skip it here.
+  const isSelected = useUIStore((s) => s.selectedMessageId === messageId);
+  useEffect(() => {
+    if (!expanded || isSelected || !mail || mail.isRead || markReadPolicy === 'manual') return;
+    if (autoMarkedRef.current) return;
+    const timer = window.setTimeout(() => {
+      autoMarkedRef.current = true;
+      void markMessageReadOnServer(messageId).then((ok) => {
+        if (ok) markMessageRead(messageId);
+      });
+    }, MARK_READ_OPEN_DWELL_MS);
+    return () => window.clearTimeout(timer);
+  }, [expanded, isSelected, mail, markReadPolicy, messageId, markMessageRead]);
+
+  // Tracking-pixel advisory on the rendered body.
+  useEffect(() => {
+    setPixelAdvisory(false);
+    if (!expanded || !mail?.bodyHtml) return;
+    const root = mailBodyRef.current;
+    if (!root) return;
+
+    const markIfPixel = (img: HTMLImageElement) => {
+      if (img.getAttribute('data-lyra-pixel') === '1') {
+        setPixelAdvisory(true);
+        return;
+      }
+      if (img.complete && img.naturalWidth > 0 && img.naturalWidth <= 4 && img.naturalHeight <= 4) {
+        img.setAttribute('data-lyra-pixel', '1');
+        setPixelAdvisory(true);
+      }
+    };
+
+    const onLoad = (ev: Event) => {
+      const target = ev.target;
+      if (target instanceof HTMLImageElement) markIfPixel(target);
+    };
+
+    root.querySelectorAll('img').forEach((img) => markIfPixel(img));
+    root.addEventListener('load', onLoad, true);
+    return () => root.removeEventListener('load', onLoad, true);
+  }, [expanded, mail?.id, mail?.bodyHtml, allowRemoteContent]);
+
+  if (!mail) return null;
+
+  const fromLabel = mail.from.name ?? mail.from.email;
+  const snippet = (mail.snippet || mail.bodyText || '').replace(/\s+/g, ' ').trim();
+
+  const handleHeaderClick = () => {
+    setSelectedMessage(messageId);
+    onToggle();
+  };
+
+  if (!expanded) {
+    return (
+      <button
+        type="button"
+        onClick={handleHeaderClick}
+        className="flex w-full items-center gap-3 border-b border-border/70 px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent/50"
+      >
+        <span className="flex w-2.5 shrink-0 justify-center">
+          {!mail.isRead ? <span className="size-1.5 rounded-full bg-unread" aria-hidden /> : null}
+        </span>
+        <Avatar className="h-7 w-7 shrink-0">
+          <AvatarFallback className="bg-accent text-[11px] text-foreground">
+            {getInitials(fromLabel)}
+          </AvatarFallback>
+        </Avatar>
+        <span className={cn('shrink-0', !mail.isRead && 'font-semibold')}>{fromLabel}</span>
+        <span className="min-w-0 flex-1 truncate text-muted-foreground">{snippet}</span>
+        <span className="shrink-0 text-[11px] tabular-nums text-ter-foreground">
+          {format(new Date(mail.date), 'MMM d, h:mm a')}
+        </span>
+      </button>
+    );
+  }
+
+  const showRemoteBanner = Boolean(mail.remoteContentBlocked) && !allowRemoteContent;
+
+  return (
+    <article className="border-b border-border/70">
+      <button
+        type="button"
+        onClick={handleHeaderClick}
+        className="flex w-full items-start gap-4 px-4 pt-4 pb-3 text-left text-sm"
+      >
+        <Avatar className="h-10 w-10 shrink-0">
+          <AvatarImage alt={fromLabel} />
+          <AvatarFallback>{getInitials(fromLabel)}</AvatarFallback>
+        </Avatar>
+        <div className="grid min-w-0 flex-1 gap-1">
+          <div className={cn('font-semibold', !mail.isRead && 'text-foreground')}>
+            {!mail.isRead ? (
+              <span className="mr-1.5 inline-block size-1.5 rounded-full bg-unread align-middle" />
+            ) : null}
+            {fromLabel}
+          </div>
+          {!hideSubject ? (
+            <div className="line-clamp-1 text-[13px] font-medium">{mail.subject}</div>
+          ) : null}
+          <div className="line-clamp-1 text-xs text-muted-foreground">
+            <span className="font-medium">{t(locale, 'mail.replyTo')}:</span> {mail.from.email}
+          </div>
+        </div>
+        {mail.date ? (
+          <div className="shrink-0 text-xs text-muted-foreground">
+            {format(new Date(mail.date), 'PPpp')}
+          </div>
+        ) : null}
+      </button>
+      {mail.opengpg ? (
+        <OpengpgMessageBanner
+          locale={locale}
+          status={mail.opengpg}
+          onUnlocked={() => setReloadNonce((n) => n + 1)}
+        />
+      ) : null}
+      {showRemoteBanner ? (
+        <div className="px-4 pb-1">
+          <div className="flex items-center gap-2 rounded-lg border border-border px-3.5 py-2.5 text-[12.5px] text-muted-foreground">
+            <Shield className="size-3.5 shrink-0" aria-hidden />
+            <span className="min-w-0 flex-1">{t(locale, 'mail.remoteContentHidden')}</span>
+            <button
+              type="button"
+              className="shrink-0 font-medium text-foreground underline underline-offset-2 hover:text-foreground/80"
+              onClick={() => setAllowRemoteContent(true)}
+            >
+              {t(locale, 'mail.showRemoteContent')}
+            </button>
+            <button
+              type="button"
+              className="shrink-0 font-medium text-foreground underline underline-offset-2 hover:text-foreground/80"
+              onClick={() => {
+                void allowSenderPrivacy(mail.from.email)
+                  .then(() => setAllowRemoteContent(true))
+                  .catch(() => {});
+              }}
+            >
+              {t(locale, 'mail.alwaysShowFromSender')}
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {pixelAdvisory && !showRemoteBanner ? (
+        <div className="px-4 pb-1">
+          <div
+            className="flex items-center gap-2 rounded-lg border border-border/80 bg-muted/40 px-3.5 py-2 text-[12px] text-ter-foreground"
+            role="status"
+          >
+            <Shield className="size-3.5 shrink-0 opacity-70" aria-hidden />
+            <span className="min-w-0 flex-1">{t(locale, 'mail.trackingPixelHint')}</span>
+          </div>
+        </div>
+      ) : null}
+      <div className="px-4 pt-1 pb-4 text-sm">
+        {loadError ? (
+          <div className="flex flex-col items-start gap-3">
+            <p className="whitespace-pre-wrap text-destructive">{loadError}</p>
+            <Button variant="outline" size="sm" onClick={() => setReloadNonce((n) => n + 1)}>
+              {t(locale, 'common.retry')}
+            </Button>
+          </div>
+        ) : bodyLoading && !mail.bodyHtml && !mail.bodyText ? (
+          <div className="space-y-3 py-1" aria-hidden>
+            <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
+            <div className="h-4 w-full animate-pulse rounded bg-muted" />
+            <div className="h-4 w-5/6 animate-pulse rounded bg-muted" />
+            <div className="h-32 w-full animate-pulse rounded bg-muted" />
+          </div>
+        ) : mail.bodyHtml ? (
+          <div
+            ref={mailBodyRef}
+            className="mail-body animate-in fade-in duration-150"
+            // Sanitized via sanitizeEmailHtml (class/style-tag stripped).
+            dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(mail.bodyHtml) }}
+          />
+        ) : mail.bodyText ? (
+          <div className="whitespace-pre-wrap">{mail.bodyText}</div>
+        ) : (
+          <div className="flex flex-col items-start gap-3 text-muted-foreground">
+            <p>{t(locale, 'mail.bodyUnavailable')}</p>
+            <Button variant="outline" size="sm" onClick={() => setReloadNonce((n) => n + 1)}>
+              {t(locale, 'common.retry')}
+            </Button>
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}

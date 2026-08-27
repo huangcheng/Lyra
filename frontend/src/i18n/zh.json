@@ -35,6 +35,7 @@
     "unread": "未读",
     "muteThread": "静音此会话",
     "unmuteThread": "取消静音",
+    "conversationCount": "共 {{count}} 封邮件",
     "noMessages": "没有邮件",
     "noMessagesHint": "下次同步后，新邮件会显示在这里。",
     "selectMessage": "选择一封邮件以阅读",

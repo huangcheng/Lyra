@@ -1,5 +1,10 @@
 /**
- * Reading pane — shadcn v3 mail-display.
+ * Reading pane — conversation stack.
+ *
+ * Messages that share an account + normalized subject (Re:/Fwd: stripped)
+ * render as Fastmail-style stacked cards: oldest first, unread and the
+ * latest expanded, the rest collapsed to a one-line header. Toolbar
+ * actions and the inline reply act on the selected message.
  */
 
 import { addDays, addHours, format, nextSaturday } from 'date-fns';
@@ -13,15 +18,13 @@ import {
   MoreVertical,
   Reply,
   ReplyAll,
-  Shield,
   Trash2,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
-import { OpengpgMessageBanner } from '@/components/mail/opengpg-message-banner';
+import { MessageCard } from '@/components/mail/message-card';
 
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Calendar } from '@/components/ui/calendar';
 import {
@@ -38,13 +41,11 @@ import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
 import { api } from '@/lib/api-client';
+import { baseSubject, conversationKeyOf, conversationMembers } from '@/lib/conversation';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
-import { allowSenderPrivacy } from '@/lib/privacy-api';
-import { sanitizeEmailHtml } from '@/lib/sanitize-email-html';
 import { useMediaQuery } from '@/lib/use-media-query';
-import { getInitials } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -78,31 +79,73 @@ export function MailDisplay() {
   const toggleMuteMessage = useUIStore((s) => s.toggleMuteMessage);
   const token = useAuthStore((s) => s.token);
   const isMobile = useMediaQuery('(max-width: 1023px)');
-  const cached = useMailStore((s) =>
-    selectedMessageId ? s.messages[selectedMessageId] : undefined,
-  );
+  const mail = useMailStore((s) => (selectedMessageId ? s.messages[selectedMessageId] : null));
+  const messages = useMailStore((s) => s.messages);
+  const folders = useMailStore((s) => s.folders);
   const accounts = useMailStore((s) => s.accounts);
   const upsertMessage = useMailStore((s) => s.upsertMessage);
   const markMessageRead = useMailStore((s) => s.markMessageRead);
   const toggleStar = useMailStore((s) => s.toggleStar);
   const removeMessage = useMailStore((s) => s.removeMessage);
 
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [replyText, setReplyText] = useState('');
-  const [allowRemoteContent, setAllowRemoteContent] = useState(false);
-  const [pixelAdvisory, setPixelAdvisory] = useState(false);
-  const mailBodyRef = useRef<HTMLDivElement>(null);
-  const [bodyLoading, setBodyLoading] = useState(false);
-  const [reloadNonce, setReloadNonce] = useState(0);
-  const today = new Date();
   const bodyScrollRef = useRef<HTMLDivElement>(null);
   const autoMarkedIdRef = useRef<string | null>(null);
+  const today = new Date();
+
+  const conversation = useMemo(
+    () => (mail ? conversationMembers(mail, messages) : []),
+    [mail, messages],
+  );
+  const conversationKey = mail ? conversationKeyOf(mail) : null;
+
+  // Conversation partners may live in folders the current view never
+  // loaded (e.g. the Inbox original while reading Sent). Subject search is
+  // unreliable for long special-char subjects (FTS tokenization), so
+  // prefetch the whole account listing once per account instead.
+  const accountPrefetchRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!mail || !token) return;
+    const accountId = mail.accountId;
+    if (accountPrefetchRef.current.has(accountId)) return;
+    accountPrefetchRef.current.add(accountId);
+    const params = new URLSearchParams({ accountId });
+    void api<ApiMessage[]>(`/messages?${params}`)
+      .then((data) => {
+        for (const raw of data) upsertMessage(mapApiMessage(raw));
+      })
+      .catch(() => {
+        accountPrefetchRef.current.delete(accountId);
+      });
+  }, [mail, token, upsertMessage]);
+
+  // Hide partners sitting in Trash unless the selected message is there.
+  const visibleConversation = useMemo(() => {
+    if (!mail) return [];
+    const selectedInTrash = folders[mail.folderId]?.role === 'trash';
+    if (selectedInTrash) return conversation;
+    return conversation.filter((m) => folders[m.folderId]?.role !== 'trash');
+  }, [mail, conversation, folders]);
+
+  // Expand state: unread and the latest message open by default; the user
+  // can toggle any card. Overrides reset when the conversation changes.
+  const [expandOverrides, setExpandOverrides] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    setExpandOverrides({});
+  }, [conversationKey]);
+  const latestId = visibleConversation.length
+    ? visibleConversation[visibleConversation.length - 1].id
+    : null;
+  const isExpanded = useCallback(
+    (id: string, isRead: boolean) => expandOverrides[id] ?? (!isRead || id === latestId),
+    [expandOverrides, latestId],
+  );
 
   useEffect(() => {
     autoMarkedIdRef.current = null;
-    setAllowRemoteContent(false);
+    setReplyText('');
   }, [selectedMessageId]);
 
   const tryAutoMarkRead = useCallback(async () => {
@@ -113,75 +156,12 @@ export function MailDisplay() {
   }, [selectedMessageId, token, markReadPolicy]);
 
   useEffect(() => {
-    setReplyText('');
-    setPixelAdvisory(false);
-  }, [selectedMessageId]);
-
-  useEffect(() => {
-    if (!selectedMessageId || !token) return;
-    let cancelled = false;
-
-    const load = async () => {
-      setLoadError(null);
-      setBodyLoading(true);
-      try {
-        const qs = allowRemoteContent ? '?remote_content=allow' : '';
-        const msg = await api<ApiMessage>(`/messages/${selectedMessageId}${qs}`);
-        if (cancelled) return;
-        upsertMessage(mapApiMessage(msg));
-      } catch (err: unknown) {
-        if (!cancelled) {
-          setLoadError(err instanceof Error ? err.message : 'Failed to load message');
-        }
-      } finally {
-        if (!cancelled) setBodyLoading(false);
-      }
-    };
-
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedMessageId, token, upsertMessage, allowRemoteContent, reloadNonce]);
-
-  const mail = cached ?? null;
-
-  useEffect(() => {
-    if (!mail?.bodyHtml) {
-      setPixelAdvisory(false);
-      return;
-    }
-    const root = mailBodyRef.current;
-    if (!root) return;
-
-    const markIfPixel = (img: HTMLImageElement) => {
-      if (img.getAttribute('data-lyra-pixel') === '1') {
-        setPixelAdvisory(true);
-        return;
-      }
-      if (img.complete && img.naturalWidth > 0 && img.naturalWidth <= 4 && img.naturalHeight <= 4) {
-        img.setAttribute('data-lyra-pixel', '1');
-        setPixelAdvisory(true);
-      }
-    };
-
-    const onLoad = (ev: Event) => {
-      const t = ev.target;
-      if (t instanceof HTMLImageElement) markIfPixel(t);
-    };
-
-    root.querySelectorAll('img').forEach((img) => markIfPixel(img));
-    root.addEventListener('load', onLoad, true);
-    return () => root.removeEventListener('load', onLoad, true);
-  }, [mail?.id, mail?.bodyHtml, allowRemoteContent]);
-
-  useEffect(() => {
-    if (markReadPolicy !== 'on_open' || !mail || mail.isRead || loadError) return;
+    if (markReadPolicy !== 'on_open' || !mail || mail.isRead) return;
     const timer = window.setTimeout(() => {
       void tryAutoMarkRead();
     }, MARK_READ_OPEN_DWELL_MS);
     return () => window.clearTimeout(timer);
-  }, [markReadPolicy, selectedMessageId, mail?.id, mail?.isRead, loadError, tryAutoMarkRead]);
+  }, [markReadPolicy, selectedMessageId, mail?.id, mail?.isRead, tryAutoMarkRead]);
 
   useEffect(() => {
     if (markReadPolicy !== 'on_scroll_end' || !mail || mail.isRead) return;
@@ -201,15 +181,7 @@ export function MailDisplay() {
       cancelAnimationFrame(raf);
       el.removeEventListener('scroll', onScroll);
     };
-  }, [
-    markReadPolicy,
-    mail?.id,
-    mail?.isRead,
-    mail?.bodyHtml,
-    mail?.bodyText,
-    mail?.snippet,
-    tryAutoMarkRead,
-  ]);
+  }, [markReadPolicy, mail?.id, mail?.isRead, tryAutoMarkRead, visibleConversation.length]);
 
   const handleReply = (all = false) => {
     if (!mail) return;
@@ -325,21 +297,6 @@ export function MailDisplay() {
   const disabled = !mail || busy;
   const toolbarIconClass =
     'rounded-[7px] border border-input bg-card text-foreground shadow-xs hover:bg-accent disabled:opacity-50';
-  const showRemoteBanner = Boolean(mail?.remoteContentBlocked);
-
-  const handleShowRemoteContent = () => {
-    setAllowRemoteContent(true);
-  };
-
-  const handleAlwaysShowFromSender = async () => {
-    if (!mail) return;
-    try {
-      await allowSenderPrivacy(mail.from.email);
-      setAllowRemoteContent(true);
-    } catch {
-      /* retry */
-    }
-  };
 
   return (
     <div className="flex h-full flex-col">
@@ -571,95 +528,31 @@ export function MailDisplay() {
       ) : null}
       {mail ? (
         <div className="flex flex-1 flex-col">
-          <div className="flex items-start p-4">
-            <div className="flex items-start gap-4 text-sm">
-              <Avatar className="h-10 w-10">
-                <AvatarImage alt={fromLabel} />
-                <AvatarFallback>{getInitials(fromLabel)}</AvatarFallback>
-              </Avatar>
-              <div className="grid gap-1">
-                <div className="font-semibold">{fromLabel}</div>
-                <div className="line-clamp-1 text-[13px] font-medium">{mail.subject}</div>
-                <div className="line-clamp-1 text-xs text-muted-foreground">
-                  <span className="font-medium">{t(locale, 'mail.replyTo')}:</span>{' '}
-                  {mail.from.email}
-                </div>
-              </div>
-            </div>
-            {mail.date ? (
-              <div className="ml-auto text-xs text-muted-foreground">
-                {format(new Date(mail.date), 'PPpp')}
+          <div ref={bodyScrollRef} className="min-h-0 flex-1 overflow-auto">
+            {visibleConversation.length > 1 ? (
+              <div className="border-b border-border/70 px-4 pt-4 pb-3">
+                <h2 className="font-display text-lg font-medium">
+                  {baseSubject(mail.subject) || mail.subject}
+                </h2>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {t(locale, 'mail.conversationCount', { count: visibleConversation.length })}
+                </p>
               </div>
             ) : null}
-          </div>
-          <Separator />
-          {mail.opengpg ? (
-            <OpengpgMessageBanner
-              locale={locale}
-              status={mail.opengpg}
-              onUnlocked={() => setReloadNonce((n) => n + 1)}
-            />
-          ) : null}
-          {showRemoteBanner ? (
-            <div className="px-4 pt-3">
-              <div className="flex items-center gap-2 rounded-lg border border-border px-3.5 py-2.5 text-[12.5px] text-muted-foreground">
-                <Shield className="size-3.5 shrink-0" aria-hidden />
-                <span className="min-w-0 flex-1">{t(locale, 'mail.remoteContentHidden')}</span>
-                <button
-                  type="button"
-                  className="shrink-0 font-medium text-foreground underline underline-offset-2 hover:text-foreground/80"
-                  onClick={handleShowRemoteContent}
-                >
-                  {t(locale, 'mail.showRemoteContent')}
-                </button>
-                <button
-                  type="button"
-                  className="shrink-0 font-medium text-foreground underline underline-offset-2 hover:text-foreground/80"
-                  onClick={() => void handleAlwaysShowFromSender()}
-                >
-                  {t(locale, 'mail.alwaysShowFromSender')}
-                </button>
-              </div>
-            </div>
-          ) : null}
-          {pixelAdvisory && !showRemoteBanner ? (
-            <div className="px-4 pt-3">
-              <div
-                className="flex items-center gap-2 rounded-lg border border-border/80 bg-muted/40 px-3.5 py-2 text-[12px] text-ter-foreground"
-                role="status"
-              >
-                <Shield className="size-3.5 shrink-0 opacity-70" aria-hidden />
-                <span className="min-w-0 flex-1">{t(locale, 'mail.trackingPixelHint')}</span>
-              </div>
-            </div>
-          ) : null}
-          <div ref={bodyScrollRef} className="flex-1 overflow-auto p-4 text-sm">
-            {loadError ? (
-              <p className="text-destructive whitespace-pre-wrap">{loadError}</p>
-            ) : bodyLoading && !mail.bodyHtml && !mail.bodyText ? (
-              <div className="space-y-3 py-1" aria-hidden>
-                <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
-                <div className="h-4 w-full animate-pulse rounded bg-muted" />
-                <div className="h-4 w-5/6 animate-pulse rounded bg-muted" />
-                <div className="h-32 w-full animate-pulse rounded bg-muted" />
-              </div>
-            ) : mail.bodyHtml ? (
-              <div
-                ref={mailBodyRef}
-                className="mail-body animate-in fade-in duration-150"
-                // Sanitized via sanitizeEmailHtml (class/style-tag stripped).
-                dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(mail.bodyHtml) }}
+            {visibleConversation.map((member) => (
+              <MessageCard
+                key={member.id}
+                messageId={member.id}
+                expanded={isExpanded(member.id, member.isRead)}
+                hideSubject={visibleConversation.length > 1}
+                onToggle={() =>
+                  setExpandOverrides((prev) => ({
+                    ...prev,
+                    [member.id]: !isExpanded(member.id, member.isRead),
+                  }))
+                }
               />
-            ) : mail.bodyText ? (
-              <div className="whitespace-pre-wrap">{mail.bodyText}</div>
-            ) : (
-              <div className="flex flex-col items-start gap-3 text-muted-foreground">
-                <p>{t(locale, 'mail.bodyUnavailable')}</p>
-                <Button variant="outline" size="sm" onClick={() => setReloadNonce((n) => n + 1)}>
-                  {t(locale, 'common.retry')}
-                </Button>
-              </div>
-            )}
+            ))}
           </div>
           <Separator className="mt-auto" />
           <div className="p-4">

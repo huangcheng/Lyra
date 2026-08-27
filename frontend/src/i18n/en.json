@@ -35,6 +35,7 @@
     "unread": "Unread",
     "muteThread": "Mute this thread",
     "unmuteThread": "Unmute this thread",
+    "conversationCount": "{{count}} messages",
     "noMessages": "No messages",
     "noMessagesHint": "New mail will appear here after the next sync.",
     "selectMessage": "Select a message to read",

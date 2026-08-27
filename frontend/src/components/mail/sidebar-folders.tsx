@@ -364,11 +364,7 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
     return (
       <div className="flex flex-col px-2 pb-2">
         <div className="grid gap-0.5 pt-2">
-          <AccountSection
-            account={selectedAccount}
-            selectedFolderId={selectedFolderId}
-            bare
-          />
+          <AccountSection account={selectedAccount} selectedFolderId={selectedFolderId} bare />
         </div>
       </div>
     );
@@ -389,11 +385,7 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
       <SectionLabel>{t(locale, 'mail.section.accounts')}</SectionLabel>
       <div className="grid gap-0.5">
         {accounts.map((account) => (
-          <AccountSection
-            key={account.id}
-            account={account}
-            selectedFolderId={selectedFolderId}
-          />
+          <AccountSection key={account.id} account={account} selectedFolderId={selectedFolderId} />
         ))}
       </div>
     </div>
