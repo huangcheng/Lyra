@@ -11,7 +11,9 @@ use crate::auth::{AuthSession, AuthState};
 use crate::entities::mail_account;
 use crate::kernel::App;
 use crate::opengpg::keys::OpengpgError;
-use crate::opengpg::send::{OpengpgSendOptions, collect_recipient_emails, wrap_outbound_opengpg};
+use crate::opengpg::send::{
+    OpengpgSendOptions, OutboundDraft, collect_recipient_emails, wrap_outbound_opengpg,
+};
 use crate::protocol::SendHandle;
 use crate::smtp::{OutboundMessage, SmtpAdapter, SmtpConfig, SmtpSecurity};
 use crate::storage::DbPool;
@@ -90,6 +92,18 @@ pub struct SendMessageResponse {
     pub message_id: String,
 }
 
+/// All unique recipient emails of the request (to + cc + bcc).
+fn opengpg_recipient_emails(body: &SendMessageRequest) -> Vec<String> {
+    let mut recipients = collect_recipient_emails(&body.to);
+    recipients.extend(collect_recipient_emails(
+        &body.cc.clone().unwrap_or_default(),
+    ));
+    recipients.extend(collect_recipient_emails(
+        &body.bcc.clone().unwrap_or_default(),
+    ));
+    recipients
+}
+
 /// Send a message through the account's `SendPlugin` (SMTP today).
 ///
 /// Mailbox sync is queued for workers; single-message SMTP stays request-scoped
@@ -144,37 +158,38 @@ pub(crate) async fn send_message(
         return Err(SyncError::InvalidInput("No recipients specified".into()));
     }
 
+    // Snapshot OpenGPG inputs before consuming body fields (owned clones, no
+    // borrows of `body` cross the partial moves below).
+    let opengpg = body
+        .opengpg
+        .as_ref()
+        .map(|opts| (opts.clone(), opengpg_recipient_emails(&body)));
+
     let mut body_text = body.body_text;
     let mut body_html = body.body_html;
     let mut mime_content_type = None;
     let mut mime_body = None;
 
-    if let Some(ref opts) = body.opengpg {
-        let mut recipients = collect_recipient_emails(&body.to);
-        recipients.extend(collect_recipient_emails(&cc_values));
-        recipients.extend(collect_recipient_emails(&bcc_values));
-        if opts.encrypt && recipients.is_empty() {
-            return Err(SyncError::InvalidInput(
-                "encrypt requires at least one recipient".into(),
-            ));
-        }
-        if let Some(wrapped) = wrap_outbound_opengpg(
+    if let Some((opts, recipients)) = &opengpg
+        && let Some(wrapped) = wrap_outbound_opengpg(
             &state,
             &user_id,
             &session.token,
+            &body.account_id,
             opts,
-            body_text.as_deref(),
-            body_html.as_deref(),
-            &recipients,
+            OutboundDraft {
+                body_text: body_text.as_deref(),
+                body_html: body_html.as_deref(),
+                recipient_emails: recipients,
+            },
         )
         .await
         .map_err(map_opengpg_send_error)?
-        {
-            mime_content_type = Some(wrapped.content_type);
-            mime_body = Some(wrapped.body);
-            body_text = None;
-            body_html = None;
-        }
+    {
+        mime_content_type = Some(wrapped.content_type);
+        mime_body = Some(wrapped.body);
+        body_text = None;
+        body_html = None;
     }
 
     let outbound = OutboundMessage {

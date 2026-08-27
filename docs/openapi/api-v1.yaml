@@ -598,12 +598,24 @@ paths:
     get:
       tags: [opengpg]
       summary: List OpenPGP keys
+      parameters:
+        - name: accountId
+          in: query
+          description: Only keys bound to this mail account
+          schema:
+            type: string
       responses:
         "200":
           description: Key list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OpengpgKey"
     post:
       tags: [opengpg]
-      summary: Import armored key
+      summary: Import armored key (secret keys require accountId)
       requestBody:
         required: true
         content:
@@ -616,17 +628,51 @@ paths:
                   type: string
                 isPrimary:
                   type: boolean
+                accountId:
+                  nullable: true
+                  type: string
+                  description: Required when importing secret (identity) keys; their UID must carry the account address
       responses:
         "201":
           description: Imported key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpengpgKey"
 
   /api/v1/opengpg/keys/generate:
     post:
       tags: [opengpg]
-      summary: Generate a new keypair
+      summary: Generate an identity keypair bound to one account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId, passphrase]
+              properties:
+                accountId:
+                  type: string
+                  description: Target mail account; email/name default from it
+                email:
+                  type: string
+                  description: Optional override of the key UID email
+                name:
+                  type: string
+                  description: Optional override of the key UID display name
+                passphrase:
+                  type: string
+                algorithm:
+                  type: string
+                  enum: [rsa4096, ed25519]
       responses:
         "201":
           description: Generated key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpengpgKey"
 
   /api/v1/opengpg/keys/{id}:
     parameters:
@@ -641,14 +687,35 @@ paths:
       responses:
         "200":
           description: Key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpengpgKey"
         "404":
           $ref: "#/components/responses/Error"
     patch:
       tags: [opengpg]
-      summary: Patch key (e.g. set primary)
+      summary: >-
+        Patch key — set is_primary and/or bind/rebind/unbind via accountId
+        (null unbinds; only public keys may be unbound)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                isPrimary:
+                  type: boolean
+                accountId:
+                  nullable: true
+                  type: string
       responses:
         "200":
           description: Updated key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpengpgKey"
     delete:
       tags: [opengpg]
       summary: Delete key
@@ -1055,6 +1122,30 @@ components:
           type: array
           items:
             type: string
+
+    OpengpgKey:
+      type: object
+      properties:
+        id:
+          type: string
+        fingerprint:
+          type: string
+        accountId:
+          nullable: true
+          type: string
+          description: Owning mail account; null = shared contact / legacy unbound key
+        primaryEmail:
+          type: string
+        emails:
+          type: array
+          items:
+            type: string
+        isSecret:
+          type: boolean
+        isPrimary:
+          type: boolean
+        revoked:
+          type: boolean
 
 security:
   - bearerAuth: []

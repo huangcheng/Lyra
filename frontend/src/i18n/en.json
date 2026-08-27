@@ -93,7 +93,8 @@
       "attachPublicKey": "Attach my public key",
       "noRecipientKey": "No public key imported for this address.",
       "pickRecipientKey": "Choose key…",
-      "recipientKeyOk": "Public key available."
+      "recipientKeyOk": "Public key available.",
+      "needsAccountKey": "This account has no OpenGPG key — add one in Settings → Encryption to sign or encrypt."
     },
     "folder": {
       "inbox": "Inbox",
@@ -340,7 +341,22 @@
       "generateError": "Key generation failed.",
       "deleteError": "Could not delete key.",
       "exportError": "Export failed.",
-      "lockError": "Could not lock keys."
+      "lockError": "Could not lock keys.",
+      "accountsTitle": "Mail accounts",
+      "accountsHint": "Each account signs and decrypts with its own key; contact public keys stay shared across accounts.",
+      "noKeyFor": "No OpenGPG personal key for {{email}} yet.",
+      "addKey": "Add Key…",
+      "managerTitle": "All keys",
+      "searchPlaceholder": "Search name, email, or key ID…",
+      "groupIdentity": "Identity keys",
+      "groupContact": "Contact keys",
+      "boundTo": "{{email}}",
+      "contactChip": "Contact",
+      "rebindTitle": "Move to account",
+      "rebindContact": "Unbind (contact key)",
+      "importTargetLabel": "Import into",
+      "importNoAccount": "No account (contact key)",
+      "generateAccountLabel": "Account"
     }
   },
   "contacts": {

@@ -268,7 +268,7 @@ Every table that contains user data has a `user_id` column (or, for `lyra_user`,
 | `contact` | `account_id` → `mail_account` | PIM cache |
 | `calendar` | `account_id` → `mail_account` | PIM cache |
 | `calendar_event` | `account_id` → `mail_account` | PIM cache |
-| `opengpg_key` | `user_id` → `lyra_user.id` | Direct partition key |
+| `opengpg_key` | `user_id` → `lyra_user.id`; `account_id` (nullable) → `mail_account.id` | Direct partition key; identity keys additionally bind to one account (`0012_opengpg_key_account`) |
 | `jobs` | `payload` JSON (`user_id` in `SyncAccount` etc.) | Kernel queue; no row-level `user_id` column yet |
 | `schema_migrations` | — | System metadata; no user data |
 
@@ -279,7 +279,7 @@ When multi-user lands:
 - `mail_account.user_id` already partitions accounts.
 - `folder`, `message`, `thread`, `sync_cursor` reach the user through `account_id → mail_account.user_id`.
 - `contact`, `calendar`, and `calendar_event` reach the user through `account_id`.
-- `opengpg_key.user_id` is already direct.
+- `opengpg_key.user_id` is already direct; `account_id` scopes identity keys per account and is nullable for shared contact keys.
 - `jobs` may gain an explicit `user_id` column when multi-user job isolation is needed.
 
 API endpoints extract `user_id` from the auth token; the query layer already accepts it.

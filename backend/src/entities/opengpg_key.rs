@@ -8,6 +8,8 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: Uuid,
     pub user_id: Uuid,
+    /// Owning mail account for identity keys; NULL = shared contact/legacy key.
+    pub account_id: Option<Uuid>,
     pub fingerprint: String,
     pub primary_email: String,
     pub emails: Json,

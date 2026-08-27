@@ -12,10 +12,8 @@ use pgp::crypto::sym::SymmetricKeyAlgorithm;
 use pgp::types::{CompressionAlgorithm, Password};
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
 
 use super::keys::{OpengpgError, extract_email, public_armored_from_stored};
-use super::session::UnlockRing;
 use super::store::{StoredKey, list_keys};
 use crate::auth::AuthState;
 
@@ -67,7 +65,7 @@ pub async fn lookup_recipient_keys(
     user_id: &str,
     emails: &[String],
 ) -> Result<Vec<RecipientKeyLookup>, OpengpgError> {
-    let keys = list_keys(db, user_id).await?;
+    let keys = list_keys(db, user_id, None).await?;
     let mut out = Vec::new();
     for email in emails {
         let lower = email.trim().to_lowercase();
@@ -100,27 +98,55 @@ pub async fn lookup_recipient_keys(
 }
 
 /// Wrap plain/html bodies in OpenPGP/MIME when requested.
+///
+/// `sending_account_id` scopes the signing identity: only secret keys bound
+/// to that mail account may sign or be attached. Encrypt-only sends need no
+/// identity and recipient keys still resolve over the whole user keyring.
 pub async fn wrap_outbound_opengpg(
     state: &AuthState,
     user_id: &str,
     session_token: &str,
+    sending_account_id: &str,
     opts: &OpengpgSendOptions,
-    body_text: Option<&str>,
-    body_html: Option<&str>,
-    recipient_emails: &[String],
+    draft: OutboundDraft<'_>,
 ) -> Result<Option<OpengpgMimeBody>, OpengpgError> {
+    let OutboundDraft {
+        body_text,
+        body_html,
+        recipient_emails,
+    } = draft;
     if !opts.sign && !opts.encrypt && !opts.attach_public_key {
         return Ok(None);
     }
+    if opts.encrypt && recipient_emails.is_empty() {
+        return Err(OpengpgError::InvalidInput(
+            "encrypt requires at least one recipient".into(),
+        ));
+    }
 
-    let keys = list_keys(&state.db, user_id).await?;
+    let keys = list_keys(&state.db, user_id, None).await?;
     let inner = build_inner_body(body_text, body_html);
     let mut payload = inner;
 
+    // Identity key: required for sign / attach-public-key, resolved once so
+    // both operations agree (and attach works without an unlocked passphrase).
+    let signing = if opts.sign || opts.attach_public_key {
+        Some(resolve_signing_key(&keys, opts, sending_account_id)?)
+    } else {
+        None
+    };
+
     if opts.sign {
-        let (secret, pw) =
-            resolve_signing_secret(&keys, &state.opengpg_unlock, session_token, opts)?;
-        payload = wrap_signed(&payload, &secret, &pw)?;
+        let stored = signing.as_ref().expect("checked above");
+        let pw = state
+            .opengpg_unlock
+            .get(session_token, &stored.id)
+            .ok_or_else(|| {
+                OpengpgError::InvalidInput(
+                    "signing key is locked; unlock in Settings or reading pane".into(),
+                )
+            })?;
+        payload = wrap_signed(&payload, &stored.key_data, pw.as_str())?;
     }
 
     if opts.encrypt {
@@ -130,11 +156,20 @@ pub async fn wrap_outbound_opengpg(
     }
 
     if opts.attach_public_key {
-        let pub_armor = signing_public_armor(&keys, opts)?;
+        let stored = signing.as_ref().expect("checked above");
+        let pub_armor = public_armored_from_stored(&stored.key_data)?;
         payload = attach_public_key_part(&payload, &pub_armor);
     }
 
     Ok(Some(payload))
+}
+
+/// The plaintext outbound message plus its resolved recipients.
+#[derive(Debug, Clone, Copy)]
+pub struct OutboundDraft<'a> {
+    pub body_text: Option<&'a str>,
+    pub body_html: Option<&'a str>,
+    pub recipient_emails: &'a [String],
 }
 
 fn build_inner_body(body_text: Option<&str>, body_html: Option<&str>) -> OpengpgMimeBody {
@@ -278,42 +313,38 @@ Content-Disposition: attachment; filename=\"public-key.asc\"\r\n\r\n\
     }
 }
 
-fn resolve_signing_secret(
-    keys: &[StoredKey],
-    ring: &UnlockRing,
-    session_token: &str,
+/// Pick the sending account's signing identity: an explicit `signingKeyId`
+/// from that account's secret keys, else the account's primary. There is no
+/// cross-account fallback — sign/encrypt is unavailable without a key.
+fn resolve_signing_key<'a>(
+    keys: &'a [StoredKey],
     opts: &OpengpgSendOptions,
-) -> Result<(String, Zeroizing<String>), OpengpgError> {
-    let key = if let Some(id) = &opts.signing_key_id {
-        keys.iter()
-            .find(|k| k.id == *id && k.is_secret)
-            .ok_or_else(|| OpengpgError::NotFound)?
-    } else {
-        keys.iter()
-            .find(|k| k.is_secret && k.is_primary)
-            .ok_or(OpengpgError::InvalidInput(
-                "no primary secret key; import or generate one in Settings → Encryption".into(),
-            ))?
-    };
-    let pw = ring.get(session_token, &key.id).ok_or_else(|| {
-        OpengpgError::InvalidInput(
-            "signing key is locked; unlock in Settings or reading pane".into(),
-        )
-    })?;
-    Ok((key.key_data.clone(), pw))
-}
-
-fn signing_public_armor(
-    keys: &[StoredKey],
-    opts: &OpengpgSendOptions,
-) -> Result<String, OpengpgError> {
-    let key = if let Some(id) = &opts.signing_key_id {
-        keys.iter().find(|k| k.id == *id)
-    } else {
-        keys.iter().find(|k| k.is_primary)
+    sending_account_id: &str,
+) -> Result<&'a StoredKey, OpengpgError> {
+    if let Some(id) = &opts.signing_key_id {
+        return keys
+            .iter()
+            .find(|k| {
+                k.id == *id && k.is_secret && k.account_id.as_deref() == Some(sending_account_id)
+            })
+            .ok_or_else(|| {
+                OpengpgError::InvalidInput(
+                    "signingKeyId must be a secret key bound to the sending account".into(),
+                )
+            });
     }
-    .ok_or(OpengpgError::NotFound)?;
-    public_armored_from_stored(&key.key_data)
+    keys.iter()
+        .find(|k| {
+            k.is_secret
+                && k.is_primary
+                && !k.revoked
+                && k.account_id.as_deref() == Some(sending_account_id)
+        })
+        .ok_or_else(|| {
+            OpengpgError::InvalidInput(
+                "this account has no OpenGPG key; add one in Settings → Encryption".into(),
+            )
+        })
 }
 
 fn resolve_recipient_public_keys(
@@ -395,6 +426,30 @@ mod tests {
         KeyAlgorithm, generate_keypair, parse_armored_key, public_armored_from_stored,
     };
 
+    fn key_row(
+        id: &str,
+        account_id: Option<&str>,
+        is_secret: bool,
+        is_primary: bool,
+        armor: &str,
+    ) -> StoredKey {
+        let parsed = parse_armored_key(armor).unwrap();
+        StoredKey {
+            id: id.into(),
+            user_id: "u".into(),
+            account_id: account_id.map(str::to_string),
+            fingerprint: parsed.fingerprint,
+            primary_email: parsed.primary_email.clone(),
+            emails: parsed.emails,
+            is_secret,
+            is_primary,
+            revoked: false,
+            key_data: armor.to_string(),
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
     #[test]
     fn sign_only_produces_multipart_signed() {
         let armor = gen_test_secret_armor(Some("sign-pass"));
@@ -412,5 +467,54 @@ mod tests {
         let pub_only = public_armored_from_stored(&pub_armor.key_data).unwrap();
         let parsed = parse_armored_key(&pub_only).unwrap();
         assert_eq!(parsed.primary_email, "peer@example.com");
+    }
+
+    #[test]
+    fn signing_resolves_the_sending_accounts_own_primary() {
+        let a = key_row(
+            "ka",
+            Some("acct-a"),
+            true,
+            true,
+            &gen_test_secret_armor(Some("pa")),
+        );
+        let b = key_row(
+            "kb",
+            Some("acct-b"),
+            true,
+            true,
+            &gen_test_secret_armor(Some("pb")),
+        );
+        let keys = vec![a, b];
+        // Sending from acct-b must pick acct-b's primary, not the global one.
+        let picked =
+            resolve_signing_key(&keys, &OpengpgSendOptions::default(), "acct-b").expect("pick");
+        assert_eq!(picked.id, "kb");
+
+        // A cross-account explicit signingKeyId is refused…
+        let cross = OpengpgSendOptions {
+            signing_key_id: Some("ka".into()),
+            ..Default::default()
+        };
+        assert!(resolve_signing_key(&keys, &cross, "acct-b").is_err());
+        // …while an in-account explicit pick works.
+        assert!(resolve_signing_key(&keys, &cross, "acct-a").is_ok());
+
+        // An account without any identity key has no fallback.
+        let contact = key_row(
+            "kc",
+            None,
+            false,
+            false,
+            &public_armored_from_stored(&gen_test_secret_armor(Some("pc"))).unwrap(),
+        );
+        assert!(
+            resolve_signing_key(
+                std::slice::from_ref(&contact),
+                &OpengpgSendOptions::default(),
+                "acct-c"
+            )
+            .is_err()
+        );
     }
 }

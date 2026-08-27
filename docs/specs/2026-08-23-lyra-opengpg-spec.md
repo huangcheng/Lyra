@@ -14,7 +14,7 @@ Lyra stores mail on the self-hosted box and transit between client and backend i
 
 ## Goals
 
-- Manage OpenGPG keys inside Lyra (generate, import, export, delete, list) — one keyring per user.
+- Manage OpenGPG keys inside Lyra (generate, import, export, delete, list) — **one keyring per user, identity keys scoped per mail account** (see [resolved decision 5](#resolved-decisions)).
 - Decrypt incoming OpenGPG messages and verify signatures, transparently in the read path.
 - Sign and encrypt are **independent operations**: sign-only, encrypt-only, both, or neither — per message, user-controlled. Defaults: sign if a secret key is unlocked; encrypt only when every recipient has a known public key.
 - Support **OpenPGP/MIME** (RFC 3156, `multipart/encrypted` / `multipart/signed`) as the primary wire format; inline armored messages best-effort on receive.
@@ -87,19 +87,47 @@ CREATE INDEX idx_opengpg_key_user_email ON opengpg_key (user_id, primary_email);
 
 (Adapt types for Postgres per the dual-DB conventions: `jsonb`, `timestamptz`, `uuid` handled in the query layer.)
 
+**Revision (migration `0012_opengpg_key_account`, per-account model):** the table gains
+`account_id TEXT NULL REFERENCES mail_account(id) ON DELETE SET NULL` + index (`UUID` on Postgres).
+Existing rows are backfilled where `primary_email` matches one of the user's account addresses;
+everything else stays unbound. Primary uniqueness is scoped to the `(user_id, account_id)` bucket.
+
+## Per-account key model (decided 2026-08-27, Thunderbird-style)
+
+The keyring holds two kinds of keys with different scoping:
+
+| Kind | Scope | Examples |
+|------|-------|----------|
+| **Identity keys** (`is_secret`) | Bound to exactly one `mail_account`; UID must carry that account's address | Your personal signing/decrypting key |
+| **Contact keys** (public-only) | User-shared by default; *may* be bound to an account (e.g. your own public cert imported from elsewhere) | Correspondents' public keys |
+
+Rules:
+
+- Generate/import of a secret key **requires** `accountId` and rejects a key whose UIDs do not
+  carry the account address.
+- Signing identity comes from the sending account: the account's own primary secret key, or an
+  explicit `signingKeyId` belonging to that account. **No cross-account fallback** — sending
+  sign/encrypt from a key-less account fails; compose grays the toggles out instead.
+- Encrypt-only sends need no identity key; recipient public keys still resolve over the whole
+  user keyring (contacts stay visible from every account).
+- Decryption prefers the receiving message-account's unlocked secrets, then falls back to other/
+  unbound unlocked secrets so legacy encrypted mail keeps opening.
+- Deleting an account detaches its keys (`ON DELETE SET NULL`); identity rows refuse explicit
+  unbind — delete them instead.
+
 ## API surface (`/api/v1/opengpg`)
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/opengpg/keys` | List keys (public fields only; secret keys marked, never return key material) |
-| POST | `/opengpg/keys` | Import armored key (auto-detect public/secret); reject multi-secret bundles > 1 |
-| POST | `/opengpg/keys/generate` | `{ email, name, passphrase }` → new keypair (see algorithms below), locked with the passphrase, mark `is_primary` |
+| GET | `/opengpg/keys[?accountId=]` | List keys (public fields only; optional per-account filter); each row carries `accountId: string \| null` |
+| POST | `/opengpg/keys` | Import armored key `{ armored, isPrimary?, accountId? }`; **secret imports require** `accountId` (+UID-address match); reject multi-secret bundles > 1 |
+| POST | `/opengpg/keys/generate` | `{ accountId, passphrase, algorithm?, email?, name? }` → new identity keypair for that account, locked with the passphrase, primary within the account; email/name default from the account |
 | POST | `/opengpg/unlock` | `{ key_id, passphrase, cache }` → unlock secret key; `cache` = `once` / `timed` / `session` (see key protection) |
 | POST | `/opengpg/lock` | Clear unlocked keys for this session |
 | GET | `/opengpg/keys/{id}` | Details incl. uids, expiry, certifications |
+| PATCH | `/opengpg/keys/{id}` | Set `is_primary`, and/or bind/rebind/unbind via `accountId` (`null` allowed only for public keys) |
 | DELETE | `/opengpg/keys/{id}` | Delete (refuse deleting `is_primary` unless another is promoted) |
 | GET | `/opengpg/keys/{id}/export` | Armored export; secret export requires re-auth + explicit `include_secret=true` |
-| PATCH | `/opengpg/keys/{id}` | Set `is_primary`, trust flag |
 
 Message responses grow an `opengpg` block (all endpoints that return a message):
 
@@ -161,6 +189,7 @@ Keygen default is **RSA-4096** (signing key + RSA-4096 encryption subkey, AES-25
 2. **Keygen algorithm:** RSA-4096 default (strongest widely-compatible); ed25519/cv25519 as explicit option. ✔
 3. **Sign vs encrypt:** independent per-message toggles; sign-only is a first-class scenario. ✔
 4. **Passphrase caching:** user chooses `once` / `timed` (TTL configurable, default 10 min) / `session`, git/gpg-agent-style, with a persisted preference. ✔
+5. **Per-account key model (2026-08-27):** identity (secret) keys bind to one mail account each — UID must match the account address; contact public keys stay user-shared; signing resolves within the sending account only; UI mirrors Thunderbird (per-account E2E section + a single all-keys manager). Migration `0012_opengpg_key_account`. ✔
 
 ## Open questions
 

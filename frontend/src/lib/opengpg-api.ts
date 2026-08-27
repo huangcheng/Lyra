@@ -9,6 +9,8 @@ export type CacheMode = 'once' | 'timed' | 'session';
 export interface OpengpgKey {
   id: string;
   fingerprint: string;
+  /** Owning mail account; null = shared contact / legacy unbound key. */
+  accountId?: string | null;
   primaryEmail: string;
   emails: string[];
   isSecret: boolean;
@@ -32,20 +34,31 @@ export interface UnlockResult {
   cached: boolean;
 }
 
-export async function listOpengpgKeys(): Promise<OpengpgKey[]> {
-  return api<OpengpgKey[]>('/opengpg/keys');
+export async function listOpengpgKeys(accountId?: string): Promise<OpengpgKey[]> {
+  return api<OpengpgKey[]>(
+    `/opengpg/keys${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`,
+  );
 }
 
-export async function importOpengpgKey(armored: string, isPrimary = false): Promise<OpengpgKey> {
+export async function importOpengpgKey(
+  armored: string,
+  opts: { isPrimary?: boolean; accountId?: string | null } = {},
+): Promise<OpengpgKey> {
   return api<OpengpgKey>('/opengpg/keys', {
     method: 'POST',
-    body: JSON.stringify({ armored, isPrimary }),
+    body: JSON.stringify({
+      armored,
+      isPrimary: opts.isPrimary ?? false,
+      accountId: opts.accountId ?? null,
+    }),
   });
 }
 
+/** Identity keys always target one account; email/name default from it. */
 export async function generateOpengpgKey(input: {
-  email: string;
-  name: string;
+  accountId: string;
+  email?: string;
+  name?: string;
   passphrase: string;
   algorithm?: 'rsa4096' | 'ed25519';
 }): Promise<OpengpgKey> {
@@ -59,6 +72,17 @@ export async function setPrimaryOpengpgKey(id: string): Promise<OpengpgKey> {
   return api<OpengpgKey>(`/opengpg/keys/${id}`, {
     method: 'PATCH',
     body: JSON.stringify({ isPrimary: true }),
+  });
+}
+
+/** Bind / rebind a key to an account (`null` unbinds — public keys only). */
+export async function setOpengpgKeyAccount(
+  id: string,
+  accountId: string | null,
+): Promise<OpengpgKey> {
+  return api<OpengpgKey>(`/opengpg/keys/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ accountId }),
   });
 }
 

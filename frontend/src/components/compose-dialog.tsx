@@ -19,7 +19,9 @@ import { t } from '@/i18n';
 import { api } from '@/lib/api-client';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
 import {
+  listOpengpgKeys,
   lookupRecipientKeys,
+  type OpengpgKey,
   type RecipientKeyLookup,
   type OpengpgSendOptions,
 } from '@/lib/opengpg-api';
@@ -59,6 +61,16 @@ export function ComposeDialog() {
   const [attachPublicKey, setAttachPublicKey] = useState(false);
   const [recipientKeys, setRecipientKeys] = useState<RecipientKeyLookup[]>([]);
   const [recipientKeyIds, setRecipientKeyIds] = useState<Record<string, string>>({});
+  const [keys, setKeys] = useState<OpengpgKey[] | null>(null);
+
+  /** The From account owns a secret (identity) key → sign/encrypt available. */
+  const fromAccountHasKey = useMemo(
+    () =>
+      Boolean(fromAccountId) &&
+      (keys ?? []).some((k) => k.isSecret && k.accountId === fromAccountId),
+    [keys, fromAccountId],
+  );
+  const cryptoAllowed = keys !== null && fromAccountHasKey;
 
   const recipientEmails = useMemo(() => {
     const split = (value: string) =>
@@ -89,6 +101,33 @@ export function ComposeDialog() {
     setRecipientKeys([]);
     setRecipientKeyIds({});
   }, [composeOpen, composeDraft, selectedAccountId, accounts]);
+
+  useEffect(() => {
+    if (!composeOpen) {
+      setKeys(null);
+      return;
+    }
+    let cancelled = false;
+    void listOpengpgKeys()
+      .then((rows) => {
+        if (!cancelled) setKeys(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setKeys([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [composeOpen]);
+
+  // Per-account identity model: without a key the crypto switches are inert.
+  useEffect(() => {
+    if (!cryptoAllowed) {
+      setSignMessage(false);
+      setEncryptMessage(false);
+      setAttachPublicKey(false);
+    }
+  }, [cryptoAllowed]);
 
   useEffect(() => {
     if (!composeOpen || !encryptMessage || recipientEmails.length === 0) {
@@ -162,7 +201,7 @@ export function ComposeDialog() {
           .map((email) => ({ email }));
 
       const opengpg: OpengpgSendOptions | undefined =
-        signMessage || encryptMessage || attachPublicKey
+        cryptoAllowed && (signMessage || encryptMessage || attachPublicKey)
           ? {
               sign: signMessage,
               encrypt: encryptMessage,
@@ -260,11 +299,17 @@ export function ComposeDialog() {
           </Field>
           <Field className="gap-3 rounded-md border border-border/60 p-3">
             <p className="text-sm font-medium">{t(locale, 'mail.opengpg.composeTitle')}</p>
+            {!cryptoAllowed ? (
+              <p className="text-xs text-muted-foreground">
+                {t(locale, 'mail.opengpg.needsAccountKey')}
+              </p>
+            ) : null}
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
                 className="accent-foreground"
                 checked={signMessage}
+                disabled={!cryptoAllowed}
                 onChange={(e) => setSignMessage(e.target.checked)}
               />
               {t(locale, 'mail.opengpg.sign')}
@@ -274,6 +319,7 @@ export function ComposeDialog() {
                 type="checkbox"
                 className="accent-foreground"
                 checked={encryptMessage}
+                disabled={!cryptoAllowed}
                 onChange={(e) => setEncryptMessage(e.target.checked)}
               />
               {t(locale, 'mail.opengpg.encrypt')}
@@ -283,6 +329,7 @@ export function ComposeDialog() {
                 type="checkbox"
                 className="accent-foreground"
                 checked={attachPublicKey}
+                disabled={!cryptoAllowed}
                 onChange={(e) => setAttachPublicKey(e.target.checked)}
               />
               {t(locale, 'mail.opengpg.attachPublicKey')}

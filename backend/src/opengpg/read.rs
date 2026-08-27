@@ -21,7 +21,7 @@ use super::session::UnlockRing;
 use super::store::{StoredKey, list_keys};
 use crate::auth::AuthState;
 use crate::db_row::id_param;
-use crate::entities::attachment;
+use crate::entities::{attachment, message};
 use crate::sanitize::persist_body_html;
 use crate::storage::DbPool;
 
@@ -388,8 +388,12 @@ pub async fn enrich_message_opengpg(
         return Ok(None);
     }
 
-    let keys = list_keys(&state.db, user_id).await?;
-    let unlocked = collect_unlocked_secrets(&keys, &state.opengpg_unlock, session_token);
+    let keys = list_keys(&state.db, user_id, None).await?;
+    let receiving_account = message_account_id(&state.db, message_id).await?;
+    let unlocked = prefer_account_secrets(
+        collect_unlocked_secrets(&keys, &state.opengpg_unlock, session_token),
+        receiving_account.as_deref(),
+    );
 
     // Encrypted content but secrets exist and none unlocked → locked.
     let encrypted_signal = looks_encrypted(text)
@@ -423,6 +427,46 @@ pub async fn enrich_message_opengpg(
         &unlocked,
         &keys,
     ))
+}
+
+/// The mail account a message arrived in (`None` → unknown/legacy row).
+async fn message_account_id(db: &DbPool, message_id: &str) -> Result<Option<String>, OpengpgError> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let bind = id_param(db, message_id).map_err(|_| OpengpgError::InvalidInput("id".into()))?;
+    let id_value = match bind {
+        crate::db_row::IdParam::Text(s) => Value::String(Some(s)),
+        crate::db_row::IdParam::Uuid(u) => Value::Uuid(Some(u)),
+    };
+    let found = message::Entity::find()
+        .filter(message::Column::Id.eq(id_value))
+        .one(&db.orm())
+        .await
+        .map_err(|e| OpengpgError::Database(unwrap_sqlx_err(e)))?;
+    Ok(found.map(|m| m.account_id.to_string()))
+}
+
+/// Stable-reorder candidate secrets so keys bound to the receiving account
+/// are tried first; other/unbound unlocked keys stay as fallback so legacy
+/// encrypted mail keeps opening.
+fn prefer_account_secrets(
+    secrets: Vec<(StoredKey, Zeroizing<String>)>,
+    account_id: Option<&str>,
+) -> Vec<(StoredKey, Zeroizing<String>)> {
+    let Some(acct) = account_id else {
+        return secrets;
+    };
+    let mut matched = Vec::new();
+    let mut rest = Vec::new();
+    for pair in secrets {
+        if pair.0.account_id.as_deref() == Some(acct) {
+            matched.push(pair);
+        } else {
+            rest.push(pair);
+        }
+    }
+    matched.extend(rest);
+    matched
 }
 
 fn collect_unlocked_secrets(
@@ -539,6 +583,7 @@ mod tests {
         let stored = StoredKey {
             id: "k1".into(),
             user_id: "u".into(),
+            account_id: Some("acct-1".into()),
             fingerprint: parsed.fingerprint.clone(),
             primary_email: parsed.primary_email.clone(),
             emails: parsed.emails.clone(),
@@ -575,6 +620,43 @@ mod tests {
     }
 
     #[test]
+    fn receiving_accounts_secret_is_tried_first() {
+        let mk = |id: &str, acct: Option<&str>| {
+            (
+                StoredKey {
+                    id: id.into(),
+                    user_id: "u".into(),
+                    account_id: acct.map(str::to_string),
+                    fingerprint: format!("fp-{id}"),
+                    primary_email: "test@example.com".into(),
+                    emails: vec!["test@example.com".into()],
+                    is_secret: true,
+                    is_primary: false,
+                    revoked: false,
+                    key_data: String::new(),
+                    created_at: None,
+                    updated_at: None,
+                },
+                Zeroizing::new("pw".into()),
+            )
+        };
+        let candidates = vec![
+            mk("other-acct", Some("acct-b")),
+            mk("unbound", None),
+            mk("mine", Some("acct-a")),
+        ];
+        let ordered = prefer_account_secrets(candidates, Some("acct-a"));
+        let ids: Vec<&str> = ordered.iter().map(|(k, _)| k.id.as_str()).collect();
+        assert_eq!(ids, vec!["mine", "other-acct", "unbound"]);
+
+        // No receiving account → order untouched.
+        let candidates = vec![mk("x", Some("acct-b")), mk("y", None)];
+        let ordered = prefer_account_secrets(candidates, None);
+        let ids: Vec<&str> = ordered.iter().map(|(k, _)| k.id.as_str()).collect();
+        assert_eq!(ids, vec!["x", "y"]);
+    }
+
+    #[test]
     fn cleartext_signed_verifies() {
         let armor = gen_test_secret_armor(Some("test-pass"));
         let (skey, _) = SignedSecretKey::from_string(&armor).unwrap();
@@ -592,6 +674,7 @@ mod tests {
         let stored = StoredKey {
             id: "k1".into(),
             user_id: "u".into(),
+            account_id: None,
             fingerprint: parsed.fingerprint,
             primary_email: parsed.primary_email,
             emails: parsed.emails,

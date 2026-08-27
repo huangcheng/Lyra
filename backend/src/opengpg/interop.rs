@@ -96,6 +96,7 @@ mod tests {
         StoredKey {
             id: id.into(),
             user_id: "u".into(),
+            account_id: None,
             fingerprint: parsed.fingerprint,
             primary_email: parsed.primary_email.clone(),
             emails: parsed.emails,

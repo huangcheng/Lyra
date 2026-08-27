@@ -14,7 +14,7 @@ use super::send::lookup_recipient_keys;
 use super::session::{CacheMode, DEFAULT_TTL_MINUTES, MAX_TTL_MINUTES};
 use super::store::{
     StoredKey, delete_key, export_armored, export_public_armored, get_key, import_armored,
-    list_keys, set_primary,
+    list_keys, load_owned_account, set_account_binding, set_primary,
 };
 use crate::api_error;
 use crate::api_error::ApiErrorBody;
@@ -27,6 +27,8 @@ use zeroize::Zeroizing;
 struct KeyResponse {
     id: String,
     fingerprint: String,
+    /// Owning mail account; null = shared contact / legacy unbound key.
+    account_id: Option<String>,
     primary_email: String,
     emails: Vec<String>,
     is_secret: bool,
@@ -41,6 +43,7 @@ impl From<StoredKey> for KeyResponse {
         Self {
             id: k.id,
             fingerprint: k.fingerprint,
+            account_id: k.account_id,
             primary_email: k.primary_email,
             emails: k.emails,
             is_secret: k.is_secret,
@@ -52,30 +55,55 @@ impl From<StoredKey> for KeyResponse {
     }
 }
 
+/// Serde tri-state for optional patch fields: missing stays `None`, an
+/// explicit JSON `null` becomes `Some(None)`.
+fn double_option<'de, T, D>(de: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(de).map(Some)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ImportKeyRequest {
     armored: String,
     #[serde(default)]
     is_primary: bool,
+    /// Bind the imported key to one of the session user's mail accounts.
+    /// Required when importing secret (identity) keys.
+    #[serde(default)]
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GenerateKeyRequest {
-    email: String,
+    /// Optional when `accountId` is given: identity is derived from the
+    /// account's address/display name.
     #[serde(default)]
-    name: String,
+    email: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
     passphrase: String,
     /// `rsa4096` (default) or `ed25519`.
     #[serde(default)]
     algorithm: Option<String>,
+    /// Account to bind the new identity key to.
+    #[serde(default)]
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PatchKeyRequest {
     is_primary: Option<bool>,
+    /// Bind/rebind (`"…"`) or unbind (`null`, public keys only). Tri-state by
+    /// design: absent = unchanged, null = unbind, value = bind.
+    #[serde(default, deserialize_with = "double_option")]
+    #[allow(clippy::option_option)] // serde tri-state, see above
+    account_id: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,11 +256,20 @@ pub fn routes() -> Router<AuthState> {
         )
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListKeysQuery {
+    /// Only keys bound to this mail account.
+    #[serde(default)]
+    account_id: Option<String>,
+}
+
 async fn list_keys_handler(
     State(state): State<AuthState>,
     AuthUser(user_id): AuthUser,
+    Query(query): Query<ListKeysQuery>,
 ) -> Result<Json<Vec<KeyResponse>>, OpengpgError> {
-    let keys = list_keys(&state.db, &user_id).await?;
+    let keys = list_keys(&state.db, &user_id, query.account_id.as_deref()).await?;
     Ok(Json(keys.into_iter().map(KeyResponse::from).collect()))
 }
 
@@ -279,7 +316,14 @@ async fn import_key(
     AuthUser(user_id): AuthUser,
     Json(body): Json<ImportKeyRequest>,
 ) -> Result<(StatusCode, Json<KeyResponse>), OpengpgError> {
-    let stored = import_armored(&state.db, &user_id, &body.armored, body.is_primary).await?;
+    let stored = import_armored(
+        &state.db,
+        &user_id,
+        &body.armored,
+        body.is_primary,
+        body.account_id.as_deref(),
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(KeyResponse::from(stored))))
 }
 
@@ -289,8 +333,27 @@ async fn generate_key(
     Json(body): Json<GenerateKeyRequest>,
 ) -> Result<(StatusCode, Json<KeyResponse>), OpengpgError> {
     let algo = KeyAlgorithm::parse(body.algorithm.as_deref().unwrap_or("rsa4096"))?;
-    let email = body.email.clone();
-    let name = body.name.clone();
+    // Generated keys are always identity (secret) keys → account required;
+    // email/name default from the account when omitted.
+    let owned = match body.account_id.as_deref() {
+        Some(a) => Some(load_owned_account(&state.db, &user_id, a).await?),
+        None => None,
+    };
+    if owned.is_none() {
+        return Err(OpengpgError::InvalidInput(
+            "generating an identity key requires one of your accounts (accountId)".into(),
+        ));
+    }
+    let email = body
+        .email
+        .clone()
+        .or_else(|| owned.as_ref().map(|o| o.email_address.clone()))
+        .ok_or_else(|| OpengpgError::InvalidInput("email or accountId required".into()))?;
+    let name = body
+        .name
+        .clone()
+        .or_else(|| owned.as_ref().and_then(|o| o.display_name.clone()))
+        .unwrap_or_default();
     let passphrase = body.passphrase.clone();
     // RSA-4096 keygen is CPU-heavy; always off the async runtime.
     let parsed =
@@ -298,7 +361,14 @@ async fn generate_key(
             .await
             .map_err(|e| OpengpgError::InvalidInput(format!("keygen task failed: {e}")))??;
 
-    let stored = super::store::insert_key(&state.db, &user_id, &parsed, true).await?;
+    let stored = super::store::insert_key(
+        &state.db,
+        &user_id,
+        &parsed,
+        true,
+        body.account_id.as_deref(),
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(KeyResponse::from(stored))))
 }
 
@@ -308,19 +378,25 @@ async fn patch_key(
     Path(id): Path<String>,
     Json(body): Json<PatchKeyRequest>,
 ) -> Result<Json<KeyResponse>, OpengpgError> {
-    if body.is_primary == Some(true) {
-        let stored = set_primary(&state.db, &user_id, &id).await?;
-        return Ok(Json(KeyResponse::from(stored)));
-    }
-    if body.is_primary == Some(false) {
-        return Err(OpengpgError::InvalidInput(
-            "clearing primary requires promoting another key".into(),
-        ));
-    }
-    let key = get_key(&state.db, &user_id, &id)
+    let mut current = get_key(&state.db, &user_id, &id)
         .await?
         .ok_or(OpengpgError::NotFound)?;
-    Ok(Json(KeyResponse::from(key)))
+    if let Some(new_account) = &body.account_id {
+        current = set_account_binding(&state.db, &user_id, &id, new_account.as_deref()).await?;
+    }
+    match body.is_primary {
+        Some(true) => {
+            let stored = set_primary(&state.db, &user_id, &id).await?;
+            return Ok(Json(KeyResponse::from(stored)));
+        }
+        Some(false) => {
+            return Err(OpengpgError::InvalidInput(
+                "clearing primary requires promoting another key".into(),
+            ));
+        }
+        None => {}
+    }
+    Ok(Json(KeyResponse::from(current)))
 }
 
 async fn delete_key_handler(

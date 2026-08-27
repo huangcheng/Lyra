@@ -93,7 +93,8 @@
       "attachPublicKey": "附加我的公钥",
       "noRecipientKey": "未导入该地址的公钥。",
       "pickRecipientKey": "选择密钥…",
-      "recipientKeyOk": "已有可用公钥。"
+      "recipientKeyOk": "已有可用公钥。",
+      "needsAccountKey": "该账户还没有 OpenGPG 密钥——请在 设置 → 加密 中添加，即可签名或加密。"
     },
     "folder": {
       "inbox": "收件箱",
@@ -340,7 +341,22 @@
       "generateError": "生成密钥失败。",
       "deleteError": "无法删除密钥。",
       "exportError": "导出失败。",
-      "lockError": "无法锁定密钥。"
+      "lockError": "无法锁定密钥。",
+      "accountsTitle": "邮件账户",
+      "accountsHint": "每个账户用自己的密钥签名与解密；联系人公钥在所有账户间共享。",
+      "noKeyFor": "{{email}} 还没有 OpenGPG 个人密钥。",
+      "addKey": "添加密钥…",
+      "managerTitle": "全部密钥",
+      "searchPlaceholder": "搜索姓名、邮箱或密钥 ID…",
+      "groupIdentity": "身份密钥",
+      "groupContact": "联系人密钥",
+      "boundTo": "{{email}}",
+      "contactChip": "联系人",
+      "rebindTitle": "移动到账户",
+      "rebindContact": "解绑（联系人密钥）",
+      "importTargetLabel": "导入目标",
+      "importNoAccount": "不绑定账户（联系人密钥）",
+      "generateAccountLabel": "账户"
     }
   },
   "contacts": {
