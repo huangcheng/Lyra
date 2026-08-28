@@ -28,7 +28,7 @@ describe('quotedReplyHtml', () => {
   it('attributes and blockquotes the original', () => {
     const html = quotedReplyHtml(
       { fromName: 'Bob', fromEmail: 'bob@example.com', date: '2026-08-27', bodyHtml: '<p>hi</p>' },
-      'Jane'
+      'Jane',
     );
     expect(html).toContain('On 2026-08-27, Bob wrote:');
     expect(html).toContain('<blockquote><p>hi</p></blockquote>');
@@ -40,7 +40,7 @@ describe('forwardHtml', () => {
   it('includes forwarded header and original', () => {
     const html = forwardHtml(
       { fromName: 'Bob', fromEmail: 'bob@example.com', date: 'x', bodyText: 'yo' },
-      undefined
+      undefined,
     );
     expect(html).toContain('-------- Forwarded message --------');
     expect(html).toContain('bob@example.com');
@@ -64,8 +64,6 @@ describe('htmlToText', () => {
 
   it('round-trips textToHtml output', () => {
     const src = 'first para\n\nsecond para';
-    expect(htmlToText(textToHtml(src)).replace(/\n+/g, '\n')).toBe(
-      src.replace(/\n+/g, '\n')
-    );
+    expect(htmlToText(textToHtml(src)).replace(/\n+/g, '\n')).toBe(src.replace(/\n+/g, '\n'));
   });
 });
