@@ -1398,4 +1398,75 @@ mod tests {
         let res = SyncError::MessageNotFound.into_response();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
+
+    /// Regression: the draft-save lookups must run against an unaliased
+    /// `message` table — the shared `m.is_deleted` clause only works in
+    /// list queries that alias the table as `m` (broke IMAP draft saves
+    /// with "no such column: m.is_deleted").
+    #[tokio::test]
+    async fn message_id_lookups_skip_soft_deleted_rows() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+
+        let msg = ImapMessage {
+            uid: 9,
+            message_id: Some("<draft-probe@lyra>".into()),
+            subject: Some("probe".into()),
+            from: None,
+            to: None,
+            cc: None,
+            date: None,
+            in_reply_to: None,
+            references: None,
+            flags: vec![],
+            size: None,
+            body: None,
+            body_text: None,
+            body_html: None,
+            has_attachments: false,
+            attachments: vec![],
+        };
+        upsert_message(&as_db(&pool), &account_id, &folder_id, &msg)
+            .await
+            .unwrap();
+        let external = imap_message_external_id(&folder_id, 9);
+        let db = as_db(&pool);
+
+        let by_header = http::message_id_by_header(&db, &account_id, "<draft-probe@lyra>")
+            .await
+            .unwrap();
+        let by_server = http::message_id_by_server_id(&db, &account_id, &external)
+            .await
+            .unwrap();
+        assert!(by_header.is_some(), "header lookup should find the row");
+        assert_eq!(by_header, by_server);
+
+        sqlx::query("UPDATE message SET is_deleted = 1 WHERE account_id = ? AND external_id = ?")
+            .bind(&account_id)
+            .bind(&external)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            http::message_id_by_header(&db, &account_id, "<draft-probe@lyra>")
+                .await
+                .unwrap()
+                .is_none(),
+            "soft-deleted rows must be invisible"
+        );
+        assert!(
+            http::message_id_by_server_id(&db, &account_id, &external)
+                .await
+                .unwrap()
+                .is_none(),
+            "soft-deleted rows must be invisible"
+        );
+    }
 }

@@ -251,6 +251,12 @@ fn add_message_list_columns(query: &mut SelectStatement) {
     for col in MESSAGE_LIST_COLS {
         query.expr_as(m_col(*col), Alias::new(col.as_str()));
     }
+    // Folder role with override: derives `is_draft` (and future role-driven
+    // display state). Every caller must also join `folder AS f`.
+    query.expr_as(
+        Expr::cust("COALESCE(f.role_override, f.role)"),
+        Alias::new("folder_role"),
+    );
 }
 
 /// `FROM message AS m JOIN mail_account AS a ON m.account_id = a.id`.
@@ -319,7 +325,11 @@ fn message_response_from_query_row(row: &QueryResult) -> Result<MessageResponse,
         body_html: row.try_get("", "body_html")?,
         is_read: row.try_get("", "is_read")?,
         is_starred: row.try_get("", "is_starred")?,
-        is_draft: row.try_get("", "is_draft")?,
+        is_draft: {
+            let stored: bool = row.try_get("", "is_draft")?;
+            let folder_role: Option<String> = row.try_get("", "folder_role")?;
+            stored || folder_role.as_deref() == Some("drafts")
+        },
         has_attachments: row.try_get("", "has_attachments")?,
         remote_content_blocked: false,
         opengpg: None,
@@ -826,8 +836,9 @@ pub(crate) async fn list_messages(
     }
 
     let messages = run_message_list(db, |q| {
-        q.from_as(message::Entity, Alias::new("m"))
-            .and_where(Expr::cust_with_values("m.folder_id = ?", [folder_value]))
+        q.from_as(message::Entity, Alias::new("m"));
+        add_message_folder_join(q);
+        q.and_where(Expr::cust_with_values("m.folder_id = ?", [folder_value]))
             .and_where(not_deleted_clause())
             .and_where(snooze_visible_clause(db))
             .order_by_expr(Expr::cust("m.date"), Order::Desc)
@@ -1009,6 +1020,7 @@ async fn search_like_fallback(
 
     run_message_list(db, |sel| {
         add_message_account_join(sel);
+        add_message_folder_join(sel);
         sel.and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
             .and_where(not_deleted_clause());
         if let Some(account_value) = account_value {
@@ -1038,6 +1050,7 @@ async fn fetch_messages_by_ids(
         let row = query_first(db, |q| {
             add_message_list_columns(q);
             add_message_account_join(q);
+            add_message_folder_join(q);
             q.and_where(Expr::cust_with_values("m.id = ?", [msg_value.clone()]))
                 .and_where(Expr::cust_with_values(
                     "a.user_id = ?",
@@ -1320,7 +1333,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         body_html: row.body_html.clone(),
         is_read: row.is_read,
         is_starred: row.is_starred,
-        is_draft: row.is_draft,
+        is_draft: row.is_draft || row.folder_role.as_deref() == Some("drafts"),
         has_attachments: row.has_attachments,
         remote_content_blocked: false,
         opengpg: None,
@@ -1693,14 +1706,32 @@ async fn maybe_fill_imap_body(
         return Ok(());
     }
 
-    let Ok(uid) = parse_imap_uid(row.external_id.as_deref()) else {
-        return Ok(());
+    let uid = match parse_imap_uid(row.external_id.as_deref()) {
+        Ok(uid) => uid,
+        Err(err) => {
+            tracing::warn!(
+                message_id = %row.id,
+                external_id = ?row.external_id,
+                error = %err,
+                "cannot lazy-fill body: unparseable IMAP UID"
+            );
+            super::recovery::mark_message_fetch_error(db, &row.id, "unparseable IMAP UID").await?;
+            return Ok(());
+        }
     };
 
     let (mut client, _) = connect_imap_for_account(db, user_id, &row.account_id).await?;
     client.select(&row.folder_name).await?;
     let bodies = client.fetch_bodies(&[uid]).await?;
     let Some(fetched) = bodies.into_iter().next() else {
+        tracing::warn!(
+            message_id = %row.id,
+            uid,
+            folder = %row.folder_name,
+            "IMAP body fetch returned no data"
+        );
+        super::recovery::mark_message_fetch_error(db, &row.id, "body fetch returned no data")
+            .await?;
         return Ok(());
     };
 
@@ -1735,13 +1766,20 @@ async fn maybe_fill_imap_body(
                 .map(|t| t.chars().take(120).collect())
         });
     let body_html = persist_body_html(fetched.body_html.as_deref());
+    // Negative-cache messages that genuinely have no text or HTML body (e.g.
+    // attachment-only): persist an empty text body so every open doesn't
+    // re-hit the IMAP server.
+    let fetched_body_text = match (&fetched.body_text, &body_html) {
+        (None, None) => Some(String::new()),
+        _ => fetched.body_text.clone(),
+    };
 
     let mut update = Sq::update();
     update
         .table(message::Entity)
         .value(
             message::Column::BodyText,
-            owned_text_value(fetched.body_text.clone()),
+            owned_text_value(fetched_body_text.clone()),
         )
         .value(
             message::Column::BodyHtml,
@@ -1791,7 +1829,7 @@ async fn maybe_fill_imap_body(
         .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
     db.orm().execute(&update).await.map_err(orm_err)?;
 
-    row.body_text = fetched.body_text;
+    row.body_text = fetched_body_text;
     row.body_html = body_html;
     row.has_attachments = fetched.has_attachments || !fetched.attachments.is_empty();
     if header_needs_refresh(row.subject.as_deref()) {
@@ -2327,7 +2365,7 @@ async fn soft_delete_message_row(db: &DbPool, message_id: &str) -> Result<(), Sy
 }
 
 /// Newest local row for an account matching a Message-ID header.
-async fn message_id_by_header(
+pub(crate) async fn message_id_by_header(
     db: &DbPool,
     account_id: &str,
     header: &str,
@@ -2338,7 +2376,7 @@ async fn message_id_by_header(
             .from(message::Entity)
             .and_where(Expr::col(message::Column::AccountId).eq(account_value))
             .and_where(Expr::col(message::Column::MessageIdHeader).eq(header))
-            .and_where(not_deleted_clause())
+            .and_where(Expr::col(message::Column::IsDeleted).eq(false))
             .order_by_expr(Expr::col(message::Column::CreatedAt), Order::Desc)
             .limit(1);
     })
@@ -2430,7 +2468,7 @@ async fn upsert_jmap_draft_row(
     Ok(id)
 }
 
-async fn message_id_by_server_id(
+pub(crate) async fn message_id_by_server_id(
     db: &DbPool,
     account_id: &str,
     server_id: &str,
@@ -2441,7 +2479,7 @@ async fn message_id_by_server_id(
             .from(message::Entity)
             .and_where(Expr::col(message::Column::AccountId).eq(account_value))
             .and_where(Expr::col(message::Column::ExternalId).eq(server_id))
-            .and_where(not_deleted_clause())
+            .and_where(Expr::col(message::Column::IsDeleted).eq(false))
             .limit(1);
     })
     .await?;
