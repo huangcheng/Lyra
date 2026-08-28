@@ -94,7 +94,6 @@ export function RichTextEditor({
 
   return (
     <div className={cn('rounded-md border border-input', className)}>
-      <Toolbar disabled={disabled} />
       <Plate
         editor={editor}
         readOnly={disabled}
@@ -102,6 +101,7 @@ export function RichTextEditor({
           void serializeHtml(editor).then((html) => onChangeRef.current(html));
         }}
       >
+        <Toolbar disabled={disabled} />
         <PlateContent
           className="lyra-editor max-h-72 min-h-32 overflow-y-auto px-3 py-2 text-sm outline-none"
           placeholder={placeholder}

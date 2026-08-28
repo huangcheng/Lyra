@@ -21,6 +21,7 @@ import { t } from '@/i18n';
 import { RichTextEditor } from '@/components/compose/rich-text-editor';
 import { api, apiBlob } from '@/lib/api-client';
 import { formatBytes } from '@/lib/attachments';
+import { signatureHtml } from '@/lib/compose-html';
 import { htmlToText } from '@/lib/html-text';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
 import {
@@ -105,6 +106,8 @@ export function ComposeDialog() {
 
   useEffect(() => {
     if (!composeOpen) return;
+    const effectiveFrom =
+      selectedAccountId === ALL_ACCOUNTS ? (accounts[0]?.id ?? '') : selectedAccountId;
     setForm({
       to: composeDraft?.to ?? '',
       cc: composeDraft?.cc ?? '',
@@ -112,9 +115,7 @@ export function ComposeDialog() {
       subject: composeDraft?.subject ?? '',
       body: composeDraft?.body ?? '',
     });
-    setFromAccountId(
-      selectedAccountId === ALL_ACCOUNTS ? (accounts[0]?.id ?? '') : selectedAccountId,
-    );
+    setFromAccountId(effectiveFrom);
     setError(null);
     setSuccess(false);
     setSignMessage(false);
@@ -126,8 +127,13 @@ export function ComposeDialog() {
     setDraftMessageId(composeDraft?.draftMessageId ?? null);
     setDraftSavedAt(null);
     setRichMode(true);
-    setEditorHtml(composeDraft?.initialHtml ?? '');
-    setInitialHtml(composeDraft?.initialHtml ?? '');
+    // Reply/forward/draft pass their own initialHtml; new mail seeds the
+    // from-account's signature (empty string when none is configured).
+    const seeded =
+      composeDraft?.initialHtml ??
+      signatureHtml(accounts.find((a) => a.id === effectiveFrom)?.signature);
+    setEditorHtml(seeded);
+    setInitialHtml(seeded);
     setEditorKey((k) => k + 1);
   }, [composeOpen, composeDraft, selectedAccountId, accounts]);
 
@@ -213,14 +219,17 @@ export function ComposeDialog() {
 
   // Debounced server autosave. Only when there is something to save, no
   // pending attachments (multipart sends skip drafts), and not mid-send.
-  const draftDirty = form.to.trim() !== '' || form.subject.trim() !== '' || form.body.trim() !== '';
+  const currentBodyText = richMode ? htmlToText(editorHtml ?? '') : form.body;
+  const currentBodyHtml = richMode ? editorHtml || undefined : undefined;
+  const draftDirty =
+    form.to.trim() !== '' || form.subject.trim() !== '' || currentBodyText.trim() !== '';
   const autosavePayload = JSON.stringify({
     accountId: fromAccountId,
     to: form.to,
     cc: form.cc,
     subject: form.subject,
-    body: richMode ? htmlToText(editorHtml ?? '') : form.body,
-    bodyHtml: richMode ? editorHtml : undefined,
+    body: currentBodyText,
+    bodyHtml: currentBodyHtml,
     draftMessageId,
   });
   useEffect(() => {
@@ -245,7 +254,8 @@ export function ComposeDialog() {
                 .filter(Boolean)
                 .map((email) => ({ email })),
               subject: form.subject,
-              bodyText: form.body,
+              bodyText: currentBodyText,
+              bodyHtml: currentBodyHtml,
               existingDraftId: draftMessageId,
             }),
           });

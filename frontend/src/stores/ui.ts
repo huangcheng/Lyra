@@ -96,9 +96,13 @@ export const useUIStore = create<UIState>((set) => ({
       composeOpen: true,
       composeDraft: {
         to: draft?.to ?? '',
+        cc: draft?.cc,
         subject: draft?.subject ?? '',
         body: draft?.body ?? '',
         mode: draft?.mode ?? 'new',
+        draftMessageId: draft?.draftMessageId,
+        initialHtml: draft?.initialHtml,
+        forwardAttachments: draft?.forwardAttachments,
       },
     }),
 
