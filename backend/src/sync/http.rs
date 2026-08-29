@@ -1889,7 +1889,7 @@ async fn maybe_fill_imap_body(
     Ok(())
 }
 
-/// PATCH /api/v1/messages/{id} — update read/starred flags (IMAP STORE / JMAP Email\set keywords).
+/// PATCH /api/v1/messages/{id} — update read/starred flags (IMAP STORE / JMAP Email/set keywords).
 pub(crate) async fn patch_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
@@ -2344,11 +2344,9 @@ pub(crate) async fn save_draft(
         }
         "jmap" => {
             let seam = connect_jmap_for_account(db, &user_id, &body.account_id).await?;
-            let server_id = seam.create_draft(&outbound).await?;
+            let server_id =
+                jmap_replace_draft(&seam, &body.account_id, &outbound, old.as_ref()).await?;
             if let Some(old) = &old {
-                if let Some(ext) = old.external_id.as_deref() {
-                    let _ = seam.destroy_email(ext).await;
-                }
                 soft_delete_message_row(db, &old.id).await?;
                 update_folder_counts(db, &old.folder_id).await?;
             }
@@ -2364,6 +2362,38 @@ pub(crate) async fn save_draft(
             "unsupported receive protocol: {other}"
         ))),
     }
+}
+
+/// JMAP arm of `save_draft`: create the server draft, then best-effort
+/// destroy the one it replaces. Returns the new draft's server id.
+async fn jmap_replace_draft(
+    seam: &crate::sync::jmap_client::JmapSeam,
+    account_id: &str,
+    outbound: &crate::smtp::OutboundMessage,
+    old: Option<&MessageRow>,
+) -> Result<String, SyncError> {
+    let server_id = match seam.create_draft(outbound).await {
+        Ok(id) => id,
+        Err(err) => {
+            if err.is_auth() {
+                crate::sync::jmap_client::JmapSeam::evict(account_id);
+            }
+            return Err(err.into());
+        }
+    };
+    if let Some(ext) = old.and_then(|o| o.external_id.as_deref()) {
+        // Best-effort: an orphaned server draft is resurrected by the next
+        // sync, so log the failure for diagnosability.
+        if let Err(err) = seam.destroy_email(ext).await {
+            tracing::warn!(
+                account_id = %account_id,
+                email_id = ext,
+                error = %err,
+                "failed to destroy replaced JMAP draft"
+            );
+        }
+    }
+    Ok(server_id)
 }
 
 /// DELETE /api/v1/messages/{id}/draft — discard a draft server-side + local.
@@ -2391,7 +2421,12 @@ pub(crate) async fn discard_draft(
                 .as_deref()
                 .ok_or_else(|| SyncError::InvalidInput("JMAP draft has no server id".into()))?;
             let seam = connect_jmap_for_account(db, &user_id, &row.account_id).await?;
-            seam.destroy_email(email_id).await?;
+            if let Err(err) = seam.destroy_email(email_id).await {
+                if err.is_auth() {
+                    crate::sync::jmap_client::JmapSeam::evict(&row.account_id);
+                }
+                return Err(err.into());
+            }
         }
         other => {
             return Err(SyncError::InvalidInput(format!(
@@ -2570,7 +2605,12 @@ async fn apply_message_move(
                 SyncError::InvalidInput("JMAP target folder has no server id".into())
             })?;
             let seam = connect_jmap_for_account(db, user_id, &row.account_id).await?;
-            seam.set_email_mailboxes(email_id, &[mailbox_id]).await?;
+            if let Err(err) = seam.set_email_mailboxes(email_id, &[mailbox_id]).await {
+                if err.is_auth() {
+                    crate::sync::jmap_client::JmapSeam::evict(&row.account_id);
+                }
+                return Err(err.into());
+            }
         }
         other => {
             return Err(SyncError::InvalidInput(format!(

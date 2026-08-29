@@ -48,8 +48,9 @@ Accepted costs:
 **In scope — full RFC 8620 + RFC 8621 for a mail client:**
 
 - Core (8620): session capability limits (size batches by `maxCallsInRequest` /
-  `maxSizeRequest`), `Core/echo` (probe), batching + result references, typed errors,
-  EventSource push (8620 §7.3).
+  `maxSizeRequest`), probe = session connect + submission capability check
+  (`Core/echo` dropped — jmap-client 0.4.2 cannot emit it), batching + result
+  references, typed errors, EventSource push (8620 §7.3).
 - Mail (8621): `Mailbox/get|changes|query|set`; `Email/query` (filter model open beyond
   `inMailbox`), `Email/queryChanges` **with `removed` applied**, `Email/changes`,
   `Email/get`, `Email/set` (keywords, mailboxIds, draft create/destroy), `Email/copy`,
@@ -94,7 +95,7 @@ Call sites rewritten (mechanical, each small):
 | `sync/send.rs` `deliver_jmap` | Batched upload+create+submit; keep OpenGPG `mime_body` via `Email/import` fallback when MIME-wrapped |
 | `sync/http.rs` | Drafts (create/destroy), move/trash/spam (`mailboxIds`), **flags push** (`patch_message` JMAP arm via `Email/set` keywords) |
 | `jmap_push.rs` | Crate `event_source` stream; no hand SSE parser; stream-scoped timeout; reconnect backoff stays in supervisor |
-| `accounts.rs` | Probe actually attempts JMAP discovery (`Core/echo`); `send_protocol` detection unchanged in shape |
+| `accounts.rs` | Probe = session connect + submission capability check (`Core/echo` dropped — jmap-client 0.4.2 cannot emit it); `send_protocol` detection unchanged in shape |
 
 Deleted: hand-rolled transport in `jmap.rs` (request tuples, SSE parser, `upload_blob`,
 `submit_email`, `discover`). Retained: Lyra DTOs (moved beside the seam),
@@ -145,7 +146,8 @@ whitelist sanitization unchanged.
 3. `feat: download JMAP attachments via blob endpoint`
 4. `feat: batched JMAP send with submission status, keep OpenGPG MIME`
 5. `feat: JMAP push via crate EventSource stream`
-6. `feat: push flags/moves for JMAP accounts; probe via Core/echo`
+6. `feat: push flags/moves for JMAP accounts; probe via Core/echo` — probe shipped as
+   session connect + submission capability check (jmap-client 0.4.2 cannot emit `Core/echo`)
 7. `refactor: delete hand-rolled JMAP transport`
 
 Update `AGENTS.md` (stack/notes) and `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md`

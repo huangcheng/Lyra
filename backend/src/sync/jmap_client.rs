@@ -1221,6 +1221,24 @@ fn crate_address(name: Option<&str>, email: &str) -> EmailAddress {
     }
 }
 
+/// `textBody`/`htmlBody` part for an `Email/set` create (RFC 8621 §4.7).
+///
+/// jmap-client 0.4.2's `EmailBodyPart<Set>` builder has no `charset` setter
+/// (nor part-level header setters), so the part is built via serde: without
+/// an explicit charset the server defaults the part to us-ascii (RFC 8621
+/// §4.1.4) and mangles non-ASCII bodies when it builds the outgoing MIME.
+/// The retired hand-rolled client marked bodies utf-8 for the same reason
+/// (on a non-standard bodyValue property); `charset` on the body part is
+/// the standard placement.
+fn outbound_text_part(part_id: &str, media_type: &str) -> EmailBodyPart<Get> {
+    serde_json::from_value(serde_json::json!({
+        "partId": part_id,
+        "type": media_type,
+        "charset": "utf-8",
+    }))
+    .expect("static body-part JSON")
+}
+
 /// Fill the `Email/set` create object for a draft/submission (RFC 8621 §4.7).
 /// Body parts: `bd1` text, `bd2` html when both exist; html-only uses `bd1`
 /// as the html part.
@@ -1265,31 +1283,15 @@ fn fill_outbound_email(
     email.body_value("bd1".to_owned(), text.as_str());
     match (&outbound.body_text, &outbound.body_html) {
         (Some(_), Some(html)) => {
-            email.text_body(
-                EmailBodyPart::new()
-                    .part_id("bd1")
-                    .content_type("text/plain"),
-            );
+            email.text_body(outbound_text_part("bd1", "text/plain"));
             email.body_value("bd2".to_owned(), html.as_str());
-            email.html_body(
-                EmailBodyPart::new()
-                    .part_id("bd2")
-                    .content_type("text/html"),
-            );
+            email.html_body(outbound_text_part("bd2", "text/html"));
         }
         (Some(_) | None, None) => {
-            email.text_body(
-                EmailBodyPart::new()
-                    .part_id("bd1")
-                    .content_type("text/plain"),
-            );
+            email.text_body(outbound_text_part("bd1", "text/plain"));
         }
         (None, Some(_)) => {
-            email.html_body(
-                EmailBodyPart::new()
-                    .part_id("bd1")
-                    .content_type("text/html"),
-            );
+            email.html_body(outbound_text_part("bd1", "text/html"));
         }
     }
 
@@ -1887,6 +1889,9 @@ mod tests {
         assert_eq!(draft["bodyValues"]["bd1"]["value"], "Hello");
         assert_eq!(draft["textBody"][0]["partId"], "bd1");
         assert_eq!(draft["textBody"][0]["type"], "text/plain");
+        // CJK exposure: without a part charset the server defaults to
+        // us-ascii (RFC 8621 §4.1.4) when building the outgoing MIME.
+        assert_eq!(draft["textBody"][0]["charset"], "utf-8");
     }
 
     #[test]
@@ -1900,7 +1905,9 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         let draft = &json["create"]["draft"];
         assert_eq!(draft["bodyValues"]["bd2"]["value"], "<p>Hello</p>");
+        assert_eq!(draft["textBody"][0]["charset"], "utf-8");
         assert_eq!(draft["htmlBody"][0]["partId"], "bd2");
+        assert_eq!(draft["htmlBody"][0]["charset"], "utf-8");
         assert_eq!(draft["inReplyTo"][0], "<parent@example.com>");
         assert_eq!(draft["references"][1], "<b@example.com>");
     }
