@@ -150,7 +150,10 @@ impl JmapClient {
     /// Discover and authenticate a JMAP session.
     ///
     /// Steps:
-    /// 1. `GET https://<host>/.well-known/jmap` (or use `base_url` if provided)
+    /// 1. `GET https://<host>/.well-known/jmap` (or use `base_url` if provided),
+    ///    following redirects manually — same-origin hops only (RFC 8620 servers
+    ///    like Fastmail legitimately redirect the well-known URL to the session
+    ///    resource, e.g. `/.well-known/jmap` → `/jmap/session`)
     /// 2. Authenticate with Basic auth (email:password)
     /// 3. Parse the session resource
     /// 4. Extract the primary mail account ID
@@ -159,9 +162,10 @@ impl JmapClient {
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            // Never follow redirects: a redirect could carry the request to
-            // a different host, and we must never replay credentials
-            // cross-origin. Redirect responses surface as errors instead.
+            // Automatic redirect following stays disabled: a redirect could
+            // carry the request to a different host, and we must never replay
+            // credentials cross-origin. Discovery below follows redirects
+            // manually, accepting same-origin hops only.
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
@@ -175,15 +179,41 @@ impl JmapClient {
 
         let origin = crate::netsec::origin_of(&well_known).map_err(JmapError::InvalidServerUrl)?;
 
-        let resp = client
-            .get(&well_known)
-            .basic_auth(email, Some(password))
-            .send()
-            .await?;
+        // Follow up to 5 redirects; every hop must stay on the configured
+        // origin so the Basic credentials never leave it.
+        let mut url = well_known;
+        let resp = {
+            const MAX_HOPS: u32 = 5;
+            let mut hops = 0;
+            loop {
+                let resp = client
+                    .get(&url)
+                    .basic_auth(email, Some(password))
+                    .send()
+                    .await?;
+                if !resp.status().is_redirection() {
+                    break resp;
+                }
+                hops += 1;
+                if hops > MAX_HOPS {
+                    return Err(JmapError::SessionDiscovery(format!(
+                        "too many redirects from {url}"
+                    )));
+                }
+                let location = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| {
+                        JmapError::SessionDiscovery(format!("redirect from {url} has no Location"))
+                    })?;
+                url = resolve_discovery_redirect(&url, location, &origin)?;
+            }
+        };
 
         if !resp.status().is_success() {
             return Err(JmapError::SessionDiscovery(format!(
-                "HTTP {} from {well_known}",
+                "HTTP {} from {url}",
                 resp.status()
             )));
         }
@@ -1119,6 +1149,35 @@ pub struct JmapIdentity {
 ///
 /// Add new session URLs here when they start being consumed
 /// (e.g. `eventSourceUrl`, `downloadUrl`).
+/// Resolve one discovery redirect hop: `location` (possibly relative) against
+/// the URL that produced it, rejecting any hop that leaves `origin`.
+///
+/// Pure decision function so the credential-pinning policy is unit-testable
+/// without a network.
+fn resolve_discovery_redirect(
+    current_url: &str,
+    location: &str,
+    origin: &str,
+) -> Result<String, JmapError> {
+    let base = reqwest::Url::parse(current_url).map_err(|e| {
+        JmapError::SessionDiscovery(format!("invalid current URL '{current_url}': {e}"))
+    })?;
+    let resolved = base.join(location).map_err(|e| {
+        JmapError::SessionDiscovery(format!("invalid redirect target '{location}': {e}"))
+    })?;
+    let resolved = resolved.as_str().to_string();
+    let target_origin = crate::netsec::origin_of(&resolved).map_err(JmapError::InvalidServerUrl)?;
+    if target_origin != origin {
+        tracing::warn!(
+            target_origin = %target_origin,
+            expected_origin = %origin,
+            "JMAP: discovery redirect leaves the configured origin; refusing to follow"
+        );
+        return Err(JmapError::CrossOrigin(resolved));
+    }
+    Ok(resolved)
+}
+
 fn check_session_urls(origin: &str, session: &JmapSession) -> Result<(), JmapError> {
     let mut owned: Vec<String> = Vec::new();
     let mut urls: Vec<&str> = vec![session.api_url.as_str()];
@@ -1422,6 +1481,64 @@ mod tests {
             upload_url: None,
         };
         assert!(check_session_urls("https://jmap.example.com:443", &session).is_err());
+    }
+
+    #[test]
+    fn discovery_redirect_relative_same_origin_accepted() {
+        // Fastmail: /.well-known/jmap → 302 /jmap/session (same origin).
+        let resolved = resolve_discovery_redirect(
+            "https://api.fastmail.com/.well-known/jmap",
+            "/jmap/session",
+            "https://api.fastmail.com:443",
+        )
+        .expect("same-origin relative redirect must be followed");
+        assert_eq!(resolved, "https://api.fastmail.com/jmap/session");
+    }
+
+    #[test]
+    fn discovery_redirect_absolute_same_origin_accepted() {
+        let resolved = resolve_discovery_redirect(
+            "https://jmap.example.com/.well-known/jmap",
+            "https://jmap.example.com/jmap/session",
+            "https://jmap.example.com:443",
+        )
+        .expect("same-origin absolute redirect must be followed");
+        assert_eq!(resolved, "https://jmap.example.com/jmap/session");
+    }
+
+    #[test]
+    fn discovery_redirect_cross_origin_rejected() {
+        // A redirect to another host must never receive our credentials.
+        let err = resolve_discovery_redirect(
+            "https://jmap.example.com/.well-known/jmap",
+            "https://evil.example/session",
+            "https://jmap.example.com:443",
+        )
+        .unwrap_err();
+        assert!(matches!(err, JmapError::CrossOrigin(_)), "got: {err}");
+    }
+
+    #[test]
+    fn discovery_redirect_scheme_downgrade_rejected() {
+        // https → http on the same host is a different origin: reject.
+        let err = resolve_discovery_redirect(
+            "https://jmap.example.com/.well-known/jmap",
+            "http://jmap.example.com/jmap/session",
+            "https://jmap.example.com:443",
+        )
+        .unwrap_err();
+        assert!(matches!(err, JmapError::CrossOrigin(_)), "got: {err}");
+    }
+
+    #[test]
+    fn discovery_redirect_garbage_location_rejected() {
+        let err = resolve_discovery_redirect(
+            "https://jmap.example.com/.well-known/jmap",
+            "http://[::1",
+            "https://jmap.example.com:443",
+        )
+        .unwrap_err();
+        assert!(matches!(err, JmapError::SessionDiscovery(_)), "got: {err}");
     }
 
     #[test]
