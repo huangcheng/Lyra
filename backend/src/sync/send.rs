@@ -358,15 +358,25 @@ pub(crate) async fn deliver_smtp(
     Ok(adapter.send(&outbound).await?)
 }
 
-/// Discover a JMAP session and submit via EmailSubmission.
+/// Submit an outbound message through the JMAP seam (cached session; batched
+/// create+submit; OpenGPG MIME via Email/import).
 pub(crate) async fn deliver_jmap(
+    account_id: &str,
     jmap_base_url: &str,
     email: &str,
     password: &str,
+    auth_type: &str,
     outbound: OutboundMessage,
 ) -> Result<String, SyncError> {
-    let client = crate::jmap::JmapClient::discover(jmap_base_url, email, password).await?;
-    Ok(client.submit_email(&outbound).await?)
+    let seam = crate::sync::jmap_client::JmapSeam::connect_for_account(
+        account_id,
+        jmap_base_url,
+        email,
+        password,
+        auth_type,
+    )
+    .await?;
+    Ok(seam.submit_outbound(&outbound).await?)
 }
 
 /// Load JMAP settings for `account_id` and build an outbound message from raw source.
@@ -374,13 +384,14 @@ pub(crate) async fn prepare_jmap_send(
     db: &DbPool,
     account_id: &str,
     raw: &str,
-) -> Result<(String, String, String, OutboundMessage), SyncError> {
+) -> Result<(String, String, String, String, OutboundMessage), SyncError> {
     let mut probe = Sq::select();
     probe
         .columns([
             mail_account::Column::EmailAddress,
             mail_account::Column::UserId,
             mail_account::Column::JmapBaseUrl,
+            mail_account::Column::AuthType,
             mail_account::Column::IsActive,
         ])
         .from(mail_account::Entity)
@@ -392,12 +403,13 @@ pub(crate) async fn prepare_jmap_send(
         .map_err(orm_err)?
         .ok_or(SyncError::AccountNotFound)?;
 
-    let (is_active, jmap_base_url, email_address, user_id) = (
+    let (is_active, jmap_base_url, email_address, auth_type, user_id) = (
         row.try_get::<bool>("", "is_active").map_err(orm_err)?,
         row.try_get::<Option<String>>("", "jmap_base_url")
             .map_err(orm_err)?,
         row.try_get::<String>("", "email_address")
             .map_err(orm_err)?,
+        row.try_get::<String>("", "auth_type").map_err(orm_err)?,
         row_id(&row, "user_id")?,
     );
     if !is_active {
@@ -411,10 +423,10 @@ pub(crate) async fn prepare_jmap_send(
         crate::auth::AuthState::get_user_dek_and_credential(db, &user_id, account_id)
             .await
             .map_err(|e| SyncError::Crypto(e.to_string()))?;
-    let password = crate::jmap::decrypt_account_password(&credential_json, &dek)?;
+    let password = crate::sync::jmap_client::decrypt_account_password(&credential_json, &dek)?;
 
     let outbound = outbound_from_raw(email_address.clone(), raw)?;
-    Ok((base_url, email_address, password, outbound))
+    Ok((base_url, email_address, password, auth_type, outbound))
 }
 
 /// Load SMTP settings for `account_id` and build an outbound message from raw source.

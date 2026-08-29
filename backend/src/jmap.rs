@@ -1,11 +1,10 @@
 //! JMAP protocol adapter (legacy hand-rolled transport).
 //!
 //! What remains here: session discovery (`JmapClient::discover`), mailbox
-//! listing, draft/destroy/move via `Email/set`, `EmailSubmission` send when
-//! the session advertises `urn:ietf:params:jmap:submission`, blob upload, and
-//! the EventSource push probe. Mailbox sync (`Email/query` + `Email/get`,
-//! `Email/changes`/`Email/queryChanges`) moved to the crate-backed seam in
-//! `sync::jmap_client`.
+//! listing, draft/destroy/move via `Email/set`, and the EventSource push
+//! probe. Mailbox sync (`Email/query` + `Email/get`,
+//! `Email/changes`/`Email/queryChanges`) and `EmailSubmission` send/blob
+//! upload moved to the crate-backed seam in `sync::jmap_client`.
 //!
 //! See `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md` §6.
 
@@ -389,154 +388,6 @@ impl JmapClient {
         Ok(mailboxes)
     }
 
-    // ── Submission (RFC 8621 EmailSubmission) ─────────────────────
-
-    /// List identities for the mail account (`Identity/get`).
-    pub async fn list_identities(&self) -> Result<Vec<JmapIdentity>, JmapError> {
-        let req = JmapRequest {
-            using: vec![
-                "urn:ietf:params:jmap:core".into(),
-                "urn:ietf:params:jmap:submission".into(),
-            ],
-            method_calls: vec![(
-                "Identity/get".into(),
-                serde_json::json!({
-                    "accountId": self.account_id,
-                    "ids": null
-                }),
-                "id0".into(),
-            )],
-        };
-
-        let resp = self.send_request(&req).await?;
-        let args = take_ok_args(&resp, "Identity/get")?;
-        let list = args
-            .get("list")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| JmapError::InvalidResponse("missing list in Identity/get".into()))?;
-
-        let mut identities = Vec::new();
-        for item in list {
-            let identity: JmapIdentity = serde_json::from_value(item.clone())
-                .map_err(|e| JmapError::InvalidResponse(format!("Identity parse: {e}")))?;
-            identities.push(identity);
-        }
-        Ok(identities)
-    }
-
-    /// Create a draft via `Email/set` and submit it with `EmailSubmission/set`.
-    ///
-    /// Requires [`Self::supports_submission`]. Moves the message to Sent on
-    /// success when a `sent` mailbox exists.
-    pub async fn submit_email(&self, outbound: &OutboundMessage) -> Result<String, JmapError> {
-        if !self.supports_submission() {
-            return Err(JmapError::SessionDiscovery(
-                "JMAP session does not advertise urn:ietf:params:jmap:submission".into(),
-            ));
-        }
-
-        let identities = self.list_identities().await?;
-        let identity = pick_identity(&identities, &outbound.from_email).ok_or_else(|| {
-            JmapError::InvalidResponse(format!("no JMAP identity for {}", outbound.from_email))
-        })?;
-
-        let mailboxes = self.list_mailboxes().await?;
-        let drafts_id = mailbox_id_for_role(&mailboxes, "drafts");
-        let sent_id = mailbox_id_for_role(&mailboxes, "sent");
-
-        // Attachments travel as blobs: upload first, then reference by id in
-        // `Email/set` (RFC 8621 §4.1.3).
-        let mut uploaded = Vec::new();
-        for att in &outbound.attachments {
-            let bytes = att.decode().map_err(|e| {
-                JmapError::InvalidResponse(format!("attachment {}: {}", att.filename, e))
-            })?;
-            let blob_id = self
-                .upload_blob(bytes, &att.content_type)
-                .await
-                .map_err(|e| {
-                    JmapError::InvalidResponse(format!("attachment {}: {e}", att.filename))
-                })?;
-            uploaded.push(UploadedAttachment {
-                blob_id,
-                r#type: att.content_type.clone(),
-                name: att.filename.clone(),
-            });
-        }
-
-        let email_create = build_email_create(outbound, drafts_id.as_deref(), &uploaded)?;
-
-        let mut on_success_update = serde_json::Map::new();
-        if let Some(ref drafts) = drafts_id {
-            on_success_update.insert(format!("mailboxIds/{drafts}"), serde_json::Value::Null);
-        }
-        on_success_update.insert("keywords/$draft".into(), serde_json::Value::Null);
-        if let Some(ref sent) = sent_id {
-            on_success_update.insert(format!("mailboxIds/{sent}"), serde_json::json!(true));
-        }
-
-        let req = JmapRequest {
-            using: vec![
-                "urn:ietf:params:jmap:core".into(),
-                "urn:ietf:params:jmap:mail".into(),
-                "urn:ietf:params:jmap:submission".into(),
-            ],
-            method_calls: vec![
-                (
-                    "Email/set".into(),
-                    serde_json::json!({
-                        "accountId": self.account_id,
-                        "create": {
-                            "draft": email_create
-                        }
-                    }),
-                    "es0".into(),
-                ),
-                (
-                    "EmailSubmission/set".into(),
-                    serde_json::json!({
-                        "accountId": self.account_id,
-                        "create": {
-                            "sub": {
-                                "emailId": "#draft",
-                                "identityId": identity.id
-                            }
-                        },
-                        "onSuccessUpdateEmail": {
-                            "#sub": on_success_update
-                        }
-                    }),
-                    "es1".into(),
-                ),
-            ],
-        };
-
-        let resp = self.send_request(&req).await?;
-        let email_args = take_ok_args_ref(&resp, "Email/set")?;
-        if let Some(not_created) = email_args.get("notCreated").and_then(|v| v.as_object())
-            && let Some(err) = not_created.get("draft")
-        {
-            return Err(jmap_set_error("Email/set", err));
-        }
-
-        let sub_args = take_ok_args(&resp, "EmailSubmission/set")?;
-        if let Some(not_created) = sub_args.get("notCreated").and_then(|v| v.as_object())
-            && let Some(err) = not_created.get("sub")
-        {
-            return Err(jmap_set_error("EmailSubmission/set", err));
-        }
-
-        let submission_id = sub_args
-            .pointer("/created/sub/id")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                JmapError::InvalidResponse("EmailSubmission/set missing created.sub.id".into())
-            })?;
-
-        Ok(submission_id)
-    }
-
     /// Create a draft Email (no submission) and return its server id.
     pub async fn create_draft(&self, outbound: &OutboundMessage) -> Result<String, JmapError> {
         let mailboxes = self.list_mailboxes().await?;
@@ -641,51 +492,6 @@ impl JmapClient {
 
     // ── Internal helpers ────────────────────────────────────────
 
-    /// Upload raw bytes via the session's `uploadUrl` (RFC 8620 blob upload)
-    /// and return the server-assigned blob id.
-    pub async fn upload_blob(
-        &self,
-        data: Vec<u8>,
-        content_type: &str,
-    ) -> Result<String, JmapError> {
-        let template = self.session.upload_url.as_deref().ok_or_else(|| {
-            JmapError::SessionDiscovery("JMAP session provides no uploadUrl".into())
-        })?;
-        let url = template.replace("{accountId}", &self.account_id);
-
-        // Same pinned-origin guarantee as `send_request`: never replay the
-        // bearer token to a host discovery did not vouch for.
-        let target = crate::netsec::origin_of(&url).map_err(JmapError::InvalidServerUrl)?;
-        if target != self.origin {
-            tracing::warn!(
-                target_origin = %target,
-                expected_origin = %self.origin,
-                "JMAP: refusing cross-origin blob upload"
-            );
-            return Err(JmapError::CrossOrigin(url));
-        }
-
-        let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", &self.auth_token)
-            .header("Content-Type", content_type)
-            .body(data)
-            .send()
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(JmapError::InvalidResponse(format!(
-                "blob upload failed: {status}"
-            )));
-        }
-        let body: serde_json::Value = resp.json().await?;
-        body.get("blobId")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-            .ok_or_else(|| JmapError::InvalidResponse("blob upload response missing blobId".into()))
-    }
-
     /// Send a JMAP request to the API endpoint.
     async fn send_request(&self, request: &JmapRequest) -> Result<JmapResponse, JmapError> {
         // Defensive re-check: discovery already pinned session URLs, but
@@ -784,15 +590,6 @@ fn jmap_set_error(method: &str, err: &serde_json::Value) -> JmapError {
         code: format!("{method}: {code}"),
         description,
     }
-}
-
-/// Pick the identity whose email matches `from`, else the first identity.
-fn pick_identity<'a>(identities: &'a [JmapIdentity], from: &str) -> Option<&'a JmapIdentity> {
-    let from_lower = from.to_ascii_lowercase();
-    identities
-        .iter()
-        .find(|i| i.email.eq_ignore_ascii_case(&from_lower))
-        .or_else(|| identities.first())
 }
 
 fn mailbox_id_for_role(mailboxes: &[JmapMailbox], role: &str) -> Option<String> {
@@ -931,15 +728,6 @@ pub enum EventSourceOutcome {
 }
 
 // ── JMAP data types ─────────────────────────────────────────────────
-
-/// A JMAP Identity object (submission capability).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JmapIdentity {
-    pub id: String,
-    pub name: String,
-    pub email: String,
-}
 
 /// Verify every credential-bearing URL in the session document shares the
 /// configured origin (`apiUrl`, and `uploadUrl` when present).
@@ -1133,24 +921,6 @@ mod tests {
         let client = JmapClient::from_session(session, "a1".into(), "u@example.com", "pw");
         assert!(client.supports_submission());
         assert!(!client.has_capability("urn:ietf:params:jmap:calendars"));
-    }
-
-    #[test]
-    fn pick_identity_prefers_matching_email() {
-        let identities = vec![
-            JmapIdentity {
-                id: "i1".into(),
-                name: "Other".into(),
-                email: "other@example.com".into(),
-            },
-            JmapIdentity {
-                id: "i2".into(),
-                name: "Me".into(),
-                email: "me@example.com".into(),
-            },
-        ];
-        let picked = pick_identity(&identities, "ME@example.com").unwrap();
-        assert_eq!(picked.id, "i2");
     }
 
     #[test]

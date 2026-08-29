@@ -34,23 +34,30 @@ impl SendPlugin for JmapSendPlugin {
 
     async fn send(&self, account_id: &str, raw: &str) -> Result<(), String> {
         let db = super::storage()?;
-        let (base_url, email, password, outbound) =
+        let (base_url, email, password, auth_type, outbound) =
             crate::sync::prepare_jmap_send(&db, account_id, raw)
                 .await
                 .map_err(jmap_send_err)?;
-        crate::sync::deliver_jmap(&base_url, &email, &password, outbound)
-            .await
-            .map(|_| ())
-            .map_err(jmap_send_err)
+        crate::sync::deliver_jmap(
+            account_id, &base_url, &email, &password, &auth_type, outbound,
+        )
+        .await
+        .map(|_| ())
+        .map_err(jmap_send_err)
     }
 }
 
 fn jmap_send_err(err: crate::sync::SyncError) -> String {
     match err {
-        crate::sync::SyncError::Jmap(jmap) => match &jmap {
-            crate::jmap::JmapError::Http(_) => "JMAP transient".into(),
-            other => format!("JMAP permanent: {other}"),
-        },
+        crate::sync::SyncError::Jmap(jmap) => {
+            if jmap.is_auth() {
+                "JMAP permanent: authentication failed".into()
+            } else if jmap.is_transient() {
+                "JMAP transient".into()
+            } else {
+                format!("JMAP permanent: {jmap}")
+            }
+        }
         other => other.to_string(),
     }
 }

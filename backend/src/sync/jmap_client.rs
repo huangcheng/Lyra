@@ -26,12 +26,14 @@ use jmap_client::core::query_changes::QueryChangesResponse;
 use jmap_client::core::response::{EmailChangesResponse, EmailGetResponse, MailboxGetResponse};
 use jmap_client::core::set::SetErrorType;
 use jmap_client::email::{self, Email, EmailAddress, EmailBodyPart, Property};
+use jmap_client::identity::Identity;
 use jmap_client::mailbox::{Mailbox, Role};
 use jmap_client::{Get, Set, URI};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::crypto::{self, EncryptedCredential};
+use crate::smtp::OutboundMessage;
 
 /// Whole-request timeout for JMAP API calls (matches the legacy client).
 const JMAP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -109,10 +111,10 @@ impl JmapError {
     /// Transient failure worth retrying with backoff: transport/timeout,
     /// 5xx/429, `serverUnavailable`/`serverPartialFail`/`tooManyChanges`
     /// method errors, `rateLimit`/`overQuota` set errors.
-    // Consumed by job retry/backoff wiring in a later task. The `Error::Server`
-    // status sniff depends on jmap-client 0.4.2's `StatusCode` Display format
-    // (version-pinned; revisit on crate upgrade).
-    #[allow(dead_code)]
+    // Consumed by the send-path error classification in `plugins/jmap_send.rs`
+    // ("JMAP transient" feeds the capped-backoff reschedule in jobs.rs). The
+    // `Error::Server` status sniff depends on jmap-client 0.4.2's `StatusCode`
+    // Display format (version-pinned; revisit on crate upgrade).
     #[must_use]
     pub fn is_transient(&self) -> bool {
         match self {
@@ -767,8 +769,172 @@ impl JmapSeam {
         Ok(self.client.download(blob_id).await?)
     }
 
+    /// Submit an outbound message. Attachments upload to `uploadUrl` first
+    /// (blob upload is not a JMAP method call), then ONE batched request:
+    /// `Email/set` create `#draft` + `EmailSubmission/set` with `#`
+    /// back-references and an on-success patch (move to Sent, clear `$draft`).
+    ///
+    /// OpenGPG MIME-wrapped outbound (`mime_body` set) goes through
+    /// `Email/import` of the uploaded RFC822 blob so the wrapper survives —
+    /// an `Email/set` create would rebuild (and destroy) the MIME structure.
+    pub(crate) async fn submit_outbound(
+        &self,
+        outbound: &OutboundMessage,
+    ) -> Result<String, JmapError> {
+        if !self.supports_submission() {
+            return Err(JmapError::SessionDiscovery(
+                "JMAP session does not advertise urn:ietf:params:jmap:submission".into(),
+            ));
+        }
+
+        // Request A: identities + mailboxes (their results shape request B).
+        let mut request_a = self.client.build();
+        request_a.get_identity();
+        request_a.get_mailbox();
+        let mut responses = request_a.send().await?.unwrap_method_responses();
+        if responses.len() != 2 {
+            return Err(JmapError::InvalidResponse(format!(
+                "expected Identity/get + Mailbox/get responses, got {}",
+                responses.len()
+            )));
+        }
+        let mailboxes = responses.remove(1).unwrap_get_mailbox()?.take_list();
+        let identities = responses.remove(0).unwrap_get_identity()?.take_list();
+
+        let identity_id = pick_identity(&identities, &outbound.from_email).ok_or_else(|| {
+            JmapError::InvalidResponse(format!("no JMAP identity for {}", outbound.from_email))
+        })?;
+        let drafts_id = mailbox_id_for_role(&mailboxes, &Role::Drafts);
+        let sent_id = mailbox_id_for_role(&mailboxes, &Role::Sent);
+
+        if let Some(mime_body) = &outbound.mime_body {
+            return self
+                .submit_mime_wrapped(mime_body, &identity_id, drafts_id, sent_id, &mailboxes)
+                .await;
+        }
+
+        let uploaded = self.upload_attachments(outbound).await?;
+
+        // Request B: create + submit with creation-id references.
+        let mut request = self.client.build();
+        {
+            let email_set = request.set_email();
+            let create_boxes: Vec<String> = drafts_id.iter().cloned().collect();
+            fill_outbound_email(
+                email_set.create_with_id("draft"),
+                outbound,
+                &create_boxes,
+                &uploaded,
+            );
+        }
+        {
+            let sub_set = request.set_email_submission();
+            sub_set
+                .create_with_id("sub")
+                .email_id("#draft")
+                .identity_id(identity_id.as_str());
+            fill_on_success_patch(
+                sub_set.arguments().on_success_update_email("sub"),
+                sent_id.as_deref(),
+            );
+        }
+        let mut responses = request.send().await?.unwrap_method_responses();
+        if responses.len() != 2 {
+            return Err(JmapError::InvalidResponse(format!(
+                "expected Email/set + EmailSubmission/set responses, got {}",
+                responses.len()
+            )));
+        }
+        let mut sub_resp = responses.remove(1).unwrap_set_email_submission()?;
+        let mut email_resp = responses.remove(0).unwrap_set_email()?;
+        // notCreated surfaces here as Error::Set (→ JmapError::Client).
+        email_resp.created("draft")?;
+        let mut submission = sub_resp.created("sub")?;
+        Ok(submission.take_id())
+    }
+
+    /// OpenGPG path: upload the RFC822 MIME blob, `Email/import` into Drafts,
+    /// submit — the signed/encrypted MIME wrapper survives.
+    async fn submit_mime_wrapped(
+        &self,
+        mime_body: &str,
+        identity_id: &str,
+        drafts_id: Option<String>,
+        sent_id: Option<String>,
+        mailboxes: &[Mailbox<Get>],
+    ) -> Result<String, JmapError> {
+        let import_mailbox = drafts_id
+            .as_deref()
+            .or(sent_id.as_deref())
+            .or_else(|| mailboxes.iter().find_map(|m| m.id()))
+            .ok_or_else(|| JmapError::InvalidResponse("no mailbox to import into".into()))?
+            .to_owned();
+
+        let blob_id = self
+            .client
+            .upload(None, mime_body.as_bytes().to_vec(), Some("message/rfc822"))
+            .await?
+            .take_blob_id();
+
+        let mut request = self.client.build();
+        let import_create_id = {
+            let import_req = request.import_email();
+            let import = import_req.email(blob_id);
+            import.mailbox_ids([import_mailbox.as_str()]);
+            import.keywords(["$draft"]);
+            import.create_id()
+        };
+        {
+            let sub_set = request.set_email_submission();
+            sub_set
+                .create_with_id("sub")
+                .email_id(format!("#{import_create_id}"))
+                .identity_id(identity_id);
+            fill_on_success_patch(
+                sub_set.arguments().on_success_update_email("sub"),
+                sent_id.as_deref(),
+            );
+        }
+        let mut responses = request.send().await?.unwrap_method_responses();
+        if responses.len() != 2 {
+            return Err(JmapError::InvalidResponse(format!(
+                "expected Email/import + EmailSubmission/set responses, got {}",
+                responses.len()
+            )));
+        }
+        let mut sub_resp = responses.remove(1).unwrap_set_email_submission()?;
+        let mut import_resp = responses.remove(0).unwrap_import_email()?;
+        import_resp.created(&import_create_id)?;
+        let mut submission = sub_resp.created("sub")?;
+        Ok(submission.take_id())
+    }
+
+    /// Upload each outbound attachment to the session `uploadUrl`
+    /// (RFC 8620 §6.1), returning blob ids for the `Email/set` create.
+    async fn upload_attachments(
+        &self,
+        outbound: &OutboundMessage,
+    ) -> Result<Vec<UploadedAttachment>, JmapError> {
+        let mut uploaded = Vec::new();
+        for att in &outbound.attachments {
+            let bytes = att.decode().map_err(|e| {
+                JmapError::InvalidResponse(format!("attachment {}: {}", att.filename, e))
+            })?;
+            let blob_id = self
+                .client
+                .upload(None, bytes, Some(att.content_type.as_str()))
+                .await?
+                .take_blob_id();
+            uploaded.push(UploadedAttachment {
+                blob_id,
+                content_type: att.content_type.clone(),
+                name: att.filename.clone(),
+            });
+        }
+        Ok(uploaded)
+    }
+
     /// True when `urn:ietf:params:jmap:submission` is advertised (RFC 8621).
-    #[allow(dead_code)] // send-path wiring lands in a later task
     pub(crate) fn supports_submission(&self) -> bool {
         self.client
             .session()
@@ -915,6 +1081,146 @@ fn map_attachments(email: &Email<Get>) -> Vec<JmapAttachmentMeta> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// An attachment already uploaded to the server, referenced by blob id.
+#[derive(Debug, Clone)]
+struct UploadedAttachment {
+    blob_id: String,
+    content_type: String,
+    name: String,
+}
+
+/// `EmailAddress` for a create (name+email tuple, or bare email).
+fn crate_address(name: Option<&str>, email: &str) -> EmailAddress {
+    match name {
+        Some(n) if !n.is_empty() => EmailAddress::from((n.to_owned(), email.to_owned())),
+        _ => EmailAddress::from(email.to_owned()),
+    }
+}
+
+/// Fill the `Email/set` create object for a draft/submission (RFC 8621 §4.7).
+/// Body parts: `bd1` text, `bd2` html when both exist; html-only uses `bd1`
+/// as the html part.
+fn fill_outbound_email(
+    email: &mut Email<Set>,
+    outbound: &OutboundMessage,
+    mailbox_ids: &[String],
+    uploaded: &[UploadedAttachment],
+) {
+    if !mailbox_ids.is_empty() {
+        email.mailbox_ids(mailbox_ids.iter().map(String::as_str));
+    }
+    email.keywords(["$draft"]);
+    email.from([crate_address(
+        outbound.from_name.as_deref(),
+        &outbound.from_email,
+    )]);
+    email.to(outbound
+        .to
+        .iter()
+        .map(|(n, e)| crate_address(n.as_deref(), e))
+        .collect::<Vec<_>>());
+    email.cc(outbound
+        .cc
+        .iter()
+        .map(|(n, e)| crate_address(n.as_deref(), e))
+        .collect::<Vec<_>>());
+    email.bcc(
+        outbound
+            .bcc
+            .iter()
+            .map(|(n, e)| crate_address(n.as_deref(), e))
+            .collect::<Vec<_>>(),
+    );
+    email.subject(outbound.subject.as_str());
+
+    let text = outbound
+        .body_text
+        .clone()
+        .or_else(|| outbound.body_html.clone())
+        .unwrap_or_default();
+    email.body_value("bd1".to_owned(), text.as_str());
+    match (&outbound.body_text, &outbound.body_html) {
+        (Some(_), Some(html)) => {
+            email.text_body(
+                EmailBodyPart::new()
+                    .part_id("bd1")
+                    .content_type("text/plain"),
+            );
+            email.body_value("bd2".to_owned(), html.as_str());
+            email.html_body(
+                EmailBodyPart::new()
+                    .part_id("bd2")
+                    .content_type("text/html"),
+            );
+        }
+        (Some(_) | None, None) => {
+            email.text_body(
+                EmailBodyPart::new()
+                    .part_id("bd1")
+                    .content_type("text/plain"),
+            );
+        }
+        (None, Some(_)) => {
+            email.html_body(
+                EmailBodyPart::new()
+                    .part_id("bd1")
+                    .content_type("text/html"),
+            );
+        }
+    }
+
+    if let Some(irt) = &outbound.in_reply_to {
+        email.in_reply_to([irt.clone()]);
+    }
+    if let Some(refs) = &outbound.references {
+        email.references(
+            refs.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    for att in uploaded {
+        email.attachment(
+            EmailBodyPart::new()
+                .blob_id(att.blob_id.clone())
+                .name(att.name.clone())
+                .content_type(att.content_type.clone()),
+        );
+    }
+}
+
+/// Post-submit patch as full-value replacement (RFC 8621 §7.5.1): the email
+/// was created in this same request with exactly `$draft`, so replacing
+/// `keywords` with the empty set is exactly "clear $draft", and replacing
+/// `mailboxIds` is exactly the move to Sent (or mailbox-less when the account
+/// has no Sent mailbox — the old client's behavior).
+fn fill_on_success_patch(patch: &mut Email<Set>, sent_id: Option<&str>) {
+    patch.keywords(Vec::<String>::new());
+    patch.mailbox_ids(sent_id.into_iter().map(str::to_owned));
+}
+
+/// Pick the identity whose email matches `from` (case-insensitive), else the first.
+fn pick_identity(identities: &[Identity], from: &str) -> Option<String> {
+    identities
+        .iter()
+        .find(|i| {
+            i.email
+                .as_deref()
+                .is_some_and(|e| e.eq_ignore_ascii_case(from))
+        })
+        .or_else(|| identities.first())
+        .and_then(|i| i.id.clone())
+}
+
+/// First mailbox with `role` (server id).
+fn mailbox_id_for_role(mailboxes: &[Mailbox<Get>], role: &Role) -> Option<String> {
+    mailboxes
+        .iter()
+        .find(|m| m.role() == *role)
+        .and_then(|m| m.id().map(str::to_owned))
 }
 
 /// Map a crate `Mailbox<Get>`; `None` when the server row has no id.
@@ -1382,5 +1688,154 @@ mod tests {
     fn map_attachments_empty_without_attachments() {
         let email: Email<Get> = serde_json::from_value(serde_json::json!({ "id": "em2" })).unwrap();
         assert!(map_attachments(&email).is_empty());
+    }
+
+    // ── send path wire shapes (Task 4) ──────────────────────────────
+
+    use jmap_client::Method;
+    use jmap_client::core::RequestParams;
+    use jmap_client::core::set::SetRequest;
+    use jmap_client::email::import::EmailImportRequest;
+    use jmap_client::email_submission::EmailSubmission;
+    use jmap_client::identity::Identity;
+
+    fn sample_outbound() -> crate::smtp::OutboundMessage {
+        crate::smtp::OutboundMessage {
+            from_email: "me@example.com".into(),
+            from_name: Some("Me".into()),
+            to: vec![(Some("You".into()), "you@example.com".into())],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Hi".into(),
+            body_text: Some("Hello".into()),
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+            mime_content_type: None,
+            mime_body: None,
+            attachments: Vec::new(),
+            message_id: None,
+        }
+    }
+
+    #[test]
+    fn draft_email_serializes_jmap_create_shape() {
+        let mut req = SetRequest::<Email<Set>>::new(RequestParams::new("acc", Method::SetEmail, 0));
+        fill_outbound_email(
+            req.create_with_id("draft"),
+            &sample_outbound(),
+            &["mb-drafts".to_owned()],
+            &[],
+        );
+        let json = serde_json::to_value(&req).unwrap();
+        let draft = &json["create"]["draft"];
+        assert_eq!(draft["subject"], "Hi");
+        assert_eq!(draft["keywords"]["$draft"], true);
+        assert_eq!(draft["mailboxIds"]["mb-drafts"], true);
+        assert_eq!(draft["from"][0]["name"], "Me");
+        assert_eq!(draft["from"][0]["email"], "me@example.com");
+        assert_eq!(draft["to"][0]["email"], "you@example.com");
+        assert_eq!(draft["bodyValues"]["bd1"]["value"], "Hello");
+        assert_eq!(draft["textBody"][0]["partId"], "bd1");
+        assert_eq!(draft["textBody"][0]["type"], "text/plain");
+    }
+
+    #[test]
+    fn draft_email_dual_body_and_threading_headers() {
+        let mut outbound = sample_outbound();
+        outbound.body_html = Some("<p>Hello</p>".into());
+        outbound.in_reply_to = Some("<parent@example.com>".into());
+        outbound.references = Some("<a@example.com> <b@example.com>".into());
+        let mut req = SetRequest::<Email<Set>>::new(RequestParams::new("acc", Method::SetEmail, 0));
+        fill_outbound_email(req.create_with_id("draft"), &outbound, &[], &[]);
+        let json = serde_json::to_value(&req).unwrap();
+        let draft = &json["create"]["draft"];
+        assert_eq!(draft["bodyValues"]["bd2"]["value"], "<p>Hello</p>");
+        assert_eq!(draft["htmlBody"][0]["partId"], "bd2");
+        assert_eq!(draft["inReplyTo"][0], "<parent@example.com>");
+        assert_eq!(draft["references"][1], "<b@example.com>");
+    }
+
+    #[test]
+    fn draft_email_references_uploaded_attachment_blobs() {
+        let uploaded = vec![UploadedAttachment {
+            blob_id: "blob-1".into(),
+            content_type: "application/pdf".into(),
+            name: "invoice.pdf".into(),
+        }];
+        let mut req = SetRequest::<Email<Set>>::new(RequestParams::new("acc", Method::SetEmail, 0));
+        fill_outbound_email(
+            req.create_with_id("draft"),
+            &sample_outbound(),
+            &[],
+            &uploaded,
+        );
+        let json = serde_json::to_value(&req).unwrap();
+        let draft = &json["create"]["draft"];
+        assert_eq!(draft["attachments"][0]["blobId"], "blob-1");
+        assert_eq!(draft["attachments"][0]["name"], "invoice.pdf");
+        assert_eq!(draft["attachments"][0]["type"], "application/pdf");
+    }
+
+    #[test]
+    fn on_success_patch_uses_full_value_replacement() {
+        let mut req = SetRequest::<EmailSubmission<Set>>::new(RequestParams::new(
+            "acc",
+            Method::SetEmailSubmission,
+            0,
+        ));
+        req.create_with_id("sub")
+            .email_id("#draft")
+            .identity_id("i1");
+        fill_on_success_patch(
+            req.arguments().on_success_update_email("sub"),
+            Some("mb-sent"),
+        );
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["create"]["sub"]["emailId"], "#draft");
+        assert_eq!(json["create"]["sub"]["identityId"], "i1");
+        // Full-value replacement (RFC 8621 §7.5.1 semantics without patch-null):
+        // we created the email in this same request with exactly `$draft`.
+        assert_eq!(
+            json["onSuccessUpdateEmail"]["#sub"]["keywords"],
+            serde_json::json!({})
+        );
+        assert_eq!(
+            json["onSuccessUpdateEmail"]["#sub"]["mailboxIds"]["mb-sent"],
+            true
+        );
+    }
+
+    #[test]
+    fn import_request_serializes_rfc_shape() {
+        let mut req = EmailImportRequest::new(RequestParams::new("acc", Method::ImportEmail, 0));
+        let import = req.email("blob-mime");
+        import.mailbox_ids(["mb-drafts"]);
+        import.keywords(["$draft"]);
+        let create_id = import.create_id();
+        assert_eq!(create_id, "i0");
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["emails"]["i0"]["blobId"], "blob-mime");
+        assert_eq!(json["emails"]["i0"]["mailboxIds"]["mb-drafts"], true);
+        assert_eq!(json["emails"]["i0"]["keywords"]["$draft"], true);
+    }
+
+    #[test]
+    fn pick_identity_prefers_matching_email() {
+        let identities: Vec<Identity> = serde_json::from_value(serde_json::json!([
+            { "id": "i1", "name": "Other", "email": "other@example.com" },
+            { "id": "i2", "name": "Me", "email": "me@example.com" }
+        ]))
+        .unwrap();
+        assert_eq!(
+            pick_identity(&identities, "ME@example.com").as_deref(),
+            Some("i2")
+        );
+        // No match → first identity.
+        assert_eq!(
+            pick_identity(&identities, "nobody@example.com").as_deref(),
+            Some("i1")
+        );
+        assert!(pick_identity(&[], "me@example.com").is_none());
     }
 }
