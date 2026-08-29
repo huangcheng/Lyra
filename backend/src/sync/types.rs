@@ -6,8 +6,8 @@ use serde::Serialize;
 use crate::api_error::{self, ApiErrorBody};
 use crate::db_row::InvalidIdError;
 use crate::imap::ImapError;
-use crate::jmap::JmapError;
 use crate::smtp::SmtpError;
+use crate::sync::jmap_client::JmapError;
 
 // ── API types ───────────────────────────────────────────────────────
 

@@ -206,20 +206,23 @@ All probes are HTTP(S) or DNS calls with timeouts (5s per probe, 30s total). Fai
 
 ### 6.1 Capabilities
 
-- Session discovery via `/.well-known/jmap`.
-- Mailbox sync (folders).
-- Email query + fetch (messages, headers, body parts).
-- Email submission (send).
-- Flag changes (keywords).
-- State-based change tracking (`sinceState`).
+- Session discovery via `/.well-known/jmap` (same-origin redirect pre-resolution; Basic or Bearer by `auth_type`).
+- Mailbox sync (folders, `parentId` hierarchy).
+- Email query + fetch (messages, headers, body parts); `Email/query` + `Email/get` batched per page.
+- Incremental sync: `Email/queryChanges` with `removed` applied as local deletes; account-level `Email/changes` for keyword/mailbox updates and destroys (`email_state` cursor).
+- Attachment download via the session `downloadUrl` into the blob store.
+- Email submission (batched `Email/set` + `EmailSubmission/set`; OpenGPG MIME via `Email/import`).
+- Flag changes pushed (`Email/set` keyword patches) and pulled.
+- State-based change tracking (`queryState` per folder, `email_state` per account).
+- EventSource push via the `jmap-client` crate stream.
 
 ### 6.2 Sync flow
 
-1. Authenticate (Bearer token or Basic auth, depending on server).
-2. Get current account state.
-3. For each mailbox: `Email/query` with `sinceState` to get changed IDs.
-4. `Email/get` for new/changed emails (properties: headers, bodyValues, keywords).
-5. Update local DB and state token.
+1. Authenticate (Bearer token or Basic auth, depending on `auth_type`).
+2. `Mailbox/get` (all folders).
+3. Account-level `Email/changes` since `email_state` (flag/mailbox updates, destroys).
+4. For each mailbox: `Email/queryChanges` since `queryState` (added → fetch; removed → delete), or paged `Email/query` + `Email/get` when the cursor is missing/expired.
+5. Update local DB and state tokens (per-folder `queryState`, account `email_state`).
 
 ### 6.3 Push
 
@@ -383,9 +386,9 @@ These match the running tree; older bullets above that still mention stubs are h
 | Credentials | `LYRA_MASTER_KEY` (32+ bytes) → per-user KEK (HKDF) → wrapped DEK in `lyra_user.encrypted_dek`. Account passwords and TOTP secrets encrypt under the DEK. No `SESSION_SECRET`; sessions are bearer tokens in kv. |
 | MIME / HTML | IMAP bodies parsed with **mail-parser**; HTML sanitized with **ammonia** at persist (`persist_body_html`). |
 | Sync writes | Per folder page: upserts, folder counts, and cursor commit in **one DB transaction**. Cursor advances only after commit. |
-| JMAP cursor | Stored `queryState` is sent as `sinceQueryState` on `Email/queryChanges`; `cannotCalculateChanges` clears the cursor and falls back to a full `Email/query`. |
+| JMAP cursors | Stored `queryState` is sent as `sinceQueryState` on `Email/queryChanges`; `cannotCalculateChanges` clears the cursor and falls back to a full `Email/query`. Account-level `Email/changes` uses an `email_state` cursor anchored on the inbox folder. |
 | Postgres | Dual-DB query macros rewrite SQLite SQL; UUID / timestamptz / jsonb bound natively. |
-| Sync module | `backend/src/sync/` (`http`, `store`, `imap_loop`, `jmap_loop`, `send`, `types`) — not a single `sync.rs`. |
+| Sync module | `backend/src/sync/` (`http`, `store`, `imap_loop`, `jmap_loop`, `jmap_client`, `send`, `types`) — not a single `sync.rs`. |
 | Account setup | Settings page probe + form. There is no `accountSetupMachine`. |
 | Frontend client | `frontend/src/lib/api-client.ts` injects the bearer token and maps session-expiry 401s to login. |
 
@@ -400,7 +403,7 @@ These match the running tree; older bullets above that still mention stubs are h
 | Protocol | Primary specs | Adapter module |
 |----------|---------------|----------------|
 | **IMAP** | RFC 3501; RFC 6851 (MOVE); RFC 7162 (CONDSTORE); RFC 6154 (SPECIAL-USE); Modified UTF-7 (RFC 3501 §5.1.3); RFC 2047 headers | `backend/src/imap.rs` |
-| **JMAP** | RFC 8620 (core); RFC 8621 (mail) | `backend/src/jmap.rs` |
+| **JMAP** | RFC 8620 (core); RFC 8621 (mail) | `backend/src/sync/jmap_client.rs` (seam over the `jmap-client` crate) |
 | **SMTP** | RFC 5321; RFC 5322 (message format); RFC 6531/6532 (UTF-8 mail) | `backend/src/smtp.rs` |
 | **POP3** | RFC 1939 | *(post-v1; plugin kernel `pop3` receive plugin)* |
 
@@ -435,10 +438,15 @@ Status key: **done** = implemented and tested · **partial** = core path works, 
 | Session discovery (`/.well-known/jmap`) | **done** | Probe + adapter |
 | Mailbox sync + `parentId` hierarchy | **done** | `upsert_jmap_folder`, `link_jmap_folder_parent` |
 | `Email/queryChanges` + opaque `queryState` | **done** | `cannotCalculateChanges` → full query |
-| Keyword / flag changes | **partial** | Core keywords; audit full set vs RFC 8621 |
+| Keyword / flag changes | **done** | `Email/set` keyword patches from PATCH /messages; full set vs RFC 8621 audited via crate |
 | EventSource push | **done** | Session `eventSourceUrl` SSE; supervisor enqueues sync on `state` |
-| EmailSubmission send when available | **done** | `JmapClient::submit_email`; `send_protocol=jmap` when capability advertised |
-| Blob download / large attachments | **gap** | CHE-109 (storage) + JMAP blob fetch |
+| EmailSubmission send when available | **done** | Seam batched send; `send_protocol=jmap` when submission capability advertised |
+| Blob download / large attachments | **done** | `downloadUrl` blobs → blob store during sync; 25 MiB per-blob cap |
+| `Email/queryChanges` `removed` applied | **done** | removed ∪ destroyed minus re-fetched → local hard deletes |
+| `Email/changes` keyword/move propagation | **done** | account-level `email_state` cursor anchored on inbox folder |
+| Bearer token auth (Fastmail API tokens) | **done** | `auth_type = "bearer"`; token in the encrypted credential field |
+| Batched send (`Email/set` + `EmailSubmission/set`) | **done** | `#` creation-id references; OpenGPG MIME via `Email/import` |
+| `threadId` persisted | **done** | `message.jmap_thread_id` (server-opaque; local `thread` table untouched) |
 
 #### SMTP (RFC 5321)
 

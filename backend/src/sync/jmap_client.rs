@@ -60,11 +60,6 @@ pub enum JmapError {
     SessionDiscovery(String),
     #[error("authentication failed: {0}")]
     Authentication(String),
-    /// Legacy wire-level method error (hand-rolled transport; pruned in Task 7).
-    // Still matched by `is_stale_query_state` and constructed in tests.
-    #[allow(dead_code)]
-    #[error("JMAP method error: {code} — {description}")]
-    Method { code: String, description: String },
     #[error("crypto error: {0}")]
     Crypto(#[from] crypto::CryptoError),
     #[error("invalid response: {0}")]
@@ -103,10 +98,6 @@ impl JmapError {
     #[must_use]
     pub fn is_stale_query_state(&self) -> bool {
         match self {
-            Self::Method { code, .. } => {
-                code.eq_ignore_ascii_case("cannotCalculateChanges")
-                    || code.eq_ignore_ascii_case("cannotCalculateChangesFrom")
-            }
             Self::Client(jmap_client::Error::Method(m)) => {
                 m.error() == &MethodErrorType::CannotCalculateChanges
             }
@@ -1587,12 +1578,6 @@ mod tests {
             p_type: MethodErrorType::CannotCalculateChanges,
         }));
         assert!(err.is_stale_query_state());
-        // Legacy string-matched arm (hand-rolled transport until Task 7).
-        let legacy = JmapError::Method {
-            code: "cannotCalculateChanges".into(),
-            description: String::new(),
-        };
-        assert!(legacy.is_stale_query_state());
         assert!(!JmapError::InvalidResponse("nope".into()).is_stale_query_state());
     }
 

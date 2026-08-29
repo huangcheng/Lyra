@@ -312,7 +312,7 @@ fn sanitize_error(err: &SyncError) -> &'static str {
         SyncError::Imap(crate::imap::ImapError::Login(_)) => "auth error",
         SyncError::Imap(crate::imap::ImapError::Timeout) => "IMAP timeout",
         SyncError::Imap(_) => "IMAP error",
-        SyncError::Jmap(crate::jmap::JmapError::Authentication(_)) => "auth error",
+        SyncError::Jmap(crate::sync::jmap_client::JmapError::Authentication(_)) => "auth error",
         SyncError::Jmap(_) => "JMAP error",
         SyncError::Smtp(smtp) => smtp.job_category(),
         SyncError::Database(_) => "database error",
@@ -877,9 +877,9 @@ mod tests {
             "IMAP timeout"
         );
         assert_eq!(
-            sanitize_error(&SyncError::Jmap(crate::jmap::JmapError::SessionDiscovery(
-                msg.into()
-            ))),
+            sanitize_error(&SyncError::Jmap(
+                crate::sync::jmap_client::JmapError::SessionDiscovery(msg.into())
+            )),
             "JMAP error"
         );
         assert_eq!(

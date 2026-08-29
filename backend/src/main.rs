@@ -20,7 +20,6 @@ mod db_row;
 mod entities;
 mod imap;
 mod imap_idle;
-mod jmap;
 mod jmap_push;
 mod jobs;
 mod kernel;

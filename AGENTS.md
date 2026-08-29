@@ -102,8 +102,8 @@ Lyra/
       auth.rs                   ← username/password + optional TOTP, bearer sessions
       storage.rs                ← storage seam (sea-orm 2.0 pool; SQLite + PostgreSQL by DATABASE_URL; migrations)
       entities/                 ← SeaORM entity per table (schema truth for data-layer code)
-      sync/                     ← sync HTTP, IMAP/JMAP loops, persist transactions
-      imap.rs / jmap.rs / smtp.rs
+      sync/                     ← sync HTTP, IMAP/JMAP loops, JMAP seam (jmap_client.rs), persist transactions
+      imap.rs / smtp.rs
       oauth/ ← Microsoft mail OAuth (PKCE) + XOAUTH2 token resolve
       jobs.rs / scheduler.rs / kernel/
     migrations/
@@ -142,6 +142,7 @@ Lyra/
 | i18n | English + Chinese (zh) |
 | Client state | Zustand (data) · XState (flows) · RxJS (async / recovery) |
 | Backend | Rust + Axum |
+| JMAP client | `jmap-client` 0.4.2 (Stalwart Labs; `async` + `aws_lc_rs` features, WebSocket off — brings reqwest 0.13 alongside 0.12) |
 | DB | SQLite **and** PostgreSQL |
 | Auth | Username/password + optional TOTP |
 | Deploy | Docker Compose (recommended) + install script |

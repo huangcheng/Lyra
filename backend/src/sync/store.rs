@@ -492,7 +492,7 @@ pub(crate) fn effective_folder_role(
 pub(crate) async fn upsert_jmap_folder(
     db: &DbPool,
     account_id: &str,
-    mailbox: &crate::jmap::JmapMailbox,
+    mailbox: &crate::sync::jmap_client::JmapMailbox,
 ) -> Result<(), SyncError> {
     let role = mailbox
         .role
@@ -1028,7 +1028,7 @@ pub(crate) async fn persist_jmap_folder_batch(
     db: &DbPool,
     account_id: &str,
     folder_id: &str,
-    emails: &[crate::jmap::JmapEmail],
+    emails: &[crate::sync::jmap_client::JmapEmail],
     query_state: Option<&str>,
 ) -> Result<(usize, usize, Vec<JmapPersistedMessage>), SyncError> {
     let mut tx = db.begin().await?;
@@ -1380,7 +1380,7 @@ pub(crate) async fn upsert_jmap_message_in_tx(
     db: &DbPool,
     account_id: &str,
     folder_id: &str,
-    email: &crate::jmap::JmapEmail,
+    email: &crate::sync::jmap_client::JmapEmail,
 ) -> Result<(bool, String), SyncError> {
     let external_id = &email.id;
 
