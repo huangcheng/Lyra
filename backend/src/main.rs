@@ -88,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
     storage.run_migrations().await?;
     let db = storage.pool().clone();
     plugins::bind_storage(db.clone());
+    plugins::bind_data_dir(std::path::PathBuf::from(&config.data_dir));
     let mut app = kernel::App::new();
     app.provide("storage");
     for plugin in plugins::builtin_plugins() {

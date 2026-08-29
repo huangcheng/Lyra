@@ -29,6 +29,21 @@ pub(crate) fn storage() -> Result<DbPool, String> {
         .ok_or_else(|| "storage not bound".into())
 }
 
+static DATA_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// Bind the process-wide data directory (blob store root) used by protocol
+/// plugins at sync time.
+pub fn bind_data_dir(path: std::path::PathBuf) {
+    let _ = DATA_DIR.set(path);
+}
+
+pub(crate) fn data_dir() -> Result<std::path::PathBuf, String> {
+    DATA_DIR
+        .get()
+        .cloned()
+        .ok_or_else(|| "data dir not bound".into())
+}
+
 /// Built-in receive/send plugins registered at process boot.
 #[must_use]
 pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {

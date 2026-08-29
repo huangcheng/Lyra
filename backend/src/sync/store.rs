@@ -1015,30 +1015,42 @@ pub(crate) async fn repair_imap_messages(
     Ok(repaired)
 }
 
+/// One JMAP message persisted this batch (same order as the input slice).
+#[derive(Debug)]
+pub(crate) struct JmapPersistedMessage {
+    pub(crate) local_id: String,
+    pub(crate) was_new: bool,
+}
+
 /// Persist one JMAP mailbox page: upserts, cursor, counts — one transaction.
+/// Returns `(new, updated, per-message results in input order)`.
 pub(crate) async fn persist_jmap_folder_batch(
     db: &DbPool,
     account_id: &str,
     folder_id: &str,
     emails: &[crate::jmap::JmapEmail],
     query_state: Option<&str>,
-) -> Result<(usize, usize), SyncError> {
+) -> Result<(usize, usize, Vec<JmapPersistedMessage>), SyncError> {
     let mut tx = db.begin().await?;
     let mut new = 0usize;
     let mut updated = 0usize;
+    let mut persisted = Vec::with_capacity(emails.len());
     for email in emails {
-        if upsert_jmap_message_in_tx(&mut tx, db, account_id, folder_id, email).await? {
+        let (was_new, local_id) =
+            upsert_jmap_message_in_tx(&mut tx, db, account_id, folder_id, email).await?;
+        if was_new {
             new += 1;
         } else {
             updated += 1;
         }
+        persisted.push(JmapPersistedMessage { local_id, was_new });
     }
     if let Some(qs) = query_state {
         save_jmap_cursor_in_tx(&mut tx, db, account_id, folder_id, qs).await?;
     }
     update_folder_counts_in_tx(&mut tx, db, folder_id).await?;
     tx.commit().await?;
-    Ok((new, updated))
+    Ok((new, updated, persisted))
 }
 
 /// Hard-delete JMAP messages by server ids (`external_id`), scoped to the
@@ -1369,7 +1381,7 @@ pub(crate) async fn upsert_jmap_message_in_tx(
     account_id: &str,
     folder_id: &str,
     email: &crate::jmap::JmapEmail,
-) -> Result<bool, SyncError> {
+) -> Result<(bool, String), SyncError> {
     let external_id = &email.id;
 
     let existing = find_message_id_in_tx(tx, db, account_id, external_id).await?;
@@ -1422,7 +1434,7 @@ pub(crate) async fn upsert_jmap_message_in_tx(
             .value(message::Column::UpdatedAt, Expr::current_timestamp())
             .and_where(message::Column::Id.eq(id_value(db, &id)?));
         tx_execute(tx, &upd).await?;
-        Ok(false)
+        Ok((false, id))
     } else {
         let in_reply_to = email
             .in_reply_to
@@ -1459,7 +1471,10 @@ pub(crate) async fn upsert_jmap_message_in_tx(
             },
         );
         tx_execute(tx, &insert).await?;
-        Ok(true)
+        let id = find_message_id_in_tx(tx, db, account_id, external_id)
+            .await?
+            .ok_or_else(|| SyncError::Internal("JMAP message insert lost its row".into()))?;
+        Ok((true, id))
     }
 }
 

@@ -1846,4 +1846,104 @@ mod tests {
             "no inbox-role folder → first folder anchors"
         );
     }
+
+    #[tokio::test]
+    async fn jmap_persist_batch_reports_per_message_results() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        let inbox = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+
+        let (new, updated, persisted) = super::store::persist_jmap_folder_batch(
+            &as_db(&pool),
+            &account_id,
+            &inbox,
+            &[
+                sample_jmap_email("em1", None),
+                sample_jmap_email("em2", None),
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!((new, updated), (2, 0));
+        assert_eq!(persisted.len(), 2, "one result per input email, in order");
+        assert!(persisted.iter().all(|p| p.was_new));
+
+        // Re-persist: same external id, now an update with the same local id.
+        let (new, updated, persisted2) = super::store::persist_jmap_folder_batch(
+            &as_db(&pool),
+            &account_id,
+            &inbox,
+            &[sample_jmap_email("em1", None)],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!((new, updated), (0, 1));
+        assert!(!persisted2[0].was_new);
+        assert_eq!(persisted2[0].local_id, persisted[0].local_id);
+    }
+
+    #[tokio::test]
+    async fn jmap_attachments_persist_to_blob_store() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        let dir = tempfile::tempdir().unwrap();
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        let inbox = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+        let (_, _, persisted) = super::store::persist_jmap_folder_batch(
+            &as_db(&pool),
+            &account_id,
+            &inbox,
+            &[sample_jmap_email("em-att", None)],
+            None,
+        )
+        .await
+        .unwrap();
+        let local_id = &persisted[0].local_id;
+
+        let extracted = vec![crate::imap::ExtractedAttachment {
+            filename: "a.txt".into(),
+            content_type: "text/plain".into(),
+            data: b"hello blob".to_vec(),
+            content_id: None,
+            is_inline: false,
+        }];
+        super::http::persist_attachments(
+            &as_db(&pool),
+            dir.path(),
+            &account_id,
+            local_id,
+            &extracted,
+        )
+        .await
+        .unwrap();
+
+        let row: (i64, String) = sqlx::query_as(
+            "SELECT COUNT(*), MIN(storage_path) FROM attachment WHERE message_id = ?",
+        )
+        .bind(local_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, 1);
+        let blob = crate::blobs::read(dir.path(), &row.1).await.unwrap();
+        assert_eq!(blob, b"hello blob");
+
+        let has: bool = sqlx::query_scalar("SELECT has_attachments FROM message WHERE id = ?")
+            .bind(local_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(has);
+    }
 }

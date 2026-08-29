@@ -227,6 +227,9 @@ pub struct JmapEmail {
     pub attachments: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     pub preview: Option<String>,
+    /// Typed attachment locators for blob download (built by `map_attachments`).
+    #[serde(default)]
+    pub attachments_meta: Vec<JmapAttachmentMeta>,
 }
 
 /// A JMAP email address.
@@ -236,6 +239,17 @@ pub struct JmapEmailAddress {
     pub name: Option<String>,
     #[serde(default)]
     pub email: Option<String>,
+}
+
+/// Attachment locator for blob download (RFC 8621 EmailBodyPart subset).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct JmapAttachmentMeta {
+    pub blob_id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: u64,
+    pub content_id: Option<String>,
+    pub is_inline: bool,
 }
 
 /// Incremental result from `Email/queryChanges` (moved from jmap.rs).
@@ -747,6 +761,12 @@ impl JmapSeam {
         Ok((emails, Some(state)))
     }
 
+    /// Download a blob via the session `downloadUrl` (RFC 8620 §6.2; the URL
+    /// template was origin-pinned at connect).
+    pub(crate) async fn download_blob(&self, blob_id: &str) -> Result<Vec<u8>, JmapError> {
+        Ok(self.client.download(blob_id).await?)
+    }
+
     /// True when `urn:ietf:params:jmap:submission` is advertised (RFC 8621).
     #[allow(dead_code)] // send-path wiring lands in a later task
     pub(crate) fn supports_submission(&self) -> bool {
@@ -824,8 +844,9 @@ fn map_email(email: &Email<Get>) -> Option<JmapEmail> {
         text_body: map_body_refs(email.text_body()),
         html_body: map_body_refs(email.html_body()),
         has_attachment: Some(email.has_attachment()),
-        attachments: None, // superseded by typed attachment meta (Task 3)
+        attachments: None,
         preview: email.preview().map(str::to_owned),
+        attachments_meta: map_attachments(email),
     })
 }
 
@@ -868,6 +889,32 @@ fn map_body_refs(parts: Option<&[EmailBodyPart]>) -> Option<Vec<serde_json::Valu
             .map(|p| serde_json::json!({ "partId": p.part_id(), "type": p.content_type() }))
             .collect()
     })
+}
+
+/// Collect downloadable attachment parts (blobId required) into typed meta.
+fn map_attachments(email: &Email<Get>) -> Vec<JmapAttachmentMeta> {
+    email
+        .attachments()
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| {
+                    let blob_id = p.blob_id()?.to_owned();
+                    Some(JmapAttachmentMeta {
+                        blob_id,
+                        filename: p.name().unwrap_or("attachment").to_owned(),
+                        content_type: p
+                            .content_type()
+                            .unwrap_or("application/octet-stream")
+                            .to_owned(),
+                        size: p.size() as u64,
+                        content_id: p.content_id().map(str::to_owned),
+                        is_inline: p.content_disposition() == Some("inline"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Map a crate `Mailbox<Get>`; `None` when the server row has no id.
@@ -1303,5 +1350,37 @@ mod tests {
         assert!(props.contains(&serde_json::json!("mailboxIds")));
         assert!(props.contains(&serde_json::json!("keywords")));
         assert!(props.contains(&serde_json::json!("attachments")));
+    }
+
+    // ── attachment meta mapping (Task 3) ────────────────────────────
+
+    #[test]
+    fn map_attachments_collects_downloadable_parts() {
+        let email: Email<Get> = serde_json::from_value(serde_json::json!({
+            "id": "em1",
+            "attachments": [
+                { "blobId": "b1", "name": "invoice.pdf", "type": "application/pdf", "size": 1234, "disposition": "attachment" },
+                { "name": "no-blob.txt", "type": "text/plain" },
+                { "blobId": "b2", "type": "image/png", "size": 10, "cid": "cid1", "disposition": "inline" }
+            ]
+        }))
+        .unwrap();
+        let meta = map_attachments(&email);
+        assert_eq!(meta.len(), 2, "parts without blobId are skipped");
+        assert_eq!(meta[0].blob_id, "b1");
+        assert_eq!(meta[0].filename, "invoice.pdf");
+        assert_eq!(meta[0].content_type, "application/pdf");
+        assert_eq!(meta[0].size, 1234);
+        assert!(!meta[0].is_inline);
+        assert_eq!(meta[1].blob_id, "b2");
+        assert!(meta[1].is_inline);
+        assert_eq!(meta[1].content_id.as_deref(), Some("cid1"));
+        assert_eq!(meta[1].filename, "attachment", "fallback filename");
+    }
+
+    #[test]
+    fn map_attachments_empty_without_attachments() {
+        let email: Email<Get> = serde_json::from_value(serde_json::json!({ "id": "em2" })).unwrap();
+        assert!(map_attachments(&email).is_empty());
     }
 }

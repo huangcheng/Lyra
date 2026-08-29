@@ -1,9 +1,10 @@
 //! JMAP mailbox fetch loop (IMAP fallback on failure).
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use super::imap_loop::run_imap_sync;
-use super::jmap_client::{JmapEmail, JmapMailbox, JmapSeam};
+use super::jmap_client::{JmapAttachmentMeta, JmapEmail, JmapMailbox, JmapSeam};
 use super::store::{
     clear_jmap_cursor, clear_jmap_email_state, delete_jmap_messages_by_external_ids,
     find_folder_id, first_folder_id, folder_id_for_role, get_folder_id, link_jmap_folder_parent,
@@ -38,16 +39,22 @@ pub(crate) async fn jmap_sync_account(
         else {
             return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
         };
-        match run_jmap_sync(
-            db,
-            account_id,
-            base_url,
-            &email_address,
-            &secret,
-            &row.auth_type,
-        )
-        .await
-        {
+        let jmap_result = match crate::plugins::data_dir() {
+            Ok(data_dir) => {
+                run_jmap_sync(
+                    db,
+                    account_id,
+                    base_url,
+                    &email_address,
+                    &secret,
+                    &row.auth_type,
+                    &data_dir,
+                )
+                .await
+            }
+            Err(e) => Err(SyncError::Internal(e)),
+        };
+        match jmap_result {
             Ok(result) => result,
             Err(e) => {
                 // Auth failures poison the cached session; drop it so the next
@@ -89,6 +96,7 @@ pub(crate) async fn run_jmap_sync(
     email: &str,
     secret: &str,
     auth_type: &str,
+    data_dir: &Path,
 ) -> Result<SyncResponse, SyncError> {
     let seam =
         JmapSeam::connect_for_account(account_id, jmap_base_url, email, secret, auth_type).await?;
@@ -146,6 +154,7 @@ pub(crate) async fn run_jmap_sync(
                         &seam,
                         &changes.updated_ids,
                         &mut refetched,
+                        data_dir,
                     )
                     .await?;
                     total_new += n;
@@ -188,6 +197,7 @@ pub(crate) async fn run_jmap_sync(
                 &seam,
                 &mut refetched,
                 &mut new_email_state,
+                data_dir,
             )
             .await?;
             total_new += n;
@@ -200,12 +210,14 @@ pub(crate) async fn run_jmap_sync(
                 refetched.extend(changes.added_ids.iter().cloned());
                 if changes.added_ids.is_empty() {
                     // Advance the cursor even with no additions.
-                    persist_jmap_folder_batch(
+                    persist_and_download(
                         db,
                         account_id,
                         &folder_id,
                         &[],
                         changes.new_query_state.as_deref(),
+                        &seam,
+                        data_dir,
                     )
                     .await?;
                     continue;
@@ -218,7 +230,7 @@ pub(crate) async fn run_jmap_sync(
                         new_email_state = email_state;
                     }
                     // The queryState cursor commits only with the LAST chunk.
-                    let (n, u) = persist_jmap_folder_batch(
+                    let (n, u) = persist_and_download(
                         db,
                         account_id,
                         &folder_id,
@@ -228,6 +240,8 @@ pub(crate) async fn run_jmap_sync(
                         } else {
                             None
                         },
+                        &seam,
+                        data_dir,
                     )
                     .await?;
                     total_new += n;
@@ -249,6 +263,7 @@ pub(crate) async fn run_jmap_sync(
                     &seam,
                     &mut refetched,
                     &mut new_email_state,
+                    data_dir,
                 )
                 .await?;
                 total_new += n;
@@ -289,6 +304,7 @@ pub(crate) async fn run_jmap_sync(
 /// page. The `queryState` cursor commits only with the LAST page: once it
 /// lands, `Email/queryChanges` returns only deltas, so an early commit would
 /// strand every message past the committed page on a crash (sync spec §4.1).
+#[allow(clippy::too_many_arguments)]
 async fn full_folder_query(
     db: &DbPool,
     account_id: &str,
@@ -297,6 +313,7 @@ async fn full_folder_query(
     seam: &JmapSeam,
     refetched: &mut HashSet<String>,
     new_email_state: &mut Option<String>,
+    data_dir: &Path,
 ) -> Result<(usize, usize), SyncError> {
     let mut new = 0usize;
     let mut updated = 0usize;
@@ -315,9 +332,16 @@ async fn full_folder_query(
         } else {
             None
         };
-        let (n, u) =
-            persist_jmap_folder_batch(db, account_id, folder_id, &page.emails, commit_state)
-                .await?;
+        let (n, u) = persist_and_download(
+            db,
+            account_id,
+            folder_id,
+            &page.emails,
+            commit_state,
+            seam,
+            data_dir,
+        )
+        .await?;
         new += n;
         updated += u;
         if page_len < QUERY_PAGE {
@@ -358,6 +382,7 @@ async fn refetch_updated_emails(
     seam: &JmapSeam,
     updated_ids: &[String],
     refetched: &mut HashSet<String>,
+    data_dir: &Path,
 ) -> Result<(usize, usize), SyncError> {
     let mut new = 0usize;
     let mut updated = 0usize;
@@ -372,12 +397,97 @@ async fn refetch_updated_emails(
         }
         for (folder_id, group) in by_folder {
             let (n, u) =
-                persist_jmap_folder_batch(db, account_id, &folder_id, &group, None).await?;
+                persist_and_download(db, account_id, &folder_id, &group, None, seam, data_dir)
+                    .await?;
             new += n;
             updated += u;
         }
     }
     Ok((new, updated))
+}
+
+/// Cap per attachment blob (mirrors the IMAP lazy-fetch body cap).
+const MAX_ATTACHMENT_DOWNLOAD_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Persist one page, then download attachments for newly-inserted messages
+/// (blob bytes land in the content-addressed store under `data_dir`).
+#[allow(clippy::too_many_arguments)]
+async fn persist_and_download(
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    emails: &[JmapEmail],
+    query_state: Option<&str>,
+    seam: &JmapSeam,
+    data_dir: &Path,
+) -> Result<(usize, usize), SyncError> {
+    let (new, updated, persisted) =
+        persist_jmap_folder_batch(db, account_id, folder_id, emails, query_state).await?;
+    // `persisted` is in the same order as `emails` (zip pairs them exactly).
+    for (email, persisted) in emails.iter().zip(persisted.iter()) {
+        if !persisted.was_new || email.attachments_meta.is_empty() {
+            continue;
+        }
+        download_attachments(
+            db,
+            account_id,
+            &persisted.local_id,
+            &email.attachments_meta,
+            seam,
+            data_dir,
+        )
+        .await?;
+    }
+    Ok((new, updated))
+}
+
+/// Download one message's attachment blobs into the blob store and persist
+/// the attachment rows. Per-blob failures mark `flags.fetch_error` and never
+/// abort the sync.
+async fn download_attachments(
+    db: &DbPool,
+    account_id: &str,
+    message_id: &str,
+    attachments: &[JmapAttachmentMeta],
+    seam: &JmapSeam,
+    data_dir: &Path,
+) -> Result<(), SyncError> {
+    let mut extracted = Vec::new();
+    for meta in attachments {
+        if meta.size > MAX_ATTACHMENT_DOWNLOAD_BYTES {
+            tracing::warn!(
+                message_id,
+                blob_id = %meta.blob_id,
+                size = meta.size,
+                "skipping oversized JMAP attachment"
+            );
+            super::recovery::mark_message_fetch_error(db, message_id, "attachment too large")
+                .await?;
+            continue;
+        }
+        match seam.download_blob(&meta.blob_id).await {
+            Ok(bytes) => extracted.push(crate::imap::ExtractedAttachment {
+                filename: meta.filename.clone(),
+                content_type: meta.content_type.clone(),
+                data: bytes,
+                content_id: meta.content_id.clone(),
+                is_inline: meta.is_inline,
+            }),
+            Err(error) => {
+                tracing::warn!(message_id, blob_id = %meta.blob_id, %error, "JMAP attachment download failed");
+                super::recovery::mark_message_fetch_error(
+                    db,
+                    message_id,
+                    "attachment download failed",
+                )
+                .await?;
+            }
+        }
+    }
+    if !extracted.is_empty() {
+        super::http::persist_attachments(db, data_dir, account_id, message_id, &extracted).await?;
+    }
+    Ok(())
 }
 
 /// First mailbox of the email that maps to a synced local folder.
