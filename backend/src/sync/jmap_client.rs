@@ -48,6 +48,13 @@ const CHANGES_PAGE_SIZE: usize = 500;
 const CHANGES_MAX_PAGES: usize = 8;
 /// Cap on returned body values (mirrors the IMAP lazy-fetch body cap).
 const MAX_BODY_VALUE_BYTES: usize = 25 * 1024 * 1024;
+/// Requested EventSource ping interval (`ping=30`). `EVENT_SOURCE_WATCHDOG`
+/// must exceed it — keep them coherent if either changes.
+const EVENT_SOURCE_PING_SECS: u32 = 30;
+/// Liveness watchdog on the EventSource stream: no notification within this
+/// window means a dead (half-open) connection — return `StreamEnded` so the
+/// push supervisor reopens the stream.
+const EVENT_SOURCE_WATCHDOG: Duration = Duration::from_secs(90);
 
 // ── Errors ──────────────────────────────────────────────────────────
 
@@ -960,15 +967,36 @@ impl JmapSeam {
     /// and wait for the first mail-relevant state change. The stream itself
     /// has no read timeout — the crate times only the connect, which fixes
     /// the old bug where the 30s request timeout killed the stream cyclically.
+    ///
+    /// Liveness: a half-open connection (NAT drop, no RST) would pend
+    /// `next()` forever, silently killing push for the account, so each wait
+    /// is bounded by `EVENT_SOURCE_WATCHDOG` (3× the requested ping); expiry
+    /// returns `StreamEnded` and the supervisor reopens the stream. The
+    /// crate's parser consumes ping frames invisibly (it exposes no activity
+    /// signal in non-debug builds), so the watchdog measures only yielded
+    /// notifications — a quiet-but-healthy mailbox reconnects once per
+    /// watchdog interval. That churn is harmless (poll sync still covers
+    /// correctness) and bounds the half-open wedge to watchdog + reconnect
+    /// delay.
     pub(crate) async fn wait_for_state_change(&self) -> Result<EventSourceOutcome, JmapError> {
         if self.client.session().event_source_url().is_empty() {
             return Ok(EventSourceOutcome::Unsupported);
         }
         let mut stream = self
             .client
-            .event_source(None::<Vec<DataType>>, false, Some(30), None)
+            .event_source(
+                None::<Vec<DataType>>,
+                false,
+                Some(EVENT_SOURCE_PING_SECS),
+                None,
+            )
             .await?;
-        while let Some(item) = stream.next().await {
+        loop {
+            let item = match tokio::time::timeout(EVENT_SOURCE_WATCHDOG, stream.next()).await {
+                Ok(item) => item,
+                Err(_elapsed) => return Ok(EventSourceOutcome::StreamEnded),
+            };
+            let Some(item) = item else { break };
             match item {
                 Ok(notification) => {
                     if push_implies_sync(&notification) {
@@ -2036,6 +2064,16 @@ mod tests {
             alert_id: "al1".into(),
         });
         assert!(!push_implies_sync(&alert));
+    }
+
+    #[test]
+    fn eventsource_watchdog_outlives_ping_interval() {
+        // The watchdog must outlive the requested ping interval with
+        // headroom, or a healthy stream would be cut between pings.
+        assert!(
+            EVENT_SOURCE_WATCHDOG.as_secs() >= 3 * u64::from(EVENT_SOURCE_PING_SECS),
+            "watchdog {EVENT_SOURCE_WATCHDOG:?} vs ping {EVENT_SOURCE_PING_SECS}s"
+        );
     }
 
     // ── flags push wire shape (Task 6) ──────────────────────────────
