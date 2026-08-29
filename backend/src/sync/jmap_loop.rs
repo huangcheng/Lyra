@@ -411,7 +411,6 @@ const MAX_ATTACHMENT_DOWNLOAD_BYTES: u64 = 25 * 1024 * 1024;
 
 /// Persist one page, then download attachments for newly-inserted messages
 /// (blob bytes land in the content-addressed store under `data_dir`).
-#[allow(clippy::too_many_arguments)]
 async fn persist_and_download(
     db: &DbPool,
     account_id: &str,
@@ -466,6 +465,22 @@ async fn download_attachments(
             continue;
         }
         match seam.download_blob(&meta.blob_id).await {
+            // The crate's `download()` buffers the whole body and trusts the
+            // server-declared `size` — re-check the real byte count.
+            Ok(bytes) if bytes.len() as u64 > MAX_ATTACHMENT_DOWNLOAD_BYTES => {
+                tracing::warn!(
+                    message_id,
+                    blob_id = %meta.blob_id,
+                    size = bytes.len(),
+                    "downloaded JMAP attachment exceeds the size cap; discarding"
+                );
+                super::recovery::mark_message_fetch_error(
+                    db,
+                    message_id,
+                    "attachment exceeds size cap",
+                )
+                .await?;
+            }
             Ok(bytes) => extracted.push(crate::imap::ExtractedAttachment {
                 filename: meta.filename.clone(),
                 content_type: meta.content_type.clone(),
@@ -485,7 +500,24 @@ async fn download_attachments(
         }
     }
     if !extracted.is_empty() {
-        super::http::persist_attachments(db, data_dir, account_id, message_id, &extracted).await?;
+        // The message row and cursor are already committed, and `was_new`
+        // gating means this message is never re-downloaded — a persist failure
+        // would leave a permanent, invisible attachment gap, so flag the row
+        // before propagating the error.
+        if let Err(error) =
+            super::http::persist_attachments(db, data_dir, account_id, message_id, &extracted).await
+        {
+            if let Err(mark_error) = super::recovery::mark_message_fetch_error(
+                db,
+                message_id,
+                "attachment persist failed",
+            )
+            .await
+            {
+                tracing::warn!(message_id, %mark_error, "failed to flag attachment persist failure");
+            }
+            return Err(error);
+        }
     }
     Ok(())
 }
