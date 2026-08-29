@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use jmap_client::client::{Client, Credentials};
 use jmap_client::core::error::MethodErrorType;
 use jmap_client::core::get::GetRequest;
@@ -26,9 +27,10 @@ use jmap_client::core::query_changes::QueryChangesResponse;
 use jmap_client::core::response::{EmailChangesResponse, EmailGetResponse, MailboxGetResponse};
 use jmap_client::core::set::SetErrorType;
 use jmap_client::email::{self, Email, EmailAddress, EmailBodyPart, Property};
+use jmap_client::event_source::PushNotification;
 use jmap_client::identity::Identity;
 use jmap_client::mailbox::{Mailbox, Role};
-use jmap_client::{Get, Set, URI};
+use jmap_client::{DataType, Get, Set, URI};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -280,6 +282,14 @@ pub(crate) struct JmapEmailChanges {
     pub(crate) updated_ids: Vec<String>,
     pub(crate) destroyed_ids: Vec<String>,
     pub(crate) new_state: Option<String>,
+}
+
+/// Outcome of waiting on a JMAP EventSource stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventSourceOutcome {
+    StateChanged,
+    Unsupported,
+    StreamEnded,
 }
 
 impl JmapEmail {
@@ -951,6 +961,31 @@ impl JmapSeam {
             .session()
             .has_capability(URI::Submission.as_ref())
     }
+
+    /// Open the session EventSource (`types=*`, `closeafter=no`, `ping=30`)
+    /// and wait for the first mail-relevant state change. The stream itself
+    /// has no read timeout — the crate times only the connect, which fixes
+    /// the old bug where the 30s request timeout killed the stream cyclically.
+    pub(crate) async fn wait_for_state_change(&self) -> Result<EventSourceOutcome, JmapError> {
+        if self.client.session().event_source_url().is_empty() {
+            return Ok(EventSourceOutcome::Unsupported);
+        }
+        let mut stream = self
+            .client
+            .event_source(None::<Vec<DataType>>, false, Some(30), None)
+            .await?;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(notification) => {
+                    if push_implies_sync(&notification) {
+                        return Ok(EventSourceOutcome::StateChanged);
+                    }
+                }
+                Err(err) => return Err(JmapError::from(err)),
+            }
+        }
+        Ok(EventSourceOutcome::StreamEnded)
+    }
 }
 
 static CLIENT_CACHE: OnceLock<Mutex<HashMap<String, Arc<JmapSeam>>>> = OnceLock::new();
@@ -1232,6 +1267,22 @@ fn mailbox_id_for_role(mailboxes: &[Mailbox<Get>], role: &Role) -> Option<String
         .iter()
         .find(|m| m.role() == *role)
         .and_then(|m| m.id().map(str::to_owned))
+}
+
+/// Whether a push notification carries a mail-relevant state change
+/// (ping frames are already filtered by the crate's SSE parser).
+pub(crate) fn push_implies_sync(notification: &PushNotification) -> bool {
+    match notification {
+        PushNotification::StateChange(changes) => [
+            DataType::Email,
+            DataType::Mailbox,
+            DataType::Thread,
+            DataType::EmailSubmission,
+        ]
+        .iter()
+        .any(|t| changes.has_type(t.clone())),
+        PushNotification::CalendarAlert(_) => false,
+    }
 }
 
 /// Map a crate `Mailbox<Get>`; `None` when the server row has no id.
@@ -1848,5 +1899,35 @@ mod tests {
             Some("i1")
         );
         assert!(pick_identity(&[], "me@example.com").is_none());
+    }
+
+    // ── push classification (Task 5) ────────────────────────────────
+
+    #[test]
+    fn push_state_change_implies_sync() {
+        use jmap_client::event_source::Changes;
+
+        let changes: Changes = serde_json::from_value(serde_json::json!({
+            "id": null,
+            "changes": { "a1": { "Email": "s1", "Mailbox": "m2" } }
+        }))
+        .unwrap();
+        assert!(push_implies_sync(&PushNotification::StateChange(changes)));
+
+        let empty: Changes = serde_json::from_value(serde_json::json!({
+            "id": null,
+            "changes": { "a1": {} }
+        }))
+        .unwrap();
+        assert!(!push_implies_sync(&PushNotification::StateChange(empty)));
+
+        let unrelated: Changes = serde_json::from_value(serde_json::json!({
+            "id": null,
+            "changes": { "a1": { "Quota": "q1" } }
+        }))
+        .unwrap();
+        assert!(!push_implies_sync(&PushNotification::StateChange(
+            unrelated
+        )));
     }
 }

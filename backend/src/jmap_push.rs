@@ -19,10 +19,10 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::entities::mail_account;
-use crate::jmap::{EventSourceOutcome, JmapClient};
 use crate::jobs::{JobPayload, enqueue};
 use crate::scheduler::has_pending_or_running_sync;
 use crate::storage::DbPool;
+use crate::sync::jmap_client::{EventSourceOutcome, JmapError, JmapSeam};
 
 const SUPERVISOR_TICK: Duration = Duration::from_secs(30);
 const RECONNECT_DELAY: Duration = Duration::from_secs(15);
@@ -31,6 +31,7 @@ struct PushAccount {
     id: String,
     user_id: String,
     email_address: String,
+    auth_type: String,
     credential: String,
     jmap_base_url: String,
 }
@@ -130,6 +131,7 @@ async fn list_jmap_push_candidates(db: &DbPool) -> Result<Vec<PushAccount>, sqlx
         mail_account::Column::Id,
         mail_account::Column::UserId,
         mail_account::Column::EmailAddress,
+        mail_account::Column::AuthType,
         mail_account::Column::Credential,
         mail_account::Column::JmapBaseUrl,
     ])
@@ -139,13 +141,14 @@ async fn list_jmap_push_candidates(db: &DbPool) -> Result<Vec<PushAccount>, sqlx
     .and_where(mail_account::Column::ReceiveProtocol.eq("jmap"));
 
     let rows = db.orm().query_all(&stmt).await.map_err(orm_err)?;
-    let tuples: Vec<(String, String, String, String, Option<String>)> = rows
+    let tuples: Vec<(String, String, String, String, String, Option<String>)> = rows
         .iter()
         .map(|row| {
             Ok((
                 row_id(row, "id")?,
                 row_id(row, "user_id")?,
                 row.try_get("", "email_address").map_err(orm_err)?,
+                row.try_get("", "auth_type").map_err(orm_err)?,
                 row.try_get("", "credential").map_err(orm_err)?,
                 row.try_get("", "jmap_base_url").map_err(orm_err)?,
             ))
@@ -154,16 +157,19 @@ async fn list_jmap_push_candidates(db: &DbPool) -> Result<Vec<PushAccount>, sqlx
 
     Ok(tuples
         .into_iter()
-        .filter_map(|(id, user_id, email_address, credential, jmap_base_url)| {
-            let jmap_base_url = jmap_base_url.filter(|u| !u.is_empty())?;
-            Some(PushAccount {
-                id,
-                user_id,
-                email_address,
-                credential,
-                jmap_base_url,
-            })
-        })
+        .filter_map(
+            |(id, user_id, email_address, auth_type, credential, jmap_base_url)| {
+                let jmap_base_url = jmap_base_url.filter(|u| !u.is_empty())?;
+                Some(PushAccount {
+                    id,
+                    user_id,
+                    email_address,
+                    auth_type,
+                    credential,
+                    jmap_base_url,
+                })
+            },
+        )
         .collect())
 }
 
@@ -204,10 +210,7 @@ async fn run_account_push_loop(db: DbPool, account: PushAccount) {
     }
 }
 
-async fn watch_once(
-    db: &DbPool,
-    account: &PushAccount,
-) -> Result<EventSourceOutcome, crate::jmap::JmapError> {
+async fn watch_once(db: &DbPool, account: &PushAccount) -> Result<EventSourceOutcome, JmapError> {
     match has_pending_or_running_sync(db, &account.id).await {
         Ok(true) => {
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -222,10 +225,25 @@ async fn watch_once(
     }
 
     let dek = crate::auth::AuthState::get_user_dek(db, &account.user_id).await?;
-    let password = crate::jmap::decrypt_account_password(&account.credential, &dek)?;
-    let client =
-        JmapClient::discover(&account.jmap_base_url, &account.email_address, &password).await?;
-    client.wait_event_source_state().await
+    let secret = crate::sync::jmap_client::decrypt_account_password(&account.credential, &dek)?;
+    let seam = match JmapSeam::connect_for_account(
+        &account.id,
+        &account.jmap_base_url,
+        &account.email_address,
+        &secret,
+        &account.auth_type,
+    )
+    .await
+    {
+        Ok(seam) => seam,
+        Err(error) => {
+            if error.is_auth() {
+                JmapSeam::evict(&account.id);
+            }
+            return Err(error);
+        }
+    };
+    seam.wait_for_state_change().await
 }
 
 async fn enqueue_sync_if_idle(db: &DbPool, account: &PushAccount) -> Result<(), sqlx::Error> {
