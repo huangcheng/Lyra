@@ -145,8 +145,8 @@ src/
   entities/     ← SeaORM entity per table (schema truth for all queries)
   db_sql.rs     ← Legacy macro layer (transition-only; being removed)
   db_row.rs     ← Legacy row/binding adapters (transition-only)
-  sync/         ← HTTP, IMAP/JMAP loops, persist batches, SMTP send
-  imap.rs / jmap.rs / smtp.rs
+  sync/         ← HTTP, IMAP/JMAP loops, JMAP seam (jmap_client.rs), persist batches, SMTP send
+  imap.rs / smtp.rs
   jobs.rs / scheduler.rs / kernel/
 ```
 

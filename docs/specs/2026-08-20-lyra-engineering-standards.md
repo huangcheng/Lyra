@@ -69,7 +69,7 @@ Rules:
 - **Spec-defined recovery** — Handle standard edge cases explicitly: IMAP `UIDVALIDITY` change → full folder resync; JMAP `cannotCalculateChanges` → full query; SMTP permanent vs transient failures; POP3 `-ERR` vs `+OK`.
 - **Documented exceptions only** — A deliberate deviation from the spec requires a comment in the adapter, an entry in `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md` §13 (compliance checklist), and a test that proves interop with a reference server.
 
-Compliance tracking lives in sync spec §13. `/api/v1` stays protocol-agnostic; standards apply inside `backend/src/imap.rs`, `jmap.rs`, `smtp.rs`, and future `pop3.rs`.
+Compliance tracking lives in sync spec §13. `/api/v1` stays protocol-agnostic; standards apply inside `backend/src/imap.rs`, `smtp.rs`, the JMAP seam (`backend/src/sync/jmap_client.rs`), and future `pop3.rs`.
 
 ## HTTP API (client-agnostic)
 
