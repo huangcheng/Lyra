@@ -212,7 +212,8 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
             <div className="line-clamp-1 text-[13px] font-medium">{mail.subject}</div>
           ) : null}
           <div className="line-clamp-1 text-xs text-muted-foreground">
-            <span className="font-medium">{t(locale, 'mail.replyTo')}:</span> {mail.from.email}
+            <span className="font-medium">{t(locale, 'mail.to')}:</span>{' '}
+            {mail.to[0]?.name ?? mail.to[0]?.email ?? mail.from.email}
           </div>
         </div>
         {mail.date ? (
