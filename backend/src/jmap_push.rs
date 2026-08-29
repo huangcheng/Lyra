@@ -243,7 +243,17 @@ async fn watch_once(db: &DbPool, account: &PushAccount) -> Result<EventSourceOut
             return Err(error);
         }
     };
-    seam.wait_for_state_change().await
+    match seam.wait_for_state_change().await {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            // A token revoked mid-watch 401s the stream too; drop the cached
+            // session so the next reconnect re-discovers with fresh auth.
+            if error.is_auth() {
+                JmapSeam::evict(&account.id);
+            }
+            Err(error)
+        }
+    }
 }
 
 async fn enqueue_sync_if_idle(db: &DbPool, account: &PushAccount) -> Result<(), sqlx::Error> {

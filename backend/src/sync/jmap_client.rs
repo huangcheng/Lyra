@@ -1929,5 +1929,33 @@ mod tests {
         assert!(!push_implies_sync(&PushNotification::StateChange(
             unrelated
         )));
+
+        let thread_only: Changes = serde_json::from_value(serde_json::json!({
+            "id": null,
+            "changes": { "a1": { "Thread": "t1" } }
+        }))
+        .unwrap();
+        assert!(push_implies_sync(&PushNotification::StateChange(
+            thread_only
+        )));
+
+        let submission_only: Changes = serde_json::from_value(serde_json::json!({
+            "id": null,
+            "changes": { "a1": { "EmailSubmission": "es1" } }
+        }))
+        .unwrap();
+        assert!(push_implies_sync(&PushNotification::StateChange(
+            submission_only
+        )));
+
+        // Calendar alerts are never mail-relevant.
+        let alert = PushNotification::CalendarAlert(jmap_client::CalendarAlert {
+            account_id: "a1".into(),
+            calendar_event_id: "ev1".into(),
+            uid: "uid1".into(),
+            recurrence_id: None,
+            alert_id: "al1".into(),
+        });
+        assert!(!push_implies_sync(&alert));
     }
 }
