@@ -840,6 +840,30 @@ pub(crate) async fn folder_id_for_role(
     row.map(|r| row_id(&r, "id")).transpose()
 }
 
+/// The account's first folder by display order — fallback anchor for the
+/// account-level JMAP `email_state` cursor when no inbox-role folder exists
+/// (the `sync_cursor.folder_id` FK just needs *some* folder of the account).
+pub(crate) async fn first_folder_id(
+    db: &DbPool,
+    account_id: &str,
+) -> Result<Option<String>, SyncError> {
+    let mut sel = Sq::select();
+    sel.column(folder::Column::Id)
+        .from(folder::Entity)
+        .and_where(folder::Column::AccountId.eq(id_value(db, account_id)?))
+        .order_by_expr(
+            Expr::col(folder::Column::SortOrder),
+            sea_orm::sea_query::Order::Asc,
+        )
+        .order_by_expr(
+            Expr::col(folder::Column::CreatedAt),
+            sea_orm::sea_query::Order::Asc,
+        )
+        .limit(1);
+    let row = db.orm().query_one(&sel).await.map_err(orm_err)?;
+    row.map(|r| row_id(&r, "id")).transpose()
+}
+
 // ── Message upsert ──────────────────────────────────────────────────
 //
 // Full-text index rows are maintained by migration 0009 triggers on `message`
@@ -1026,6 +1050,10 @@ pub(crate) async fn delete_jmap_messages_by_external_ids(
     account_id: &str,
     external_ids: &[String],
 ) -> Result<usize, SyncError> {
+    // Chunk the IN (...) binds so huge removal sets stay under SQLite's
+    // variable cap (999 on older builds, 32766 on modern ones).
+    const IDS_CHUNK: usize = 1000;
+
     if external_ids.is_empty() {
         return Ok(0);
     }
@@ -1033,29 +1061,33 @@ pub(crate) async fn delete_jmap_messages_by_external_ids(
 
     // Folders whose counts change (collected before the delete; the delete +
     // count refresh are deliberately non-transactional, as persist_attachments).
-    let mut sel = Sq::select();
-    sel.distinct()
-        .column(message::Column::FolderId)
-        .from(message::Entity)
-        .and_where(message::Column::AccountId.eq(account_bind.clone()))
-        .and_where(message::Column::ExternalId.is_in(external_ids.iter().cloned()));
-    let rows = db.orm().query_all(&sel).await.map_err(orm_err)?;
-    let folder_ids: Vec<String> = rows
-        .iter()
-        .map(|r| row_id(r, "folder_id"))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut folder_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut deleted = 0usize;
+    for chunk in external_ids.chunks(IDS_CHUNK) {
+        let mut sel = Sq::select();
+        sel.distinct()
+            .column(message::Column::FolderId)
+            .from(message::Entity)
+            .and_where(message::Column::AccountId.eq(account_bind.clone()))
+            .and_where(message::Column::ExternalId.is_in(chunk.iter().cloned()));
+        let rows = db.orm().query_all(&sel).await.map_err(orm_err)?;
+        for row in &rows {
+            folder_ids.insert(row_id(row, "folder_id")?);
+        }
 
-    let mut del = Sq::delete();
-    del.from_table(message::Entity)
-        .and_where(message::Column::AccountId.eq(account_bind))
-        .and_where(message::Column::ExternalId.is_in(external_ids.iter().cloned()));
-    let res = db.orm().execute(&del).await.map_err(orm_err)?;
-    let deleted = res.rows_affected();
+        let mut del = Sq::delete();
+        del.from_table(message::Entity)
+            .and_where(message::Column::AccountId.eq(account_bind.clone()))
+            .and_where(message::Column::ExternalId.is_in(chunk.iter().cloned()));
+        let res = db.orm().execute(&del).await.map_err(orm_err)?;
+        deleted =
+            deleted.saturating_add(usize::try_from(res.rows_affected()).unwrap_or(usize::MAX));
+    }
 
     for folder_id in &folder_ids {
         update_folder_counts(db, folder_id).await?;
     }
-    Ok(usize::try_from(deleted).unwrap_or(usize::MAX))
+    Ok(deleted)
 }
 
 /// Wire-format for IMAP message identity.
@@ -1551,7 +1583,13 @@ pub(crate) async fn clear_folder_messages_in_tx(
     let mut del_cursors = Sq::delete();
     del_cursors
         .from_table(sync_cursor::Entity)
-        .and_where(sync_cursor::Column::FolderId.eq(folder_bind));
+        .and_where(sync_cursor::Column::FolderId.eq(folder_bind))
+        // This is an IMAP-path wipe (UIDVALIDITY change): folder-scoped
+        // cursors must die with the wiped rows — a deltas-only resume could
+        // never refetch them. Account-level JMAP `email_state` rows merely
+        // ANCHOR on the folder and must survive, or the Email/changes
+        // safety net silently goes dark on an IMAP-fallback wipe.
+        .and_where(sync_cursor::Column::CursorType.ne("email_state"));
     tx_execute(tx, &del_cursors).await?;
     Ok(())
 }

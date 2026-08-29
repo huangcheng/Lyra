@@ -612,6 +612,20 @@ async fn update_account(
         .await
         .map_err(orm_err)?;
 
+    // Credential/host changes invalidate the cached JMAP session (the seam
+    // cache keys on account id but binds base URL, login, and secret).
+    if body.password.is_some()
+        || body.email_address.is_some()
+        || body.imap_host.is_some()
+        || body.imap_port.is_some()
+        || body.imap_security.is_some()
+        || body.smtp_host.is_some()
+        || body.smtp_port.is_some()
+        || body.smtp_security.is_some()
+    {
+        crate::sync::jmap_client::JmapSeam::evict(&id);
+    }
+
     let account = find_account(db, id_bind, user_bind).await?;
     Ok(Json(account))
 }
@@ -624,6 +638,7 @@ async fn delete_account(
 ) -> Result<StatusCode, AccountError> {
     let db = state.db();
 
+    let account_id = id.clone();
     let id = id_value(db, &id)?;
     let user_id = id_value(db, &user_id)?;
     let result = mail_account::Entity::delete_many()
@@ -639,6 +654,9 @@ async fn delete_account(
     if result.rows_affected == 0 {
         return Err(AccountError::NotFound);
     }
+
+    // Drop the cached JMAP session so a re-created account never inherits it.
+    crate::sync::jmap_client::JmapSeam::evict(&account_id);
 
     Ok(StatusCode::NO_CONTENT)
 }

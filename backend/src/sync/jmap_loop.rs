@@ -3,10 +3,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::imap_loop::run_imap_sync;
-use super::jmap_client::{JmapEmail, JmapSeam};
+use super::jmap_client::{JmapEmail, JmapMailbox, JmapSeam};
 use super::store::{
     clear_jmap_cursor, clear_jmap_email_state, delete_jmap_messages_by_external_ids,
-    find_folder_id, folder_id_for_role, get_folder_id, link_jmap_folder_parent,
+    find_folder_id, first_folder_id, folder_id_for_role, get_folder_id, link_jmap_folder_parent,
     load_account_sync_row, load_jmap_cursor, load_jmap_email_state, outcome_from_response,
     persist_jmap_folder_batch, save_jmap_email_state, upsert_jmap_folder,
 };
@@ -114,34 +114,63 @@ pub(crate) async fn run_jmap_sync(
 
     // 2. Account-level Email/changes: keyword/mailbox updates + destroys that
     // per-folder queryChanges cannot see (no membership change).
-    let email_state_anchor = folder_id_for_role(db, account_id, "inbox").await?;
+    //
+    // The account-level state anchors on the inbox-role folder; without one,
+    // fall back to the account's first folder (the `sync_cursor.folder_id` FK
+    // just needs *some* folder of the account).
+    let mut email_state_anchor = folder_id_for_role(db, account_id, "inbox").await?;
+    if email_state_anchor.is_none() {
+        email_state_anchor = first_folder_id(db, account_id).await?;
+        if email_state_anchor.is_some() {
+            tracing::warn!(
+                account_id,
+                "no inbox-role folder; anchoring JMAP email_state on the first folder"
+            );
+        } else {
+            tracing::warn!(
+                account_id,
+                "no folders synced; account-level JMAP Email/changes pipeline disabled"
+            );
+        }
+    }
     let mut new_email_state: Option<String> = None;
-    if let Some(ref anchor) = email_state_anchor
-        && let Some(since) = load_jmap_email_state(db, account_id, anchor).await?
-    {
-        match seam.email_changes(&since).await {
-            Ok(changes) => {
-                removed.extend(changes.destroyed_ids);
-                new_email_state = changes.new_state;
-                let (n, u) = refetch_updated_emails(
-                    db,
-                    account_id,
-                    &seam,
-                    &changes.updated_ids,
-                    &mut refetched,
-                )
-                .await?;
-                total_new += n;
-                total_updated += u;
-            }
-            Err(e) if e.is_stale_query_state() => {
-                tracing::info!(
-                    account_id,
-                    "JMAP Email state expired; clearing email_state cursor"
-                );
-                clear_jmap_email_state(db, account_id, anchor).await?;
-            }
-            Err(e) => return Err(e.into()),
+    if let Some(ref anchor) = email_state_anchor {
+        match load_jmap_email_state(db, account_id, anchor).await? {
+            Some(since) => match seam.email_changes(&since).await {
+                Ok(changes) => {
+                    removed.extend(changes.destroyed_ids);
+                    new_email_state = changes.new_state;
+                    let (n, u) = refetch_updated_emails(
+                        db,
+                        account_id,
+                        &seam,
+                        &changes.updated_ids,
+                        &mut refetched,
+                    )
+                    .await?;
+                    total_new += n;
+                    total_updated += u;
+                }
+                Err(e) if e.is_stale_query_state() => {
+                    tracing::info!(
+                        account_id,
+                        "JMAP Email state expired; clearing email_state cursor"
+                    );
+                    clear_jmap_email_state(db, account_id, anchor).await?;
+                    // Re-seed immediately: otherwise a quiet account (no folder
+                    // fetches anything this run) would leave the account-level
+                    // safety net dark — keyword updates stop flowing and a
+                    // message removed from one of several mailboxes could be
+                    // hard-deleted locally while still on the server.
+                    seed_email_state(&seam, &mailboxes, &mut new_email_state).await?;
+                }
+                // tooManyChanges currently fails the whole run into the IMAP
+                // fallback; it could later be handled as clear-cursor + reseed.
+                Err(e) => return Err(e.into()),
+            },
+            // No cursor ever saved (first sync, or a cleared anchor): seed the
+            // state now so Email/changes can resume from it on the next run.
+            None => seed_email_state(&seam, &mailboxes, &mut new_email_state).await?,
         }
     }
 
@@ -225,6 +254,8 @@ pub(crate) async fn run_jmap_sync(
                 total_new += n;
                 total_updated += u;
             }
+            // tooManyChanges currently fails the whole run into the IMAP
+            // fallback; it could later be handled as clear-cursor + full query.
             Err(e) => return Err(e.into()),
         }
     }
@@ -236,6 +267,10 @@ pub(crate) async fn run_jmap_sync(
     let total_deleted = delete_jmap_messages_by_external_ids(db, account_id, &deletions).await?;
 
     // 5. Commit the account-level Email state last.
+    // WARNING: committing it earlier (or per-folder) breaks the deletion
+    // safety net — destroys from Email/changes must first be validated
+    // against this run's refetches (step 4) before the state advances past
+    // them, or a move could be misread as a deletion.
     if let (Some(ref anchor), Some(ref state)) = (email_state_anchor, new_email_state) {
         save_jmap_email_state(db, account_id, anchor, state).await?;
     }
@@ -293,6 +328,27 @@ async fn full_folder_query(
     Ok((new, updated))
 }
 
+/// Seed the account-level `Email` state from a limit-1 `Email/query` page of
+/// the first mailbox. Even an empty mailbox yields the batched `Email/get`
+/// response's `state` (a required field per RFC 8621), so the seed works on
+/// quiet accounts. On the rare `maxCallsInRequest < 2` split path an empty
+/// page carries no state; the cursor then stays unset and the seed retries
+/// next run.
+async fn seed_email_state(
+    seam: &JmapSeam,
+    mailboxes: &[JmapMailbox],
+    new_email_state: &mut Option<String>,
+) -> Result<(), SyncError> {
+    let Some(first) = mailboxes.first() else {
+        return Ok(());
+    };
+    let page = seam.query_emails_page(&first.id, 0, 1).await?;
+    if new_email_state.is_none() {
+        *new_email_state = page.email_state;
+    }
+    Ok(())
+}
+
 /// Re-fetch `Email/changes`-updated messages and upsert them under the folder
 /// of their (first locally-known) mailbox — this is how server-side flag and
 /// mailbox changes reach local rows between full queries.
@@ -325,6 +381,11 @@ async fn refetch_updated_emails(
 }
 
 /// First mailbox of the email that maps to a synced local folder.
+///
+/// A message in several mailboxes lands under the first matching map key
+/// (JSON object iteration order is arbitrary). A move-out only updates the
+/// row's `folder_id`; the vacated folder's counts self-heal on its next
+/// persisted batch.
 async fn resolve_jmap_email_folder(
     db: &DbPool,
     account_id: &str,

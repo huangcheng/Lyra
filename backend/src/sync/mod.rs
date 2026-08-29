@@ -1045,8 +1045,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Save cursor
+        // Save cursor (IMAP folder cursor) and an account-level JMAP
+        // `email_state` row anchored on the same folder.
         save_cursor(&as_db(&pool), &account_id, &folder_id, "imap", 100, 1, 0)
+            .await
+            .unwrap();
+        super::store::save_jmap_email_state(&as_db(&pool), &account_id, &folder_id, "es-1")
             .await
             .unwrap();
 
@@ -1062,13 +1066,24 @@ mod tests {
             .unwrap();
         assert_eq!(msg_count, 0);
 
-        let cursor_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM sync_cursor WHERE folder_id = ?")
-                .bind(&folder_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        // Folder-scoped cursors are wiped with the messages…
+        let cursor_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_cursor WHERE folder_id = ? AND cursor_type != 'email_state'",
+        )
+        .bind(&folder_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(cursor_count, 0);
+        // …but the account-level JMAP `email_state` anchored here survives:
+        // an IMAP-path wipe must not disable the Email/changes safety net.
+        assert_eq!(
+            super::store::load_jmap_email_state(&as_db(&pool), &account_id, &folder_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("es-1")
+        );
     }
 
     #[tokio::test]
@@ -1749,6 +1764,86 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_id_for_role_honors_role_override() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        upsert_folder(&as_db(&pool), &account_id, "Archive", Some("/"), &[])
+            .await
+            .unwrap();
+        let archive = get_folder_id(&as_db(&pool), &account_id, "Archive")
+            .await
+            .unwrap();
+
+        // Base role resolves while no override exists.
+        assert_eq!(
+            super::store::folder_id_for_role(&as_db(&pool), &account_id, "archive")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(archive.as_str())
+        );
+
+        // The override REPLACES the effective role (COALESCE branch): the
+        // folder now matches the override and no longer its base role.
+        sqlx::query("UPDATE folder SET role_override = 'trash' WHERE id = ?")
+            .bind(&archive)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::store::folder_id_for_role(&as_db(&pool), &account_id, "trash")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(archive.as_str())
+        );
+        assert!(
+            super::store::folder_id_for_role(&as_db(&pool), &account_id, "archive")
+                .await
+                .unwrap()
+                .is_none(),
+            "overridden base role must no longer match"
+        );
+        // INBOX's own role is unaffected.
+        assert!(
+            super::store::folder_id_for_role(&as_db(&pool), &account_id, "inbox")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn first_folder_id_falls_back_to_any_folder() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        assert!(
+            super::store::first_folder_id(&as_db(&pool), &account_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "no folders → no anchor"
+        );
+        upsert_folder(&as_db(&pool), &account_id, "Notes", Some("/"), &[])
+            .await
+            .unwrap();
+        let notes = get_folder_id(&as_db(&pool), &account_id, "Notes")
+            .await
+            .unwrap();
+        assert_eq!(
+            super::store::first_folder_id(&as_db(&pool), &account_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(notes.as_str()),
+            "no inbox-role folder → first folder anchors"
         );
     }
 }

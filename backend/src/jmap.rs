@@ -1,8 +1,11 @@
-//! JMAP protocol adapter.
+//! JMAP protocol adapter (legacy hand-rolled transport).
 //!
-//! Implements a JMAP HTTP client for session discovery, mailbox sync,
-//! Email/query + Email/get, and EmailSubmission send when the session
-//! advertises `urn:ietf:params:jmap:submission`.
+//! What remains here: session discovery (`JmapClient::discover`), mailbox
+//! listing, draft/destroy/move via `Email/set`, `EmailSubmission` send when
+//! the session advertises `urn:ietf:params:jmap:submission`, blob upload, and
+//! the EventSource push probe. Mailbox sync (`Email/query` + `Email/get`,
+//! `Email/changes`/`Email/queryChanges`) moved to the crate-backed seam in
+//! `sync::jmap_client`.
 //!
 //! See `docs/specs/2026-08-20-lyra-sync-and-protocols-spec.md` §6.
 

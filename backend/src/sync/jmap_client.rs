@@ -646,10 +646,13 @@ impl JmapSeam {
                 responses.len()
             )));
         }
-        let mut get_resp = responses.remove(1).unwrap_get_email()?;
+        // Unwrap the query FIRST: when the query fails, the get's `/ids`
+        // result reference fails too, and unwrapping the get first would
+        // surface only its `invalidResultReference`, masking the root error.
         let mut query_resp = responses.remove(0).unwrap_query_email()?;
+        let mut get_resp = responses.remove(0).unwrap_get_email()?;
         let email_state = get_resp.take_state();
-        let emails = get_resp.take_list().iter().map(map_email).collect();
+        let emails = get_resp.take_list().iter().filter_map(map_email).collect();
         Ok(EmailPage {
             ids: query_resp.take_ids(),
             emails,
@@ -688,9 +691,11 @@ impl JmapSeam {
     ) -> Result<JmapEmailChanges, JmapError> {
         let mut updated_ids = Vec::new();
         let mut destroyed_ids = Vec::new();
-        let mut new_state = None;
+        // `since` always ends at the latest page's state (the loop runs at
+        // least once), so `new_state` is just its final value.
         let mut since = since_state.to_owned();
-        for _page in 0..CHANGES_MAX_PAGES {
+        let mut pages = 0usize;
+        loop {
             let mut request = self.client.build();
             request
                 .changes_email(since.clone())
@@ -699,15 +704,25 @@ impl JmapSeam {
             updated_ids.extend(resp.take_updated());
             destroyed_ids.extend(resp.take_destroyed());
             since = resp.take_new_state();
-            new_state = Some(since.clone());
             if !resp.has_more_changes() {
+                break;
+            }
+            pages += 1;
+            if pages >= CHANGES_MAX_PAGES {
+                // The state still advances page by page, so the remaining
+                // changes flow in on the next sync — this is a backlog
+                // warning, not data loss.
+                tracing::warn!(
+                    "Email/changes still hasMoreChanges after {CHANGES_MAX_PAGES} pages; \
+                     resuming from the latest state next sync"
+                );
                 break;
             }
         }
         Ok(JmapEmailChanges {
             updated_ids,
             destroyed_ids,
-            new_state,
+            new_state: Some(since),
         })
     }
 
@@ -728,7 +743,7 @@ impl JmapSeam {
         }
         let mut resp = request.send_single::<EmailGetResponse>().await?;
         let state = resp.take_state();
-        let emails = resp.take_list().iter().map(map_email).collect();
+        let emails = resp.take_list().iter().filter_map(map_email).collect();
         Ok((emails, Some(state)))
     }
 
@@ -756,7 +771,11 @@ fn lock_cache() -> MutexGuard<'static, HashMap<String, Arc<JmapSeam>>> {
 ///
 /// `keywords`/`mailbox_ids` keep the old DTO shape (JSON object with `true`
 /// values); the crate exposes only set keys, which is the same information.
-fn map_email(email: &Email<Get>) -> JmapEmail {
+///
+/// Returns `None` for id-less emails: collapsing them onto `external_id = ""`
+/// would make distinct server rows upsert onto each other.
+fn map_email(email: &Email<Get>) -> Option<JmapEmail> {
+    let id = email.id()?;
     let keywords = email.keywords();
     let keywords = if keywords.is_empty() {
         None
@@ -779,8 +798,8 @@ fn map_email(email: &Email<Get>) -> JmapEmail {
                 .collect(),
         ))
     };
-    JmapEmail {
-        id: email.id().unwrap_or_default().to_owned(),
+    Some(JmapEmail {
+        id: id.to_owned(),
         blob_id: email.blob_id().map(str::to_owned),
         thread_id: email.thread_id().map(str::to_owned),
         mailbox_ids,
@@ -807,7 +826,7 @@ fn map_email(email: &Email<Get>) -> JmapEmail {
         has_attachment: Some(email.has_attachment()),
         attachments: None, // superseded by typed attachment meta (Task 3)
         preview: email.preview().map(str::to_owned),
-    }
+    })
 }
 
 fn map_addresses(addrs: &[EmailAddress]) -> Vec<JmapEmailAddress> {
@@ -1171,7 +1190,7 @@ mod tests {
         }))
         .unwrap();
 
-        let mapped = map_email(&crate_email);
+        let mapped = map_email(&crate_email).expect("email with id maps");
         assert_eq!(mapped.id, "em1");
         assert_eq!(mapped.thread_id.as_deref(), Some("th1"));
         assert!(mapped.is_seen());
@@ -1202,9 +1221,18 @@ mod tests {
     fn map_email_empty_keywords_stay_absent() {
         let crate_email: Email<Get> =
             serde_json::from_value(serde_json::json!({ "id": "em2", "keywords": {} })).unwrap();
-        let mapped = map_email(&crate_email);
+        let mapped = map_email(&crate_email).expect("email with id maps");
         assert!(!mapped.is_seen());
         assert!(mapped.keywords.is_none());
+    }
+
+    #[test]
+    fn map_email_skips_idless_emails() {
+        // An id-less row must not collapse onto external_id = "" and upsert
+        // over unrelated messages.
+        let idless: Email<Get> =
+            serde_json::from_value(serde_json::json!({ "subject": "no id" })).unwrap();
+        assert!(map_email(&idless).is_none());
     }
 
     #[test]
