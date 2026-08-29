@@ -24,7 +24,9 @@ use jmap_client::core::error::MethodErrorType;
 use jmap_client::core::get::GetRequest;
 use jmap_client::core::query::{QueryRequest, QueryResponse};
 use jmap_client::core::query_changes::QueryChangesResponse;
-use jmap_client::core::response::{EmailChangesResponse, EmailGetResponse, MailboxGetResponse};
+use jmap_client::core::response::{
+    EmailChangesResponse, EmailGetResponse, EmailSetResponse, MailboxGetResponse,
+};
 use jmap_client::core::set::SetErrorType;
 use jmap_client::email::{self, Email, EmailAddress, EmailBodyPart, Property};
 use jmap_client::event_source::PushNotification;
@@ -59,6 +61,8 @@ pub enum JmapError {
     #[error("authentication failed: {0}")]
     Authentication(String),
     /// Legacy wire-level method error (hand-rolled transport; pruned in Task 7).
+    // Still matched by `is_stale_query_state` and constructed in tests.
+    #[allow(dead_code)]
     #[error("JMAP method error: {code} — {description}")]
     Method { code: String, description: String },
     #[error("crypto error: {0}")]
@@ -577,7 +581,6 @@ impl JmapSeam {
     }
 
     /// Uncached connect (account probe before the account row exists).
-    #[allow(dead_code)] // account-probe wiring lands in a later task
     pub(crate) async fn connect_ephemeral(
         base_url: &str,
         email: &str,
@@ -986,6 +989,79 @@ impl JmapSeam {
         }
         Ok(EventSourceOutcome::StreamEnded)
     }
+
+    /// Push read/starred flags: one `Email/set` update patching the
+    /// `$seen`/`$flagged` keywords. `None` flags are left untouched.
+    pub(crate) async fn set_email_keywords(
+        &self,
+        email_id: &str,
+        is_read: Option<bool>,
+        is_starred: Option<bool>,
+    ) -> Result<(), JmapError> {
+        if is_read.is_none() && is_starred.is_none() {
+            return Ok(());
+        }
+        let mut request = self.client.build();
+        {
+            let set = request.set_email();
+            fill_keyword_update(set.update(email_id), is_read, is_starred);
+        }
+        let mut resp = request.send_single::<EmailSetResponse>().await?;
+        resp.updated(email_id)?; // notUpdated surfaces here
+        Ok(())
+    }
+
+    /// Move an email to exactly these mailboxes: full `mailboxIds`
+    /// replacement (RFC 8621 §4.4).
+    pub(crate) async fn set_email_mailboxes(
+        &self,
+        email_id: &str,
+        mailbox_ids: &[String],
+    ) -> Result<(), JmapError> {
+        if mailbox_ids.is_empty() {
+            return Err(JmapError::InvalidResponse(
+                "move requires at least one destination mailbox".into(),
+            ));
+        }
+        self.client
+            .email_set_mailboxes(email_id, mailbox_ids.iter().cloned())
+            .await?;
+        Ok(())
+    }
+
+    /// Create a draft Email (no submission) in the Drafts mailbox; returns
+    /// the server id.
+    pub(crate) async fn create_draft(
+        &self,
+        outbound: &OutboundMessage,
+    ) -> Result<String, JmapError> {
+        let mailboxes = self.list_mailboxes().await?;
+        let drafts_id = mailboxes
+            .iter()
+            .find(|m| m.role.as_deref() == Some("drafts"))
+            .map(|m| m.id.clone())
+            .ok_or_else(|| {
+                JmapError::InvalidResponse("no drafts mailbox on this account".into())
+            })?;
+        let mut request = self.client.build();
+        {
+            let set = request.set_email();
+            fill_outbound_email(
+                set.create_with_id("draft"),
+                outbound,
+                std::slice::from_ref(&drafts_id),
+                &[],
+            );
+        }
+        let mut resp = request.send_single::<EmailSetResponse>().await?;
+        let mut created = resp.created("draft")?;
+        Ok(created.take_id())
+    }
+
+    /// Destroy an Email server-side (draft cleanup after send/discard).
+    pub(crate) async fn destroy_email(&self, email_id: &str) -> Result<(), JmapError> {
+        Ok(self.client.email_destroy(email_id).await?)
+    }
 }
 
 static CLIENT_CACHE: OnceLock<Mutex<HashMap<String, Arc<JmapSeam>>>> = OnceLock::new();
@@ -1282,6 +1358,17 @@ pub(crate) fn push_implies_sync(notification: &PushNotification) -> bool {
         .iter()
         .any(|t| changes.has_type(t.clone())),
         PushNotification::CalendarAlert(_) => false,
+    }
+}
+
+/// Fill an `Email/set` update with keyword patches for read/starred.
+/// `is_read = true` sets `$seen`; `is_starred = true` sets `$flagged`.
+fn fill_keyword_update(email: &mut Email<Set>, is_read: Option<bool>, is_starred: Option<bool>) {
+    if let Some(read) = is_read {
+        email.keyword("$seen", read);
+    }
+    if let Some(star) = is_starred {
+        email.keyword("$flagged", star);
     }
 }
 
@@ -1957,5 +2044,27 @@ mod tests {
             alert_id: "al1".into(),
         });
         assert!(!push_implies_sync(&alert));
+    }
+
+    // ── flags push wire shape (Task 6) ──────────────────────────────
+
+    #[test]
+    fn keyword_update_serializes_seen_and_flagged_patch() {
+        let mut req = SetRequest::<Email<Set>>::new(RequestParams::new("acc", Method::SetEmail, 0));
+        fill_keyword_update(req.update("em1"), Some(true), Some(false));
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["update"]["em1"]["keywords/$seen"], true);
+        assert_eq!(json["update"]["em1"]["keywords/$flagged"], false);
+    }
+
+    #[test]
+    fn keyword_update_skips_absent_flags() {
+        let mut req = SetRequest::<Email<Set>>::new(RequestParams::new("acc", Method::SetEmail, 0));
+        fill_keyword_update(req.update("em1"), None, Some(true));
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json["update"]["em1"],
+            serde_json::json!({ "keywords/$flagged": true })
+        );
     }
 }

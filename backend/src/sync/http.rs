@@ -1597,12 +1597,12 @@ pub(crate) async fn connect_imap_for_account(
     Ok((client, protocol))
 }
 
-/// Connect a JMAP client for an account (discover session, basic auth).
+/// Connect the cached JMAP seam for an account (discovers on cache miss).
 pub(crate) async fn connect_jmap_for_account(
     db: &DbPool,
     user_id: &str,
     account_id: &str,
-) -> Result<crate::jmap::JmapClient, SyncError> {
+) -> Result<std::sync::Arc<crate::sync::jmap_client::JmapSeam>, SyncError> {
     let (dek, credential_json) =
         crate::auth::AuthState::get_user_dek_and_credential(db, user_id, account_id)
             .await
@@ -1619,6 +1619,10 @@ pub(crate) async fn connect_jmap_for_account(
             Expr::col(mail_account::Column::EmailAddress),
             Alias::new("email_address"),
         )
+        .expr_as(
+            Expr::col(mail_account::Column::AuthType),
+            Alias::new("auth_type"),
+        )
         .from(mail_account::Entity)
         .and_where(Expr::col(mail_account::Column::Id).eq(acct_value))
         .and_where(Expr::col(mail_account::Column::UserId).eq(user_value))
@@ -1629,10 +1633,18 @@ pub(crate) async fn connect_jmap_for_account(
 
     let jmap_base_url: Option<String> = row.try_get("", "jmap_base_url").map_err(orm_err)?;
     let email_address: String = row.try_get("", "email_address").map_err(orm_err)?;
+    let auth_type: String = row.try_get("", "auth_type").map_err(orm_err)?;
     let base_url = jmap_base_url
         .ok_or_else(|| SyncError::InvalidInput("JMAP base URL not configured".into()))?;
-    let password = crate::jmap::decrypt_account_password(&credential_json, &dek)?;
-    Ok(crate::jmap::JmapClient::discover(&base_url, &email_address, &password).await?)
+    let password = crate::sync::jmap_client::decrypt_account_password(&credential_json, &dek)?;
+    Ok(crate::sync::jmap_client::JmapSeam::connect_for_account(
+        account_id,
+        &base_url,
+        &email_address,
+        &password,
+        &auth_type,
+    )
+    .await?)
 }
 
 /// GET /api/v1/messages/{id} — return one message; lazily fetch IMAP body if missing.
@@ -1877,7 +1889,7 @@ async fn maybe_fill_imap_body(
     Ok(())
 }
 
-/// PATCH /api/v1/messages/{id} — update read/starred flags (IMAP STORE when possible).
+/// PATCH /api/v1/messages/{id} — update read/starred flags (IMAP STORE / JMAP Email\set keywords).
 pub(crate) async fn patch_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
@@ -1915,6 +1927,21 @@ pub(crate) async fn patch_message(
             } else if !is_starred && row.is_starred {
                 client.remove_flags(uid, &["\\Flagged"]).await?;
             }
+        }
+    } else if row.protocol == "jmap" && (body.is_read.is_some() || body.is_starred.is_some()) {
+        let email_id = row
+            .external_id
+            .as_deref()
+            .ok_or_else(|| SyncError::InvalidInput("JMAP message has no server id".into()))?;
+        let seam = connect_jmap_for_account(db, &user_id, &row.account_id).await?;
+        if let Err(err) = seam
+            .set_email_keywords(email_id, body.is_read, body.is_starred)
+            .await
+        {
+            if err.is_auth() {
+                crate::sync::jmap_client::JmapSeam::evict(&row.account_id);
+            }
+            return Err(err.into());
         }
     }
 
@@ -2316,11 +2343,11 @@ pub(crate) async fn save_draft(
             })))
         }
         "jmap" => {
-            let client = connect_jmap_for_account(db, &user_id, &body.account_id).await?;
-            let server_id = client.create_draft(&outbound).await?;
+            let seam = connect_jmap_for_account(db, &user_id, &body.account_id).await?;
+            let server_id = seam.create_draft(&outbound).await?;
             if let Some(old) = &old {
                 if let Some(ext) = old.external_id.as_deref() {
-                    let _ = client.destroy_email(ext).await;
+                    let _ = seam.destroy_email(ext).await;
                 }
                 soft_delete_message_row(db, &old.id).await?;
                 update_folder_counts(db, &old.folder_id).await?;
@@ -2363,8 +2390,8 @@ pub(crate) async fn discard_draft(
                 .external_id
                 .as_deref()
                 .ok_or_else(|| SyncError::InvalidInput("JMAP draft has no server id".into()))?;
-            let client = connect_jmap_for_account(db, &user_id, &row.account_id).await?;
-            client.destroy_email(email_id).await?;
+            let seam = connect_jmap_for_account(db, &user_id, &row.account_id).await?;
+            seam.destroy_email(email_id).await?;
         }
         other => {
             return Err(SyncError::InvalidInput(format!(
@@ -2542,8 +2569,8 @@ async fn apply_message_move(
             let mailbox_id = dest_external.clone().ok_or_else(|| {
                 SyncError::InvalidInput("JMAP target folder has no server id".into())
             })?;
-            let client = connect_jmap_for_account(db, user_id, &row.account_id).await?;
-            client.set_email_mailboxes(email_id, &[mailbox_id]).await?;
+            let seam = connect_jmap_for_account(db, user_id, &row.account_id).await?;
+            seam.set_email_mailboxes(email_id, &[mailbox_id]).await?;
         }
         other => {
             return Err(SyncError::InvalidInput(format!(

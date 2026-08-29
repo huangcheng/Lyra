@@ -380,14 +380,15 @@ async fn create_account(
         body.jmap_base_url.as_deref(),
         &body.email_address,
     );
+    let auth_type = body.auth_type.unwrap_or_else(|| "password".into());
     let send_protocol = choose_send_protocol(
         &protocol,
         jmap_base_url.as_deref(),
         &body.email_address,
         &body.password,
+        &auth_type,
     )
     .await;
-    let auth_type = body.auth_type.unwrap_or_else(|| "password".into());
     let id_bind = id_value(db, &id)?;
     let user_bind = id_value(db, &user_id)?;
 
@@ -681,11 +682,16 @@ fn resolve_jmap_base_url(
 }
 
 /// Prefer JMAP EmailSubmission when the session advertises it; otherwise SMTP.
+///
+/// The probe is a session connect + capability check: `jmap-client` 0.4.2
+/// cannot emit `Core/echo` (no Arguments variant), and the connect performs
+/// the same authenticated round trip the retired probe did.
 async fn choose_send_protocol(
     protocol: &str,
     jmap_base_url: Option<&str>,
     email: &str,
     password: &str,
+    auth_type: &str,
 ) -> String {
     if protocol != "jmap" {
         return "smtp".into();
@@ -693,8 +699,10 @@ async fn choose_send_protocol(
     let Some(base) = jmap_base_url else {
         return "smtp".into();
     };
-    match crate::jmap::JmapClient::discover(base, email, password).await {
-        Ok(client) if client.supports_submission() => {
+    match crate::sync::jmap_client::JmapSeam::connect_ephemeral(base, email, password, auth_type)
+        .await
+    {
+        Ok(seam) if seam.supports_submission() => {
             tracing::info!(%email, "JMAP submission capability present; send_protocol=jmap");
             "jmap".into()
         }
