@@ -48,7 +48,9 @@ pub enum OAuthConfigError {
     #[error("parse OAuth config {path}: {source}")]
     Parse {
         path: PathBuf,
-        source: toml::de::Error,
+        // Boxed: toml::de::Error is large (span + message); keeps
+        // Result<_, OAuthConfigError> small (clippy::result_large_err).
+        source: Box<toml::de::Error>,
     },
     #[error("OAuth provider {provider}: client_id must not be empty")]
     EmptyClientId { provider: String },
@@ -174,7 +176,7 @@ fn parse_oauth_file(path: &Path) -> Result<HashMap<String, ProviderCredentials>,
     let file: OAuthProvidersFile =
         toml::from_str(&raw).map_err(|source| OAuthConfigError::Parse {
             path: path.to_path_buf(),
-            source,
+            source: Box::new(source),
         })?;
     for (provider, creds) in &file.providers {
         if creds.client_id.trim().is_empty() {
