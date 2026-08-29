@@ -43,7 +43,17 @@ impl SendPlugin for JmapSendPlugin {
         )
         .await
         .map(|_| ())
-        .map_err(jmap_send_err)
+        .map_err(|err| {
+            // Auth failures poison the cached session (the crate bakes
+            // credentials in at connect and never self-recovers from 401);
+            // drop it so the next send reconnects with fresh credentials.
+            if let crate::sync::SyncError::Jmap(ref jmap) = err
+                && jmap.is_auth()
+            {
+                crate::sync::jmap_client::JmapSeam::evict(account_id);
+            }
+            jmap_send_err(err)
+        })
     }
 }
 

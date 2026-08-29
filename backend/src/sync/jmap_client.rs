@@ -845,8 +845,11 @@ impl JmapSeam {
                 responses.len()
             )));
         }
-        let mut sub_resp = responses.remove(1).unwrap_set_email_submission()?;
+        // Unwrap Email/set FIRST (symmetry with query_emails_page): when it
+        // fails, the submission's `#draft` reference fails too, and unwrapping
+        // the submission first would mask the root error.
         let mut email_resp = responses.remove(0).unwrap_set_email()?;
+        let mut sub_resp = responses.remove(0).unwrap_set_email_submission()?;
         // notCreated surfaces here as Error::Set (→ JmapError::Client).
         email_resp.created("draft")?;
         let mut submission = sub_resp.created("sub")?;
@@ -902,8 +905,10 @@ impl JmapSeam {
                 responses.len()
             )));
         }
-        let mut sub_resp = responses.remove(1).unwrap_set_email_submission()?;
+        // Unwrap Email/import FIRST: the submission's `#{create_id}` reference
+        // fails with it and would otherwise mask the root error.
         let mut import_resp = responses.remove(0).unwrap_import_email()?;
+        let mut sub_resp = responses.remove(0).unwrap_set_email_submission()?;
         import_resp.created(&import_create_id)?;
         let mut submission = sub_resp.created("sub")?;
         Ok(submission.take_id())
@@ -923,7 +928,13 @@ impl JmapSeam {
             let blob_id = self
                 .client
                 .upload(None, bytes, Some(att.content_type.as_str()))
-                .await?
+                .await
+                // Name the file like the decode error above; the enum has no
+                // transient string variant, and the legacy send path used
+                // InvalidResponse for upload failures too.
+                .map_err(|e| {
+                    JmapError::InvalidResponse(format!("attachment {}: {e}", att.filename))
+                })?
                 .take_blob_id();
             uploaded.push(UploadedAttachment {
                 blob_id,
