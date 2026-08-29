@@ -119,6 +119,23 @@
   }
 }
 
+/* Thin, quiet scrollbars in both themes — track stays invisible, thumb is a
+   hairline-strength gray so panes read as flat paper. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ring);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

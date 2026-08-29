@@ -74,11 +74,11 @@ function UnifiedRow({ folder, active }: { folder: UnifiedFolder; active: boolean
       type="button"
       onClick={() => selectUnifiedRole(folder.role)}
       className={cn(
-        'flex h-8 w-full items-center gap-2 rounded-[7px] px-2.5 text-left text-[13px]',
-        active ? 'bg-accent' : 'hover:bg-accent/60',
+        'flex h-8 w-full items-center gap-2 rounded-[7px] border px-2.5 text-left text-[13px]',
+        active ? 'border-input bg-card shadow-whisper' : 'border-transparent hover:bg-accent/60',
       )}
     >
-      <Icon className="size-4 shrink-0" />
+      <Icon className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')} />
       <span className="truncate">{t(locale, `mail.folder.${folder.role}`)}</span>
       <UnreadCount count={folder.unreadCount} />
     </button>
@@ -109,8 +109,8 @@ function CustomFolderBranch({
     <div>
       <div
         className={cn(
-          'flex items-center rounded-[7px]',
-          active ? 'bg-accent' : 'hover:bg-accent/60',
+          'flex items-center rounded-[7px] border',
+          active ? 'border-input bg-card shadow-whisper' : 'border-transparent hover:bg-accent/60',
         )}
         style={{ marginLeft: depth * 16 }}
       >
@@ -138,7 +138,9 @@ function CustomFolderBranch({
           className="flex h-8 min-w-0 flex-1 items-center gap-2 pr-2.5 text-left text-[13px]"
           onClick={() => selectAccountFolder(accountId, node.id)}
         >
-          <Folder className="size-4 shrink-0" />
+          <Folder
+            className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')}
+          />
           <span className="truncate">{node.title}</span>
           {node.label ? (
             <span className="ml-auto text-[11.5px] tabular-nums text-muted-foreground">
@@ -231,8 +233,10 @@ function AccountSection({
               <div key={folder.id}>
                 <div
                   className={cn(
-                    'flex items-center rounded-[7px]',
-                    active ? 'bg-accent' : 'hover:bg-accent/60',
+                    'flex items-center rounded-[7px] border',
+                    active
+                      ? 'border-input bg-card shadow-whisper'
+                      : 'border-transparent hover:bg-accent/60',
                   )}
                 >
                   {hasChildren ? (
@@ -261,7 +265,12 @@ function AccountSection({
                     onClick={() => selectAccountFolder(account.id, folder.id)}
                     className="flex h-8 min-w-0 flex-1 items-center gap-2 pr-2.5 text-left text-[13px]"
                   >
-                    <Icon className="size-4 shrink-0" />
+                    <Icon
+                      className={cn(
+                        'size-4 shrink-0',
+                        active ? 'text-foreground' : 'text-ter-foreground',
+                      )}
+                    />
                     <span className="truncate">{t(locale, `mail.folder.${role}`)}</span>
                     <UnreadCount count={folder.unreadCount} />
                   </button>
@@ -318,8 +327,10 @@ function CollapsedFolders({ unifiedFolders }: { unifiedFolders: UnifiedFolder[] 
                 type="button"
                 onClick={() => selectUnifiedRole(folder.role)}
                 className={cn(
-                  'flex h-9 w-9 items-center justify-center rounded-[7px]',
-                  active ? 'bg-accent' : 'hover:bg-accent/60',
+                  'flex h-9 w-9 items-center justify-center rounded-[7px] border',
+                  active
+                    ? 'border-input bg-card text-foreground shadow-whisper'
+                    : 'border-transparent text-ter-foreground hover:bg-accent/60 hover:text-foreground',
                 )}
               >
                 <Icon className="h-4 w-4" />
