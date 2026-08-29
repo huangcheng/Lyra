@@ -175,7 +175,7 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
           {!mail.isRead ? <span className="size-1.5 rounded-full bg-unread" aria-hidden /> : null}
         </span>
         <Avatar className="h-7 w-7 shrink-0">
-          <AvatarFallback className="bg-accent text-[11px] text-foreground">
+          <AvatarFallback className="bg-muted text-[11px] text-foreground">
             {getInitials(fromLabel)}
           </AvatarFallback>
         </Avatar>
@@ -275,10 +275,9 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
           </div>
         ) : bodyLoading && !mail.bodyHtml && !mail.bodyText ? (
           <div className="space-y-3 py-1" aria-hidden>
-            <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
-            <div className="h-4 w-full animate-pulse rounded bg-muted" />
-            <div className="h-4 w-5/6 animate-pulse rounded bg-muted" />
-            <div className="h-32 w-full animate-pulse rounded bg-muted" />
+            <div className="h-3.5 w-2/3 animate-pulse rounded bg-muted" />
+            <div className="h-3.5 w-full animate-pulse rounded bg-muted" />
+            <div className="h-3.5 w-5/6 animate-pulse rounded bg-muted" />
           </div>
         ) : mail.bodyHtml ? (
           <div

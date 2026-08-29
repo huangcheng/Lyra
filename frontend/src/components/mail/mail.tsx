@@ -73,7 +73,7 @@ function NavContent({ isCollapsed }: { isCollapsed: boolean }) {
   const openCompose = useUIStore((s) => s.openCompose);
   const navigate = useNavigate();
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col bg-muted">
       <div
         className={cn(
           'flex h-[52px] items-center justify-center gap-1',
@@ -193,7 +193,7 @@ function ListPane({ onOpenDrawer }: { onOpenDrawer?: () => void }) {
             <Search className="absolute top-2.5 left-2 h-4 w-4 text-muted-foreground" />
             <Input
               placeholder={t(locale, 'mail.searchPlaceholder')}
-              className="pl-8 shadow-sm"
+              className="pl-8"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />

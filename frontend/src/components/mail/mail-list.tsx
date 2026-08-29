@@ -212,7 +212,7 @@ export function MailList() {
         />
       ) : null}
       <ScrollArea className="min-h-0 flex-1">
-        <div className="flex flex-col px-2 pb-2">
+        <div className="flex flex-col gap-1.5 p-2">
           {conversations.map((convo) => {
             const item = convo.latest;
             const account = accounts.find((a) => a.id === item.accountId);
@@ -237,9 +237,8 @@ export function MailList() {
                 key={convo.key}
                 type="button"
                 className={cn(
-                  'flex w-full gap-3 border-b border-border/70 px-2 py-3 text-left text-sm transition-colors hover:bg-accent/60',
-                  isSelected &&
-                    'rounded-lg border border-input bg-card shadow-whisper hover:bg-card',
+                  'flex w-full gap-3 rounded-lg border border-border/70 bg-card px-3 py-2.5 text-left text-sm transition-colors hover:border-border',
+                  isSelected && 'border-input shadow-whisper hover:border-input',
                 )}
                 onClick={() => {
                   const target = convo.messages.find((m) => !m.isRead) ?? convo.latest;
@@ -260,7 +259,7 @@ export function MailList() {
                   ) : null}
                 </div>
                 <Avatar className="h-8 w-8 shrink-0">
-                  <AvatarFallback className="bg-accent text-xs text-foreground">
+                  <AvatarFallback className="bg-muted text-xs text-foreground">
                     {getInitials(fromLabel)}
                   </AvatarFallback>
                 </Avatar>

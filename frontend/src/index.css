@@ -165,6 +165,21 @@
   white-space: pre-wrap;
 }
 
+/* HTML mail renders on a paper-white sheet even in dark mode: message HTML
+   is authored against a light canvas, so the reader keeps it legible instead
+   of letting app dark tokens bleed into third-party markup. */
+.dark .mail-body {
+  background: #ffffff;
+  color: #1a1b1f;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.dark .mail-body a {
+  color: #1a1b1f;
+}
+
 .mail-body blockquote {
   margin: 0;
   padding-left: 0.8em;

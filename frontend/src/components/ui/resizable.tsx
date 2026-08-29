@@ -32,14 +32,15 @@ function ResizableHandle({
     <ResizablePrimitive.Separator
       data-slot="resizable-handle"
       className={cn(
-        'group relative flex w-[5px] shrink-0 cursor-col-resize items-center justify-center bg-secondary transition-colors',
-        'after:absolute after:inset-y-0 after:left-1/2 after:w-px after:-translate-x-1/2 after:bg-border after:transition-all',
-        'hover:after:w-0.5 hover:after:bg-[#c8c9cd] active:after:w-0.5 active:after:bg-[#c8c9cd]',
+        // Visually a pure 1px hairline on the pane boundary; the 7px box is
+        // the invisible drag target overlapping the left/top pane by 3px.
+        'group relative z-10 -ml-[3px] flex w-[7px] shrink-0 cursor-col-resize items-center justify-center bg-transparent transition-colors',
+        'after:absolute after:inset-y-0 after:left-[3px] after:w-px after:bg-border after:transition-colors',
+        'hover:after:bg-[#c8c9cd] active:after:bg-[#c8c9cd]',
         'focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:outline-hidden',
-        'data-[panel-group-direction=vertical]:h-[5px] data-[panel-group-direction=vertical]:w-full data-[panel-group-direction=vertical]:cursor-row-resize',
-        'data-[panel-group-direction=vertical]:after:left-0 data-[panel-group-direction=vertical]:after:h-px data-[panel-group-direction=vertical]:after:w-full',
-        'data-[panel-group-direction=vertical]:after:translate-x-0 data-[panel-group-direction=vertical]:after:-translate-y-1/2',
-        'data-[panel-group-direction=vertical]:hover:after:h-0.5 data-[panel-group-direction=vertical]:active:after:h-0.5',
+        'data-[panel-group-direction=vertical]:-mt-[3px] data-[panel-group-direction=vertical]:-ml-0 data-[panel-group-direction=vertical]:h-[7px] data-[panel-group-direction=vertical]:w-full data-[panel-group-direction=vertical]:cursor-row-resize',
+        'data-[panel-group-direction=vertical]:after:top-[3px] data-[panel-group-direction=vertical]:after:left-0 data-[panel-group-direction=vertical]:after:h-px data-[panel-group-direction=vertical]:after:w-full',
+        'data-[panel-group-direction=vertical]:after:translate-x-0',
         '[&[data-panel-group-direction=vertical]>div]:rotate-90',
         className,
       )}

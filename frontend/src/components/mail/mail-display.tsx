@@ -364,7 +364,7 @@ export function MailDisplay() {
   const fromLabel = mail ? (mail.from.name ?? mail.from.email) : '';
   const disabled = !mail || busy;
   const toolbarIconClass =
-    'rounded-[7px] border border-input bg-card text-foreground shadow-xs hover:bg-accent disabled:opacity-50';
+    'rounded-[7px] text-ter-foreground hover:bg-accent hover:text-foreground disabled:opacity-50';
 
   return (
     <div className="flex h-full flex-col">
@@ -687,7 +687,7 @@ export function MailDisplay() {
                 void handleInlineSend();
               }}
             >
-              <div className="rounded-lg border border-input bg-card shadow-xs">
+              <div className="rounded-lg border border-input bg-card">
                 <div className="flex items-start gap-2.5 px-3.5 pt-3">
                   <Reply className="mt-2 size-4 shrink-0 text-muted-foreground" aria-hidden />
                   <Textarea
@@ -715,6 +715,7 @@ export function MailDisplay() {
                   </Label>
                   <Button
                     type="submit"
+                    variant="outline"
                     size="sm"
                     className="ml-auto rounded-full px-4"
                     disabled={busy}

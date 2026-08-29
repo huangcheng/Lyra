@@ -89,7 +89,7 @@ export function LoginForm({
     description = t(locale, 'auth.totpDescription');
   }
 
-  const submitButtonClass = 'h-[42px] w-full rounded-lg border-foreground font-medium';
+  const submitButtonClass = 'h-[42px] w-full rounded-lg font-medium';
 
   return (
     <div className={cn('flex flex-col', className)} {...props}>
