@@ -56,6 +56,9 @@ base64 = "0.22"
 hkdf = "0.12"
 sha2 = "0.10"
 reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
+# JMAP protocol client (RFC 8620/8621). Pulls reqwest 0.13 alongside our 0.12
+# (separate 0.x majors coexist); websockets off — push uses its EventSource stream.
+jmap-client = { version = "0.4.2", default-features = false, features = ["async", "aws_lc_rs"] }
 async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
 native-tls = "0.2"
 tokio-native-tls = "0.3"

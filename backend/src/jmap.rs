@@ -10,46 +10,19 @@
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
-use crate::crypto::{self, EncryptedCredential};
 use crate::smtp::OutboundMessage;
 
-/// Errors specific to the JMAP adapter.
-#[derive(Debug, Error)]
-pub enum JmapError {
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("session discovery failed: {0}")]
-    SessionDiscovery(String),
-    #[error("authentication failed: {0}")]
-    #[allow(dead_code)]
-    Authentication(String),
-    #[error("JMAP method error: {code} — {description}")]
-    Method { code: String, description: String },
-    #[error("crypto error: {0}")]
-    Crypto(#[from] crypto::CryptoError),
-    #[error("invalid response: {0}")]
-    InvalidResponse(String),
-    #[error("invalid server URL: {0}")]
-    InvalidServerUrl(String),
-    #[error("cross-origin URL rejected (credentials stay pinned): {0}")]
-    CrossOrigin(String),
-}
-
-impl JmapError {
-    /// `Email/queryChanges` cannot resume from the stored token; caller should full-query.
-    #[must_use]
-    pub fn is_stale_query_state(&self) -> bool {
-        match self {
-            Self::Method { code, .. } => {
-                code.eq_ignore_ascii_case("cannotCalculateChanges")
-                    || code.eq_ignore_ascii_case("cannotCalculateChangesFrom")
-            }
-            _ => false,
-        }
-    }
-}
+// DTOs, the error type, and credential decrypt live in the sync seam
+// (`sync::jmap_client`); re-exported so `crate::jmap::…` paths keep
+// resolving while the hand-rolled transport below is retired (Task 7).
+// `JmapEmailAddress` is re-exported for the seam consumers landing in
+// Tasks 2–7; nothing references it through `crate::jmap` yet.
+use crate::sync::jmap_client::resolve_discovery_redirect;
+#[allow(unused_imports)]
+pub use crate::sync::jmap_client::{
+    JmapEmail, JmapEmailAddress, JmapError, JmapMailbox, decrypt_account_password,
+};
 
 // ── JMAP Session Resource ───────────────────────────────────────────
 
@@ -1149,35 +1122,6 @@ pub struct JmapIdentity {
 ///
 /// Add new session URLs here when they start being consumed
 /// (e.g. `eventSourceUrl`, `downloadUrl`).
-/// Resolve one discovery redirect hop: `location` (possibly relative) against
-/// the URL that produced it, rejecting any hop that leaves `origin`.
-///
-/// Pure decision function so the credential-pinning policy is unit-testable
-/// without a network.
-fn resolve_discovery_redirect(
-    current_url: &str,
-    location: &str,
-    origin: &str,
-) -> Result<String, JmapError> {
-    let base = reqwest::Url::parse(current_url).map_err(|e| {
-        JmapError::SessionDiscovery(format!("invalid current URL '{current_url}': {e}"))
-    })?;
-    let resolved = base.join(location).map_err(|e| {
-        JmapError::SessionDiscovery(format!("invalid redirect target '{location}': {e}"))
-    })?;
-    let resolved = resolved.as_str().to_string();
-    let target_origin = crate::netsec::origin_of(&resolved).map_err(JmapError::InvalidServerUrl)?;
-    if target_origin != origin {
-        tracing::warn!(
-            target_origin = %target_origin,
-            expected_origin = %origin,
-            "JMAP: discovery redirect leaves the configured origin; refusing to follow"
-        );
-        return Err(JmapError::CrossOrigin(resolved));
-    }
-    Ok(resolved)
-}
-
 fn check_session_urls(origin: &str, session: &JmapSession) -> Result<(), JmapError> {
     let mut owned: Vec<String> = Vec::new();
     let mut urls: Vec<&str> = vec![session.api_url.as_str()];
@@ -1207,24 +1151,6 @@ fn check_session_urls(origin: &str, session: &JmapSession) -> Result<(), JmapErr
     Ok(())
 }
 
-/// A JMAP Mailbox object.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JmapMailbox {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub parent_id: Option<String>,
-    #[serde(default)]
-    pub total_emails: Option<u64>,
-    #[serde(default)]
-    pub unread_emails: Option<u64>,
-    #[serde(default)]
-    pub sort_order: Option<u32>,
-}
-
 /// Result of an `Email/query` call.
 #[derive(Debug)]
 pub struct EmailQueryResult {
@@ -1241,159 +1167,6 @@ pub struct EmailQueryChanges {
     #[allow(dead_code)]
     pub removed_ids: Vec<String>,
     pub new_query_state: Option<String>,
-}
-
-/// A JMAP Email object (partial, only the fields we need).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JmapEmail {
-    pub id: String,
-    #[serde(default)]
-    pub blob_id: Option<String>,
-    #[serde(default)]
-    pub thread_id: Option<String>,
-    #[serde(default)]
-    pub mailbox_ids: Option<serde_json::Value>,
-    #[serde(default)]
-    pub keywords: Option<serde_json::Value>,
-    #[serde(default)]
-    pub size: Option<u64>,
-    #[serde(default)]
-    pub received_at: Option<String>,
-    #[serde(default)]
-    pub message_id: Option<Vec<String>>,
-    #[serde(default)]
-    pub in_reply_to: Option<Vec<String>>,
-    #[serde(default)]
-    pub references: Option<Vec<String>>,
-    #[serde(default)]
-    pub sender: Option<Vec<JmapEmailAddress>>,
-    #[serde(default)]
-    pub from: Option<Vec<JmapEmailAddress>>,
-    #[serde(default)]
-    pub to: Option<Vec<JmapEmailAddress>>,
-    #[serde(default)]
-    pub cc: Option<Vec<JmapEmailAddress>>,
-    #[serde(default)]
-    pub bcc: Option<Vec<JmapEmailAddress>>,
-    #[serde(default)]
-    pub reply_to: Option<Vec<JmapEmailAddress>>,
-    #[serde(default)]
-    pub subject: Option<String>,
-    #[serde(default)]
-    pub body_structure: Option<serde_json::Value>,
-    #[serde(default)]
-    pub body_values: Option<serde_json::Map<String, serde_json::Value>>,
-    #[serde(default)]
-    pub text_body: Option<Vec<serde_json::Value>>,
-    #[serde(default)]
-    pub html_body: Option<Vec<serde_json::Value>>,
-    #[serde(default)]
-    pub has_attachment: Option<bool>,
-    #[serde(default)]
-    pub attachments: Option<Vec<serde_json::Value>>,
-    #[serde(default)]
-    pub preview: Option<String>,
-}
-
-/// A JMAP email address.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct JmapEmailAddress {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub email: Option<String>,
-}
-
-impl JmapEmail {
-    /// Extract the plain-text body from bodyValues.
-    pub fn body_text(&self) -> Option<String> {
-        extract_body_part(self, "text/plain")
-    }
-
-    /// Extract the HTML body from bodyValues (unsanitized; persist via `persist_body_html`).
-    pub fn body_html(&self) -> Option<String> {
-        extract_body_part(self, "text/html")
-    }
-
-    /// Get the `from` address as a formatted string.
-    pub fn format_from(&self) -> Option<String> {
-        self.from
-            .as_ref()
-            .and_then(|addrs| addrs.first())
-            .map(|a| match (&a.name, &a.email) {
-                (Some(name), Some(email)) => format!("{name} <{email}>"),
-                (None, Some(email)) => email.clone(),
-                (Some(name), None) => name.clone(),
-                _ => String::new(),
-            })
-    }
-
-    /// Get the `to` addresses as a formatted string.
-    pub fn to_string_list(&self) -> Option<String> {
-        self.to.as_ref().map(|addrs| {
-            addrs
-                .iter()
-                .map(|a| match (&a.name, &a.email) {
-                    (Some(name), Some(email)) => format!("{name} <{email}>"),
-                    (None, Some(email)) => email.clone(),
-                    (Some(name), None) => name.clone(),
-                    _ => String::new(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-    }
-
-    /// Get the first Message-ID header value.
-    pub fn message_id_header(&self) -> Option<String> {
-        self.message_id
-            .as_ref()
-            .and_then(|ids| ids.first().cloned())
-    }
-
-    /// Whether the email has the `$seen` keyword (read).
-    pub fn is_seen(&self) -> bool {
-        self.keywords
-            .as_ref()
-            .and_then(|k| k.get("$seen"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    }
-
-    /// Whether the email has the `$flagged` keyword (starred).
-    pub fn is_flagged(&self) -> bool {
-        self.keywords
-            .as_ref()
-            .and_then(|k| k.get("$flagged"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    }
-}
-
-/// Extract body text from `bodyValues` using the part type.
-fn extract_body_part(email: &JmapEmail, content_type: &str) -> Option<String> {
-    let body_parts = if content_type == "text/plain" {
-        email.text_body.as_ref()?
-    } else {
-        email.html_body.as_ref()?
-    };
-
-    let part_id = body_parts.first()?.get("partId")?.as_str()?;
-    let body_values = email.body_values.as_ref()?;
-    let value = body_values.get(part_id)?;
-    value.get("value")?.as_str().map(String::from)
-}
-
-/// Decrypt the stored credential for a JMAP account.
-pub fn decrypt_account_password(credential_json: &str, dek: &[u8]) -> Result<String, JmapError> {
-    let encrypted: EncryptedCredential = serde_json::from_str(credential_json)
-        .map_err(|e| JmapError::InvalidResponse(format!("invalid credential blob: {e}")))?;
-
-    let plaintext = crypto::decrypt(dek, &encrypted)?;
-
-    String::from_utf8(plaintext)
-        .map_err(|e| JmapError::InvalidResponse(format!("credential not valid UTF-8: {e}")))
 }
 
 // ── Probe ───────────────────────────────────────────────────────────
@@ -1484,145 +1257,6 @@ mod tests {
     }
 
     #[test]
-    fn discovery_redirect_relative_same_origin_accepted() {
-        // Fastmail: /.well-known/jmap → 302 /jmap/session (same origin).
-        let resolved = resolve_discovery_redirect(
-            "https://api.fastmail.com/.well-known/jmap",
-            "/jmap/session",
-            "https://api.fastmail.com:443",
-        )
-        .expect("same-origin relative redirect must be followed");
-        assert_eq!(resolved, "https://api.fastmail.com/jmap/session");
-    }
-
-    #[test]
-    fn discovery_redirect_absolute_same_origin_accepted() {
-        let resolved = resolve_discovery_redirect(
-            "https://jmap.example.com/.well-known/jmap",
-            "https://jmap.example.com/jmap/session",
-            "https://jmap.example.com:443",
-        )
-        .expect("same-origin absolute redirect must be followed");
-        assert_eq!(resolved, "https://jmap.example.com/jmap/session");
-    }
-
-    #[test]
-    fn discovery_redirect_cross_origin_rejected() {
-        // A redirect to another host must never receive our credentials.
-        let err = resolve_discovery_redirect(
-            "https://jmap.example.com/.well-known/jmap",
-            "https://evil.example/session",
-            "https://jmap.example.com:443",
-        )
-        .unwrap_err();
-        assert!(matches!(err, JmapError::CrossOrigin(_)), "got: {err}");
-    }
-
-    #[test]
-    fn discovery_redirect_scheme_downgrade_rejected() {
-        // https → http on the same host is a different origin: reject.
-        let err = resolve_discovery_redirect(
-            "https://jmap.example.com/.well-known/jmap",
-            "http://jmap.example.com/jmap/session",
-            "https://jmap.example.com:443",
-        )
-        .unwrap_err();
-        assert!(matches!(err, JmapError::CrossOrigin(_)), "got: {err}");
-    }
-
-    #[test]
-    fn discovery_redirect_garbage_location_rejected() {
-        let err = resolve_discovery_redirect(
-            "https://jmap.example.com/.well-known/jmap",
-            "http://[::1",
-            "https://jmap.example.com:443",
-        )
-        .unwrap_err();
-        assert!(matches!(err, JmapError::SessionDiscovery(_)), "got: {err}");
-    }
-
-    #[test]
-    fn parse_jmap_mailbox() {
-        let json = serde_json::json!({
-            "id": "mb1",
-            "name": "Inbox",
-            "role": "inbox",
-            "totalEmails": 42,
-            "unreadEmails": 7
-        });
-
-        let mb: JmapMailbox = serde_json::from_value(json).unwrap();
-        assert_eq!(mb.id, "mb1");
-        assert_eq!(mb.name, "Inbox");
-        assert_eq!(mb.role.as_deref(), Some("inbox"));
-        assert_eq!(mb.total_emails, Some(42));
-        assert_eq!(mb.unread_emails, Some(7));
-    }
-
-    #[test]
-    fn parse_jmap_email() {
-        let json = serde_json::json!({
-            "id": "em1",
-            "threadId": "th1",
-            "mailboxIds": { "mb1": true },
-            "keywords": { "$seen": true, "$flagged": false },
-            "size": 12345,
-            "receivedAt": "2025-01-15T10:00:00Z",
-            "messageId": ["<msg1@example.com>"],
-            "from": [{ "name": "Alice", "email": "alice@example.com" }],
-            "to": [{ "name": "Bob", "email": "bob@example.com" }],
-            "subject": "Hello!",
-            "preview": "Hi Bob, ...",
-            "hasAttachment": false
-        });
-
-        let email: JmapEmail = serde_json::from_value(json).unwrap();
-        assert_eq!(email.id, "em1");
-        assert!(email.is_seen());
-        assert!(!email.is_flagged());
-        assert_eq!(
-            email.format_from(),
-            Some("Alice <alice@example.com>".into())
-        );
-        assert_eq!(email.subject.as_deref(), Some("Hello!"));
-    }
-
-    #[test]
-    fn jmap_email_body_extraction() {
-        let json = serde_json::json!({
-            "id": "em2",
-            "subject": "Test",
-            "bodyStructure": {
-                "type": "text/plain",
-                "partId": "p1"
-            },
-            "bodyValues": {
-                "p1": {
-                    "value": "Hello world",
-                    "encoding": "UTF-8"
-                }
-            },
-            "textBody": [{ "partId": "p1", "type": "text/plain" }],
-            "htmlBody": []
-        });
-
-        let email: JmapEmail = serde_json::from_value(json).unwrap();
-        assert_eq!(email.body_text(), Some("Hello world".into()));
-        assert_eq!(email.body_html(), None);
-    }
-
-    #[test]
-    fn jmap_email_seen_flagged() {
-        let json = serde_json::json!({
-            "id": "em3",
-            "keywords": {}
-        });
-        let email: JmapEmail = serde_json::from_value(json).unwrap();
-        assert!(!email.is_seen());
-        assert!(!email.is_flagged());
-    }
-
-    #[test]
     fn parse_email_query_result() {
         let json = serde_json::json!({
             "ids": ["em1", "em2", "em3"],
@@ -1644,28 +1278,6 @@ mod tests {
         assert_eq!(result.ids.len(), 3);
         assert_eq!(result.query_state.as_deref(), Some("abc123"));
         assert_eq!(result.total, Some(100));
-    }
-
-    #[test]
-    fn decrypt_roundtrip() {
-        let key = crypto::generate_key();
-        let password = "jmap-test-password";
-        let encrypted = crypto::encrypt(&key, password.as_bytes()).unwrap();
-        let json = serde_json::to_string(&encrypted).unwrap();
-        let decrypted = decrypt_account_password(&json, &key).unwrap();
-        assert_eq!(decrypted, password);
-    }
-
-    #[test]
-    fn parse_mailbox_with_null_role() {
-        let json = serde_json::json!({
-            "id": "mb2",
-            "name": "Projects"
-        });
-
-        let mb: JmapMailbox = serde_json::from_value(json).unwrap();
-        assert_eq!(mb.role, None);
-        assert_eq!(mb.total_emails, None);
     }
 
     #[test]
@@ -1832,16 +1444,5 @@ mod tests {
         assert!(sse_frame_is_state_push(
             "data: {\"changed\":{\"a1\":{\"Mailbox\":\"m1\"}}}\n"
         ));
-    }
-
-    #[test]
-    fn stale_query_state_detects_rfc_code() {
-        let err = JmapError::Method {
-            code: "cannotCalculateChanges".into(),
-            description: String::new(),
-        };
-        assert!(err.is_stale_query_state());
-        let err = JmapError::InvalidResponse("nope".into());
-        assert!(!err.is_stale_query_state());
     }
 }

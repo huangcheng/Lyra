@@ -9,6 +9,7 @@
 
 mod http;
 mod imap_loop;
+pub(crate) mod jmap_client;
 mod jmap_loop;
 mod recovery;
 mod send;
