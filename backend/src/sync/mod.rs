@@ -1256,6 +1256,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repair_heals_mojibake_subject_and_clears_body() {
+        let pool = test_pool().await;
+        let (_user_id, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+
+        // Row as written by the charset-blind parser: U+FFFD mojibake baked
+        // into subject (and snippet), the sender display name, and the body.
+        let mut mangled = sample_imap_message(42);
+        mangled.subject = Some("\u{FFFD}\u{FFFD}ҵ\u{FFFD}п".into());
+        mangled.from = Some("\u{FFFD}\u{FFFD}ҵ\u{FFFD}п <cib@example.com>".into());
+        mangled.body_text = Some("\u{FFFD}\u{FFFD}ÿ˵".into());
+        upsert_message(&as_db(&pool), &account_id, &folder_id, &mangled)
+            .await
+            .unwrap();
+        // Second row whose subject already healed but whose sender name is
+        // still mangled — the scan must catch address-only mojibake too.
+        let mut addr_only = sample_imap_message(43);
+        addr_only.from = Some("\u{FFFD}\u{FFFD}ͨ\u{FFFD}п <bocom@example.com>".into());
+        upsert_message(&as_db(&pool), &account_id, &folder_id, &addr_only)
+            .await
+            .unwrap();
+
+        // The self-heal pass discovers both rows by U+FFFD.
+        let mut uids = store::mojibake_message_uids(&as_db(&pool), &folder_id, 200)
+            .await
+            .unwrap();
+        uids.sort_unstable();
+        assert_eq!(uids, vec![42, 43]);
+
+        // Re-fetched envelope with the correctly decoded subject and sender.
+        let mut fresh = sample_imap_message(42);
+        fresh.subject = Some("兴业银行信用卡账单".into());
+        fresh.from = Some("兴业银行 <cib@example.com>".into());
+        // Repairing uid 42 leaves the address-only uid 43 in the scan.
+        let repaired =
+            store::repair_imap_messages(&as_db(&pool), &account_id, &folder_id, &[fresh])
+                .await
+                .unwrap();
+        assert_eq!(repaired, 1);
+
+        let (subject, snippet, from_address, body_text): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT subject, snippet, from_address, body_text FROM message \
+                 WHERE account_id = ? AND external_id = ?",
+        )
+        .bind(&account_id)
+        .bind(imap_message_external_id(&folder_id, 42))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(subject.as_deref(), Some("兴业银行信用卡账单"));
+        assert_eq!(snippet.as_deref(), Some("兴业银行信用卡账单"));
+        assert_eq!(
+            from_address.as_deref(),
+            Some(r#"{"raw":"兴业银行 <cib@example.com>"}"#),
+            "mojibake sender display name must heal on re-sync"
+        );
+        assert_eq!(
+            body_text, None,
+            "mojibake body must be cleared for lazy re-fetch"
+        );
+
+        // The healed row drops out of the repair scan; the still-mangled
+        // address-only row remains for the next pass.
+        let uids = store::mojibake_message_uids(&as_db(&pool), &folder_id, 200)
+            .await
+            .unwrap();
+        assert_eq!(uids, vec![43]);
+    }
+
+    #[tokio::test]
     async fn unsnooze_job_clears_column() {
         let pool = test_pool().await;
         let (user_id, account_id) = seed_user_and_account(&pool).await;

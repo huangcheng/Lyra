@@ -4,7 +4,8 @@ use std::collections::HashSet;
 
 use super::store::{
     AccountSyncRow, get_folder_id, imap_folder_depth, load_account_sync_row, load_cursor,
-    outcome_from_response, persist_imap_folder_batch, upsert_folder,
+    mojibake_message_uids, outcome_from_response, persist_imap_folder_batch, repair_imap_messages,
+    upsert_folder,
 };
 use super::types::{SyncError, SyncResponse};
 use crate::imap::{ImapClient, ImapConfig, ImapSecurity};
@@ -125,6 +126,20 @@ pub(crate) async fn run_imap_sync(
         let uid_validity = select.uid_validity;
         let highest_modseq = select.highest_modseq.unwrap_or(0);
 
+        // Self-heal rows whose stored text still carries U+FFFD mojibake from
+        // before full legacy-charset decoding: re-fetch their envelopes (the
+        // upsert conflict path replaces stale text) and clear mojibake bodies
+        // so the next open lazily re-parses them. Never fatal to sync.
+        match repair_folder_mojibake(db, account_id, &folder_id, &mut client).await {
+            Ok(repaired) if repaired > 0 => {
+                tracing::info!(account_id, folder = %folder.name, repaired, "repaired mojibake messages");
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(account_id, folder = %folder.name, error = %err, "mojibake repair failed");
+            }
+        }
+
         // Load existing cursor
         let cursor = load_cursor(db, account_id, &folder_id).await?;
         let uidvalidity_changed = cursor
@@ -223,4 +238,26 @@ pub(crate) async fn run_imap_sync(
         messages_updated: total_updated,
         messages_deleted: total_deleted,
     })
+}
+
+/// Re-fetch envelopes for messages whose stored text still carries U+FFFD
+/// mojibake (synced before full legacy-charset decoding) and upsert them;
+/// [`repair_imap_messages`] also clears mojibake bodies so the next open
+/// lazily re-fetches and re-parses them. Runs against the mailbox the caller
+/// already selected.
+async fn repair_folder_mojibake(
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    client: &mut ImapClient,
+) -> Result<usize, SyncError> {
+    let uids = mojibake_message_uids(db, folder_id, 200).await?;
+    if uids.is_empty() {
+        return Ok(0);
+    }
+    let fetched = client.fetch_metadata(&uids).await?;
+    if fetched.is_empty() {
+        return Ok(0);
+    }
+    repair_imap_messages(db, account_id, folder_id, &fetched).await
 }

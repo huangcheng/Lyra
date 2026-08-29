@@ -734,8 +734,26 @@ pub fn decode_mime_header(raw: &str) -> String {
         .unwrap_or_else(|| raw.to_string())
 }
 
-fn decode_opt_mime_header(raw: Option<String>) -> Option<String> {
-    raw.map(|s| decode_mime_header(&s))
+/// Decode a header received as raw bytes (IMAP ENVELOPE fields are byte
+/// strings). Valid UTF-8 goes through the RFC 2047 path; anything else is a
+/// raw 8-bit header — RFC-violating but common from legacy CJK senders — so
+/// fall back to GB18030 (a superset of GBK/GB2312) before giving up to lossy.
+pub fn decode_mime_header_bytes(raw: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(raw) {
+        return decode_mime_header(text);
+    }
+    // Raw 8-bit header (RFC-violating but common from legacy CJK senders):
+    // fall back to GB18030 (a superset of GBK/GB2312) before going lossy.
+    let (decoded, _, had_errors) = encoding_rs::GB18030.decode(raw);
+    if had_errors {
+        String::from_utf8_lossy(raw).into_owned()
+    } else {
+        decoded.into_owned()
+    }
+}
+
+fn decode_opt_mime_header_bytes(raw: Option<&[u8]>) -> Option<String> {
+    raw.map(decode_mime_header_bytes)
 }
 
 /// Parse an `async_imap::types::Fetch` into our `ImapMessage`.
@@ -752,12 +770,7 @@ fn parse_fetch_to_message(fetch: &async_imap::types::Fetch, include_body: bool) 
                     .message_id
                     .as_ref()
                     .map(|n| String::from_utf8_lossy(n).into_owned()),
-                decode_opt_mime_header(
-                    envelope
-                        .subject
-                        .as_ref()
-                        .map(|n| String::from_utf8_lossy(n).into_owned()),
-                ),
+                decode_opt_mime_header_bytes(envelope.subject.as_deref()),
                 envelope.from.as_ref().map(|a| format_address_list(a)),
                 envelope.to.as_ref().map(|a| format_address_list(a)),
                 envelope.cc.as_ref().map(|a| format_address_list(a)),
@@ -871,10 +884,7 @@ fn format_address_list(addrs: &[Address]) -> String {
                 .as_ref()
                 .map(|h| String::from_utf8_lossy(h).into_owned())
                 .unwrap_or_default();
-            let name = addr
-                .name
-                .as_ref()
-                .map(|n| decode_mime_header(&String::from_utf8_lossy(n)));
+            let name = addr.name.as_deref().map(decode_mime_header_bytes);
 
             if let Some(name) = name {
                 format!("{name} <{mailbox}@{host}>")
@@ -1169,6 +1179,46 @@ mod tests {
         let decoded = decode_mime_header(encoded);
         assert!(!decoded.contains("=?"), "got: {decoded}");
         assert!(decoded.contains("AdGuard"), "got: {decoded}");
+    }
+
+    #[test]
+    fn decode_mime_header_gb18030_encoded_word() {
+        // "兴业银行" as GB18030 base64 encoded-word.
+        let encoded = "=?GB18030?B?0MvStdL40NA=?=";
+        let decoded = decode_mime_header(encoded);
+        assert_eq!(decoded, "兴业银行");
+    }
+
+    #[test]
+    fn decode_mime_header_bytes_raw_gbk() {
+        // RFC-violating raw 8-bit GBK header bytes for "兴业银行信用卡".
+        let raw: &[u8] = b"\xD0\xCB\xD2\xB5\xD2\xF8\xD0\xD0\xD0\xC5\xD3\xC3\xBF\xA8";
+        assert_eq!(decode_mime_header_bytes(raw), "兴业银行信用卡");
+    }
+
+    #[test]
+    fn decode_mime_header_bytes_utf8_passthrough() {
+        assert_eq!(
+            decode_mime_header_bytes("报表 2026".as_bytes()),
+            "报表 2026"
+        );
+        // Encoded words still decode through the UTF-8 fast path.
+        assert_eq!(
+            decode_mime_header_bytes("=?utf-8?B?UmU6IOWFs+S6juiHquWKqOe7rei0uQ==?=".as_bytes()),
+            "Re: 关于自动续费"
+        );
+    }
+
+    #[test]
+    fn extract_mime_parts_decodes_declared_gbk_body() {
+        // Declared legacy CJK charset must be honored (requires mail-parser's
+        // full_encoding feature; without it this regresses to U+FFFD mojibake).
+        let mut raw =
+            b"Subject: hi\r\nContent-Type: text/plain; charset=gb2312\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"
+                .to_vec();
+        raw.extend_from_slice(b"\xD0\xCB\xD2\xB5\xD2\xF8\xD0\xD0\xD0\xC5\xD3\xC3\xBF\xA8");
+        let (text, _html, _atts) = extract_mime_parts(&raw);
+        assert_eq!(text.as_deref(), Some("兴业银行信用卡"));
     }
 
     #[test]

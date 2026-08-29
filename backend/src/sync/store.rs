@@ -841,6 +841,75 @@ pub(crate) async fn persist_imap_folder_batch(
     Ok((new, updated))
 }
 
+/// IMAP UIDs of up to `limit` messages in a folder whose stored subject,
+/// snippet, addresses, or body still carries U+FFFD mojibake — rows synced
+/// before full legacy-charset decoding (mail-parser `full_encoding`) was
+/// enabled. The sync-loop self-heal pass re-fetches these envelopes.
+pub(crate) async fn mojibake_message_uids(
+    db: &DbPool,
+    folder_id: &str,
+    limit: u64,
+) -> Result<Vec<u32>, SyncError> {
+    let mut sel = Sq::select();
+    sel.column(message::Column::ExternalId)
+        .from(message::Entity)
+        .and_where(message::Column::FolderId.eq(id_value(db, folder_id)?))
+        .and_where(
+            message::Column::Subject
+                .like("%\u{FFFD}%")
+                .or(message::Column::Snippet.like("%\u{FFFD}%"))
+                .or(message::Column::FromAddress.like("%\u{FFFD}%"))
+                .or(message::Column::ToAddresses.like("%\u{FFFD}%"))
+                .or(message::Column::BodyText.like("%\u{FFFD}%"))
+                .or(message::Column::BodyHtml.like("%\u{FFFD}%")),
+        )
+        .limit(limit);
+    let rows = db.orm().query_all(&sel).await.map_err(orm_err)?;
+    let mut uids = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let external_id: Option<String> = row.try_get("", "external_id").map_err(orm_err)?;
+        if let Ok(uid) = parse_imap_uid(external_id.as_deref()) {
+            uids.push(uid);
+        }
+    }
+    Ok(uids)
+}
+
+/// Upsert re-fetched envelopes for self-heal — no cursor movement — and clear
+/// any remaining mojibake bodies in the folder so the next open lazily
+/// re-fetches and re-parses them with full charset decoding.
+///
+/// Subject/snippet repair rides the normal upsert conflict path: `stale_text`
+/// treats U+FFFD text as stale, so the freshly decoded envelope replaces it.
+pub(crate) async fn repair_imap_messages(
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    messages: &[ImapMessage],
+) -> Result<usize, SyncError> {
+    let mut tx = db.begin().await?;
+    let mut repaired = 0usize;
+    for msg in messages {
+        upsert_message_in_tx(&mut tx, db, account_id, folder_id, msg).await?;
+        repaired += 1;
+    }
+    let mut clear = Sq::update();
+    clear
+        .table(message::Entity)
+        .value(message::Column::BodyText, opt_str_value(None))
+        .value(message::Column::BodyHtml, opt_str_value(None))
+        .and_where(message::Column::FolderId.eq(id_value(db, folder_id)?))
+        .and_where(
+            message::Column::BodyText
+                .like("%\u{FFFD}%")
+                .or(message::Column::BodyHtml.like("%\u{FFFD}%")),
+        );
+    tx_execute(&mut tx, &clear).await?;
+    update_folder_counts_in_tx(&mut tx, db, folder_id).await?;
+    tx.commit().await?;
+    Ok(repaired)
+}
+
 /// Persist one JMAP mailbox page: upserts, cursor, counts — one transaction.
 pub(crate) async fn persist_jmap_folder_batch(
     db: &DbPool,
@@ -902,9 +971,13 @@ fn excluded_col(col: message::Column) -> Expr {
 }
 
 /// Refresh-only-if-stale guard used for subject/snippet fill-in: replace the
-/// stored text when it is NULL, empty, or still RFC-2047-encoded.
+/// stored text when it is NULL, empty, still RFC-2047-encoded, or carries
+/// U+FFFD mojibake baked in before full legacy-charset decoding landed.
 fn stale_text(col: message::Column) -> Expr {
-    col.is_null().or(col.eq("")).or(col.like("%=?%?=%"))
+    col.is_null()
+        .or(col.eq(""))
+        .or(col.like("%=?%?=%"))
+        .or(col.like("%\u{FFFD}%"))
 }
 
 /// Existing-message id lookup by `(account_id, external_id)` inside the txn.
@@ -1001,9 +1074,10 @@ fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStatement {
 
 /// Refresh read/star/flags state plus fill-in semantics for a matched message.
 ///
-/// `flags = excluded.flags`, while subject/snippet only move off
-/// RFC-2047-encoded placeholders and address/date/header columns only fill
-/// previously-absent values — byte-for-byte the legacy ON CONFLICT clauses.
+/// `flags = excluded.flags`, while subject/snippet/address columns only move
+/// off RFC-2047-encoded placeholders or U+FFFD mojibake and date/header
+/// columns only fill previously-absent values — the legacy ON CONFLICT
+/// clauses, extended so charset-mangled sender names heal on re-sync.
 fn apply_fill_in_on_conflict(mut insert: InsertStatement) -> InsertStatement {
     let conflict = OnConflict::columns([message::Column::AccountId, message::Column::ExternalId])
         .update_columns([message::Column::IsRead, message::Column::IsStarred])
@@ -1018,24 +1092,27 @@ fn apply_fill_in_on_conflict(mut insert: InsertStatement) -> InsertStatement {
         )
         .value(
             message::Column::FromAddress,
-            Func::coalesce([
-                cur_row_col(message::Column::FromAddress),
+            Expr::case(
+                stale_text(message::Column::FromAddress),
                 excluded_col(message::Column::FromAddress),
-            ]),
+            )
+            .finally(cur_row_col(message::Column::FromAddress)),
         )
         .value(
             message::Column::ToAddresses,
-            Func::coalesce([
-                cur_row_col(message::Column::ToAddresses),
+            Expr::case(
+                stale_text(message::Column::ToAddresses),
                 excluded_col(message::Column::ToAddresses),
-            ]),
+            )
+            .finally(cur_row_col(message::Column::ToAddresses)),
         )
         .value(
             message::Column::CcAddresses,
-            Func::coalesce([
-                cur_row_col(message::Column::CcAddresses),
+            Expr::case(
+                stale_text(message::Column::CcAddresses),
                 excluded_col(message::Column::CcAddresses),
-            ]),
+            )
+            .finally(cur_row_col(message::Column::CcAddresses)),
         )
         .value(
             message::Column::Date,

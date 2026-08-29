@@ -66,7 +66,11 @@ async-trait = "0.1"
 redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
 ammonia = "4.1.4"
 toml = "0.8"
-mail-parser = "0.11.8"
+# full_encoding: legacy/CJK charsets (GBK, GB18030, Big5, EUC-KR, …) via
+# encoding_rs — without it mail-parser silently falls back to UTF-8 lossy and
+# bakes U+FFFD mojibake into stored subjects and bodies.
+mail-parser = { version = "0.11.8", features = ["full_encoding"] }
+encoding_rs = "0.8"
 regex = "1"
 hmac = "0.12"
 utf7-imap = "0.3.2"

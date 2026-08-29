@@ -1343,7 +1343,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
 
 fn header_needs_refresh(existing: Option<&str>) -> bool {
     let value = existing.unwrap_or("");
-    value.is_empty() || (value.contains("=?") && value.contains("?="))
+    value.is_empty() || (value.contains("=?") && value.contains("?=")) || value.contains('\u{FFFD}')
 }
 
 /// Apply remote-image policy and optional OpenGPG decrypt at serve time.
@@ -1672,13 +1672,15 @@ fn coalesce_existing(column: message::Column, val: Value) -> sea_orm::sea_query:
     Func::coalesce([Expr::col(column), Expr::val(val)])
 }
 
-/// Encoded-word sniffing RHS: refresh fields that are empty or still contain
-/// `=?…?=` markers (the legacy `%=?%?=%` LIKE pattern).
+/// Encoded-word sniffing RHS: refresh fields that are empty, still contain
+/// `=?…?=` markers (the legacy `%=?%?=%` LIKE pattern), or carry U+FFFD
+/// mojibake from before full legacy-charset decoding.
 fn refresh_if_stale(column: message::Column, replacement: Value) -> Expr {
     let stale = Condition::any()
         .add(Expr::col(column).is_null())
         .add(Expr::col(column).eq(""))
-        .add(Expr::col(column).like("%=?%?=%"));
+        .add(Expr::col(column).like("%=?%?=%"))
+        .add(Expr::col(column).like("%\u{FFFD}%"));
     Expr::case(stale, Expr::val(replacement))
         .finally(Expr::col(column))
         .into()
@@ -1796,21 +1798,45 @@ async fn maybe_fill_imap_body(
                 message::Column::Subject,
                 text_value(fetched.subject.as_deref()),
             ),
-        )
-        .value(
+        );
+    // Addresses: heal encoded-word/U+FFFD mojibake when the fetch produced a
+    // value; otherwise keep the legacy fill-only-if-absent semantics so a
+    // header-less fetch never wipes the stored column.
+    if from_json.is_some() {
+        update.value(
+            message::Column::FromAddress,
+            refresh_if_stale(
+                message::Column::FromAddress,
+                opt_json_value(db, from_json.as_deref()),
+            ),
+        );
+    } else {
+        update.value(
             message::Column::FromAddress,
             coalesce_existing(
                 message::Column::FromAddress,
                 opt_json_value(db, from_json.as_deref()),
             ),
-        )
-        .value(
+        );
+    }
+    if to_json.is_some() {
+        update.value(
+            message::Column::ToAddresses,
+            refresh_if_stale(
+                message::Column::ToAddresses,
+                opt_json_value(db, to_json.as_deref()),
+            ),
+        );
+    } else {
+        update.value(
             message::Column::ToAddresses,
             coalesce_existing(
                 message::Column::ToAddresses,
                 opt_json_value(db, to_json.as_deref()),
             ),
-        )
+        );
+    }
+    update
         .value(
             message::Column::Date,
             coalesce_existing(
@@ -1835,10 +1861,10 @@ async fn maybe_fill_imap_body(
     if header_needs_refresh(row.subject.as_deref()) {
         row.subject.clone_from(&fetched.subject);
     }
-    if row.from_address.is_none() {
+    if from_json.is_some() && header_needs_refresh(row.from_address.as_deref()) {
         row.from_address = from_json;
     }
-    if row.to_addresses.is_none() {
+    if to_json.is_some() && header_needs_refresh(row.to_addresses.as_deref()) {
         row.to_addresses = to_json;
     }
     if row.date.is_none() {
