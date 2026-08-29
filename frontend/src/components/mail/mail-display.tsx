@@ -368,7 +368,7 @@ export function MailDisplay() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center p-2">
+      <div className="flex items-center overflow-x-auto p-2">
         <div className="flex items-center gap-1.5">
           {isMobile ? (
             <Button
