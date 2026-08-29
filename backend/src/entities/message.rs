@@ -14,6 +14,8 @@ pub struct Model {
     /// IMAP: `{folder_id}:{uid}`; JMAP: opaque email id.
     pub external_id: Option<String>,
     pub thread_id: Option<Uuid>,
+    /// JMAP `threadId` (server-opaque string; no FK — `thread.id` is a local UUID).
+    pub jmap_thread_id: Option<String>,
     pub message_id_header: Option<String>,
     pub subject: Option<String>,
     pub from_address: Option<Json>,

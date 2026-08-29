@@ -1550,4 +1550,205 @@ mod tests {
             "soft-deleted rows must be invisible"
         );
     }
+
+    fn sample_jmap_email(id: &str, thread: Option<&str>) -> super::jmap_client::JmapEmail {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "threadId": thread,
+            "subject": format!("Message {id}"),
+            "keywords": {},
+            "receivedAt": "2026-08-29T10:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn jmap_upsert_persists_thread_and_folder_moves() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        upsert_folder(&as_db(&pool), &account_id, "Archive", Some("/"), &[])
+            .await
+            .unwrap();
+        let inbox = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+        let archive = get_folder_id(&as_db(&pool), &account_id, "Archive")
+            .await
+            .unwrap();
+
+        super::store::persist_jmap_folder_batch(
+            &as_db(&pool),
+            &account_id,
+            &inbox,
+            &[sample_jmap_email("em1", Some("th1"))],
+            None,
+        )
+        .await
+        .unwrap();
+        let row: (Option<String>, String) = sqlx::query_as(
+            "SELECT jmap_thread_id, folder_id FROM message WHERE account_id = ? AND external_id = ?",
+        )
+        .bind(&account_id)
+        .bind("em1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some("th1"));
+        assert_eq!(row.1, inbox);
+
+        // Re-upsert under another folder = server-side move re-homes the row.
+        super::store::persist_jmap_folder_batch(
+            &as_db(&pool),
+            &account_id,
+            &archive,
+            &[sample_jmap_email("em1", Some("th1"))],
+            None,
+        )
+        .await
+        .unwrap();
+        let row: (String,) = sqlx::query_as(
+            "SELECT folder_id FROM message WHERE account_id = ? AND external_id = ?",
+        )
+        .bind(&account_id)
+        .bind("em1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, archive);
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message WHERE account_id = ? AND external_id = ?",
+        )
+        .bind(&account_id)
+        .bind("em1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "move must not duplicate the row");
+    }
+
+    #[tokio::test]
+    async fn jmap_delete_by_external_ids_removes_rows_and_updates_counts() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        let inbox = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+        super::store::persist_jmap_folder_batch(
+            &as_db(&pool),
+            &account_id,
+            &inbox,
+            &[
+                sample_jmap_email("em1", None),
+                sample_jmap_email("em2", None),
+                sample_jmap_email("em3", None),
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+
+        let deleted = super::store::delete_jmap_messages_by_external_ids(
+            &as_db(&pool),
+            &account_id,
+            &["em2".to_owned(), "emX".to_owned()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted, 1, "unknown ids are skipped");
+
+        let remaining: Vec<String> = sqlx::query_scalar(
+            "SELECT external_id FROM message WHERE account_id = ? ORDER BY external_id",
+        )
+        .bind(&account_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, vec!["em1".to_owned(), "em3".to_owned()]);
+
+        let total: i64 = sqlx::query_scalar("SELECT total_messages FROM folder WHERE id = ?")
+            .bind(&inbox)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 2);
+    }
+
+    #[tokio::test]
+    async fn jmap_email_state_cursor_roundtrip() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        let inbox = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+
+        assert!(
+            super::store::load_jmap_email_state(&as_db(&pool), &account_id, &inbox)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        super::store::save_jmap_email_state(&as_db(&pool), &account_id, &inbox, "email-state-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            super::store::load_jmap_email_state(&as_db(&pool), &account_id, &inbox)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("email-state-1")
+        );
+        super::store::save_jmap_email_state(&as_db(&pool), &account_id, &inbox, "email-state-2")
+            .await
+            .unwrap();
+        assert_eq!(
+            super::store::load_jmap_email_state(&as_db(&pool), &account_id, &inbox)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("email-state-2")
+        );
+        super::store::clear_jmap_email_state(&as_db(&pool), &account_id, &inbox)
+            .await
+            .unwrap();
+        assert!(
+            super::store::load_jmap_email_state(&as_db(&pool), &account_id, &inbox)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_id_for_role_finds_inbox() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        let inbox = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+        assert_eq!(
+            super::store::folder_id_for_role(&as_db(&pool), &account_id, "inbox")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(inbox.as_str())
+        );
+        assert!(
+            super::store::folder_id_for_role(&as_db(&pool), &account_id, "trash")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }

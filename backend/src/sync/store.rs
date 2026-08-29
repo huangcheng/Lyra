@@ -750,13 +750,94 @@ pub(crate) async fn clear_jmap_cursor(
     account_id: &str,
     folder_id: &str,
 ) -> Result<(), SyncError> {
+    clear_state_cursor(db, account_id, folder_id, "state_token").await
+}
+
+async fn clear_state_cursor(
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    cursor_type: &str,
+) -> Result<(), SyncError> {
     let mut del = Sq::delete();
     del.from_table(sync_cursor::Entity)
         .and_where(sync_cursor::Column::AccountId.eq(id_value(db, account_id)?))
         .and_where(sync_cursor::Column::FolderId.eq(id_value(db, folder_id)?))
-        .and_where(sync_cursor::Column::CursorType.eq("state_token"));
+        .and_where(sync_cursor::Column::CursorType.eq(cursor_type));
     db.orm().execute(&del).await.map_err(orm_err)?;
     Ok(())
+}
+
+/// Load the account-level `Email/changes` state.
+///
+/// `Email/changes` state is account-scoped, but `sync_cursor.folder_id` is
+/// NOT NULL with a folder FK — the row anchors on the account's inbox folder.
+pub(crate) async fn load_jmap_email_state(
+    db: &DbPool,
+    account_id: &str,
+    anchor_folder_id: &str,
+) -> Result<Option<String>, SyncError> {
+    load_cursor_value(db, account_id, anchor_folder_id, "email_state").await
+}
+
+pub(crate) async fn save_jmap_email_state(
+    db: &DbPool,
+    account_id: &str,
+    anchor_folder_id: &str,
+    state: &str,
+) -> Result<(), SyncError> {
+    let mut tx = db.begin().await?;
+    save_state_cursor_in_tx(
+        &mut tx,
+        db,
+        account_id,
+        anchor_folder_id,
+        "email_state",
+        state,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(crate) async fn clear_jmap_email_state(
+    db: &DbPool,
+    account_id: &str,
+    anchor_folder_id: &str,
+) -> Result<(), SyncError> {
+    clear_state_cursor(db, account_id, anchor_folder_id, "email_state").await
+}
+
+/// Find the local folder id for a JMAP mailbox id (`external_id`), if synced.
+pub(crate) async fn find_folder_id(
+    db: &DbPool,
+    account_id: &str,
+    external_id: &str,
+) -> Result<Option<String>, SyncError> {
+    find_folder_id_by_external_id(db, account_id, external_id).await
+}
+
+/// The account's folder with `role` (local `role_override` wins), if any.
+pub(crate) async fn folder_id_for_role(
+    db: &DbPool,
+    account_id: &str,
+    role: &str,
+) -> Result<Option<String>, SyncError> {
+    let mut sel = Sq::select();
+    sel.column(folder::Column::Id)
+        .from(folder::Entity)
+        .and_where(folder::Column::AccountId.eq(id_value(db, account_id)?))
+        .and_where(Expr::cust_with_values(
+            "COALESCE(role_override, role) = ?",
+            [role],
+        ))
+        .order_by_expr(
+            Expr::col(folder::Column::SortOrder),
+            sea_orm::sea_query::Order::Asc,
+        )
+        .limit(1);
+    let row = db.orm().query_one(&sel).await.map_err(orm_err)?;
+    row.map(|r| row_id(&r, "id")).transpose()
 }
 
 // ── Message upsert ──────────────────────────────────────────────────
@@ -936,6 +1017,47 @@ pub(crate) async fn persist_jmap_folder_batch(
     Ok((new, updated))
 }
 
+/// Hard-delete JMAP messages by server ids (`external_id`), scoped to the
+/// account. Server-gone and moved-out messages both land here; the caller
+/// has already subtracted anything re-fetched this run. Attachment rows and
+/// FTS entries cascade. Folder counts of affected folders are refreshed.
+pub(crate) async fn delete_jmap_messages_by_external_ids(
+    db: &DbPool,
+    account_id: &str,
+    external_ids: &[String],
+) -> Result<usize, SyncError> {
+    if external_ids.is_empty() {
+        return Ok(0);
+    }
+    let account_bind = id_value(db, account_id)?;
+
+    // Folders whose counts change (collected before the delete; the delete +
+    // count refresh are deliberately non-transactional, as persist_attachments).
+    let mut sel = Sq::select();
+    sel.distinct()
+        .column(message::Column::FolderId)
+        .from(message::Entity)
+        .and_where(message::Column::AccountId.eq(account_bind.clone()))
+        .and_where(message::Column::ExternalId.is_in(external_ids.iter().cloned()));
+    let rows = db.orm().query_all(&sel).await.map_err(orm_err)?;
+    let folder_ids: Vec<String> = rows
+        .iter()
+        .map(|r| row_id(r, "folder_id"))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut del = Sq::delete();
+    del.from_table(message::Entity)
+        .and_where(message::Column::AccountId.eq(account_bind))
+        .and_where(message::Column::ExternalId.is_in(external_ids.iter().cloned()));
+    let res = db.orm().execute(&del).await.map_err(orm_err)?;
+    let deleted = res.rows_affected();
+
+    for folder_id in &folder_ids {
+        update_folder_counts(db, folder_id).await?;
+    }
+    Ok(usize::try_from(deleted).unwrap_or(usize::MAX))
+}
+
 /// Wire-format for IMAP message identity.
 ///
 /// RFC 3501 UIDs are unique only within a mailbox (paired with UIDVALIDITY),
@@ -1016,6 +1138,7 @@ struct MessageInsert<'a> {
     has_attachments: bool,
     body_text: Option<&'a str>,
     body_html: Option<&'a str>,
+    jmap_thread_id: Option<&'a str>,
 }
 
 /// Insert one message with the canonical envelope column set.
@@ -1046,6 +1169,7 @@ fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStatement {
             message::Column::HasAttachments,
             message::Column::BodyText,
             message::Column::BodyHtml,
+            message::Column::JmapThreadId,
         ])
         .values_panic(vec![
             Expr::val(new_uuid_text()),
@@ -1068,6 +1192,7 @@ fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStatement {
             Expr::val(m.has_attachments),
             Expr::val(opt_str_value(m.body_text)),
             Expr::val(opt_str_value(m.body_html)),
+            Expr::val(opt_str_value(m.jmap_thread_id)),
         ]);
     ins
 }
@@ -1198,6 +1323,7 @@ pub(crate) async fn upsert_message_in_tx(
             has_attachments: msg.has_attachments,
             body_text: msg.body_text.as_deref(),
             body_html: body_html.as_deref(),
+            jmap_thread_id: None,
         },
     ));
     tx_execute(tx, &insert).await?;
@@ -1252,6 +1378,15 @@ pub(crate) async fn upsert_jmap_message_in_tx(
                 message::Column::Flags,
                 Expr::val(opt_json_value(db, Some(flags_json.as_str()))),
             )
+            // Server-side moves re-home the row; the JMAP threadId is persisted.
+            .value(
+                message::Column::FolderId,
+                Expr::val(id_value(db, folder_id)?),
+            )
+            .value(
+                message::Column::JmapThreadId,
+                Expr::val(opt_str_value(email.thread_id.as_deref())),
+            )
             .value(message::Column::UpdatedAt, Expr::current_timestamp())
             .and_where(message::Column::Id.eq(id_value(db, &id)?));
         tx_execute(tx, &upd).await?;
@@ -1288,6 +1423,7 @@ pub(crate) async fn upsert_jmap_message_in_tx(
                 has_attachments: email.has_attachment.unwrap_or(false),
                 body_text: body_text.as_deref(),
                 body_html: body_html.as_deref(),
+                jmap_thread_id: email.thread_id.as_deref(),
             },
         );
         tx_execute(tx, &insert).await?;
@@ -1350,6 +1486,19 @@ pub(crate) async fn save_jmap_cursor_in_tx(
     folder_id: &str,
     query_state: &str,
 ) -> Result<(), SyncError> {
+    save_state_cursor_in_tx(tx, db, account_id, folder_id, "state_token", query_state).await
+}
+
+/// Upsert a JMAP state cursor of `cursor_type` (`state_token` per folder,
+/// `email_state` account-level). Opaque server tokens, stored verbatim.
+async fn save_state_cursor_in_tx(
+    tx: &mut DbTxn,
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    cursor_type: &str,
+    cursor_value: &str,
+) -> Result<(), SyncError> {
     let mut ins = Sq::insert();
     ins.into_table(sync_cursor::Entity)
         .columns([
@@ -1366,8 +1515,8 @@ pub(crate) async fn save_jmap_cursor_in_tx(
             Expr::val(id_value(db, account_id)?),
             Expr::val(id_value(db, folder_id)?),
             Expr::val("jmap"),
-            Expr::val("state_token"),
-            Expr::val(query_state),
+            Expr::val(cursor_type),
+            Expr::val(cursor_value),
             Expr::current_timestamp(),
         ])
         .on_conflict(

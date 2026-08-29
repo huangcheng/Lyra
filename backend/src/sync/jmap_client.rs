@@ -20,22 +20,28 @@ use std::time::Duration;
 
 use jmap_client::client::{Client, Credentials};
 use jmap_client::core::error::MethodErrorType;
+use jmap_client::core::get::GetRequest;
+use jmap_client::core::query::{QueryRequest, QueryResponse};
+use jmap_client::core::query_changes::QueryChangesResponse;
+use jmap_client::core::response::{EmailChangesResponse, EmailGetResponse, MailboxGetResponse};
 use jmap_client::core::set::SetErrorType;
-use jmap_client::email::{Email, EmailAddress, EmailBodyPart};
+use jmap_client::email::{self, Email, EmailAddress, EmailBodyPart, Property};
 use jmap_client::mailbox::{Mailbox, Role};
-use jmap_client::{Get, URI};
+use jmap_client::{Get, Set, URI};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::crypto::{self, EncryptedCredential};
 
-/// Whole-request timeout for JMAP API calls (matches the retired client).
-// Used by the seam connect path, wired into callers from Task 2 on.
-#[allow(dead_code)]
+/// Whole-request timeout for JMAP API calls (matches the legacy client).
 const JMAP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Redirect hops accepted during well-known pre-resolution.
-#[allow(dead_code)]
 const MAX_DISCOVERY_HOPS: u32 = 5;
+/// `Email/changes` page size and page bound (a page is ≤ this many ids).
+const CHANGES_PAGE_SIZE: usize = 500;
+const CHANGES_MAX_PAGES: usize = 8;
+/// Cap on returned body values (mirrors the IMAP lazy-fetch body cap).
+const MAX_BODY_VALUE_BYTES: usize = 25 * 1024 * 1024;
 
 // ── Errors ──────────────────────────────────────────────────────────
 
@@ -67,6 +73,9 @@ pub enum JmapError {
 impl From<jmap_client::Error> for JmapError {
     fn from(err: jmap_client::Error) -> Self {
         // 401 surfaces as ProblemDetails (RFC 7807 body) or a bare status line.
+        // The string sniff on `Error::Server` depends on jmap-client 0.4.2's
+        // `StatusCode` Display format ("401 Unauthorized"); the crate is
+        // version-pinned — revisit these matches on any upgrade.
         let is_auth = match &err {
             jmap_client::Error::Problem(p) => p.status() == Some(401),
             jmap_client::Error::Server(s) => s.starts_with("401"),
@@ -100,7 +109,9 @@ impl JmapError {
     /// Transient failure worth retrying with backoff: transport/timeout,
     /// 5xx/429, `serverUnavailable`/`serverPartialFail`/`tooManyChanges`
     /// method errors, `rateLimit`/`overQuota` set errors.
-    // Consumed by the sync loop's retry/backoff wiring (Task 2).
+    // Consumed by job retry/backoff wiring in a later task. The `Error::Server`
+    // status sniff depends on jmap-client 0.4.2's `StatusCode` Display format
+    // (version-pinned; revisit on crate upgrade).
     #[allow(dead_code)]
     #[must_use]
     pub fn is_transient(&self) -> bool {
@@ -128,8 +139,8 @@ impl JmapError {
     }
 
     /// Authentication/authorization failure; callers evict the cached session.
-    // Consumed by the sync loop's session-eviction wiring (Task 2).
-    #[allow(dead_code)]
+    // The `Error::Server` status sniff depends on jmap-client 0.4.2's
+    // `StatusCode` Display format (version-pinned; revisit on crate upgrade).
     #[must_use]
     pub fn is_auth(&self) -> bool {
         match self {
@@ -225,6 +236,34 @@ pub struct JmapEmailAddress {
     pub name: Option<String>,
     #[serde(default)]
     pub email: Option<String>,
+}
+
+/// Incremental result from `Email/queryChanges` (moved from jmap.rs).
+#[derive(Debug, Clone)]
+pub(crate) struct EmailQueryChanges {
+    pub(crate) added_ids: Vec<String>,
+    pub(crate) removed_ids: Vec<String>,
+    pub(crate) new_query_state: Option<String>,
+}
+
+/// One page of a (batched) `Email/query` + `Email/get`.
+#[derive(Debug)]
+pub(crate) struct EmailPage {
+    /// Ids from the query (paging is driven by these, not the fetched list).
+    pub(crate) ids: Vec<String>,
+    pub(crate) emails: Vec<JmapEmail>,
+    /// Folder cursor (`queryState`), committed only with the last page.
+    pub(crate) query_state: Option<String>,
+    /// Account-level `Email` state from the get response (`Email/changes` input).
+    pub(crate) email_state: Option<String>,
+}
+
+/// Account-level `Email/changes` outcome.
+#[derive(Debug)]
+pub(crate) struct JmapEmailChanges {
+    pub(crate) updated_ids: Vec<String>,
+    pub(crate) destroyed_ids: Vec<String>,
+    pub(crate) new_state: Option<String>,
 }
 
 impl JmapEmail {
@@ -353,8 +392,6 @@ pub(crate) fn resolve_discovery_redirect(
 ///
 /// `urls` are the session's `apiUrl` / `uploadUrl` / `downloadUrl` /
 /// `eventSourceUrl`; empty entries are skipped defensively.
-// Called from `JmapSeam::connect`/`refresh_if_stale` (Task 2 wiring).
-#[allow(dead_code)]
 fn pin_session_urls(origin: &str, urls: &[&str]) -> Result<(), JmapError> {
     for url in urls.iter().filter(|u| !u.is_empty()) {
         let target = crate::netsec::origin_of(url).map_err(JmapError::InvalidServerUrl)?;
@@ -372,7 +409,6 @@ fn pin_session_urls(origin: &str, urls: &[&str]) -> Result<(), JmapError> {
 
 /// `auth_type = "bearer"` (e.g. Fastmail API tokens) selects Bearer; anything
 /// else is Basic with the account password.
-#[allow(dead_code)] // called from `JmapSeam::connect` (Task 2 wiring)
 fn credentials_for(auth_type: &str, email: &str, secret: &str) -> Credentials {
     if auth_type.eq_ignore_ascii_case("bearer") {
         Credentials::bearer(secret)
@@ -383,7 +419,6 @@ fn credentials_for(auth_type: &str, email: &str, secret: &str) -> Credentials {
 
 /// Authorization header value for our own pre-resolution GETs. `Credentials`
 /// stores the Basic value pre-encoded (jmap-client `src/client.rs`).
-#[allow(dead_code)] // called from `preflight_discovery` (Task 2 wiring)
 fn authorization_header(credentials: &Credentials) -> String {
     match credentials {
         Credentials::Basic(encoded) => format!("Basic {encoded}"),
@@ -397,7 +432,6 @@ fn authorization_header(credentials: &Credentials) -> String {
 ///
 /// Non-2xx final statuses are *not* an error here: `connect()` produces the
 /// typed 401/problem error for them. Only the chain's shape matters.
-#[allow(dead_code)] // called from `JmapSeam::connect` (Task 2 wiring)
 async fn preflight_discovery(
     base: &str,
     auth_header: &str,
@@ -439,13 +473,11 @@ async fn preflight_discovery(
 /// A connected JMAP session pinned to its configured origin.
 ///
 /// Consumed by the sync loop, send path, and push wiring from Task 2 on.
-#[allow(dead_code)]
 pub(crate) struct JmapSeam {
     client: Client,
     origin: String,
 }
 
-#[allow(dead_code)] // seam surface is wired into callers over Tasks 2–7
 impl JmapSeam {
     /// Discover + connect (no caching). Pre-resolves well-known redirects
     /// with the same-origin follower, then pins the session URLs.
@@ -519,6 +551,7 @@ impl JmapSeam {
     }
 
     /// Uncached connect (account probe before the account row exists).
+    #[allow(dead_code)] // account-probe wiring lands in a later task
     pub(crate) async fn connect_ephemeral(
         base_url: &str,
         email: &str,
@@ -552,7 +585,155 @@ impl JmapSeam {
         Ok(())
     }
 
+    /// `maxCallsInRequest` capability; conservative default when the session's
+    /// core capabilities fail to type-check (untagged `Capabilities` is
+    /// all-or-nothing per required field set).
+    pub(crate) fn max_calls_in_request(&self) -> usize {
+        match self.client.session().core_capabilities() {
+            Some(c) => c.max_calls_in_request(),
+            None => 8,
+        }
+    }
+
+    /// List all mailboxes (folders) for this account (`Mailbox/get`, ids omitted = all).
+    pub(crate) async fn list_mailboxes(&self) -> Result<Vec<JmapMailbox>, JmapError> {
+        let mut request = self.client.build();
+        request.get_mailbox();
+        let mut resp = request.send_single::<MailboxGetResponse>().await?;
+        Ok(resp.take_list().iter().filter_map(map_mailbox).collect())
+    }
+
+    /// One `Email/query` page with the matching `Email/get` batched into the
+    /// same request via a `/ids` result reference (one round trip per page).
+    /// Splits into two requests when `maxCallsInRequest < 2`.
+    pub(crate) async fn query_emails_page(
+        &self,
+        mailbox_id: &str,
+        position: usize,
+        limit: usize,
+    ) -> Result<EmailPage, JmapError> {
+        let position = i32::try_from(position).unwrap_or(i32::MAX);
+        if self.max_calls_in_request() < 2 {
+            let mut query_req = self.client.build();
+            fill_email_query(query_req.query_email(), mailbox_id, position, limit);
+            let mut query_resp = query_req.send_single::<QueryResponse>().await?;
+            let ids = query_resp.take_ids();
+            let query_state = query_resp.take_query_state();
+            let (emails, email_state) = self.get_emails(&ids).await?;
+            return Ok(EmailPage {
+                ids,
+                emails,
+                query_state: Some(query_state),
+                email_state,
+            });
+        }
+
+        let mut request = self.client.build();
+        let ids_ref = {
+            let q = request.query_email();
+            fill_email_query(q, mailbox_id, position, limit);
+            q.result_reference()
+        };
+        {
+            let g = request.get_email();
+            g.ids_ref(ids_ref);
+            fill_email_get(g);
+        }
+        let mut responses = request.send().await?.unwrap_method_responses();
+        if responses.len() != 2 {
+            return Err(JmapError::InvalidResponse(format!(
+                "expected Email/query + Email/get responses, got {}",
+                responses.len()
+            )));
+        }
+        let mut get_resp = responses.remove(1).unwrap_get_email()?;
+        let mut query_resp = responses.remove(0).unwrap_query_email()?;
+        let email_state = get_resp.take_state();
+        let emails = get_resp.take_list().iter().map(map_email).collect();
+        Ok(EmailPage {
+            ids: query_resp.take_ids(),
+            emails,
+            query_state: Some(query_resp.take_query_state()),
+            email_state: Some(email_state),
+        })
+    }
+
+    /// Incremental mailbox changes since a stored `queryState` (RFC 8621 `Email/queryChanges`).
+    pub(crate) async fn query_email_changes(
+        &self,
+        mailbox_id: &str,
+        since_query_state: &str,
+    ) -> Result<EmailQueryChanges, JmapError> {
+        let mut request = self.client.build();
+        {
+            let q = request.query_email_changes(since_query_state);
+            q.filter(email::query::Filter::in_mailbox(mailbox_id));
+            q.sort([email::query::Comparator::received_at().descending()]);
+            q.max_changes(CHANGES_PAGE_SIZE);
+        }
+        let resp = request.send_single::<QueryChangesResponse>().await?;
+        Ok(EmailQueryChanges {
+            added_ids: resp.added().iter().map(|a| a.id().to_owned()).collect(),
+            removed_ids: resp.removed().to_vec(),
+            new_query_state: Some(resp.new_query_state().to_owned()),
+        })
+    }
+
+    /// Account-level `Email/changes`: keyword/mailbox updates and destroys that
+    /// per-folder queryChanges cannot see (no membership change). Pages until
+    /// `hasMoreChanges` clears or the bound is hit.
+    pub(crate) async fn email_changes(
+        &self,
+        since_state: &str,
+    ) -> Result<JmapEmailChanges, JmapError> {
+        let mut updated_ids = Vec::new();
+        let mut destroyed_ids = Vec::new();
+        let mut new_state = None;
+        let mut since = since_state.to_owned();
+        for _page in 0..CHANGES_MAX_PAGES {
+            let mut request = self.client.build();
+            request
+                .changes_email(since.clone())
+                .max_changes(CHANGES_PAGE_SIZE);
+            let mut resp = request.send_single::<EmailChangesResponse>().await?;
+            updated_ids.extend(resp.take_updated());
+            destroyed_ids.extend(resp.take_destroyed());
+            since = resp.take_new_state();
+            new_state = Some(since.clone());
+            if !resp.has_more_changes() {
+                break;
+            }
+        }
+        Ok(JmapEmailChanges {
+            updated_ids,
+            destroyed_ids,
+            new_state,
+        })
+    }
+
+    /// Fetch email objects by id with the sync property set.
+    /// Returns the emails plus the account-level `Email` state.
+    pub(crate) async fn get_emails(
+        &self,
+        ids: &[String],
+    ) -> Result<(Vec<JmapEmail>, Option<String>), JmapError> {
+        if ids.is_empty() {
+            return Ok((Vec::new(), None));
+        }
+        let mut request = self.client.build();
+        {
+            let get = request.get_email();
+            get.ids(ids.iter().cloned());
+            fill_email_get(get);
+        }
+        let mut resp = request.send_single::<EmailGetResponse>().await?;
+        let state = resp.take_state();
+        let emails = resp.take_list().iter().map(map_email).collect();
+        Ok((emails, Some(state)))
+    }
+
     /// True when `urn:ietf:params:jmap:submission` is advertised (RFC 8621).
+    #[allow(dead_code)] // send-path wiring lands in a later task
     pub(crate) fn supports_submission(&self) -> bool {
         self.client
             .session()
@@ -560,10 +741,8 @@ impl JmapSeam {
     }
 }
 
-#[allow(dead_code)] // session cache is exercised via `JmapSeam` (Task 2 wiring)
 static CLIENT_CACHE: OnceLock<Mutex<HashMap<String, Arc<JmapSeam>>>> = OnceLock::new();
 
-#[allow(dead_code)]
 fn lock_cache() -> MutexGuard<'static, HashMap<String, Arc<JmapSeam>>> {
     CLIENT_CACHE
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -577,7 +756,6 @@ fn lock_cache() -> MutexGuard<'static, HashMap<String, Arc<JmapSeam>>> {
 ///
 /// `keywords`/`mailbox_ids` keep the old DTO shape (JSON object with `true`
 /// values); the crate exposes only set keys, which is the same information.
-#[allow(dead_code)] // consumed by the sync loop rewrite (Task 2)
 fn map_email(email: &Email<Get>) -> JmapEmail {
     let keywords = email.keywords();
     let keywords = if keywords.is_empty() {
@@ -632,7 +810,6 @@ fn map_email(email: &Email<Get>) -> JmapEmail {
     }
 }
 
-#[allow(dead_code)] // helper of `map_email` (Task 2)
 fn map_addresses(addrs: &[EmailAddress]) -> Vec<JmapEmailAddress> {
     addrs
         .iter()
@@ -645,7 +822,6 @@ fn map_addresses(addrs: &[EmailAddress]) -> Vec<JmapEmailAddress> {
 
 /// Rebuild the `bodyValues` JSON map (`partId → {value, isTruncated}`) that
 /// `extract_body_part` reads, from the crate's keyed accessor.
-#[allow(dead_code)] // helper of `map_email` (Task 2)
 fn map_body_values(email: &Email<Get>) -> Option<serde_json::Map<String, serde_json::Value>> {
     let mut map = serde_json::Map::new();
     for part in email
@@ -667,7 +843,6 @@ fn map_body_values(email: &Email<Get>) -> Option<serde_json::Map<String, serde_j
 }
 
 /// `textBody`/`htmlBody` as `[{partId, type}]` JSON (the DTO's wire shape).
-#[allow(dead_code)] // helper of `map_email` (Task 2)
 fn map_body_refs(parts: Option<&[EmailBodyPart]>) -> Option<Vec<serde_json::Value>> {
     parts.map(|ps| {
         ps.iter()
@@ -678,7 +853,6 @@ fn map_body_refs(parts: Option<&[EmailBodyPart]>) -> Option<Vec<serde_json::Valu
 
 /// Map a crate `Mailbox<Get>`; `None` when the server row has no id.
 /// `Role::Junk` normalizes to Lyra's `"spam"` vocabulary.
-#[allow(dead_code)] // consumed by the sync loop rewrite (Task 2)
 fn map_mailbox(mb: &Mailbox<Get>) -> Option<JmapMailbox> {
     let id = mb.id()?.to_owned();
     let role = match mb.role() {
@@ -701,6 +875,60 @@ fn map_mailbox(mb: &Mailbox<Get>) -> Option<JmapMailbox> {
         unread_emails: Some(mb.unread_emails() as u64),
         sort_order: Some(mb.sort_order()),
     })
+}
+
+/// Properties fetched for every synced message (RFC 8621 §4.3 property list).
+fn email_get_properties() -> Vec<Property> {
+    use jmap_client::email::Property as P;
+    vec![
+        P::Id,
+        P::BlobId,
+        P::ThreadId,
+        P::MailboxIds,
+        P::Keywords,
+        P::Size,
+        P::ReceivedAt,
+        P::MessageId,
+        P::InReplyTo,
+        P::References,
+        P::Sender,
+        P::From,
+        P::To,
+        P::Cc,
+        P::Bcc,
+        P::ReplyTo,
+        P::Subject,
+        P::BodyStructure,
+        P::BodyValues,
+        P::TextBody,
+        P::HtmlBody,
+        P::Attachments,
+        P::HasAttachment,
+        P::Preview,
+    ]
+}
+
+/// `Email/query` args for one folder page (receivedAt desc, paged by position).
+fn fill_email_query(
+    q: &mut QueryRequest<Email<Set>>,
+    mailbox_id: &str,
+    position: i32,
+    limit: usize,
+) {
+    q.filter(email::query::Filter::in_mailbox(mailbox_id));
+    q.sort([email::query::Comparator::received_at().descending()]);
+    q.position(position);
+    q.limit(limit);
+    q.calculate_total(true);
+}
+
+/// `Email/get` args for sync: full property set + text/HTML body values,
+/// capped at `MAX_BODY_VALUE_BYTES` per value.
+fn fill_email_get(get: &mut GetRequest<Email<Set>>) {
+    get.properties(email_get_properties());
+    get.arguments().fetch_text_body_values(true);
+    get.arguments().fetch_html_body_values(true);
+    get.arguments().max_body_value_bytes(MAX_BODY_VALUE_BYTES);
 }
 
 #[cfg(test)]
@@ -1009,5 +1237,43 @@ mod tests {
         let no_id: Mailbox<Get> =
             serde_json::from_value(serde_json::json!({ "name": "Ghost" })).unwrap();
         assert!(map_mailbox(&no_id).is_none());
+    }
+
+    // ── request wire shapes (Task 2) ────────────────────────────────
+
+    #[test]
+    fn email_query_serializes_rfc_shape() {
+        use jmap_client::Method;
+        use jmap_client::core::RequestParams;
+
+        let mut q =
+            QueryRequest::<Email<Set>>::new(RequestParams::new("acc", Method::QueryEmail, 0));
+        fill_email_query(&mut q, "mb1", 0, 100);
+        let json = serde_json::to_value(&q).unwrap();
+        assert_eq!(json["accountId"], "acc");
+        assert_eq!(json["filter"]["inMailbox"], "mb1");
+        assert_eq!(json["sort"][0]["property"], "receivedAt");
+        assert_eq!(json["sort"][0]["isAscending"], false);
+        assert_eq!(json["position"], 0);
+        assert_eq!(json["limit"], 100);
+        assert_eq!(json["calculateTotal"], true);
+    }
+
+    #[test]
+    fn email_get_serializes_properties_and_body_flags() {
+        use jmap_client::Method;
+        use jmap_client::core::RequestParams;
+
+        let mut g = GetRequest::<Email<Set>>::new(RequestParams::new("acc", Method::GetEmail, 0));
+        g.ids(["em1"]);
+        fill_email_get(&mut g);
+        let json = serde_json::to_value(&g).unwrap();
+        assert_eq!(json["fetchTextBodyValues"], true);
+        assert_eq!(json["fetchHTMLBodyValues"], true);
+        let props = json["properties"].as_array().unwrap();
+        assert!(props.contains(&serde_json::json!("threadId")));
+        assert!(props.contains(&serde_json::json!("mailboxIds")));
+        assert!(props.contains(&serde_json::json!("keywords")));
+        assert!(props.contains(&serde_json::json!("attachments")));
     }
 }
