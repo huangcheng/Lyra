@@ -24,7 +24,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { t } from '@/i18n';
 import { buildCustomFolderTree, buildRoleChildren, type FolderTreeNode } from '@/lib/folder-tree';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
-import { cn } from '@/lib/utils';
+import { avatarTone, cn } from '@/lib/utils';
 import { useMailStore, type UnifiedFolder } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 import type { MailAccount } from '@/types';
@@ -138,8 +138,9 @@ function CustomFolderBranch({
           className="flex h-8 min-w-0 flex-1 items-center gap-2 pr-2.5 text-left text-[13px]"
           onClick={() => selectAccountFolder(accountId, node.id)}
         >
-          <Folder
-            className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')}
+          <span
+            aria-hidden
+            className={cn('size-2 shrink-0 rounded-[3px]', avatarTone(node.title))}
           />
           <span className="truncate">{node.title}</span>
           {node.label ? (

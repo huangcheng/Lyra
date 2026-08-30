@@ -4,16 +4,15 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { BarChart3, Menu, PenSquare, Search, Settings } from 'lucide-react';
-import { useNavigate } from '@tanstack/react-router';
+import { Menu, PenSquare, Search } from 'lucide-react';
 import { useDefaultLayout } from 'react-resizable-panels';
 
 import { AccountSwitcher } from '@/components/mail/account-switcher';
+import { AppRail } from '@/components/mail/app-rail';
 import { MailDisplay } from '@/components/mail/mail-display';
 import { MailList } from '@/components/mail/mail-list';
 import { SidebarFolders } from '@/components/mail/sidebar-folders';
 import { LyraWordmark } from '@/components/lyra-wordmark';
-import { ThemeToggle } from '@/components/theme-toggle';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
@@ -71,7 +70,6 @@ function useFolderTitle(): string {
 function NavContent({ isCollapsed }: { isCollapsed: boolean }) {
   const locale = useUIStore((s) => s.locale);
   const openCompose = useUIStore((s) => s.openCompose);
-  const navigate = useNavigate();
   return (
     <div className="flex h-full flex-col bg-muted">
       <div
@@ -99,32 +97,11 @@ function NavContent({ isCollapsed }: { isCollapsed: boolean }) {
       <div className="min-h-0 flex-1 overflow-y-auto">
         <SidebarFolders isCollapsed={isCollapsed} />
       </div>
-      {isCollapsed ? (
-        <div className="mt-auto flex items-center justify-center px-3 py-2">
-          <ThemeToggle isCollapsed />
-        </div>
-      ) : (
+      {isCollapsed ? null : (
         <div className="mt-auto flex items-center gap-1.5 px-3 py-2">
           <LyraWordmark className="[&>span:last-child]:text-sm" />
           <SyncStatusDot />
           <div className="flex-1" />
-          <button
-            type="button"
-            className="inline-flex size-[26px] items-center justify-center rounded-[7px] text-ter-foreground hover:bg-accent"
-            onClick={() => void navigate({ to: '/dashboard' })}
-            aria-label={t(locale, 'nav.dashboard')}
-          >
-            <BarChart3 size={14} />
-          </button>
-          <button
-            type="button"
-            className="inline-flex size-[26px] items-center justify-center rounded-[7px] text-ter-foreground hover:bg-accent"
-            onClick={() => void navigate({ to: '/settings' })}
-            aria-label={t(locale, 'nav.settings')}
-          >
-            <Settings size={14} />
-          </button>
-          <ThemeToggle />
         </div>
       )}
     </div>
@@ -271,35 +248,38 @@ export function Mail() {
 
   return (
     <TooltipProvider delayDuration={0}>
-      <ResizablePanelGroup
-        orientation="horizontal"
-        defaultLayout={defaultLayout ?? { nav: 20, list: 32, view: 48 }}
-        onLayoutChanged={onLayoutChanged}
-        className="h-full items-stretch"
-      >
-        <ResizablePanel
-          id="nav"
-          defaultSize="20%"
-          collapsedSize={48}
-          collapsible
-          minSize="15%"
-          maxSize="20%"
-          onResize={(size) => {
-            setIsCollapsed(size.asPercentage < 10 || size.inPixels <= 56);
-          }}
-          className={cn(isCollapsed && 'min-w-[50px] transition-all duration-300 ease-in-out')}
+      <div className="flex h-full">
+        <AppRail />
+        <ResizablePanelGroup
+          orientation="horizontal"
+          defaultLayout={defaultLayout ?? { nav: 20, list: 32, view: 48 }}
+          onLayoutChanged={onLayoutChanged}
+          className="h-full flex-1 items-stretch"
         >
-          <NavContent isCollapsed={isCollapsed} />
-        </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel id="list" defaultSize="32%" minSize="30%" className="bg-background">
-          <ListPane />
-        </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel id="view" defaultSize="48%" minSize="30%">
-          <MailDisplay />
-        </ResizablePanel>
-      </ResizablePanelGroup>
+          <ResizablePanel
+            id="nav"
+            defaultSize="20%"
+            collapsedSize={48}
+            collapsible
+            minSize="15%"
+            maxSize="20%"
+            onResize={(size) => {
+              setIsCollapsed(size.asPercentage < 10 || size.inPixels <= 56);
+            }}
+            className={cn(isCollapsed && 'min-w-[50px] transition-all duration-300 ease-in-out')}
+          >
+            <NavContent isCollapsed={isCollapsed} />
+          </ResizablePanel>
+          <ResizableHandle withHandle />
+          <ResizablePanel id="list" defaultSize="32%" minSize="30%" className="bg-background">
+            <ListPane />
+          </ResizablePanel>
+          <ResizableHandle withHandle />
+          <ResizablePanel id="view" defaultSize="48%" minSize="30%">
+            <MailDisplay />
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      </div>
     </TooltipProvider>
   );
 }
