@@ -100,6 +100,13 @@ impl IntoResponse for SyncError {
                     Some("internal_error"),
                 )
             }
+            // A read-only JMAP account (e.g. a scoped API token) is
+            // actionable user information — surface it, don't mask it.
+            SyncError::Jmap(jmap_err) if jmap_err.is_read_only() => (
+                StatusCode::FORBIDDEN,
+                "mail account is read-only; check the token's access level".to_string(),
+                Some("account_read_only"),
+            ),
             masked @ (SyncError::Database(_)
             | SyncError::Imap(_)
             | SyncError::Jmap(_)

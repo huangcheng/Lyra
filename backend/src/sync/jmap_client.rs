@@ -163,6 +163,18 @@ impl JmapError {
             _ => false,
         }
     }
+
+    /// The server rejected a write because the account is read-only
+    /// (e.g. a read-only scoped Fastmail API token).
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        match self {
+            Self::Client(jmap_client::Error::Method(m)) => {
+                m.error() == &MethodErrorType::AccountReadOnly
+            }
+            _ => false,
+        }
+    }
 }
 
 // ── Lyra DTOs (persistence boundary; moved from jmap.rs) ────────────
@@ -2248,5 +2260,22 @@ mod tests {
             json["update"]["em1"],
             serde_json::json!({ "keywords/$flagged": true })
         );
+    }
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+    use jmap_client::core::error::{MethodError, MethodErrorType};
+
+    #[test]
+    fn read_only_classification() {
+        let err = JmapError::from(jmap_client::Error::Method(MethodError {
+            p_type: MethodErrorType::AccountReadOnly,
+        }));
+        assert!(err.is_read_only());
+        assert!(!err.is_transient());
+        assert!(!err.is_auth());
+        assert!(!JmapError::InvalidResponse("x".into()).is_read_only());
     }
 }
