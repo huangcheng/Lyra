@@ -184,8 +184,12 @@ Flat by default. Depth is conveyed by tonal layering (Canvas < Panel < List < Pa
 - **Style:** Hover Wash track, Paper active pill, 6-8px radius. Used for All/Unread and range pickers (7/30/90 days).
 
 ### Navigation
-- **Mail sidebar (240px, Panel Fog):** Account pill and compose on top; UNIFIED and ACCOUNTS sections; folder tree with 16px indent per level, disclosure chevrons, thin-stroke icons (Tertiary Ash at rest, Ink when active). Selected row is a Paper pill with a 1px Button Border.
+- **App rail (52px, Panel Fog):** Far-left on the mail screen — stamp, Mail / Contacts / Calendar (calendar carries today's date badge), then Dashboard / Settings / theme at the bottom. Standalone pages keep the slim nav instead.
+- **Mail sidebar (240px, Panel Fog):** Account pill (Paper + 1px Button Border) and compose on top; UNIFIED and ACCOUNTS sections; folder tree with 16px indent per level, disclosure chevrons, thin-stroke role icons, and a pastel tone dot for custom folders. Selected row is a Paper pill with a 1px Button Border. Footer: wordmark + sync dot only.
 - **Standalone slim nav (220px, List Mist):** Stamp + wordmark, "← Mail" return, section list. Dashboard and Settings share this shell exactly.
+
+### Correspondence tones (avatar exception)
+- Sender avatars and custom-folder dots use 12 deterministic muted pastels (`avatar-tone-0…11`), hashed from the sender/folder name. This is the only decorative color in the product; saturation stays low so status colors still win.
 
 ## 6. Do's and Don'ts
 
