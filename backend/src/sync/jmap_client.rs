@@ -508,6 +508,14 @@ async fn preflight_discovery(
     )))
 }
 
+/// Trim a request's `using` list to capabilities the session advertises
+/// (RFC 8620 §3.2 `unknownCapability` is a hard 400, and the crate defaults
+/// to every known URI). Free function so the policy is unit-testable without
+/// a connected client.
+fn trim_using(using: &mut Vec<URI>, advertised: impl Fn(&URI) -> bool) {
+    using.retain(|uri| advertised(uri));
+}
+
 // ── The seam client ─────────────────────────────────────────────────
 
 /// A connected JMAP session pinned to its configured origin.
@@ -636,7 +644,7 @@ impl JmapSeam {
 
     /// List all mailboxes (folders) for this account (`Mailbox/get`, ids omitted = all).
     pub(crate) async fn list_mailboxes(&self) -> Result<Vec<JmapMailbox>, JmapError> {
-        let mut request = self.client.build();
+        let mut request = self.build_request();
         request.get_mailbox();
         let mut resp = request.send_single::<MailboxGetResponse>().await?;
         Ok(resp.take_list().iter().filter_map(map_mailbox).collect())
@@ -653,7 +661,7 @@ impl JmapSeam {
     ) -> Result<EmailPage, JmapError> {
         let position = i32::try_from(position).unwrap_or(i32::MAX);
         if self.max_calls_in_request() < 2 {
-            let mut query_req = self.client.build();
+            let mut query_req = self.build_request();
             fill_email_query(query_req.query_email(), mailbox_id, position, limit);
             let mut query_resp = query_req.send_single::<QueryResponse>().await?;
             let ids = query_resp.take_ids();
@@ -667,7 +675,7 @@ impl JmapSeam {
             });
         }
 
-        let mut request = self.client.build();
+        let mut request = self.build_request();
         let ids_ref = {
             let q = request.query_email();
             fill_email_query(q, mailbox_id, position, limit);
@@ -706,7 +714,7 @@ impl JmapSeam {
         mailbox_id: &str,
         since_query_state: &str,
     ) -> Result<EmailQueryChanges, JmapError> {
-        let mut request = self.client.build();
+        let mut request = self.build_request();
         {
             let q = request.query_email_changes(since_query_state);
             q.filter(email::query::Filter::in_mailbox(mailbox_id));
@@ -735,7 +743,7 @@ impl JmapSeam {
         let mut since = since_state.to_owned();
         let mut pages = 0usize;
         loop {
-            let mut request = self.client.build();
+            let mut request = self.build_request();
             request
                 .changes_email(since.clone())
                 .max_changes(CHANGES_PAGE_SIZE);
@@ -774,7 +782,7 @@ impl JmapSeam {
         if ids.is_empty() {
             return Ok((Vec::new(), None));
         }
-        let mut request = self.client.build();
+        let mut request = self.build_request();
         {
             let get = request.get_email();
             get.ids(ids.iter().cloned());
@@ -811,7 +819,7 @@ impl JmapSeam {
         }
 
         // Request A: identities + mailboxes (their results shape request B).
-        let mut request_a = self.client.build();
+        let mut request_a = self.build_request();
         request_a.get_identity();
         request_a.get_mailbox();
         let mut responses = request_a.send().await?.unwrap_method_responses();
@@ -839,7 +847,7 @@ impl JmapSeam {
         let uploaded = self.upload_attachments(outbound).await?;
 
         // Request B: create + submit with creation-id references.
-        let mut request = self.client.build();
+        let mut request = self.build_request();
         {
             let email_set = request.set_email();
             let create_boxes: Vec<String> = drafts_id.iter().cloned().collect();
@@ -902,7 +910,7 @@ impl JmapSeam {
             .await?
             .take_blob_id();
 
-        let mut request = self.client.build();
+        let mut request = self.build_request();
         let import_create_id = {
             let import_req = request.import_email();
             let import = import_req.email(blob_id);
@@ -975,6 +983,20 @@ impl JmapSeam {
             .has_capability(URI::Submission.as_ref())
     }
 
+    /// Build a request whose `using` lists only capabilities the session
+    /// actually advertises. RFC 8620 §3.2: a server MUST reject unknown
+    /// capability URIs with HTTP 400 `unknownCapability`, and the crate's
+    /// `Request::new` defaults to all 11 known URIs while real servers
+    /// advertise a subset (Fastmail: core/mail/submission only).
+    fn build_request(&self) -> jmap_client::core::request::Request<'_> {
+        let mut request = self.client.build();
+        let session = self.client.session();
+        trim_using(&mut request.using, |uri| {
+            session.has_capability(uri.as_ref())
+        });
+        request
+    }
+
     /// Open the session EventSource (`types=*`, `closeafter=no`, `ping=30`)
     /// and wait for the first mail-relevant state change. The stream itself
     /// has no read timeout — the crate times only the connect, which fixes
@@ -1032,7 +1054,7 @@ impl JmapSeam {
         if is_read.is_none() && is_starred.is_none() {
             return Ok(());
         }
-        let mut request = self.client.build();
+        let mut request = self.build_request();
         {
             let set = request.set_email();
             fill_keyword_update(set.update(email_id), is_read, is_starred);
@@ -1074,7 +1096,7 @@ impl JmapSeam {
             .ok_or_else(|| {
                 JmapError::InvalidResponse("no drafts mailbox on this account".into())
             })?;
-        let mut request = self.client.build();
+        let mut request = self.build_request();
         {
             let set = request.set_email();
             fill_outbound_email(
@@ -1587,6 +1609,35 @@ mod tests {
         );
         // Unparseable URL.
         assert!(validate_session_urls("https://jmap.example.com:443", &["not a url"]).is_err());
+    }
+
+    #[test]
+    fn trim_using_keeps_only_advertised_capabilities() {
+        // The crate's Request::new defaults to all 11 known URIs; a server
+        // advertising only core/mail must see exactly those (RFC 8620 §3.2:
+        // unknown capability URIs are a hard HTTP 400).
+        let advertised = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"];
+        let mut using = vec![
+            URI::Core,
+            URI::Mail,
+            URI::Submission,
+            URI::Sieve,
+            URI::Blob,
+            URI::Quota,
+        ];
+        trim_using(&mut using, |uri| advertised.contains(&uri.as_ref()));
+        assert_eq!(using, vec![URI::Core, URI::Mail]);
+
+        let mut all = using.clone();
+        trim_using(&mut all, |_| true);
+        assert_eq!(
+            all,
+            vec![URI::Core, URI::Mail],
+            "all-advertised keeps order"
+        );
+
+        trim_using(&mut all, |_| false);
+        assert!(all.is_empty(), "nothing advertised → empty using");
     }
 
     // ── credentials ─────────────────────────────────────────────────
