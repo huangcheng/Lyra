@@ -424,7 +424,7 @@ export function ComposeDialog() {
   return (
     <Dialog open={composeOpen} onOpenChange={(open) => !open && handleClose()}>
       <DialogContent
-        className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden rounded-xl p-0 shadow-2xl sm:max-w-2xl"
+        className="flex h-[min(720px,calc(100dvh-2rem))] flex-col gap-0 overflow-hidden rounded-xl p-0 shadow-2xl sm:max-w-3xl"
         showCloseButton={false}
       >
         {/* Title bar */}
