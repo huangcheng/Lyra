@@ -33,10 +33,9 @@ use jmap_client::core::response::{
 };
 use jmap_client::core::set::SetErrorType;
 use jmap_client::email::{self, Email, EmailAddress, EmailBodyPart, Property};
-use jmap_client::event_source::PushNotification;
 use jmap_client::identity::Identity;
 use jmap_client::mailbox::{Mailbox, Role};
-use jmap_client::{DataType, Get, Set, URI};
+use jmap_client::{Get, Set, URI};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -524,6 +523,9 @@ fn trim_using(using: &mut Vec<URI>, advertised: impl Fn(&URI) -> bool) {
 pub(crate) struct JmapSeam {
     client: Client,
     origin: String,
+    /// `Authorization` header value, reused by our own EventSource request
+    /// (the crate's stream parser is unusable — see `wait_for_state_change`).
+    auth_header: String,
 }
 
 impl JmapSeam {
@@ -545,8 +547,8 @@ impl JmapSeam {
             .ok_or_else(|| JmapError::InvalidServerUrl(format!("no host in '{base}'")))?;
 
         let credentials = credentials_for(auth_type, email, secret);
-        let redirected =
-            preflight_discovery(base, &authorization_header(&credentials), &origin).await?;
+        let auth_header = authorization_header(&credentials);
+        let redirected = preflight_discovery(base, &auth_header, &origin).await?;
 
         let mut builder = Client::new().credentials(credentials).timeout(JMAP_TIMEOUT);
         if redirected {
@@ -579,7 +581,11 @@ impl JmapSeam {
             .ok_or_else(|| JmapError::SessionDiscovery("no mail account in JMAP session".into()))?;
         client.set_default_account_id(mail_account);
 
-        Ok(Self { client, origin })
+        Ok(Self {
+            client,
+            origin,
+            auth_header,
+        })
     }
 
     /// Cached connect for a Lyra account: one session per account per process.
@@ -998,49 +1004,88 @@ impl JmapSeam {
     }
 
     /// Open the session EventSource (`types=*`, `closeafter=no`, `ping=30`)
-    /// and wait for the first mail-relevant state change. The stream itself
-    /// has no read timeout — the crate times only the connect, which fixes
-    /// the old bug where the 30s request timeout killed the stream cyclically.
+    /// and wait for the first mail-relevant state change.
     ///
-    /// Liveness: a half-open connection (NAT drop, no RST) would pend
-    /// `next()` forever, silently killing push for the account, so each wait
-    /// is bounded by `EVENT_SOURCE_WATCHDOG` (3× the requested ping); expiry
-    /// returns `StreamEnded` and the supervisor reopens the stream. The
-    /// crate's parser consumes ping frames invisibly (it exposes no activity
-    /// signal in non-debug builds), so the watchdog measures only yielded
-    /// notifications — a quiet-but-healthy mailbox reconnects once per
-    /// watchdog interval. That churn is harmless (poll sync still covers
-    /// correctness) and bounds the half-open wedge to watchdog + reconnect
-    /// delay.
+    /// We read the SSE byte stream ourselves instead of the crate's
+    /// `event_source()`: its parser emits an empty State event on every
+    /// comment line + blank line (Fastmail's keepalive shape), which fails
+    /// JSON parsing with `EOF while parsing a value` — push was unusable
+    /// against Fastmail (jmap-client 0.4.2 event_source/parser.rs).
+    ///
+    /// Liveness: each read is bounded by `EVENT_SOURCE_WATCHDOG` (3× the
+    /// requested ping) and ANY received chunk — including ping frames the
+    /// crate used to hide — resets the watchdog, so a quiet-but-healthy
+    /// mailbox no longer reconnects on a timer, while a half-open connection
+    /// (NAT drop, no RST) ends as `StreamEnded` and the supervisor reopens.
     pub(crate) async fn wait_for_state_change(&self) -> Result<EventSourceOutcome, JmapError> {
-        if self.client.session().event_source_url().is_empty() {
+        let url = self.event_source_url();
+        let Some(url) = url else {
             return Ok(EventSourceOutcome::Unsupported);
-        }
-        let mut stream = self
-            .client
-            .event_source(
-                None::<Vec<DataType>>,
-                false,
-                Some(EVENT_SOURCE_PING_SECS),
-                None,
-            )
+        };
+
+        let http = reqwest::Client::builder()
+            .connect_timeout(JMAP_TIMEOUT)
+            // No read timeout — the watchdog below bounds liveness; the SSE
+            // stream is meant to idle between events.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let resp = http
+            .get(&url)
+            .header(reqwest::header::AUTHORIZATION, &self.auth_header)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .send()
             .await?;
+        if !resp.status().is_success() {
+            return Err(JmapError::SessionDiscovery(format!(
+                "event stream: HTTP {} from {url}",
+                resp.status()
+            )));
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
         loop {
-            let item = match tokio::time::timeout(EVENT_SOURCE_WATCHDOG, stream.next()).await {
-                Ok(item) => item,
+            let chunk = match tokio::time::timeout(EVENT_SOURCE_WATCHDOG, stream.next()).await {
+                Ok(chunk) => chunk,
                 Err(_elapsed) => return Ok(EventSourceOutcome::StreamEnded),
             };
-            let Some(item) = item else { break };
-            match item {
-                Ok(notification) => {
-                    if push_implies_sync(&notification) {
-                        return Ok(EventSourceOutcome::StateChanged);
-                    }
+            let Some(chunk) = chunk else { break };
+            let bytes = chunk?;
+            buf.extend_from_slice(&bytes);
+            while let Some(pos) = find_sse_frame_end(&buf) {
+                let frame: Vec<u8> = buf.drain(..pos).collect();
+                if let Some(change) = parse_sse_frame(&frame)
+                    && push_implies_sync(&change)
+                {
+                    return Ok(EventSourceOutcome::StateChanged);
                 }
-                Err(err) => return Err(JmapError::from(err)),
             }
         }
         Ok(EventSourceOutcome::StreamEnded)
+    }
+
+    /// Expanded session `eventSourceUrl` (`types=*&closeafter=no&ping=30`),
+    /// `None` when the session declares none.
+    fn event_source_url(&self) -> Option<String> {
+        use jmap_client::core::session::URLPart;
+        use jmap_client::event_source::URLParameter;
+
+        let parts = self.client.event_source_url();
+        if parts.is_empty() || self.client.session().event_source_url().is_empty() {
+            return None;
+        }
+        let mut url = String::new();
+        for part in parts {
+            match part {
+                URLPart::Value(value) => url.push_str(value),
+                URLPart::Parameter(param) => match param {
+                    URLParameter::Types => url.push('*'),
+                    URLParameter::CloseAfter => url.push_str("no"),
+                    URLParameter::Ping => url.push_str(&EVENT_SOURCE_PING_SECS.to_string()),
+                },
+            }
+        }
+        Some(url)
     }
 
     /// Push read/starred flags: one `Email/set` update patching the
@@ -1400,20 +1445,55 @@ fn mailbox_id_for_role(mailboxes: &[Mailbox<Get>], role: &Role) -> Option<String
         .and_then(|m| m.id().map(str::to_owned))
 }
 
-/// Whether a push notification carries a mail-relevant state change
-/// (ping frames are already filtered by the crate's SSE parser).
-pub(crate) fn push_implies_sync(notification: &PushNotification) -> bool {
-    match notification {
-        PushNotification::StateChange(changes) => [
-            DataType::Email,
-            DataType::Mailbox,
-            DataType::Thread,
-            DataType::EmailSubmission,
-        ]
-        .iter()
-        .any(|t| changes.has_type(t.clone())),
-        PushNotification::CalendarAlert(_) => false,
+/// A parsed JMAP `StateChange` push frame: account id → type → new state.
+/// Only the shape Lyra needs; unknown fields are ignored.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct StateChange {
+    /// `changed: { accountId: { DataType: stateString } }` (RFC 8620 §7.3).
+    #[serde(default)]
+    changed: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+}
+
+/// Whether a push frame carries a mail-relevant state change.
+pub(crate) fn push_implies_sync(change: &StateChange) -> bool {
+    const MAIL_TYPES: [&str; 4] = ["Email", "Mailbox", "Thread", "EmailSubmission"];
+    change
+        .changed
+        .values()
+        .flat_map(|types| types.keys())
+        .any(|t| MAIL_TYPES.contains(&t.as_str()))
+}
+
+/// End of one SSE frame (blank line: `\n\n`, tolerating `\r\n`).
+fn find_sse_frame_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n").map(|p| p + 2)
+}
+
+/// Parse one SSE frame into a `StateChange`. Returns `None` for pings,
+/// comments, keepalive blanks, and frames without usable `data:` — these are
+/// connection noise, not errors (the crate's parser errored on them).
+fn parse_sse_frame(frame: &[u8]) -> Option<StateChange> {
+    let mut data: Vec<u8> = Vec::new();
+    let mut is_ping = false;
+    for line in frame.split(|b| *b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() || line.starts_with(b":") {
+            continue; // blank lines and comment lines (e.g. `: ping`)
+        }
+        if let Some(value) = line.strip_prefix(b"data:") {
+            let value = value.strip_prefix(b" ").unwrap_or(value);
+            if !data.is_empty() {
+                data.push(b'\n');
+            }
+            data.extend_from_slice(value);
+        } else if line == b"event: ping" {
+            is_ping = true;
+        }
     }
+    if is_ping || data.is_empty() {
+        return None;
+    }
+    serde_json::from_slice(&data).ok()
 }
 
 /// Fill an `Email/set` update with keyword patches for read/starred.
@@ -2076,58 +2156,66 @@ mod tests {
 
     #[test]
     fn push_state_change_implies_sync() {
-        use jmap_client::event_source::Changes;
+        let frame = |json: serde_json::Value| {
+            parse_sse_frame(
+                format!(
+                    "event: state\ndata: {}\n\n",
+                    serde_json::to_string(&json).unwrap()
+                )
+                .as_bytes(),
+            )
+            .expect("state frame parses")
+        };
 
-        let changes: Changes = serde_json::from_value(serde_json::json!({
-            "id": null,
-            "changes": { "a1": { "Email": "s1", "Mailbox": "m2" } }
-        }))
-        .unwrap();
-        assert!(push_implies_sync(&PushNotification::StateChange(changes)));
+        assert!(push_implies_sync(&frame(serde_json::json!({
+            "@type": "StateChange",
+            "changed": { "a1": { "Email": "s1", "Mailbox": "m2" } }
+        }))));
+        assert!(!push_implies_sync(&frame(serde_json::json!({
+            "@type": "StateChange",
+            "changed": { "a1": {} }
+        }))));
+        assert!(!push_implies_sync(&frame(serde_json::json!({
+            "@type": "StateChange",
+            "changed": { "a1": { "Quota": "q1" } }
+        }))));
+        assert!(push_implies_sync(&frame(serde_json::json!({
+            "@type": "StateChange",
+            "changed": { "a1": { "Thread": "t1" } }
+        }))));
+        assert!(push_implies_sync(&frame(serde_json::json!({
+            "@type": "StateChange",
+            "changed": { "a1": { "EmailSubmission": "es1" } }
+        }))));
+    }
 
-        let empty: Changes = serde_json::from_value(serde_json::json!({
-            "id": null,
-            "changes": { "a1": {} }
-        }))
-        .unwrap();
-        assert!(!push_implies_sync(&PushNotification::StateChange(empty)));
+    #[test]
+    fn sse_frame_parser_skips_noise_and_parses_state() {
+        // Fastmail keepalive: comment lines and blank frames produce nothing
+        // (the crate's parser turned these into empty-State JSON errors).
+        assert!(parse_sse_frame(b": ping\n\n").is_none());
+        assert!(parse_sse_frame(b"\n\n").is_none());
+        assert!(parse_sse_frame(b"event: ping\ndata: null\n\n").is_none());
+        assert!(
+            parse_sse_frame(b"event: state\n\n").is_none(),
+            "no data → no event"
+        );
 
-        let unrelated: Changes = serde_json::from_value(serde_json::json!({
-            "id": null,
-            "changes": { "a1": { "Quota": "q1" } }
-        }))
-        .unwrap();
-        assert!(!push_implies_sync(&PushNotification::StateChange(
-            unrelated
-        )));
+        // Multi-line data is joined per SSE spec.
+        let change = parse_sse_frame(
+            b"event: state\ndata: {\"changed\": {\"a1\": \ndata: {\"Email\": \"s1\"}}}\n\n",
+        )
+        .expect("multi-line data parses");
+        assert!(push_implies_sync(&change));
 
-        let thread_only: Changes = serde_json::from_value(serde_json::json!({
-            "id": null,
-            "changes": { "a1": { "Thread": "t1" } }
-        }))
-        .unwrap();
-        assert!(push_implies_sync(&PushNotification::StateChange(
-            thread_only
-        )));
+        // CRLF tolerated.
+        let change =
+            parse_sse_frame(b"data: {\"changed\": {\"a1\": {\"Mailbox\": \"m1\"}}}\r\n\r\n")
+                .expect("crlf frame parses");
+        assert!(push_implies_sync(&change));
 
-        let submission_only: Changes = serde_json::from_value(serde_json::json!({
-            "id": null,
-            "changes": { "a1": { "EmailSubmission": "es1" } }
-        }))
-        .unwrap();
-        assert!(push_implies_sync(&PushNotification::StateChange(
-            submission_only
-        )));
-
-        // Calendar alerts are never mail-relevant.
-        let alert = PushNotification::CalendarAlert(jmap_client::CalendarAlert {
-            account_id: "a1".into(),
-            calendar_event_id: "ev1".into(),
-            uid: "uid1".into(),
-            recurrence_id: None,
-            alert_id: "al1".into(),
-        });
-        assert!(!push_implies_sync(&alert));
+        // Garbage JSON in a data line is noise, not an error.
+        assert!(parse_sse_frame(b"data: {not json\n\n").is_none());
     }
 
     #[test]
