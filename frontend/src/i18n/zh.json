@@ -291,7 +291,18 @@
       "oauthReconnected": "邮箱账户已重新连接。",
       "oauthDenied": "已取消或拒绝登录。",
       "oauthError": "无法完成邮箱登录。",
-      "oauthEmailRequired": "请先填写邮箱地址，再使用 OAuth 登录。"
+      "oauthEmailRequired": "请先填写邮箱地址，再使用 OAuth 登录。",
+      "protocol": "协议",
+      "protocolJmap": "JMAP（推荐）",
+      "protocolImap": "IMAP + SMTP",
+      "authMethod": "认证方式",
+      "authApiToken": "API 令牌",
+      "authPassword": "密码",
+      "apiToken": "API 令牌",
+      "apiTokenHint": "在服务商的 API 令牌设置里生成（如 Fastmail → 隐私与安全 → Integrations）",
+      "jmapServerUrl": "JMAP 服务器地址（可选）",
+      "jmapServerUrlHint": "留空则按邮箱域名自动发现",
+      "probeJmap": "该服务商支持 JMAP，已默认为你选中"
     },
     "encryption": {
       "title": "加密",

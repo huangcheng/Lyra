@@ -41,6 +41,7 @@ import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
+import { cn } from '@/lib/utils';
 import {
   Select,
   SelectContent,
@@ -78,6 +79,8 @@ interface ProbeResult {
   found: boolean;
   source?: string;
   protocol: string;
+  /** The provider answers `/.well-known/jmap` — account can use JMAP. */
+  jmapSupported?: boolean;
   /** `"oauth2"` when Microsoft Outlook/365 — use Sign in with Microsoft */
   authMethod?: string;
   imapHost?: string;
@@ -114,6 +117,8 @@ export function SettingsPage() {
     emailAddress: '',
     password: '',
     protocol: 'imap',
+    authType: 'password',
+    jmapBaseUrl: '',
     imapHost: '',
     imapPort: 993,
     imapSecurity: 'tls',
@@ -371,6 +376,10 @@ export function SettingsPage() {
           smtpSecurity: enriched.smtpSecurity || prev.smtpSecurity,
         }));
       }
+      // JMAP-capable providers default to JMAP + API token (Lyra prefers JMAP).
+      if (enriched.jmapSupported && !editingAccount) {
+        setFormData((prev) => ({ ...prev, protocol: 'jmap', authType: 'bearer' }));
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -381,12 +390,15 @@ export function SettingsPage() {
   useEffect(() => {
     if (!showAddForm || editingAccount) return;
     const email = formData.emailAddress.trim();
-    if (!email.includes('@') || !suggestsMailOAuth(email)) return;
+    // Auto-probe any complete address: the probe answers IMAP autoconfig,
+    // OAuth providers, and JMAP support (/.well-known/jmap).
+    const domain = email.split('@')[1] ?? '';
+    if (!email.includes('@') || !domain.includes('.')) return;
     const timer = window.setTimeout(() => {
       void handleProbe();
     }, 400);
     return () => window.clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- debounced probe on OAuth-capable domains
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- debounced probe on any complete address
   }, [formData.emailAddress, showAddForm, editingAccount]);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -394,16 +406,19 @@ export function SettingsPage() {
     try {
       const url = editingAccount ? `/accounts/${editingAccount.id}` : '/accounts';
       const method = editingAccount ? 'PUT' : 'POST';
+      const isJmap = formData.protocol === 'jmap';
       const body: any = {
         displayName: formData.displayName,
         emailAddress: formData.emailAddress,
         protocol: formData.protocol,
-        imapHost: formData.imapHost || null,
-        imapPort: formData.imapPort || null,
-        imapSecurity: formData.imapSecurity,
-        smtpHost: formData.smtpHost || null,
-        smtpPort: formData.smtpPort || null,
-        smtpSecurity: formData.smtpSecurity,
+        authType: isJmap ? formData.authType : undefined,
+        jmapBaseUrl: isJmap && formData.jmapBaseUrl ? formData.jmapBaseUrl : undefined,
+        imapHost: isJmap ? null : formData.imapHost || null,
+        imapPort: isJmap ? null : formData.imapPort || null,
+        imapSecurity: isJmap ? null : formData.imapSecurity,
+        smtpHost: isJmap ? null : formData.smtpHost || null,
+        smtpPort: isJmap ? null : formData.smtpPort || null,
+        smtpSecurity: isJmap ? null : formData.smtpSecurity,
       };
       if (formData.password) {
         body.password = formData.password;
@@ -486,6 +501,8 @@ export function SettingsPage() {
       emailAddress: account.emailAddress,
       password: '',
       protocol: account.protocol,
+      authType: 'password',
+      jmapBaseUrl: '',
       imapHost: account.imapHost || '',
       imapPort: account.imapPort || 993,
       // Legacy 'none' values (removed insecure mode) coerce to 'tls' so the
@@ -509,6 +526,8 @@ export function SettingsPage() {
       emailAddress: '',
       password: '',
       protocol: 'imap',
+      authType: 'password',
+      jmapBaseUrl: '',
       imapHost: '',
       imapPort: 993,
       imapSecurity: 'tls',
@@ -1292,17 +1311,60 @@ export function SettingsPage() {
                   </div>
                 </Field>
 
-                {(probeResult?.found || suggestedAuthMethod === 'oauth2') && (
+                {probeResult?.jmapSupported && !editingAccount && !preferMailOAuth && (
+                  <Field>
+                    <FieldLabel>{t(locale, 'settings.accounts.protocol')}</FieldLabel>
+                    <div className="flex gap-0.5 rounded-lg bg-accent p-0.5">
+                      <button
+                        type="button"
+                        className={cn(
+                          'flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                          formData.protocol === 'jmap'
+                            ? 'bg-card text-foreground'
+                            : 'text-muted-foreground hover:text-foreground',
+                        )}
+                        onClick={() =>
+                          setFormData((prev) => ({ ...prev, protocol: 'jmap', authType: 'bearer' }))
+                        }
+                      >
+                        {t(locale, 'settings.accounts.protocolJmap')}
+                      </button>
+                      <button
+                        type="button"
+                        className={cn(
+                          'flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                          formData.protocol !== 'jmap'
+                            ? 'bg-card text-foreground'
+                            : 'text-muted-foreground hover:text-foreground',
+                        )}
+                        onClick={() => setFormData((prev) => ({ ...prev, protocol: 'imap' }))}
+                      >
+                        {t(locale, 'settings.accounts.protocolImap')}
+                      </button>
+                    </div>
+                  </Field>
+                )}
+
+                {(probeResult?.found ||
+                  probeResult?.jmapSupported ||
+                  suggestedAuthMethod === 'oauth2') && (
                   <div className="probe-result space-y-2">
-                    <p>
-                      {suggestedAuthMethod === 'oauth2'
-                        ? suggestedOAuthProvider === 'yandex'
-                          ? t(locale, 'settings.accounts.probeYandexOAuth')
-                          : t(locale, 'settings.accounts.probeMicrosoftOAuth')
-                        : t(locale, 'settings.accounts.probeFound', {
-                            source: probeResult?.source || 'unknown',
-                          })}
-                    </p>
+                    {(probeResult?.found || suggestedAuthMethod === 'oauth2') && (
+                      <p>
+                        {suggestedAuthMethod === 'oauth2'
+                          ? suggestedOAuthProvider === 'yandex'
+                            ? t(locale, 'settings.accounts.probeYandexOAuth')
+                            : t(locale, 'settings.accounts.probeMicrosoftOAuth')
+                          : t(locale, 'settings.accounts.probeFound', {
+                              source: probeResult?.source || 'unknown',
+                            })}
+                      </p>
+                    )}
+                    {probeResult?.jmapSupported && (
+                      <p className="text-xs text-muted-foreground">
+                        {t(locale, 'settings.accounts.probeJmap')}
+                      </p>
+                    )}
                     {suggestedAuthMethod === 'oauth2' &&
                       !editingAccount &&
                       suggestedOAuthProvider && (
@@ -1349,10 +1411,44 @@ export function SettingsPage() {
                   </div>
                 )}
 
+                {!preferMailOAuth && formData.protocol === 'jmap' && !editingAccount && (
+                  <Field>
+                    <FieldLabel>{t(locale, 'settings.accounts.authMethod')}</FieldLabel>
+                    <div className="flex gap-0.5 rounded-lg bg-accent p-0.5">
+                      <button
+                        type="button"
+                        className={cn(
+                          'flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                          formData.authType === 'bearer'
+                            ? 'bg-card text-foreground'
+                            : 'text-muted-foreground hover:text-foreground',
+                        )}
+                        onClick={() => setFormData((prev) => ({ ...prev, authType: 'bearer' }))}
+                      >
+                        {t(locale, 'settings.accounts.authApiToken')}
+                      </button>
+                      <button
+                        type="button"
+                        className={cn(
+                          'flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                          formData.authType !== 'bearer'
+                            ? 'bg-card text-foreground'
+                            : 'text-muted-foreground hover:text-foreground',
+                        )}
+                        onClick={() => setFormData((prev) => ({ ...prev, authType: 'password' }))}
+                      >
+                        {t(locale, 'settings.accounts.authPassword')}
+                      </button>
+                    </div>
+                  </Field>
+                )}
+
                 {!preferMailOAuth && (
                   <Field>
                     <FieldLabel htmlFor="settings-password">
-                      {t(locale, 'settings.accounts.password')}
+                      {formData.protocol === 'jmap' && formData.authType === 'bearer'
+                        ? t(locale, 'settings.accounts.apiToken')
+                        : t(locale, 'settings.accounts.password')}
                     </FieldLabel>
                     <Input
                       id="settings-password"
@@ -1366,10 +1462,34 @@ export function SettingsPage() {
                       }
                       required={!editingAccount && !preferMailOAuth}
                     />
+                    {formData.protocol === 'jmap' && formData.authType === 'bearer' && (
+                      <p className="text-xs text-muted-foreground">
+                        {t(locale, 'settings.accounts.apiTokenHint')}
+                      </p>
+                    )}
                   </Field>
                 )}
 
-                {!preferMailOAuth && (
+                {!preferMailOAuth && formData.protocol === 'jmap' && !editingAccount && (
+                  <Field>
+                    <FieldLabel htmlFor="settings-jmap-url">
+                      {t(locale, 'settings.accounts.jmapServerUrl')}
+                    </FieldLabel>
+                    <Input
+                      id="settings-jmap-url"
+                      value={formData.jmapBaseUrl}
+                      onChange={(e) =>
+                        setFormData((prev) => ({ ...prev, jmapBaseUrl: e.target.value }))
+                      }
+                      placeholder="https://api.fastmail.com"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t(locale, 'settings.accounts.jmapServerUrlHint')}
+                    </p>
+                  </Field>
+                )}
+
+                {!preferMailOAuth && formData.protocol !== 'jmap' && (
                   <>
                     <Field className="gap-3 rounded-md border border-border/60 p-3">
                       <p className="text-sm font-medium">

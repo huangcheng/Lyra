@@ -121,6 +121,9 @@ pub struct ProbeResult {
     pub found: bool,
     pub source: Option<String>,
     pub protocol: String,
+    /// The domain answers `/.well-known/jmap` (RFC 8620 discovery) — the
+    /// account can be added as JMAP. Detection needs no credentials.
+    pub jmap_supported: bool,
     /// Suggested auth: `"oauth2"` for Microsoft Outlook/365, otherwise omitted
     /// (password form). Frontend uses this to switch away from app-password UX.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -739,43 +742,106 @@ async fn probe_server_config(
 
     let domain = crate::netsec::validate_domain(&domain).map_err(AccountError::InvalidInput)?;
 
+    // JMAP capability is cheap to detect and worth knowing on every path.
+    let jmap_supported = probe_jmap_support(&domain).await;
+
     // Microsoft consumer / 365 domains should use OAuth2 (XOAUTH2), not a
     // password. ISPDB still returns outlook.office365.com + password auth,
     // which fails for modern Outlook accounts without an app password.
     if is_microsoft_mail_domain(&domain) {
-        return Ok(Json(microsoft_oauth_probe_result("microsoft_domain")));
+        return Ok(Json(with_jmap_support(
+            microsoft_oauth_probe_result("microsoft_domain"),
+            jmap_supported,
+        )));
     }
     if is_yandex_mail_domain(&domain) {
-        return Ok(Json(yandex_oauth_probe_result("yandex_domain")));
+        return Ok(Json(with_jmap_support(
+            yandex_oauth_probe_result("yandex_domain"),
+            jmap_supported,
+        )));
     }
 
     // Try Mozilla ISPDB first
     if let Some(config) = probe_mozilla_ispdb(&domain).await {
-        return Ok(Json(annotate_oauth_probe(config)));
+        return Ok(Json(with_jmap_support(
+            annotate_oauth_probe(config),
+            jmap_supported,
+        )));
     }
 
     // Try SRV records
     if let Some(config) = probe_srv_records(&domain) {
-        return Ok(Json(annotate_oauth_probe(config)));
+        return Ok(Json(with_jmap_support(
+            annotate_oauth_probe(config),
+            jmap_supported,
+        )));
     }
 
     // Try common patterns
     if let Some(config) = probe_common_patterns(&domain).await {
-        return Ok(Json(annotate_oauth_probe(config)));
+        return Ok(Json(with_jmap_support(
+            annotate_oauth_probe(config),
+            jmap_supported,
+        )));
     }
 
-    Ok(Json(ProbeResult {
-        found: false,
-        source: None,
-        protocol: "imap".into(),
-        auth_method: None,
-        imap_host: None,
-        imap_port: None,
-        imap_security: None,
-        smtp_host: None,
-        smtp_port: None,
-        smtp_security: None,
-    }))
+    Ok(Json(with_jmap_support(
+        ProbeResult {
+            found: false,
+            source: None,
+            protocol: "imap".into(),
+            jmap_supported: false,
+            auth_method: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+        },
+        jmap_supported,
+    )))
+}
+
+/// Stamp the JMAP-support bit onto a probe outcome.
+fn with_jmap_support(mut result: ProbeResult, jmap_supported: bool) -> ProbeResult {
+    result.jmap_supported = jmap_supported;
+    result
+}
+
+/// Detect JMAP support: `/.well-known/jmap` answering 200/401/403 means the
+/// host speaks JMAP (RFC 8620 §2 discovery). No credentials are sent, so
+/// redirects may be followed freely.
+///
+/// Tries the `api.` subdomain first (Fastmail serves discovery on
+/// `api.fastmail.com` while `fastmail.com` redirect-chains into its
+/// marketing site), then the bare domain. 15s per attempt: a slow network
+/// must not read as "no JMAP" (Fastmail's redirect chain alone can take
+/// 8-12s on a slow link).
+async fn probe_jmap_support(domain: &str) -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    else {
+        return false;
+    };
+    // Both candidates concurrently: two sequential 8s timeouts would read
+    // as "no JMAP" whenever the network is merely slow.
+    let hosts = [format!("api.{domain}"), domain.to_string()];
+    let (first, second) = tokio::join!(
+        probe_one_jmap_host(&client, &hosts[0]),
+        probe_one_jmap_host(&client, &hosts[1]),
+    );
+    first || second
+}
+
+/// One `/.well-known/jmap` candidate (see `probe_jmap_support`).
+async fn probe_one_jmap_host(client: &reqwest::Client, host: &str) -> bool {
+    let url = format!("https://{host}/.well-known/jmap");
+    match client.get(&url).send().await {
+        Ok(resp) => matches!(resp.status().as_u16(), 200 | 401 | 403),
+        Err(_) => false,
+    }
 }
 
 /// Extract domain from email address.
@@ -833,6 +899,7 @@ fn parse_mozilla_autoconfig(xml: &str) -> Option<ProbeResult> {
             found: true,
             source: Some("mozilla_ispdb".into()),
             protocol: "imap".into(),
+            jmap_supported: false,
             auth_method: None,
             imap_host,
             imap_port,
@@ -916,6 +983,7 @@ async fn probe_common_patterns(domain: &str) -> Option<ProbeResult> {
             found: true,
             source: Some("common_patterns".into()),
             protocol: "imap".into(),
+            jmap_supported: false,
             auth_method: None,
             imap_host: imap_config.as_ref().map(|c| c.0.clone()),
             imap_port: imap_config.as_ref().map(|c| c.1),
@@ -997,6 +1065,7 @@ fn microsoft_oauth_probe_result(source: &str) -> ProbeResult {
         found: true,
         source: Some(source.into()),
         protocol: "imap".into(),
+        jmap_supported: false,
         auth_method: Some("oauth2".into()),
         imap_host: Some("outlook.office365.com".into()),
         imap_port: Some(993),
@@ -1012,6 +1081,7 @@ fn yandex_oauth_probe_result(source: &str) -> ProbeResult {
         found: true,
         source: Some(source.into()),
         protocol: "imap".into(),
+        jmap_supported: false,
         auth_method: Some("oauth2".into()),
         imap_host: Some("imap.yandex.com".into()),
         imap_port: Some(993),
@@ -1100,6 +1170,7 @@ mod tests {
             found: true,
             source: Some("mozilla_ispdb".into()),
             protocol: "imap".into(),
+            jmap_supported: false,
             auth_method: None,
             imap_host: Some("outlook.office365.com".into()),
             imap_port: Some(993),

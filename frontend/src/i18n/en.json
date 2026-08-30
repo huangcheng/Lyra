@@ -291,7 +291,18 @@
       "oauthReconnected": "Mail account reconnected.",
       "oauthDenied": "Sign-in was cancelled or denied.",
       "oauthError": "Could not complete mail sign-in.",
-      "oauthEmailRequired": "Enter your mailbox address before signing in with OAuth."
+      "oauthEmailRequired": "Enter your mailbox address before signing in with OAuth.",
+      "protocol": "Protocol",
+      "protocolJmap": "JMAP (recommended)",
+      "protocolImap": "IMAP + SMTP",
+      "authMethod": "Authentication",
+      "authApiToken": "API token",
+      "authPassword": "Password",
+      "apiToken": "API token",
+      "apiTokenHint": "Generate one in your provider's API-token settings (e.g. Fastmail → Privacy & Security → Integrations)",
+      "jmapServerUrl": "JMAP server URL (optional)",
+      "jmapServerUrlHint": "Leave empty to auto-discover from the email domain",
+      "probeJmap": "This provider supports JMAP — selected by default above"
     },
     "encryption": {
       "title": "Encryption",
