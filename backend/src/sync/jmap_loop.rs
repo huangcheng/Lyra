@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::Duration;
 
 use super::imap_loop::run_imap_sync;
 use super::jmap_client::{JmapAttachmentMeta, JmapEmail, JmapMailbox, JmapSeam};
@@ -17,6 +18,9 @@ use crate::storage::DbPool;
 
 /// `Email/query`/`Email/get` page size (kept small so one response stays bounded).
 const QUERY_PAGE: usize = 100;
+
+/// In-run retries for transient JMAP failures before the IMAP fallback.
+const JMAP_TRANSIENT_ATTEMPTS: u32 = 3;
 
 /// Load a JMAP account and run the JMAP fetch loop.
 ///
@@ -39,20 +43,40 @@ pub(crate) async fn jmap_sync_account(
         else {
             return Err(super::recovery::fail_credential_decrypt(db, account_id).await);
         };
-        let jmap_result = match crate::plugins::data_dir() {
-            Ok(data_dir) => {
-                run_jmap_sync(
-                    db,
-                    account_id,
-                    base_url,
-                    &email_address,
-                    &secret,
-                    &row.auth_type,
-                    &data_dir,
-                )
-                .await
+        // Transient failures (transport, 5xx/429, rateLimit/…) retry in-run
+        // with a short backoff before we consider the IMAP fallback.
+        let jmap_result = {
+            let mut attempt = 0u32;
+            loop {
+                attempt += 1;
+                let result = match crate::plugins::data_dir() {
+                    Ok(data_dir) => {
+                        run_jmap_sync(
+                            db,
+                            account_id,
+                            base_url,
+                            &email_address,
+                            &secret,
+                            &row.auth_type,
+                            &data_dir,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(SyncError::Internal(e)),
+                };
+                let retryable = matches!(&result, Err(SyncError::Jmap(j)) if j.is_transient());
+                if retryable && attempt < JMAP_TRANSIENT_ATTEMPTS {
+                    let backoff = Duration::from_secs(u64::from(attempt) * 2);
+                    tracing::warn!(
+                        account_id,
+                        attempt,
+                        "JMAP sync hit a transient error; retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                break result;
             }
-            Err(e) => Err(SyncError::Internal(e)),
         };
         match jmap_result {
             Ok(result) => result,
@@ -63,6 +87,12 @@ pub(crate) async fn jmap_sync_account(
                     && jmap_err.is_auth()
                 {
                     JmapSeam::evict(account_id);
+                }
+                if row.auth_type.eq_ignore_ascii_case("bearer") {
+                    // A Bearer token (e.g. a Fastmail API token) cannot
+                    // authenticate IMAP; falling back would mask the JMAP
+                    // error behind a certain IMAP auth failure.
+                    return Err(e);
                 }
                 tracing::warn!("JMAP sync failed ({e}), falling back to IMAP");
                 let Ok(password) = crate::imap::decrypt_account_password(&credential_json, &dek)
@@ -440,6 +470,26 @@ async fn persist_and_download(
     Ok((new, updated))
 }
 
+/// Download one blob, retrying transient transport failures a few times
+/// (Fastmail's CDN host drops connections often enough to matter on a first
+/// sync of a large mailbox).
+async fn download_blob_with_retry(
+    seam: &JmapSeam,
+    meta: &JmapAttachmentMeta,
+) -> Result<Vec<u8>, super::jmap_client::JmapError> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match seam.download_blob(&meta.blob_id).await {
+            Err(e) if e.is_transient() && attempt < JMAP_TRANSIENT_ATTEMPTS => {
+                tracing::warn!(blob_id = %meta.blob_id, attempt, "JMAP blob download failed transiently; retrying");
+                tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Download one message's attachment blobs into the blob store and persist
 /// the attachment rows. Per-blob failures mark `flags.fetch_error` and never
 /// abort the sync.
@@ -464,7 +514,7 @@ async fn download_attachments(
                 .await?;
             continue;
         }
-        match seam.download_blob(&meta.blob_id).await {
+        match download_blob_with_retry(seam, meta).await {
             // The crate's `download()` buffers the whole body and trusts the
             // server-declared `size` — re-check the real byte count.
             Ok(bytes) if bytes.len() as u64 > MAX_ATTACHMENT_DOWNLOAD_BYTES => {
