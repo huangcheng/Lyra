@@ -3,6 +3,9 @@
  *
  * Owns HTML in (deserialize initial value) / HTML out (serializeHtml on
  * change). Toolbar covers the v1 mail set: marks, lists, blockquote, link.
+ * Markdown works both ways users expect: paste `**bold**`/`- list`/`> quote`
+ * and it lands formatted (MarkdownPlugin), and typing markdown shortcuts
+ * auto-formats (per-plugin `inputRules` — @platejs/autoformat is inert in v53).
  */
 
 import {
@@ -24,10 +27,19 @@ import {
   StrikethroughPlugin,
   UnderlinePlugin,
 } from '@platejs/basic-nodes/react';
+import {
+  BlockquoteRules,
+  BoldRules,
+  ItalicRules,
+  StrikethroughRules,
+  UnderlineRules,
+} from '@platejs/basic-nodes';
 import { insertLink, unwrapLink } from '@platejs/link';
 import { LinkPlugin } from '@platejs/link/react';
 import { toggleList } from '@platejs/list';
 import { ListPlugin } from '@platejs/list/react';
+import { BulletedListRules, OrderedListRules } from '@platejs/list';
+import { MarkdownPlugin } from '@platejs/markdown';
 import { HistoryPlugin, HtmlPlugin } from 'platejs';
 import {
   ParagraphPlugin,
@@ -49,6 +61,8 @@ export interface RichTextEditorProps {
   onKeyDown?: (event: React.KeyboardEvent) => void;
   placeholder?: string;
   className?: string;
+  /** Class override for the content area (e.g. a shorter reply box). */
+  contentClassName?: string;
   disabled?: boolean;
 }
 
@@ -56,12 +70,17 @@ const PLUGINS = [
   ParagraphPlugin,
   HistoryPlugin,
   HtmlPlugin,
-  BoldPlugin,
-  ItalicPlugin,
-  UnderlinePlugin,
-  StrikethroughPlugin,
-  BlockquotePlugin,
-  ListPlugin,
+  // Paste Markdown → rich text; typing shortcuts come from each feature
+  // plugin's `inputRules` (Plate v53: @platejs/autoformat is inert).
+  MarkdownPlugin,
+  BoldPlugin.configure({ inputRules: [BoldRules.markdown()] }),
+  ItalicPlugin.configure({ inputRules: [ItalicRules.markdown()] }),
+  UnderlinePlugin.configure({ inputRules: [UnderlineRules.markdown()] }),
+  StrikethroughPlugin.configure({ inputRules: [StrikethroughRules.markdown()] }),
+  BlockquotePlugin.configure({ inputRules: [BlockquoteRules.markdown()] }),
+  ListPlugin.configure({
+    inputRules: [BulletedListRules.markdown(), OrderedListRules.markdown()],
+  }),
   LinkPlugin,
 ];
 
@@ -74,6 +93,7 @@ export function RichTextEditor({
   onKeyDown,
   placeholder,
   className,
+  contentClassName,
   disabled,
 }: RichTextEditorProps) {
   const editor = usePlateEditor({ plugins: PLUGINS });
@@ -103,7 +123,10 @@ export function RichTextEditor({
       >
         <Toolbar disabled={disabled} />
         <PlateContent
-          className="lyra-editor max-h-72 min-h-32 overflow-y-auto px-3 py-2 text-sm outline-none"
+          className={cn(
+            'lyra-editor max-h-72 min-h-32 overflow-y-auto px-3 py-2 text-sm outline-none',
+            contentClassName,
+          )}
           placeholder={placeholder}
           onKeyDown={onKeyDown}
         />

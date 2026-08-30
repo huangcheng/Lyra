@@ -26,6 +26,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
 import { MessageCard } from '@/components/mail/message-card';
+import { RichTextEditor } from '@/components/compose/rich-text-editor';
 
 import { Button } from '@/components/ui/button';
 import { Calendar } from '@/components/ui/calendar';
@@ -39,7 +40,6 @@ import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
-import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
 import { api } from '@/lib/api-client';
@@ -73,6 +73,15 @@ function isScrolledToBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_END_THRESHOLD_PX;
 }
 
+/** Plain-text fallback for an HTML reply body (block tags become newlines). */
+function htmlToPlainText(html: string): string {
+  const withBreaks = html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|blockquote|h[1-6])>/gi, '\n');
+  const doc = new DOMParser().parseFromString(withBreaks, 'text/html');
+  return (doc.body.textContent ?? '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 export function MailDisplay() {
   const locale = useUIStore((s) => s.locale);
   const markReadPolicy = useUIStore((s) => s.markReadPolicy);
@@ -94,7 +103,8 @@ export function MailDisplay() {
 
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [replyText, setReplyText] = useState('');
+  const [replyHtml, setReplyHtml] = useState('');
+  const [replyNonce, setReplyNonce] = useState(0);
   const bodyScrollRef = useRef<HTMLDivElement>(null);
   const autoMarkedIdRef = useRef<string | null>(null);
   const today = new Date();
@@ -149,7 +159,7 @@ export function MailDisplay() {
 
   useEffect(() => {
     autoMarkedIdRef.current = null;
-    setReplyText('');
+    setReplyHtml('');
   }, [selectedMessageId]);
 
   const tryAutoMarkRead = useCallback(async () => {
@@ -298,7 +308,8 @@ export function MailDisplay() {
 
   const handleInlineSend = async () => {
     if (!token || !mail || busy) return;
-    const text = replyText.trim();
+    const html = replyHtml;
+    const text = htmlToPlainText(html);
     if (!text) {
       handleReply();
       return;
@@ -318,10 +329,11 @@ export function MailDisplay() {
           to: [{ email: mail.from.email }],
           subject: mail.subject.startsWith('Re:') ? mail.subject : `Re: ${mail.subject}`,
           bodyText: text,
-          bodyHtml: null,
+          bodyHtml: html,
         }),
       });
-      setReplyText('');
+      setReplyHtml('');
+      setReplyNonce((n) => n + 1); // remount the editor cleared
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : t(locale, 'mail.sendError'));
     } finally {
@@ -688,16 +700,21 @@ export function MailDisplay() {
               }}
             >
               <div className="rounded-lg border border-input bg-card">
-                <div className="flex items-start gap-2.5 px-3.5 pt-3">
-                  <Reply className="mt-2 size-4 shrink-0 text-muted-foreground" aria-hidden />
-                  <Textarea
-                    className="min-h-12 resize-none border-0 px-0 py-1.5 shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent"
-                    placeholder={t(locale, 'mail.replyPlaceholder', { name: fromLabel })}
-                    value={replyText}
-                    onChange={(e) => setReplyText(e.target.value)}
-                    disabled={busy}
-                  />
-                </div>
+                <RichTextEditor
+                  key={`${selectedMessageId}:${replyNonce}`}
+                  className="rounded-none border-0"
+                  contentClassName="max-h-48 min-h-16"
+                  initialHtml=""
+                  onChange={setReplyHtml}
+                  placeholder={t(locale, 'mail.replyPlaceholder', { name: fromLabel })}
+                  disabled={busy}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      void handleInlineSend();
+                    }
+                  }}
+                />
                 <div className="flex items-center px-3.5 pb-2.5">
                   <Label htmlFor="mute" className="flex items-center gap-2 text-xs font-normal">
                     <Switch
