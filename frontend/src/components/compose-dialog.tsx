@@ -20,6 +20,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { t } from '@/i18n';
+import { RecipientsInput, splitAddresses } from '@/components/compose/recipients-input';
 import { RichTextEditor } from '@/components/compose/rich-text-editor';
 import { api, apiBlob } from '@/lib/api-client';
 import { formatBytes } from '@/lib/attachments';
@@ -66,6 +67,10 @@ export function ComposeDialog() {
     subject: '',
     body: '',
   });
+  /** Committed address pills; form.to/cc/bcc hold the pending typed text. */
+  const [toChips, setToChips] = useState<string[]>([]);
+  const [ccChips, setCcChips] = useState<string[]>([]);
+  const [bccChips, setBccChips] = useState<string[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -103,24 +108,31 @@ export function ComposeDialog() {
 
   const recipientEmails = useMemo(() => {
     const split = (value: string) =>
-      value
-        .split(',')
-        .map((s) => s.trim().toLowerCase())
-        .filter((e) => e.includes('@'));
-    return [...split(form.to), ...split(form.cc), ...split(form.bcc)];
-  }, [form.to, form.cc, form.bcc]);
+      splitAddresses(value.toLowerCase()).filter((e) => e.includes('@'));
+    return [
+      ...toChips,
+      ...split(form.to),
+      ...ccChips,
+      ...split(form.cc),
+      ...bccChips,
+      ...split(form.bcc),
+    ];
+  }, [toChips, ccChips, bccChips, form.to, form.cc, form.bcc]);
 
   useEffect(() => {
     if (!composeOpen) return;
     const effectiveFrom =
       selectedAccountId === ALL_ACCOUNTS ? (accounts[0]?.id ?? '') : selectedAccountId;
     setForm({
-      to: composeDraft?.to ?? '',
-      cc: composeDraft?.cc ?? '',
+      to: '',
+      cc: '',
       bcc: '',
       subject: composeDraft?.subject ?? '',
       body: composeDraft?.body ?? '',
     });
+    setToChips(splitAddresses(composeDraft?.to ?? ''));
+    setCcChips(splitAddresses(composeDraft?.cc ?? ''));
+    setBccChips([]);
     setFromAccountId(effectiveFrom);
     setError(null);
     setSuccess(false);
@@ -228,14 +240,17 @@ export function ComposeDialog() {
 
   // Debounced server autosave. Only when there is something to save, no
   // pending attachments (multipart sends skip drafts), and not mid-send.
+  const fullTo = useMemo(() => [...toChips, ...splitAddresses(form.to)], [toChips, form.to]);
+  const fullCc = useMemo(() => [...ccChips, ...splitAddresses(form.cc)], [ccChips, form.cc]);
+  const fullBcc = useMemo(() => [...bccChips, ...splitAddresses(form.bcc)], [bccChips, form.bcc]);
   const currentBodyText = richMode ? htmlToText(editorHtml ?? '') : form.body;
   const currentBodyHtml = richMode ? editorHtml || undefined : undefined;
   const draftDirty =
-    form.to.trim() !== '' || form.subject.trim() !== '' || currentBodyText.trim() !== '';
+    fullTo.length > 0 || form.subject.trim() !== '' || currentBodyText.trim() !== '';
   const autosavePayload = JSON.stringify({
     accountId: fromAccountId,
-    to: form.to,
-    cc: form.cc,
+    to: fullTo,
+    cc: fullCc,
     subject: form.subject,
     body: currentBodyText,
     bodyHtml: currentBodyHtml,
@@ -252,16 +267,8 @@ export function ComposeDialog() {
             method: 'POST',
             body: JSON.stringify({
               accountId: fromAccountId,
-              to: form.to
-                .split(',')
-                .map((x) => x.trim())
-                .filter(Boolean)
-                .map((email) => ({ email })),
-              cc: form.cc
-                .split(',')
-                .map((x) => x.trim())
-                .filter(Boolean)
-                .map((email) => ({ email })),
+              to: fullTo.map((email) => ({ email })),
+              cc: fullCc.map((email) => ({ email })),
               subject: form.subject,
               bodyText: currentBodyText,
               bodyHtml: currentBodyHtml,
@@ -318,6 +325,9 @@ export function ComposeDialog() {
     setComposeOpen(false);
     clearComposeDraft();
     setForm({ to: '', cc: '', bcc: '', subject: '', body: '' });
+    setToChips([]);
+    setCcChips([]);
+    setBccChips([]);
     setError(null);
     setSuccess(false);
     setSignMessage(false);
@@ -343,7 +353,7 @@ export function ComposeDialog() {
   };
 
   const handleSend = async () => {
-    if (!form.to.trim()) {
+    if (fullTo.length === 0) {
       setError(t(locale, 'mail.to') + ' is required');
       return;
     }
@@ -360,13 +370,6 @@ export function ComposeDialog() {
     setError(null);
 
     try {
-      const split = (value: string) =>
-        value
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .map((email) => ({ email }));
-
       const opengpg: OpengpgSendOptions | undefined =
         cryptoAllowed && (signMessage || encryptMessage || attachPublicKey)
           ? {
@@ -382,9 +385,9 @@ export function ComposeDialog() {
       const bodyText = richMode ? htmlToText(editorHtml ?? '') : form.body;
       const payload = {
         accountId: fromAccountId,
-        to: split(form.to),
-        cc: split(form.cc),
-        bcc: split(form.bcc),
+        to: fullTo.map((email) => ({ email })),
+        cc: fullCc.map((email) => ({ email })),
+        bcc: fullBcc.map((email) => ({ email })),
         subject: form.subject,
         bodyText,
         bodyHtml,
@@ -479,18 +482,24 @@ export function ComposeDialog() {
               </div>
             </div>
           ) : null}
-          <div className="flex h-11 items-center gap-3 border-b border-border/60">
-            <label htmlFor="compose-to" className="w-11 shrink-0 text-xs text-muted-foreground">
+          <div className="flex items-center gap-3 border-b border-border/60 pr-1">
+            <label
+              htmlFor="compose-to"
+              className="w-11 shrink-0 self-center py-2 text-xs text-muted-foreground"
+            >
               {t(locale, 'mail.to')}
             </label>
-            <input
-              id="compose-to"
-              className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/60"
-              value={form.to}
-              onChange={(e) => setForm((f) => ({ ...f, to: e.target.value }))}
-              placeholder={t(locale, 'mail.toPlaceholder')}
-              autoFocus
-            />
+            <div className="min-w-0 flex-1">
+              <RecipientsInput
+                id="compose-to"
+                chips={toChips}
+                input={form.to}
+                onChipsChange={setToChips}
+                onInputChange={(v) => setForm((f) => ({ ...f, to: v }))}
+                placeholder={t(locale, 'mail.toPlaceholder')}
+                autoFocus
+              />
+            </div>
             {!showCc ? (
               <button
                 type="button"
@@ -511,29 +520,41 @@ export function ComposeDialog() {
             ) : null}
           </div>
           {showCc ? (
-            <div className="flex h-11 items-center gap-3 border-b border-border/60">
-              <label htmlFor="compose-cc" className="w-11 shrink-0 text-xs text-muted-foreground">
+            <div className="flex items-center gap-3 border-b border-border/60 pr-1">
+              <label
+                htmlFor="compose-cc"
+                className="w-11 shrink-0 self-center py-2 text-xs text-muted-foreground"
+              >
                 {t(locale, 'mail.cc')}
               </label>
-              <input
-                id="compose-cc"
-                className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/60"
-                value={form.cc}
-                onChange={(e) => setForm((f) => ({ ...f, cc: e.target.value }))}
-              />
+              <div className="min-w-0 flex-1">
+                <RecipientsInput
+                  id="compose-cc"
+                  chips={ccChips}
+                  input={form.cc}
+                  onChipsChange={setCcChips}
+                  onInputChange={(v) => setForm((f) => ({ ...f, cc: v }))}
+                />
+              </div>
             </div>
           ) : null}
           {showBcc ? (
-            <div className="flex h-11 items-center gap-3 border-b border-border/60">
-              <label htmlFor="compose-bcc" className="w-11 shrink-0 text-xs text-muted-foreground">
+            <div className="flex items-center gap-3 border-b border-border/60 pr-1">
+              <label
+                htmlFor="compose-bcc"
+                className="w-11 shrink-0 self-center py-2 text-xs text-muted-foreground"
+              >
                 {t(locale, 'mail.bcc')}
               </label>
-              <input
-                id="compose-bcc"
-                className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/60"
-                value={form.bcc}
-                onChange={(e) => setForm((f) => ({ ...f, bcc: e.target.value }))}
-              />
+              <div className="min-w-0 flex-1">
+                <RecipientsInput
+                  id="compose-bcc"
+                  chips={bccChips}
+                  input={form.bcc}
+                  onChipsChange={setBccChips}
+                  onInputChange={(v) => setForm((f) => ({ ...f, bcc: v }))}
+                />
+              </div>
             </div>
           ) : null}
           <div className="flex h-11 items-center border-b border-border/60">
