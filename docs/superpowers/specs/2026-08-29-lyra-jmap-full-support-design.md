@@ -77,9 +77,14 @@ The seam owns:
 2. **Discovery**: pre-resolve `/.well-known/jmap` redirects with the existing
    same-origin follower (`resolve_discovery_redirect`, landed in `083614a`), then
    `Client::connect()` with the crate default (deny-all redirects).
-3. **Session URL origin pinning** post-connect: `apiUrl`/`uploadUrl`/`downloadUrl`/
-   `eventSourceUrl` must share the configured origin (`netsec::origin_of`), replacing
-   `check_session_urls`.
+3. **Session URL validation** post-connect: `apiUrl`/`uploadUrl`/`downloadUrl`/
+   `eventSourceUrl` are parsed and must use https on public hosts
+   (`netsec::validate_server_url`). ~~Origin pinning~~ was relaxed after live
+   Fastmail verification: the session document is server-authoritative (RFC 8620)
+   and Fastmail legitimately serves the API from `phl.*` sibling hosts, so
+   cross-origin declarations are accepted with an audit log instead of rejected.
+   (Discovery-chain redirects stay same-origin; redirect replay during API calls
+   stays denied by the crate's empty allowlist.)
 4. **Session caching** per account (in-process `Mutex<HashMap<account_id, Client>>`
    on the sync state; refresh when `is_session_updated()` reports staleness or on
    401/404 session errors). Kills the per-operation re-discovery.
@@ -129,7 +134,8 @@ whitelist sanitization unchanged.
 ## Testing
 
 - Seam unit tests (hermetic): DTO mapping from crate types, error classification
-  matrix, origin pinning of session URLs (malicious cross-origin `apiUrl` rejected),
+  matrix, session URL validation (garbage/plaintext rejected; cross-origin sibling
+  hosts accepted per the relaxed model),
   redirect resolution (already covered), keyword⇄flag mapping, cursor/removed-ids
   application logic against an in-memory SQLite DB.
 - Existing `cargo test --bin lyra_backend` suite must stay green; clippy

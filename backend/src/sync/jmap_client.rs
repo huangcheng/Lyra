@@ -7,8 +7,12 @@
 //! Security: `/.well-known/jmap` redirects are pre-resolved with our own
 //! same-origin follower; the crate client is then allowed to re-follow only
 //! the configured host (the crate's allowlist is host-scoped — our follower
-//! already validated the chain origin-scoped). Post-connect, every
-//! credential-bearing session URL is pinned to the configured origin.
+//! already validated the chain origin-scoped). Post-connect, the session's
+//! credential-bearing URLs are validated (parseable, https on public hosts)
+//! and cross-origin declarations are audit-logged but accepted: the session
+//! document is server-authoritative (RFC 8620) and providers like Fastmail
+//! legitimately serve the API/blobs from sibling hosts
+//! (`phl.api.fastmail.com`, `phl-www.fastmailusercontent.com`).
 //!
 //! See `docs/superpowers/specs/2026-08-29-lyra-jmap-full-support-design.md`.
 
@@ -416,20 +420,28 @@ pub(crate) fn resolve_discovery_redirect(
     Ok(resolved)
 }
 
-/// Pin every credential-bearing session URL to the configured origin.
+/// Validate the session's credential-bearing URLs (`apiUrl` / `uploadUrl` /
+/// `downloadUrl` / `eventSourceUrl`).
 ///
-/// `urls` are the session's `apiUrl` / `uploadUrl` / `downloadUrl` /
-/// `eventSourceUrl`; empty entries are skipped defensively.
-fn pin_session_urls(origin: &str, urls: &[&str]) -> Result<(), JmapError> {
+/// The session document is server-authoritative (RFC 8620): the client
+/// already authenticated to this server during discovery, so a session
+/// pointing at other hosts exposes nothing the server doesn't hold. Providers
+/// legitimately split endpoints across hosts (Fastmail serves the API and
+/// blobs from `phl.*` hosts), so cross-origin declarations are accepted with
+/// an audit log. We still hard-reject unparseable URLs and plaintext-`http`
+/// URLs on public hosts (a real downgrade leak), and redirect *replay* during
+/// API calls stays denied by the crate's empty trusted-host allowlist.
+fn validate_session_urls(configured_origin: &str, urls: &[&str]) -> Result<(), JmapError> {
     for url in urls.iter().filter(|u| !u.is_empty()) {
+        // Parse + https-for-public-hosts enforcement (loopback/LAN http allowed).
+        crate::netsec::validate_server_url(url).map_err(JmapError::InvalidServerUrl)?;
         let target = crate::netsec::origin_of(url).map_err(JmapError::InvalidServerUrl)?;
-        if target != origin {
-            tracing::warn!(
+        if target != configured_origin {
+            tracing::info!(
                 target_origin = %target,
-                expected_origin = %origin,
-                "JMAP: session URL points at a different origin; refusing to send credentials"
+                configured_origin = %configured_origin,
+                "JMAP: session declares a sibling host for API/blob traffic (server-authoritative)"
             );
-            return Err(JmapError::CrossOrigin((*url).to_owned()));
         }
     }
     Ok(())
@@ -540,7 +552,7 @@ impl JmapSeam {
         let mut client = builder.connect(base).await?;
 
         let session = client.session();
-        pin_session_urls(
+        validate_session_urls(
             &origin,
             &[
                 session.api_url(),
@@ -599,7 +611,7 @@ impl JmapSeam {
         if !self.client.is_session_updated() {
             self.client.refresh_session().await?;
             let session = self.client.session();
-            pin_session_urls(
+            validate_session_urls(
                 &self.origin,
                 &[
                     session.api_url(),
@@ -1535,11 +1547,11 @@ mod tests {
         assert!(matches!(err, JmapError::SessionDiscovery(_)), "got: {err}");
     }
 
-    // ── session URL origin pinning ──────────────────────────────────
+    // ── session URL validation (server-authoritative) ───────────────
 
     #[test]
-    fn session_url_pinning_accepts_same_origin() {
-        pin_session_urls(
+    fn session_urls_accept_same_origin_and_sibling_hosts() {
+        validate_session_urls(
             "https://jmap.example.com:443",
             &[
                 "https://jmap.example.com/api/",
@@ -1549,31 +1561,32 @@ mod tests {
             ],
         )
         .unwrap();
+        // Fastmail's real shape: discovery on api.fastmail.com, session
+        // endpoints on phl.* sibling hosts — accepted (server-authoritative).
+        validate_session_urls(
+            "https://api.fastmail.com:443",
+            &[
+                "https://phl.api.fastmail.com/jmap/api/",
+                "https://phl.api.fastmail.com/jmap/upload/{accountId}/",
+                "https://phl-www.fastmailusercontent.com/jmap/download/{accountId}/{blobId}/{name}?type={type}",
+                "https://phl.api.fastmail.com/jmap/event/?types={types}&closeafter={closeafter}&ping={ping}",
+            ],
+        )
+        .unwrap();
     }
 
     #[test]
-    fn session_url_pinning_rejects_cross_origin_and_garbage() {
-        // A malicious JMAP server pointing uploadUrl elsewhere must never
-        // receive our Authorization header.
-        let err = pin_session_urls(
-            "https://jmap.example.com:443",
-            &[
-                "https://jmap.example.com/api/",
-                "https://evil.example/upload/",
-            ],
-        )
-        .unwrap_err();
-        assert!(matches!(err, JmapError::CrossOrigin(_)), "got: {err}");
-        // https → http on the same host is a different origin.
+    fn session_urls_reject_garbage_and_plaintext() {
+        // Plaintext http on a public host would leak the credential off-TLS.
         assert!(
-            pin_session_urls(
+            validate_session_urls(
                 "https://jmap.example.com:443",
                 &["http://jmap.example.com/api/"]
             )
             .is_err()
         );
         // Unparseable URL.
-        assert!(pin_session_urls("https://jmap.example.com:443", &["not a url"]).is_err());
+        assert!(validate_session_urls("https://jmap.example.com:443", &["not a url"]).is_err());
     }
 
     // ── credentials ─────────────────────────────────────────────────
