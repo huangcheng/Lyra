@@ -135,6 +135,17 @@ impl TsParam {
     }
 }
 
+/// SQLite timestamps are UTC but zone-less ("2026-08-30 14:44:37"); the API
+/// contract is RFC3339 `date-time`, and browsers parse zone-less strings as
+/// LOCAL time. Normalize the stored text to RFC3339 with a Z.
+#[must_use]
+pub fn normalize_ts_text(text: String) -> String {
+    match parse_ts(&text) {
+        Some(dt) => dt.to_rfc3339(),
+        None => text,
+    }
+}
+
 /// Optional timestamp bind. Unparseable Postgres values become `None` (NULL).
 #[must_use]
 pub fn opt_ts_param(db: &DbPool, raw: Option<&str>) -> Option<TsParam> {

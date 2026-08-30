@@ -96,6 +96,9 @@ export function ComposeDialog() {
   const autosavePayloadRef = useRef<string | null>(null);
   /** Forward drafts load their original attachments once, not per rerender. */
   const forwardLoadedRef = useRef<unknown>(null);
+  /** The draft this open session seeded from — guards against re-seeding on
+   * store identity churn (accounts/folders refresh on every sync tick). */
+  const seededForRef = useRef<unknown>(null);
 
   /** The From account owns a secret (identity) key → sign/encrypt available. */
   const fromAccountHasKey = useMemo(
@@ -120,7 +123,15 @@ export function ComposeDialog() {
   }, [toChips, ccChips, bccChips, form.to, form.cc, form.bcc]);
 
   useEffect(() => {
-    if (!composeOpen) return;
+    if (!composeOpen) {
+      seededForRef.current = null;
+      return;
+    }
+    // Seed once per open: the accounts/folders arrays get fresh identities on
+    // every sync tick, and depending on them here would wipe the half-written
+    // draft mid-compose (observed live: autosave → push → form reset).
+    if (seededForRef.current === composeDraft) return;
+    seededForRef.current = composeDraft;
     const effectiveFrom =
       selectedAccountId === ALL_ACCOUNTS ? (accounts[0]?.id ?? '') : selectedAccountId;
     setForm({
@@ -156,7 +167,8 @@ export function ComposeDialog() {
     setEditorHtml(seeded);
     setInitialHtml(seeded);
     setEditorKey((k) => k + 1);
-  }, [composeOpen, composeDraft, selectedAccountId, accounts]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [composeOpen, composeDraft]);
 
   // Forwarding carries the original's (non-inline) attachments: fetch bytes
   // once per draft and seed the file list.

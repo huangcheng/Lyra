@@ -116,7 +116,7 @@ fn row_opt_id(row: &QueryResult, col: &str) -> Result<Option<String>, sea_orm::D
 /// Nullable timestamp column: stored text on SQLite, RFC3339 on Postgres.
 fn row_opt_ts(row: &QueryResult, col: &str) -> Result<Option<String>, sea_orm::DbErr> {
     if let Ok(text) = row.try_get::<Option<String>>("", col) {
-        return Ok(text);
+        return Ok(text.map(crate::db_row::normalize_ts_text));
     }
     row.try_get::<Option<DateTime<Utc>>>("", col)
         .map(|opt| opt.map(|t| t.to_rfc3339()))
