@@ -63,6 +63,8 @@ export interface RichTextEditorProps {
   className?: string;
   /** Class override for the content area (e.g. a shorter reply box). */
   contentClassName?: string;
+  /** Toolbar placement; compose uses a bottom bar, reply keeps the top. */
+  toolbarPosition?: 'top' | 'bottom';
   disabled?: boolean;
 }
 
@@ -94,6 +96,7 @@ export function RichTextEditor({
   placeholder,
   className,
   contentClassName,
+  toolbarPosition = 'top',
   disabled,
 }: RichTextEditorProps) {
   const editor = usePlateEditor({ plugins: PLUGINS });
@@ -121,7 +124,7 @@ export function RichTextEditor({
           void serializeHtml(editor).then((html) => onChangeRef.current(html));
         }}
       >
-        <Toolbar disabled={disabled} />
+        {toolbarPosition === 'top' ? <Toolbar disabled={disabled} position="top" /> : null}
         <PlateContent
           className={cn(
             'lyra-editor max-h-72 min-h-32 overflow-y-auto px-3 py-2 text-sm outline-none',
@@ -130,6 +133,7 @@ export function RichTextEditor({
           placeholder={placeholder}
           onKeyDown={onKeyDown}
         />
+        {toolbarPosition === 'bottom' ? <Toolbar disabled={disabled} position="bottom" /> : null}
       </Plate>
     </div>
   );
@@ -147,7 +151,13 @@ function useBlockState() {
   }, []);
 }
 
-function Toolbar({ disabled }: { disabled?: boolean }) {
+function Toolbar({
+  disabled,
+  position = 'top',
+}: {
+  disabled?: boolean;
+  position?: 'top' | 'bottom';
+}) {
   const editor = useEditorRef();
   const block = useBlockState();
   const marks = useEditorSelector(
@@ -193,7 +203,12 @@ function Toolbar({ disabled }: { disabled?: boolean }) {
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-0.5 border-b border-border/60 px-1.5 py-1">
+    <div
+      className={cn(
+        'flex flex-wrap items-center gap-0.5 px-1.5 py-1',
+        position === 'top' ? 'border-b border-border/60' : 'border-t border-border/60',
+      )}
+    >
       <Button
         type="button"
         variant="ghost"

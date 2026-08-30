@@ -74,6 +74,8 @@
     "attachmentUnnamed": "attachment",
     "send": "Send",
     "discard": "Discard",
+    "sendShortcut": "Ctrl+Enter to send",
+    "close": "Close",
     "sending": "Sending…",
     "sendSuccess": "Message sent",
     "sendError": "Failed to send message",

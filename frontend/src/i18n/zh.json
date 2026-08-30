@@ -74,6 +74,8 @@
     "attachmentUnnamed": "附件",
     "send": "发送",
     "discard": "丢弃",
+    "sendShortcut": "Ctrl+Enter 发送",
+    "close": "关闭",
     "sending": "发送中…",
     "sendSuccess": "邮件已发送",
     "sendError": "发送失败",

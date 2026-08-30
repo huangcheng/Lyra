@@ -4,18 +4,20 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { Paperclip, Type, X } from 'lucide-react';
+import {
+  ChevronDown,
+  KeyRound,
+  Lock,
+  Paperclip,
+  PenLine,
+  SendHorizontal,
+  Trash2,
+  Type,
+  X,
+} from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
-import { Input } from '@/components/ui/input';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { t } from '@/i18n';
 import { RichTextEditor } from '@/components/compose/rich-text-editor';
@@ -24,6 +26,7 @@ import { formatBytes } from '@/lib/attachments';
 import { signatureHtml } from '@/lib/compose-html';
 import { htmlToText } from '@/lib/html-text';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
+import { cn } from '@/lib/utils';
 import {
   listOpengpgKeys,
   lookupRecipientKeys,
@@ -80,6 +83,9 @@ export function ComposeDialog() {
   const [initialHtml, setInitialHtml] = useState('');
   const [draftMessageId, setDraftMessageId] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
+  const [showCc, setShowCc] = useState(false);
+  const [showBcc, setShowBcc] = useState(false);
+  const [cryptoOpen, setCryptoOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Last autosave payload sent — prevents re-saving unchanged drafts. */
   const autosavePayloadRef = useRef<string | null>(null);
@@ -127,6 +133,9 @@ export function ComposeDialog() {
     setDraftMessageId(composeDraft?.draftMessageId ?? null);
     setDraftSavedAt(null);
     setRichMode(true);
+    setShowCc(Boolean(composeDraft?.cc));
+    setShowBcc(false);
+    setCryptoOpen(false);
     // Reply/forward/draft pass their own initialHtml; new mail seeds the
     // from-account's signature (empty string when none is configured).
     const seeded =
@@ -318,6 +327,9 @@ export function ComposeDialog() {
     setDraftMessageId(null);
     setDraftSavedAt(null);
     setRichMode(true);
+    setShowCc(false);
+    setShowBcc(false);
+    setCryptoOpen(false);
     setEditorHtml('');
     setInitialHtml('');
     autosavePayloadRef.current = null;
@@ -404,197 +416,250 @@ export function ComposeDialog() {
     }
   };
 
+  const cryptoActive = signMessage || encryptMessage || attachPublicKey;
+
+  const iconBtn =
+    'relative flex size-8 items-center justify-center rounded-md text-muted-foreground transition-all hover:bg-accent hover:text-foreground active:scale-[0.96] disabled:pointer-events-none disabled:opacity-50';
+
   return (
     <Dialog open={composeOpen} onOpenChange={(open) => !open && handleClose()}>
       <DialogContent
-        className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-xl"
-        showCloseButton
+        className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden rounded-xl p-0 shadow-2xl sm:max-w-2xl"
+        showCloseButton={false}
       >
-        <DialogHeader>
-          <DialogTitle>{t(locale, titleKey)}</DialogTitle>
-        </DialogHeader>
-        <FieldGroup className="min-h-0 overflow-y-auto">
+        {/* Title bar */}
+        <div className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 pr-2 pl-4">
+          <DialogTitle className="text-[13px] font-medium text-muted-foreground">
+            {t(locale, titleKey)}
+          </DialogTitle>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="ml-auto text-muted-foreground hover:text-foreground"
+            aria-label={t(locale, 'mail.close')}
+            onClick={handleClose}
+          >
+            <X className="size-4" aria-hidden />
+          </Button>
+        </div>
+
+        {/* Address block */}
+        <div className="shrink-0 px-4">
           {accounts.length > 1 || selectedAccountId === ALL_ACCOUNTS ? (
-            <Field>
-              <FieldLabel htmlFor="compose-from">{t(locale, 'mail.from')}</FieldLabel>
-              <select
-                id="compose-from"
-                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-                value={fromAccountId}
-                onChange={(e) => setFromAccountId(e.target.value)}
-                required={selectedAccountId === ALL_ACCOUNTS}
-              >
-                {selectedAccountId === ALL_ACCOUNTS && accounts.length > 1 ? (
-                  <option value="" disabled>
-                    {t(locale, 'mail.fromPick')}
-                  </option>
-                ) : null}
-                {accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.emailAddress}
-                    {a.displayName && a.displayName !== a.emailAddress ? ` (${a.displayName})` : ''}
-                  </option>
-                ))}
-              </select>
-            </Field>
+            <div className="flex h-11 items-center gap-3 border-b border-border/60">
+              <label htmlFor="compose-from" className="w-11 shrink-0 text-xs text-muted-foreground">
+                {t(locale, 'mail.from')}
+              </label>
+              <div className="relative min-w-0 flex-1">
+                <select
+                  id="compose-from"
+                  className="h-11 w-full appearance-none bg-transparent pr-6 text-sm outline-none"
+                  value={fromAccountId}
+                  onChange={(e) => setFromAccountId(e.target.value)}
+                  required={selectedAccountId === ALL_ACCOUNTS}
+                >
+                  {selectedAccountId === ALL_ACCOUNTS && accounts.length > 1 ? (
+                    <option value="" disabled>
+                      {t(locale, 'mail.fromPick')}
+                    </option>
+                  ) : null}
+                  {accounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.emailAddress}
+                      {a.displayName && a.displayName !== a.emailAddress
+                        ? ` (${a.displayName})`
+                        : ''}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown
+                  className="pointer-events-none absolute top-1/2 right-1 size-3.5 -translate-y-1/2 text-muted-foreground"
+                  aria-hidden
+                />
+              </div>
+            </div>
           ) : null}
-          <Field>
-            <FieldLabel htmlFor="compose-to">{t(locale, 'mail.to')}</FieldLabel>
-            <Input
+          <div className="flex h-11 items-center gap-3 border-b border-border/60">
+            <label htmlFor="compose-to" className="w-11 shrink-0 text-xs text-muted-foreground">
+              {t(locale, 'mail.to')}
+            </label>
+            <input
               id="compose-to"
+              className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/60"
               value={form.to}
               onChange={(e) => setForm((f) => ({ ...f, to: e.target.value }))}
               placeholder={t(locale, 'mail.toPlaceholder')}
               autoFocus
             />
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="compose-subject">{t(locale, 'mail.subject')}</FieldLabel>
-            <Input
+            {!showCc ? (
+              <button
+                type="button"
+                className="rounded px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                onClick={() => setShowCc(true)}
+              >
+                {t(locale, 'mail.cc')}
+              </button>
+            ) : null}
+            {!showBcc ? (
+              <button
+                type="button"
+                className="rounded px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                onClick={() => setShowBcc(true)}
+              >
+                {t(locale, 'mail.bcc')}
+              </button>
+            ) : null}
+          </div>
+          {showCc ? (
+            <div className="flex h-11 items-center gap-3 border-b border-border/60">
+              <label htmlFor="compose-cc" className="w-11 shrink-0 text-xs text-muted-foreground">
+                {t(locale, 'mail.cc')}
+              </label>
+              <input
+                id="compose-cc"
+                className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/60"
+                value={form.cc}
+                onChange={(e) => setForm((f) => ({ ...f, cc: e.target.value }))}
+              />
+            </div>
+          ) : null}
+          {showBcc ? (
+            <div className="flex h-11 items-center gap-3 border-b border-border/60">
+              <label htmlFor="compose-bcc" className="w-11 shrink-0 text-xs text-muted-foreground">
+                {t(locale, 'mail.bcc')}
+              </label>
+              <input
+                id="compose-bcc"
+                className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/60"
+                value={form.bcc}
+                onChange={(e) => setForm((f) => ({ ...f, bcc: e.target.value }))}
+              />
+            </div>
+          ) : null}
+          <div className="flex h-11 items-center border-b border-border/60">
+            <input
               id="compose-subject"
+              className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/60"
               value={form.subject}
               onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))}
               placeholder={t(locale, 'mail.subjectPlaceholder')}
+              aria-label={t(locale, 'mail.subject')}
             />
-          </Field>
-          <Field>
-            <div className="flex items-center justify-between">
-              <FieldLabel htmlFor="compose-body">{t(locale, 'mail.body')}</FieldLabel>
-              <div className="flex items-center gap-0.5 rounded-md border border-input p-0.5">
-                <button
-                  type="button"
-                  disabled={richMode}
-                  className="rounded-[5px] px-2 py-0.5 text-[11px] font-medium disabled:bg-accent disabled:text-foreground"
-                  onClick={() => setRichMode(true)}
-                >
-                  {t(locale, 'mail.richText')}
-                </button>
-                <button
-                  type="button"
-                  disabled={!richMode}
-                  className="flex items-center gap-1 rounded-[5px] px-2 py-0.5 text-[11px] font-medium disabled:bg-accent disabled:text-foreground"
-                  onClick={() => {
-                    // Rich → plain carries the text content over.
-                    setForm((f) => ({ ...f, body: htmlToText(editorHtml ?? '') || f.body }));
-                    setRichMode(false);
-                  }}
-                >
-                  <Type className="size-3" aria-hidden />
-                  {t(locale, 'mail.plainText')}
-                </button>
-              </div>
-            </div>
-            {richMode ? (
-              <RichTextEditor
-                key={editorKey}
-                initialHtml={initialHtml}
-                onChange={setEditorHtml}
-                placeholder={t(locale, 'mail.bodyPlaceholder')}
-                onKeyDown={(e) => {
-                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                    e.preventDefault();
-                    void handleSend();
-                  }
-                }}
-              />
-            ) : (
-              <Textarea
-                id="compose-body"
-                className="min-h-40"
-                value={form.body}
-                onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))}
-                onKeyDown={(e) => {
-                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                    e.preventDefault();
-                    void handleSend();
-                  }
-                }}
-                placeholder={t(locale, 'mail.bodyPlaceholder')}
-              />
-            )}
-          </Field>
-          <Field className="gap-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={sending || files.length >= MAX_ATTACHMENTS}
-                onClick={() => fileInputRef.current?.click()}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="flex min-h-0 flex-1 flex-col">
+          {richMode ? (
+            <RichTextEditor
+              key={editorKey}
+              className="flex min-h-0 flex-1 flex-col rounded-none border-0"
+              toolbarPosition="bottom"
+              contentClassName="max-h-none min-h-56 flex-1 px-4 py-3"
+              initialHtml={initialHtml}
+              onChange={setEditorHtml}
+              placeholder={t(locale, 'mail.bodyPlaceholder')}
+              onKeyDown={(e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                  e.preventDefault();
+                  void handleSend();
+                }
+              }}
+            />
+          ) : (
+            <Textarea
+              id="compose-body"
+              className="min-h-56 flex-1 resize-none rounded-none border-0 px-4 py-3 shadow-none focus-visible:border-transparent focus-visible:ring-0"
+              value={form.body}
+              onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))}
+              onKeyDown={(e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                  e.preventDefault();
+                  void handleSend();
+                }
+              }}
+              placeholder={t(locale, 'mail.bodyPlaceholder')}
+            />
+          )}
+        </div>
+        {/* Attachment chips */}
+        {files.length > 0 ? (
+          <div className="flex max-h-28 shrink-0 flex-wrap items-center gap-1.5 overflow-y-auto border-t border-border/60 px-4 py-2.5">
+            {files.map((f, i) => (
+              <span
+                key={`${f.name}-${i}`}
+                className="flex max-w-56 items-center gap-1.5 rounded-full border border-border/70 bg-muted/40 py-1 pr-1 pl-2.5 text-xs"
               >
-                <Paperclip className="size-3.5" />
-                {t(locale, 'mail.addAttachment')}
-              </Button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(e) => {
-                  addFiles(e.target.files);
-                  e.target.value = '';
-                }}
-              />
-              {files.length > 0
-                ? files.map((f, i) => (
-                    <span
-                      key={`${f.name}-${i}`}
-                      className="flex max-w-[200px] items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs"
-                    >
-                      <span className="min-w-0">
-                        <span className="block truncate font-medium">{f.name}</span>
-                        <span className="block text-ter-foreground">{formatBytes(f.size)}</span>
-                      </span>
-                      <button
-                        type="button"
-                        aria-label={t(locale, 'mail.removeAttachment', { name: f.name })}
-                        className="shrink-0 rounded p-0.5 hover:bg-accent"
-                        onClick={() => removeFile(i)}
-                      >
-                        <X className="size-3" aria-hidden />
-                      </button>
-                    </span>
-                  ))
-                : null}
+                <Paperclip className="size-3 shrink-0 text-muted-foreground" aria-hidden />
+                <span className="min-w-0 truncate font-medium">{f.name}</span>
+                <span className="shrink-0 text-ter-foreground tabular-nums">
+                  {formatBytes(f.size)}
+                </span>
+                <button
+                  type="button"
+                  aria-label={t(locale, 'mail.removeAttachment', { name: f.name })}
+                  className="relative flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors before:absolute before:-inset-1 before:content-[''] hover:bg-accent hover:text-foreground"
+                  onClick={() => removeFile(i)}
+                >
+                  <X className="size-3" aria-hidden />
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {/* OpenGPG panel */}
+        {cryptoOpen ? (
+          <div className="shrink-0 space-y-2.5 border-t border-border/60 bg-muted/30 px-4 py-3">
+            <div className="flex items-center gap-2">
+              <Lock className="size-3.5 text-muted-foreground" aria-hidden />
+              <p className="text-xs font-medium">{t(locale, 'mail.opengpg.composeTitle')}</p>
             </div>
-          </Field>
-          <Field className="gap-3 rounded-md border border-border/60 p-3">
-            <p className="text-sm font-medium">{t(locale, 'mail.opengpg.composeTitle')}</p>
             {!cryptoAllowed ? (
               <p className="text-xs text-muted-foreground">
                 {t(locale, 'mail.opengpg.needsAccountKey')}
               </p>
             ) : null}
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                className="accent-foreground"
-                checked={signMessage}
-                disabled={!cryptoAllowed}
-                onChange={(e) => setSignMessage(e.target.checked)}
-              />
-              {t(locale, 'mail.opengpg.sign')}
-            </label>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                className="accent-foreground"
-                checked={encryptMessage}
-                disabled={!cryptoAllowed}
-                onChange={(e) => setEncryptMessage(e.target.checked)}
-              />
-              {t(locale, 'mail.opengpg.encrypt')}
-            </label>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                className="accent-foreground"
-                checked={attachPublicKey}
-                disabled={!cryptoAllowed}
-                onChange={(e) => setAttachPublicKey(e.target.checked)}
-              />
-              {t(locale, 'mail.opengpg.attachPublicKey')}
-            </label>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {(
+                [
+                  {
+                    on: signMessage,
+                    toggle: () => setSignMessage((v) => !v),
+                    icon: PenLine,
+                    label: t(locale, 'mail.opengpg.sign'),
+                  },
+                  {
+                    on: encryptMessage,
+                    toggle: () => setEncryptMessage((v) => !v),
+                    icon: Lock,
+                    label: t(locale, 'mail.opengpg.encrypt'),
+                  },
+                  {
+                    on: attachPublicKey,
+                    toggle: () => setAttachPublicKey((v) => !v),
+                    icon: KeyRound,
+                    label: t(locale, 'mail.opengpg.attachPublicKey'),
+                  },
+                ] as const
+              ).map(({ on, toggle, icon: Icon, label }) => (
+                <button
+                  key={label}
+                  type="button"
+                  aria-pressed={on}
+                  disabled={!cryptoAllowed}
+                  onClick={toggle}
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-all active:scale-[0.97] disabled:pointer-events-none disabled:opacity-40',
+                    on
+                      ? 'border-foreground/25 bg-foreground/[0.06] text-foreground'
+                      : 'border-border/70 text-muted-foreground hover:border-foreground/20 hover:text-foreground',
+                  )}
+                >
+                  <Icon className="size-3.5" aria-hidden />
+                  {label}
+                </button>
+              ))}
+            </div>
             {encryptMessage && recipientKeys.length > 0 ? (
               <ul className="space-y-2 text-xs text-muted-foreground">
                 {recipientKeys.map((row) => (
@@ -629,23 +694,112 @@ export function ComposeDialog() {
                 ))}
               </ul>
             ) : null}
-          </Field>
-          {error ? <p className="text-sm text-destructive">{error}</p> : null}
-          {draftSavedAt && !success ? (
-            <p className="text-xs text-ter-foreground">{t(locale, 'mail.draftSaved')}</p>
-          ) : null}
-          {success ? (
-            <p className="text-sm text-muted-foreground">{t(locale, 'mail.sendSuccess')}</p>
-          ) : null}
-        </FieldGroup>
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={handleDiscard} disabled={sending}>
-            {t(locale, 'mail.discard')}
-          </Button>
-          <Button type="button" onClick={() => void handleSend()} disabled={sending}>
+          </div>
+        ) : null}
+        {error ? (
+          <div className="shrink-0 border-t border-destructive/25 bg-destructive/5 px-4 py-2 text-xs text-destructive">
+            {error}
+          </div>
+        ) : null}
+
+        {/* Footer bar */}
+        <div className="flex h-14 shrink-0 items-center gap-1.5 border-t border-border/60 px-3">
+          <Button
+            type="button"
+            className="h-9 rounded-full bg-foreground px-4 text-background transition-all hover:bg-foreground/90 active:scale-[0.97]"
+            onClick={() => void handleSend()}
+            disabled={sending}
+            title={t(locale, 'mail.sendShortcut')}
+          >
+            <SendHorizontal className="size-3.5" aria-hidden />
             {sending ? t(locale, 'mail.sending') : t(locale, 'mail.send')}
           </Button>
-        </DialogFooter>
+          {success ? (
+            <span className="ml-1 text-xs text-muted-foreground">
+              {t(locale, 'mail.sendSuccess')}
+            </span>
+          ) : (
+            <span className="ml-1 hidden text-[11px] text-ter-foreground md:inline">
+              {t(locale, 'mail.sendShortcut')}
+            </span>
+          )}
+          <div className="ml-auto flex items-center gap-0.5">
+            {draftSavedAt && !success ? (
+              <span className="mr-1.5 text-[11px] text-ter-foreground tabular-nums">
+                {t(locale, 'mail.draftSaved')}
+              </span>
+            ) : null}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                addFiles(e.target.files);
+                e.target.value = '';
+              }}
+            />
+            <button
+              type="button"
+              className={iconBtn}
+              disabled={sending || files.length >= MAX_ATTACHMENTS}
+              onClick={() => fileInputRef.current?.click()}
+              aria-label={t(locale, 'mail.addAttachment')}
+            >
+              <Paperclip className="size-4" aria-hidden />
+              {files.length > 0 ? (
+                <span className="absolute top-0.5 right-0.5 flex size-3.5 items-center justify-center rounded-full bg-foreground text-[9px] font-medium text-background tabular-nums">
+                  {files.length}
+                </span>
+              ) : null}
+            </button>
+            <button
+              type="button"
+              className={cn(iconBtn, !richMode && 'bg-accent text-foreground')}
+              aria-pressed={!richMode}
+              title={t(locale, richMode ? 'mail.plainText' : 'mail.richText')}
+              aria-label={t(locale, richMode ? 'mail.plainText' : 'mail.richText')}
+              onClick={() => {
+                if (richMode) {
+                  // Rich → plain carries the text content over.
+                  setForm((f) => ({ ...f, body: htmlToText(editorHtml ?? '') || f.body }));
+                  setRichMode(false);
+                } else {
+                  setRichMode(true);
+                }
+              }}
+            >
+              <Type className="size-4" aria-hidden />
+            </button>
+            <button
+              type="button"
+              className={cn(iconBtn, (cryptoOpen || cryptoActive) && 'bg-accent text-foreground')}
+              aria-pressed={cryptoOpen}
+              title={t(locale, 'mail.opengpg.composeTitle')}
+              aria-label={t(locale, 'mail.opengpg.composeTitle')}
+              onClick={() => setCryptoOpen((v) => !v)}
+            >
+              <Lock className="size-4" aria-hidden />
+              {cryptoActive ? (
+                <span
+                  className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-foreground"
+                  aria-hidden
+                />
+              ) : null}
+            </button>
+            <span className="mx-1 h-4 w-px bg-border" aria-hidden />
+            <button
+              type="button"
+              className={cn(iconBtn, 'hover:text-destructive')}
+              onClick={handleDiscard}
+              disabled={sending}
+              aria-label={t(locale, 'mail.discard')}
+              title={t(locale, 'mail.discard')}
+            >
+              <Trash2 className="size-4" aria-hidden />
+            </button>
+          </div>
+        </div>
       </DialogContent>
     </Dialog>
   );
