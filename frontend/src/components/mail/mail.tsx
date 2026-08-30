@@ -250,7 +250,7 @@ export function Mail() {
   if (isMobile) {
     return (
       <TooltipProvider delayDuration={0}>
-        <div className="flex h-full flex-col bg-secondary">
+        <div className="flex h-full flex-col bg-background">
           {selectedMessageId ? (
             <MailDisplay />
           ) : (
@@ -292,7 +292,7 @@ export function Mail() {
           <NavContent isCollapsed={isCollapsed} />
         </ResizablePanel>
         <ResizableHandle withHandle />
-        <ResizablePanel id="list" defaultSize="32%" minSize="30%" className="bg-secondary">
+        <ResizablePanel id="list" defaultSize="32%" minSize="30%" className="bg-background">
           <ListPane />
         </ResizablePanel>
         <ResizableHandle withHandle />

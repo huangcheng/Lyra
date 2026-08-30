@@ -26,21 +26,21 @@ Decisions made during review:
 
 | Token | Light | Dark | Use |
 |---|---|---|---|
-| INK | `#1A1B1F` | `#ECEDEF` | Primary text, stamp square, chart bars |
-| SEC | `#6B6F76` | `#9BA0A8` | Secondary text, counts |
-| TER | `#9B9BA3` | `#6E737B` | Tertiary text, inactive icons, placeholders |
-| HAIR | `#E2E2E5` | `#2E3138` | 1px hairline rules, card borders |
-| BTNB | `#E1E2E4` | `#35383F` | Button/input borders |
-| HOV | `#E8E8E9` | `#26282E` | Hover, active nav pill, segmented track |
-| PANEL | `#EFF0F2` | `#1A1C20` | Sidebar background, avatar tiles |
-| LIST | `#F6F6F8` | `#17181C` | List column / standalone nav background |
-| READER | `#FFFFFF` | `#24262B` | Reading surface, cards, pills |
-| Canvas | `#F7F7F8` | `#101114` | Login page backdrop |
+| INK | `#1D1B17` | `#EDEBE5` | Primary text, stamp square, chart bars |
+| SEC | `#6F6A5F` | `#9D988D` | Secondary text, counts |
+| TER | `#A39D90` | `#706B60` | Tertiary text, inactive icons, placeholders |
+| HAIR | `#E5E2DA` | `#302D28` | 1px hairline rules, card borders |
+| BTNB | `#E3E0D8` | `#383530` | Button/input borders |
+| HOV | `#E9E6DF` | `#282622` | Hover, active nav pill, segmented track |
+| PANEL | `#F1EFE9` | `#1B1A17` | Sidebar background, avatar tiles |
+| LIST | `#F7F6F2` | `#171614` | List column / standalone nav background |
+| READER | `#FFFFFF` | `#21201C` | Reading surface, cards, pills |
+| Canvas | `#F8F7F4` | `#12110f` | Login page backdrop |
 | UNREAD | `#E2A336` | `#E2A336` | Unread dot, "today" bar (same both themes) |
 | OK | `#3D9A5F` | `#3D9A5F` | Sync dot, toggle-on (same both themes) |
 | Danger | `#B4453C` | `#D4756B` | Destructive text only — the only red anywhere |
 
-Color is reserved for status: amber = unread/today, green = healthy/on, muted red = destructive. Everything else is cool gray.
+Color is reserved for status: amber = unread/today, green = healthy/on, muted red = destructive. Everything else is warm paper gray (the palette moved off cool gray in the 2026-08-30 polish pass).
 
 ### Typography
 

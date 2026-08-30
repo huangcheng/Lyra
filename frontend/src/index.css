@@ -44,73 +44,73 @@
 :root {
   --radius: 0.5rem;
   --background: #ffffff;
-  --foreground: #1a1b1f;
+  --foreground: #1d1b17;
   --card: #ffffff;
-  --card-foreground: #1a1b1f;
+  --card-foreground: #1d1b17;
   --popover: #ffffff;
-  --popover-foreground: #1a1b1f;
-  --primary: #1a1b1f; /* ink — used for text emphasis, not paint */
+  --popover-foreground: #1d1b17;
+  --primary: #1d1b17; /* ink — used for text emphasis, not paint */
   --primary-foreground: #ffffff;
-  --secondary: #f6f6f8; /* LIST */
-  --secondary-foreground: #1a1b1f;
-  --muted: #eff0f2; /* PANEL */
-  --muted-foreground: #6b6f76; /* SEC */
-  --accent: #e8e8e9; /* HOV */
-  --accent-foreground: #1a1b1f;
+  --secondary: #f7f6f2; /* LIST — warm paper mist */
+  --secondary-foreground: #1d1b17;
+  --muted: #f1efe9; /* PANEL — warm fog */
+  --muted-foreground: #6f6a5f; /* SEC */
+  --accent: #e9e6df; /* HOV */
+  --accent-foreground: #1d1b17;
   --destructive: #b4453c; /* muted red, text/borders only */
   --destructive-foreground: #ffffff;
-  --border: #e2e2e5; /* HAIR */
-  --input: #e1e2e4; /* BTNB */
-  --ring: #9b9ba3; /* TER */
-  --sidebar: #eff0f2;
-  --sidebar-foreground: #1a1b1f;
-  --sidebar-primary: #1a1b1f;
+  --border: #e5e2da; /* HAIR */
+  --input: #e3e0d8; /* BTNB */
+  --ring: #a39d90; /* TER */
+  --sidebar: #f1efe9;
+  --sidebar-foreground: #1d1b17;
+  --sidebar-primary: #1d1b17;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #e8e8e9;
-  --sidebar-accent-foreground: #1a1b1f;
-  --sidebar-border: #e2e2e5;
-  --sidebar-ring: #9b9ba3;
+  --sidebar-accent: #e9e6df;
+  --sidebar-accent-foreground: #1d1b17;
+  --sidebar-border: #e5e2da;
+  --sidebar-ring: #a39d90;
   /* Lyra v2 extras */
   --unread: #e2a336; /* amber — unread dots, today bar */
   --ok: #3d9a5f; /* green — sync dot, toggles on */
-  --ter-foreground: #9b9ba3; /* TER */
-  --canvas: #f7f7f8; /* login backdrop */
-  --shadow-whisper: 0 1px 2px rgba(26, 27, 31, 0.04), 0 0 0 1px rgba(226, 226, 229, 0.8);
+  --ter-foreground: #a39d90; /* TER */
+  --canvas: #f8f7f4; /* login backdrop */
+  --shadow-whisper: 0 1px 2px rgba(29, 27, 23, 0.04), 0 0 0 1px rgba(229, 226, 218, 0.8);
 }
 
 .dark {
-  --background: #17181c; /* LIST dark = app canvas */
-  --foreground: #ecedef;
-  --card: #24262b; /* READER dark */
-  --card-foreground: #ecedef;
-  --popover: #24262b;
-  --popover-foreground: #ecedef;
-  --primary: #ecedef;
-  --primary-foreground: #1a1b1f;
-  --secondary: #1a1c20; /* PANEL dark */
-  --secondary-foreground: #ecedef;
-  --muted: #1a1c20;
-  --muted-foreground: #9ba0a8;
-  --accent: #26282e; /* HOV dark */
-  --accent-foreground: #ecedef;
+  --background: #171614; /* LIST dark = app canvas */
+  --foreground: #edebe5;
+  --card: #21201c; /* READER dark */
+  --card-foreground: #edebe5;
+  --popover: #21201c;
+  --popover-foreground: #edebe5;
+  --primary: #edebe5;
+  --primary-foreground: #1d1b17;
+  --secondary: #1b1a17; /* PANEL dark */
+  --secondary-foreground: #edebe5;
+  --muted: #1b1a17;
+  --muted-foreground: #9d988d;
+  --accent: #282622; /* HOV dark */
+  --accent-foreground: #edebe5;
   --destructive: #d4756b;
-  --destructive-foreground: #1a1b1f;
-  --border: #2e3138;
-  --input: #35383f;
-  --ring: #6e737b;
-  --sidebar: #1a1c20;
-  --sidebar-foreground: #ecedef;
-  --sidebar-primary: #ecedef;
-  --sidebar-primary-foreground: #1a1b1f;
-  --sidebar-accent: #26282e;
-  --sidebar-accent-foreground: #ecedef;
-  --sidebar-border: #2e3138;
-  --sidebar-ring: #6e737b;
+  --destructive-foreground: #1d1b17;
+  --border: #302d28;
+  --input: #383530;
+  --ring: #706b60;
+  --sidebar: #1b1a17;
+  --sidebar-foreground: #edebe5;
+  --sidebar-primary: #edebe5;
+  --sidebar-primary-foreground: #1d1b17;
+  --sidebar-accent: #282622;
+  --sidebar-accent-foreground: #edebe5;
+  --sidebar-border: #302d28;
+  --sidebar-ring: #706b60;
   --unread: #e2a336;
   --ok: #3d9a5f;
-  --ter-foreground: #6e737b;
-  --canvas: #101114;
-  --shadow-whisper: 0 1px 2px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(46, 49, 56, 0.8);
+  --ter-foreground: #706b60;
+  --canvas: #12110f;
+  --shadow-whisper: 0 1px 2px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(48, 45, 40, 0.8);
 }
 
 @layer utilities {
@@ -187,14 +187,14 @@
    of letting app dark tokens bleed into third-party markup. */
 .dark .mail-body {
   background: #ffffff;
-  color: #1a1b1f;
+  color: #1d1b17;
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 16px;
 }
 
 .dark .mail-body a {
-  color: #1a1b1f;
+  color: #1d1b17;
 }
 
 .mail-body blockquote {

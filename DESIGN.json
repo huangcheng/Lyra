@@ -4,16 +4,16 @@
   "title": "Design System: Lyra",
   "extensions": {
     "colorMeta": {
-      "ink": { "role": "primary", "displayName": "Ink", "canonical": "#1A1B1F", "tonalRamp": ["#101114", "#17181C", "#1A1C20", "#24262B", "#2E3138", "#6B6F76", "#9BA0A8", "#ECEDEF"] },
-      "paper": { "role": "neutral", "displayName": "Paper", "canonical": "#FFFFFF", "tonalRamp": ["#24262B", "#3A3D44", "#6B6F76", "#9B9BA3", "#C9CACF", "#E8E8E9", "#F6F6F8", "#FFFFFF"] },
-      "canvas": { "role": "neutral", "displayName": "Canvas", "canonical": "#F7F7F8", "tonalRamp": ["#101114", "#24262B", "#4A4D54", "#8A8D94", "#B9BABF", "#DCDCDE", "#EFF0F2", "#F7F7F8"] },
-      "list-mist": { "role": "neutral", "displayName": "List Mist", "canonical": "#F6F6F8", "tonalRamp": ["#17181C", "#2E3138", "#565960", "#94969C", "#C2C3C8", "#E2E2E5", "#F0F0F3", "#F6F6F8"] },
-      "panel-fog": { "role": "neutral", "displayName": "Panel Fog", "canonical": "#EFF0F2", "tonalRamp": ["#1A1C20", "#35383F", "#5F626A", "#9A9CA2", "#C6C7CC", "#E1E2E4", "#E8E8E9", "#EFF0F2"] },
-      "hover-wash": { "role": "neutral", "displayName": "Hover Wash", "canonical": "#E8E8E9", "tonalRamp": ["#26282E", "#3C3F46", "#686B72", "#A2A4AA", "#CBCCD0", "#E2E2E5", "#EFF0F2", "#F6F6F8"] },
-      "hairline": { "role": "neutral", "displayName": "Hairline", "canonical": "#E2E2E5", "tonalRamp": ["#2E3138", "#45484F", "#73767D", "#A8AAb0", "#CECFD3", "#E2E2E5", "#EFEFF1", "#F7F7F8"] },
-      "button-border": { "role": "neutral", "displayName": "Button Border", "canonical": "#E1E2E4", "tonalRamp": ["#35383F", "#4C4F57", "#7A7D84", "#ADAFb4", "#D1D2D5", "#E1E2E4", "#EEEFF0", "#F7F7F8"] },
-      "secondary-ink": { "role": "neutral", "displayName": "Secondary Ink", "canonical": "#6B6F76", "tonalRamp": ["#35373D", "#4A4D53", "#6B6F76", "#8B8F96", "#ABAFB5", "#C7CACE", "#DFE1E4", "#F1F2F3"] },
-      "tertiary-ash": { "role": "neutral", "displayName": "Tertiary Ash", "canonical": "#9B9BA3", "tonalRamp": ["#4A4A51", "#62626A", "#7F7F87", "#9B9BA3", "#B5B5BB", "#CDCDD1", "#E2E2E5", "#F2F2F4"] },
+      "ink": { "role": "primary", "displayName": "Ink", "canonical": "#1D1B17", "tonalRamp": ["#12110f", "#171614", "#1B1A17", "#21201C", "#302D28", "#6F6A5F", "#9D988D", "#EDEBE5"] },
+      "paper": { "role": "neutral", "displayName": "Paper", "canonical": "#FFFFFF", "tonalRamp": ["#21201C", "#3A3D44", "#6F6A5F", "#A39D90", "#C9CACF", "#E9E6DF", "#F7F6F2", "#FFFFFF"] },
+      "canvas": { "role": "neutral", "displayName": "Canvas", "canonical": "#F8F7F4", "tonalRamp": ["#12110f", "#21201C", "#4A4D54", "#8A8D94", "#B9BABF", "#DCDCDE", "#F1EFE9", "#F8F7F4"] },
+      "list-mist": { "role": "neutral", "displayName": "List Mist", "canonical": "#F7F6F2", "tonalRamp": ["#171614", "#302D28", "#565960", "#94969C", "#C2C3C8", "#E5E2DA", "#F0F0F3", "#F7F6F2"] },
+      "panel-fog": { "role": "neutral", "displayName": "Panel Fog", "canonical": "#F1EFE9", "tonalRamp": ["#1B1A17", "#383530", "#5F626A", "#9A9CA2", "#C6C7CC", "#E3E0D8", "#E9E6DF", "#F1EFE9"] },
+      "hover-wash": { "role": "neutral", "displayName": "Hover Wash", "canonical": "#E9E6DF", "tonalRamp": ["#282622", "#3C3F46", "#686B72", "#A2A4AA", "#CBCCD0", "#E5E2DA", "#F1EFE9", "#F7F6F2"] },
+      "hairline": { "role": "neutral", "displayName": "Hairline", "canonical": "#E5E2DA", "tonalRamp": ["#302D28", "#45484F", "#73767D", "#A8AAb0", "#CECFD3", "#E5E2DA", "#EFEFF1", "#F8F7F4"] },
+      "button-border": { "role": "neutral", "displayName": "Button Border", "canonical": "#E3E0D8", "tonalRamp": ["#383530", "#4C4F57", "#7A7D84", "#ADAFb4", "#D1D2D5", "#E3E0D8", "#EEEFF0", "#F8F7F4"] },
+      "secondary-ink": { "role": "neutral", "displayName": "Secondary Ink", "canonical": "#6F6A5F", "tonalRamp": ["#35373D", "#4A4D53", "#6F6A5F", "#8B8F96", "#ABAFB5", "#C7CACE", "#DFE1E4", "#F1F2F3"] },
+      "tertiary-ash": { "role": "neutral", "displayName": "Tertiary Ash", "canonical": "#A39D90", "tonalRamp": ["#4A4A51", "#62626A", "#7F7F87", "#A39D90", "#B5B5BB", "#CDCDD1", "#E5E2DA", "#F2F2F4"] },
       "unread-amber": { "role": "primary", "displayName": "Unread Amber", "canonical": "#E2A336", "tonalRamp": ["#4A3510", "#6E4F18", "#93691F", "#B88528", "#E2A336", "#ECBA5F", "#F4D28E", "#FAE9C4"] },
       "sync-green": { "role": "primary", "displayName": "Sync Green", "canonical": "#3D9A5F", "tonalRamp": ["#153522", "#1F4D31", "#2A6641", "#3D9A5F", "#5DB57C", "#83CC9C", "#ACE0BE", "#D6F0E1"] },
       "destructive-red": { "role": "primary", "displayName": "Destructive Red", "canonical": "#B4453C", "tonalRamp": ["#3E1714", "#5C241F", "#7A312A", "#B4453C", "#C96259", "#D4756B", "#E6A199", "#F3CFCA"] }
@@ -47,7 +47,7 @@
       "refersTo": "stamp",
       "description": "The only logo: an ink square with a serif L, inverting by theme.",
       "html": "<div class=\"ds-stamp\">L</div>",
-      "css": ".ds-stamp { width: 40px; height: 40px; border-radius: 9px; background: #1A1B1F; color: #FFFFFF; font-family: 'Instrument Serif', Georgia, serif; font-size: 22px; line-height: 40px; text-align: center; }"
+      "css": ".ds-stamp { width: 40px; height: 40px; border-radius: 9px; background: #1D1B17; color: #FFFFFF; font-family: 'Instrument Serif', Georgia, serif; font-size: 22px; line-height: 40px; text-align: center; }"
     },
     {
       "name": "Primary Button",
@@ -55,7 +55,7 @@
       "refersTo": "button-primary",
       "description": "White pill with hairline border; the only primary action style.",
       "html": "<button class=\"ds-btn-primary\">Compose</button>",
-      "css": ".ds-btn-primary { background: #FFFFFF; color: #1A1B1F; border: 1px solid #E1E2E4; border-radius: 8px; padding: 8px 16px; font-family: 'Inter Variable', ui-sans-serif, system-ui, sans-serif; font-size: 13px; font-weight: 500; transition: background 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-btn-primary:hover { background: #E8E8E9; } .ds-btn-primary:focus-visible { outline: 2px solid #9B9BA3; outline-offset: 2px; } .ds-btn-primary:active { background: #E1E2E4; }"
+      "css": ".ds-btn-primary { background: #FFFFFF; color: #1D1B17; border: 1px solid #E3E0D8; border-radius: 8px; padding: 8px 16px; font-family: 'Inter Variable', ui-sans-serif, system-ui, sans-serif; font-size: 13px; font-weight: 500; transition: background 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-btn-primary:hover { background: #E9E6DF; } .ds-btn-primary:focus-visible { outline: 2px solid #A39D90; outline-offset: 2px; } .ds-btn-primary:active { background: #E3E0D8; }"
     },
     {
       "name": "Ghost Icon Button",
@@ -63,7 +63,7 @@
       "refersTo": "button-ghost",
       "description": "Borderless toolbar action; ash icon at rest, ink on hover.",
       "html": "<button class=\"ds-btn-ghost\" aria-label=\"Archive\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"2\" y=\"4\" width=\"20\" height=\"5\" rx=\"1\"/><path d=\"M4 9v9a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9\"/><path d=\"M10 13h4\"/></svg></button>",
-      "css": ".ds-btn-ghost { background: transparent; color: #9B9BA3; border: none; border-radius: 6px; padding: 6px; display: inline-flex; align-items: center; transition: color 150ms cubic-bezier(0.25, 1, 0.5, 1), background 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-btn-ghost:hover { color: #1A1B1F; background: #E8E8E9; } .ds-btn-ghost:focus-visible { outline: 2px solid #9B9BA3; outline-offset: 2px; }"
+      "css": ".ds-btn-ghost { background: transparent; color: #A39D90; border: none; border-radius: 6px; padding: 6px; display: inline-flex; align-items: center; transition: color 150ms cubic-bezier(0.25, 1, 0.5, 1), background 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-btn-ghost:hover { color: #1D1B17; background: #E9E6DF; } .ds-btn-ghost:focus-visible { outline: 2px solid #A39D90; outline-offset: 2px; }"
     },
     {
       "name": "Input",
@@ -71,7 +71,7 @@
       "refersTo": "input",
       "description": "Paper fill with a hairline border that strengthens on focus; no glow.",
       "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"Search mail\" />",
-      "css": ".ds-input { background: #FFFFFF; color: #1A1B1F; border: 1px solid #E1E2E4; border-radius: 8px; padding: 8px 12px; font-family: 'Inter Variable', ui-sans-serif, system-ui, sans-serif; font-size: 14px; transition: border-color 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-input::placeholder { color: #9B9BA3; } .ds-input:hover { border-color: #C9CACF; } .ds-input:focus { outline: none; border-color: #9B9BA3; }"
+      "css": ".ds-input { background: #FFFFFF; color: #1D1B17; border: 1px solid #E3E0D8; border-radius: 8px; padding: 8px 12px; font-family: 'Inter Variable', ui-sans-serif, system-ui, sans-serif; font-size: 14px; transition: border-color 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-input::placeholder { color: #A39D90; } .ds-input:hover { border-color: #C9CACF; } .ds-input:focus { outline: none; border-color: #A39D90; }"
     },
     {
       "name": "Card",
@@ -79,7 +79,7 @@
       "refersTo": "card",
       "description": "Paper surface with a hairline border and 10px radius; no resting shadow.",
       "html": "<div class=\"ds-card\"><div class=\"ds-card-title\">Personal</div><div class=\"ds-card-meta\">cheng@example.com · IMAP · synced 2 min ago</div></div>",
-      "css": ".ds-card { background: #FFFFFF; border: 1px solid #E2E2E5; border-radius: 10px; padding: 20px; font-family: 'Inter Variable', ui-sans-serif, system-ui, sans-serif; } .ds-card-title { font-size: 15px; font-weight: 600; color: #1A1B1F; } .ds-card-meta { margin-top: 4px; font-size: 12px; color: #6B6F76; }"
+      "css": ".ds-card { background: #FFFFFF; border: 1px solid #E5E2DA; border-radius: 10px; padding: 20px; font-family: 'Inter Variable', ui-sans-serif, system-ui, sans-serif; } .ds-card-title { font-size: 15px; font-weight: 600; color: #1D1B17; } .ds-card-meta { margin-top: 4px; font-size: 12px; color: #6F6A5F; }"
     },
     {
       "name": "Toggle",
@@ -87,7 +87,7 @@
       "refersTo": "toggle",
       "description": "36x20 pill; Sync Green when on so state reads from across the room.",
       "html": "<button class=\"ds-toggle ds-toggle-on\" role=\"switch\" aria-checked=\"true\"><span class=\"ds-toggle-knob\"></span></button>",
-      "css": ".ds-toggle { width: 36px; height: 20px; border-radius: 10px; border: none; background: #E1E2E4; position: relative; transition: background 150ms cubic-bezier(0.25, 1, 0.5, 1); padding: 0; } .ds-toggle-on { background: #3D9A5F; } .ds-toggle-knob { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #FFFFFF; transition: transform 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-toggle-on .ds-toggle-knob { transform: translateX(16px); } .ds-toggle:focus-visible { outline: 2px solid #9B9BA3; outline-offset: 2px; }"
+      "css": ".ds-toggle { width: 36px; height: 20px; border-radius: 10px; border: none; background: #E3E0D8; position: relative; transition: background 150ms cubic-bezier(0.25, 1, 0.5, 1); padding: 0; } .ds-toggle-on { background: #3D9A5F; } .ds-toggle-knob { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #FFFFFF; transition: transform 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-toggle-on .ds-toggle-knob { transform: translateX(16px); } .ds-toggle:focus-visible { outline: 2px solid #A39D90; outline-offset: 2px; }"
     },
     {
       "name": "Segmented Control",
@@ -95,7 +95,7 @@
       "refersTo": "segmented",
       "description": "Hover Wash track with a Paper active pill; used for All/Unread and ranges.",
       "html": "<div class=\"ds-segmented\" role=\"tablist\"><button class=\"ds-seg ds-seg-active\" role=\"tab\" aria-selected=\"true\">All mail</button><button class=\"ds-seg\" role=\"tab\" aria-selected=\"false\">Unread</button></div>",
-      "css": ".ds-segmented { display: inline-flex; background: #E8E8E9; border-radius: 8px; padding: 2px; gap: 2px; font-family: 'Inter Variable', ui-sans-serif, system-ui, sans-serif; } .ds-seg { border: none; background: transparent; color: #6B6F76; font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 6px; transition: background 150ms cubic-bezier(0.25, 1, 0.5, 1), color 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-seg:hover { color: #1A1B1F; } .ds-seg-active { background: #FFFFFF; color: #1A1B1F; } .ds-seg:focus-visible { outline: 2px solid #9B9BA3; outline-offset: 1px; }"
+      "css": ".ds-segmented { display: inline-flex; background: #E9E6DF; border-radius: 8px; padding: 2px; gap: 2px; font-family: 'Inter Variable', ui-sans-serif, system-ui, sans-serif; } .ds-seg { border: none; background: transparent; color: #6F6A5F; font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 6px; transition: background 150ms cubic-bezier(0.25, 1, 0.5, 1), color 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-seg:hover { color: #1D1B17; } .ds-seg-active { background: #FFFFFF; color: #1D1B17; } .ds-seg:focus-visible { outline: 2px solid #A39D90; outline-offset: 1px; }"
     },
     {
       "name": "Folder Nav Item",
@@ -103,7 +103,7 @@
       "refersTo": "nav-item-active",
       "description": "Sidebar folder row: thin-stroke icon, selected state is a Paper pill with hairline border.",
       "html": "<div class=\"ds-nav\"><div class=\"ds-nav-item\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M22 12h-6l-2 3h-4l-2-3H2\"/><path d=\"M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z\"/></svg><span>Inbox</span></div><div class=\"ds-nav-item ds-nav-item-active\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"2\" y=\"4\" width=\"20\" height=\"5\" rx=\"1\"/><path d=\"M4 9v9a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9\"/><path d=\"M10 13h4\"/></svg><span>Archive</span><span class=\"ds-nav-count\">4</span></div></div>",
-      "css": ".ds-nav { background: #EFF0F2; padding: 8px; border-radius: 10px; font-family: 'Inter Variable', ui-sans-serif, system-ui, sans-serif; } .ds-nav-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; border: 1px solid transparent; color: #1A1B1F; font-size: 13px; transition: background 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-nav-item svg { color: #9B9BA3; } .ds-nav-item:hover { background: #E8E8E9; } .ds-nav-item-active { background: #FFFFFF; border-color: #E1E2E4; } .ds-nav-item-active svg { color: #1A1B1F; } .ds-nav-count { margin-left: auto; font-size: 12px; color: #6B6F76; }"
+      "css": ".ds-nav { background: #F1EFE9; padding: 8px; border-radius: 10px; font-family: 'Inter Variable', ui-sans-serif, system-ui, sans-serif; } .ds-nav-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; border: 1px solid transparent; color: #1D1B17; font-size: 13px; transition: background 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-nav-item svg { color: #A39D90; } .ds-nav-item:hover { background: #E9E6DF; } .ds-nav-item-active { background: #FFFFFF; border-color: #E3E0D8; } .ds-nav-item-active svg { color: #1D1B17; } .ds-nav-count { margin-left: auto; font-size: 12px; color: #6F6A5F; }"
     }
   ],
   "narrative": {
@@ -125,7 +125,7 @@
     ],
     "dos": [
       "Do reserve color for status: Unread Amber #E2A336, Sync Green #3D9A5F, Destructive Red #B4453C, everything else cool gray (The Status Rule).",
-      "Do separate regions with 1px Hairline #E2E2E5 rules; keep surfaces flat (The Hairline Rule).",
+      "Do separate regions with 1px Hairline #E5E2DA rules; keep surfaces flat (The Hairline Rule).",
       "Do build primary actions as white pills: Paper fill, 1px Button Border, Ink text, 8px radius.",
       "Do render every screen in light + dark and en + zh before calling it done; status colors stay constant across themes (The Constant Status Rule).",
       "Do keep the stamp square's corner radius at 20-25% of its size and invert it by theme.",

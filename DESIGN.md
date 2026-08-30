@@ -2,16 +2,16 @@
 name: Lyra
 description: A self-hosted mail client. Mail you host yourself.
 colors:
-  ink: "#1A1B1F"
+  ink: "#1D1B17"
   paper: "#FFFFFF"
-  canvas: "#F7F7F8"
-  list-mist: "#F6F6F8"
-  panel-fog: "#EFF0F2"
-  hover-wash: "#E8E8E9"
-  hairline: "#E2E2E5"
-  button-border: "#E1E2E4"
-  secondary-ink: "#6B6F76"
-  tertiary-ash: "#9B9BA3"
+  canvas: "#F8F7F4"
+  list-mist: "#F7F6F2"
+  panel-fog: "#F1EFE9"
+  hover-wash: "#E9E6DF"
+  hairline: "#E5E2DA"
+  button-border: "#E3E0D8"
+  secondary-ink: "#6F6A5F"
+  tertiary-ash: "#A39D90"
   unread-amber: "#E2A336"
   sync-green: "#3D9A5F"
   destructive-red: "#B4453C"
@@ -84,12 +84,12 @@ components:
 
 Lyra is a well-kept desk where the day's correspondence is sorted, read, and answered. Everything on it has a place: paper surfaces, hairline rules, a single postage stamp for a logo. Nothing shouts, because a desk you work at all day should disappear into the work.
 
-The palette is cool gray until something needs you. Amber marks the unread, green marks a healthy sync, a muted red marks the rare destructive act. Typography is Inter everywhere, with Instrument Serif permitted exactly twice: the "Lyra" wordmark and the stamp's "L". Depth comes from tonal layering and 1px hairlines, never from shadows at rest.
+The palette is warm paper until something needs you. Amber marks the unread, green marks a healthy sync, a muted red marks the rare destructive act. Typography is Inter everywhere, with Instrument Serif permitted exactly twice: the "Lyra" wordmark and the stamp's "L". Depth comes from tonal layering and 1px hairlines, never from shadows at rest.
 
-This system explicitly rejects the stock shadcn mail look, indigo/purple-blue SaaS palettes, gradient text, glassmorphism, solid black CTAs, hero-metric dashboards, identical icon-card grids, nested cards, and colored side-stripe borders.
+This system explicitly rejects the stock shadcn mail look, indigo/purple-blue SaaS palettes and sterile institutional cool grays, gradient text, glassmorphism, solid black CTAs, hero-metric dashboards, identical icon-card grids, nested cards, and colored side-stripe borders.
 
 **Key Characteristics:**
-- Status-only color on a cool-gray field
+- Status-only color on a warm-paper field
 - Hairline separation, flat surfaces, no resting shadows
 - White pill buttons with hairline borders; never solid fills
 - One serif, used twice; Inter for everything else
@@ -97,10 +97,10 @@ This system explicitly rejects the stock shadcn mail look, indigo/purple-blue Sa
 
 ## 2. Colors: The Status-Only Palette
 
-A cool-gray field where color is reserved for meaning.
+A warm-paper field where color is reserved for meaning.
 
 ### Primary
-- **Ink** (#1A1B1F): Primary text, the stamp square, chart bars. Ink is for emphasis, not paint: it never fills a button or a banner.
+- **Ink** (#1D1B17): Primary text, the stamp square, chart bars. Ink is for emphasis, not paint: it never fills a button or a banner.
 
 ### Secondary
 - **Unread Amber** (#E2A336): The unread dot and the "today" bar in charts. Identical in both themes; it is the warmest thing in the product.
@@ -108,15 +108,15 @@ A cool-gray field where color is reserved for meaning.
 - **Destructive Red** (#B4453C light / #D4756B dark): Destructive text only. The only red anywhere, and it never fills a surface.
 
 ### Neutral
-- **Paper** (#FFFFFF light / #24262B dark): The reading surface, cards, active pills. Where content lives.
-- **Canvas** (#F7F7F8 light / #101114 dark): The login backdrop; the room the desk sits in.
-- **List Mist** (#F6F6F8 light / #17181C dark): The message-list column and standalone-nav background. In dark mode this is the app canvas.
-- **Panel Fog** (#EFF0F2 light / #1A1C20 dark): Sidebar background and avatar tiles.
-- **Hover Wash** (#E8E8E9 light / #26282E dark): Hover states, the segmented-control track.
-- **Hairline** (#E2E2E5 light / #2E3138 dark): 1px rules and card borders. The only permitted divider.
-- **Button Border** (#E1E2E4 light / #35383F dark): Input and button outlines, one step stronger than Hairline.
-- **Secondary Ink** (#6B6F76 light / #9BA0A8 dark): Secondary text, unread counts.
-- **Tertiary Ash** (#9B9BA3 light / #6E737B dark): Placeholders, inactive icons, focus ring.
+- **Paper** (#FFFFFF light / #21201C dark): The reading surface and the message-list column — content lives on paper, rows divide by hairlines. Also cards and active pills.
+- **Canvas** (#F8F7F4 light / #12110f dark): The login backdrop; the room the desk sits in.
+- **List Mist** (#F7F6F2 light / #171614 dark): The selected-row wash and standalone-nav background. In dark mode this is the app canvas.
+- **Panel Fog** (#F1EFE9 light / #1B1A17 dark): Sidebar background and avatar tiles.
+- **Hover Wash** (#E9E6DF light / #282622 dark): Hover states, the segmented-control track.
+- **Hairline** (#E5E2DA light / #302D28 dark): 1px rules and card borders. The only permitted divider.
+- **Button Border** (#E3E0D8 light / #383530 dark): Input and button outlines, one step stronger than Hairline.
+- **Secondary Ink** (#6F6A5F light / #9D988D dark): Secondary text, unread counts.
+- **Tertiary Ash** (#A39D90 light / #706B60 dark): Placeholders, inactive icons, focus ring.
 
 ### Named Rules
 **The Status Rule.** Color means status: amber for unread, green for healthy, muted red for destructive. If a color carries no status, it is gray.
@@ -190,8 +190,8 @@ Flat by default. Depth is conveyed by tonal layering (Canvas < Panel < List < Pa
 ## 6. Do's and Don'ts
 
 ### Do:
-- **Do** reserve color for status: Unread Amber #E2A336, Sync Green #3D9A5F, Destructive Red #B4453C, everything else cool gray (The Status Rule).
-- **Do** separate regions with 1px Hairline #E2E2E5 rules; keep surfaces flat (The Hairline Rule).
+- **Do** reserve color for status: Unread Amber #E2A336, Sync Green #3D9A5F, Destructive Red #B4453C, everything else warm paper gray (The Status Rule).
+- **Do** separate regions with 1px Hairline #E5E2DA rules; keep surfaces flat (The Hairline Rule).
 - **Do** build primary actions as white pills: Paper fill, 1px Button Border, Ink text, 8px radius.
 - **Do** render every screen in light + dark and en + zh before calling it done; status colors stay constant across themes (The Constant Status Rule).
 - **Do** keep the stamp square's corner radius at 20-25% of its size and invert it by theme.
