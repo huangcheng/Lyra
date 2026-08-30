@@ -5,7 +5,7 @@
 import type { ComponentProps } from 'react';
 import { formatDistanceToNow, isSameDay, isSameMonth, subDays } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
-import { CornerUpLeft, Inbox, SearchX } from 'lucide-react';
+import { Archive, CornerUpLeft, Inbox, Paperclip, SearchX, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
@@ -71,6 +71,7 @@ export function MailList() {
   const mutedMessageIds = useUIStore((s) => s.mutedMessageIds);
   const token = useAuthStore((s) => s.token);
   const upsertMessage = useMailStore((s) => s.upsertMessage);
+  const removeMessage = useMailStore((s) => s.removeMessage);
   const replaceMessagesForView = useMailStore((s) => s.replaceMessagesForView);
   const accounts = useMailStore((s) => s.accounts);
   const messages = useMailStore((s) => s.messages);
@@ -277,19 +278,58 @@ export function MailList() {
             const showSnippet =
               snippet.length > 0 &&
               (subjectNorm.length === 0 || !snippet.startsWith(subjectNorm.slice(0, 60)));
+            const hasAttachments = (item.attachments ?? []).some((a) => !a.isInline);
+            const quickAction = (e: React.MouseEvent, action: 'archive' | 'trash') => {
+              e.stopPropagation();
+              void api(`/messages/${item.id}/${action}`, { method: 'POST' })
+                .then(() => {
+                  removeMessage(item.id);
+                  if (selectedMessageId === item.id) setSelectedMessage(null);
+                })
+                .catch(() => {});
+            };
             return (
-              <button
+              <div
                 key={convo.key}
-                type="button"
+                role="button"
+                tabIndex={0}
                 className={cn(
-                  'flex w-full gap-3 border-b border-border/60 px-4 py-3 text-left text-sm transition-colors hover:bg-accent/40',
-                  isSelected && 'bg-secondary hover:bg-secondary',
+                  'group relative flex w-full cursor-pointer gap-3 border-b border-border/60 px-4 py-3 text-left text-sm transition-colors hover:bg-accent/40',
+                  isSelected &&
+                    'bg-secondary shadow-[inset_2px_0_0_var(--color-foreground)] hover:bg-secondary',
                 )}
                 onClick={() => {
                   const target = convo.messages.find((m) => !m.isRead) ?? convo.latest;
                   setSelectedMessage(target.id);
                 }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    const target = convo.messages.find((m) => !m.isRead) ?? convo.latest;
+                    setSelectedMessage(target.id);
+                  }
+                }}
               >
+                <div className="absolute right-3 top-2 hidden items-center gap-0.5 rounded-[7px] border border-input bg-card p-0.5 shadow-whisper group-hover:flex">
+                  <button
+                    type="button"
+                    className="flex size-6 items-center justify-center rounded-[5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    title={t(locale, 'mail.archive')}
+                    aria-label={t(locale, 'mail.archive')}
+                    onClick={(e) => quickAction(e, 'archive')}
+                  >
+                    <Archive className="size-3.5" aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    className="flex size-6 items-center justify-center rounded-[5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    title={t(locale, 'mail.moveToTrash')}
+                    aria-label={t(locale, 'mail.moveToTrash')}
+                    onClick={(e) => quickAction(e, 'trash')}
+                  >
+                    <Trash2 className="size-3.5" aria-hidden />
+                  </button>
+                </div>
                 <div className="flex w-3 shrink-0 items-start justify-center pt-1.5">
                   {convo.anyReplied ? (
                     <CornerUpLeft
@@ -333,7 +373,7 @@ export function MailList() {
                     ) : null}
                     <div
                       className={cn(
-                        'ml-auto shrink-0 text-[11px] tabular-nums',
+                        'ml-auto shrink-0 text-[11px] tabular-nums transition-opacity group-hover:opacity-0',
                         isSelected ? 'text-muted-foreground' : 'text-ter-foreground',
                       )}
                     >
@@ -349,8 +389,14 @@ export function MailList() {
                     {item.subject || '—'}
                   </div>
                   {showSnippet ? (
-                    <div className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-                      {snippet.slice(0, 300)}
+                    <div className="mt-1 flex items-start gap-1 text-xs leading-relaxed text-muted-foreground">
+                      {hasAttachments ? (
+                        <Paperclip
+                          className="mt-0.5 size-3 shrink-0 text-ter-foreground"
+                          aria-hidden
+                        />
+                      ) : null}
+                      <span className="line-clamp-2 min-w-0">{snippet.slice(0, 300)}</span>
                     </div>
                   ) : null}
                   {labels.length ? (
@@ -367,7 +413,7 @@ export function MailList() {
                     </div>
                   ) : null}
                 </div>
-              </button>
+              </div>
             );
           })}
         </div>
