@@ -13,10 +13,12 @@ import {
   ArchiveX,
   Check,
   ChevronLeft,
+  ChevronRight,
   Clock,
   FolderInput,
   Forward,
   MailOpen,
+  Maximize2,
   MoreVertical,
   Reply,
   ReplyAll,
@@ -28,6 +30,7 @@ import { EmptyState } from '@/components/empty-state';
 import { MessageCard } from '@/components/mail/message-card';
 import { RichTextEditor } from '@/components/compose/rich-text-editor';
 
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Calendar } from '@/components/ui/calendar';
 import {
@@ -36,20 +39,24 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Separator } from '@/components/ui/separator';
-import { Switch } from '@/components/ui/switch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
 import { api } from '@/lib/api-client';
-import { baseSubject, conversationKeyOf, conversationMembers } from '@/lib/conversation';
+import {
+  baseSubject,
+  conversationKeyOf,
+  conversationMembers,
+  groupIntoConversations,
+} from '@/lib/conversation';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { forwardHtml, quotedReplyHtml, textToHtml } from '@/lib/compose-html';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { sanitizeEmailHtml } from '@/lib/sanitize-email-html';
 import { useMediaQuery } from '@/lib/use-media-query';
+import { avatarTone, cn, getInitials } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -105,9 +112,53 @@ export function MailDisplay() {
   const [busy, setBusy] = useState(false);
   const [replyHtml, setReplyHtml] = useState('');
   const [replyNonce, setReplyNonce] = useState(0);
+  const [quoteOpen, setQuoteOpen] = useState(false);
   const bodyScrollRef = useRef<HTMLDivElement>(null);
   const autoMarkedIdRef = useRef<string | null>(null);
   const today = new Date();
+
+  // Selected conversation's position in the current list view — drives the
+  // ‹ n / total › pager in the toolbar.
+  const selectedAccountId = useUIStore((s) => s.selectedAccountId);
+  const selectedFolderId = useUIStore((s) => s.selectedFolderId);
+  const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
+  const searchQuery = useUIStore((s) => s.searchQuery);
+  const listTab = useUIStore((s) => s.listTab);
+  const mutedMessageIdsList = useUIStore((s) => s.mutedMessageIds);
+  const getMessagesForView = useMailStore((s) => s.getMessagesForView);
+
+  const viewConversations = useMemo(() => {
+    const items = getMessagesForView({
+      accountId: selectedAccountId,
+      folderId: selectedFolderId,
+      folderRole: selectedFolderRole,
+    });
+    const filtered = (listTab === 'unread' ? items.filter((m) => !m.isRead) : items).filter(
+      (m) => !mutedMessageIdsList.includes(m.id),
+    );
+    return groupIntoConversations(filtered);
+  }, [
+    getMessagesForView,
+    messages,
+    selectedAccountId,
+    selectedFolderId,
+    selectedFolderRole,
+    listTab,
+    mutedMessageIdsList,
+  ]);
+
+  const convoPosition = useMemo(() => {
+    if (!mail) return { index: -1, total: viewConversations.length };
+    const idx = viewConversations.findIndex((c) => c.messages.some((m) => m.id === mail.id));
+    return { index: idx, total: viewConversations.length };
+  }, [viewConversations, mail]);
+
+  const stepConversation = (delta: 1 | -1) => {
+    const next = viewConversations[convoPosition.index + delta];
+    if (!next) return;
+    const target = next.messages.find((m) => !m.isRead) ?? next.latest;
+    setSelectedMessage(target.id);
+  };
 
   const conversation = useMemo(
     () => (mail ? conversationMembers(mail, messages) : []),
@@ -322,14 +373,21 @@ export function MailDisplay() {
     setBusy(true);
     setActionError(null);
     try {
+      const source = {
+        fromName: mail.from.name ?? '',
+        fromEmail: mail.from.email,
+        date: mail.date,
+        bodyHtml: mail.bodyHtml ? sanitizeEmailHtml(mail.bodyHtml) : undefined,
+        bodyText: mail.bodyText,
+      };
       await api('/messages/send', {
         method: 'POST',
         body: JSON.stringify({
           accountId,
           to: [{ email: mail.from.email }],
           subject: mail.subject.startsWith('Re:') ? mail.subject : `Re: ${mail.subject}`,
-          bodyText: text,
-          bodyHtml: html,
+          bodyText: text + quoteBody(mail),
+          bodyHtml: html + quotedReplyHtml(source, undefined),
         }),
       });
       setReplyHtml('');
@@ -392,6 +450,36 @@ export function MailDisplay() {
               <ChevronLeft className="h-4 w-4" />
               <span className="sr-only">{t(locale, 'common.back')}</span>
             </Button>
+          ) : null}
+          {!isMobile && convoPosition.index >= 0 && searchQuery.trim().length < 2 ? (
+            <>
+              <div className="flex items-center gap-0.5 text-[11px] tabular-nums text-ter-foreground">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={toolbarIconClass}
+                  disabled={convoPosition.index + 1 >= convoPosition.total}
+                  onClick={() => stepConversation(1)}
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  <span className="sr-only">{t(locale, 'mail.prevConversation')}</span>
+                </Button>
+                <span>
+                  {convoPosition.index + 1} / {convoPosition.total}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={toolbarIconClass}
+                  disabled={convoPosition.index <= 0}
+                  onClick={() => stepConversation(-1)}
+                >
+                  <ChevronRight className="h-4 w-4" />
+                  <span className="sr-only">{t(locale, 'mail.nextConversation')}</span>
+                </Button>
+              </div>
+              <Separator orientation="vertical" className="mx-1 h-6" />
+            </>
           ) : null}
           <Tooltip>
             <TooltipTrigger asChild>
@@ -699,7 +787,39 @@ export function MailDisplay() {
                 void handleInlineSend();
               }}
             >
-              <div className="rounded-lg border border-input bg-card">
+              <div className="overflow-hidden rounded-xl border border-input bg-card">
+                {/* recipient context line */}
+                <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-2">
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {t(locale, 'mail.reply')}
+                  </span>
+                  <span className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/70 bg-muted/40 py-0.5 pr-2.5 pl-1 text-xs">
+                    <Avatar className="size-4.5 shrink-0">
+                      <AvatarFallback className={cn('text-[8px]', avatarTone(fromLabel))}>
+                        {getInitials(fromLabel)}
+                      </AvatarFallback>
+                    </Avatar>
+                    <span className="truncate">{fromLabel}</span>
+                  </span>
+                  <span className="ml-auto min-w-0 truncate text-xs text-ter-foreground">
+                    {mail.subject.startsWith('Re:') ? mail.subject : `Re: ${mail.subject}`}
+                  </span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="size-6 shrink-0 text-ter-foreground hover:bg-accent hover:text-foreground"
+                        onClick={() => handleReply()}
+                      >
+                        <Maximize2 className="size-3" />
+                        <span className="sr-only">{t(locale, 'mail.expandCompose')}</span>
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t(locale, 'mail.expandCompose')}</TooltipContent>
+                  </Tooltip>
+                </div>
                 <RichTextEditor
                   key={`${selectedMessageId}:${replyNonce}`}
                   className="rounded-none border-0"
@@ -715,26 +835,37 @@ export function MailDisplay() {
                     }
                   }}
                 />
-                <div className="flex items-center px-3.5 pb-2.5">
-                  <Label htmlFor="mute" className="flex items-center gap-2 text-xs font-normal">
-                    <Switch
-                      id="mute"
-                      checked={Boolean(mail && mutedMessageIds.includes(mail.id))}
-                      onCheckedChange={() => {
-                        if (!mail) return;
-                        const willMute = !mutedMessageIds.includes(mail.id);
-                        toggleMuteMessage(mail.id);
-                        if (willMute) setSelectedMessage(null);
-                      }}
-                      aria-label={t(locale, 'mail.muteThread')}
-                    />{' '}
-                    {t(locale, 'mail.muteThread')}
-                  </Label>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1.5 border-t border-border/60 px-3.5 py-1.5 text-left text-[11px] text-ter-foreground transition-colors hover:text-muted-foreground"
+                  onClick={() => setQuoteOpen((v) => !v)}
+                >
+                  <ChevronRight
+                    className={cn('size-3 transition-transform', quoteOpen && 'rotate-90')}
+                  />
+                  {t(locale, 'mail.originalMessage')} · {fromLabel} ·{' '}
+                  {format(new Date(mail.date), 'PP')}
+                </button>
+                {quoteOpen ? (
+                  <div className="max-h-40 overflow-y-auto border-t border-border/60 px-3.5 py-2 text-xs leading-relaxed text-muted-foreground">
+                    <p>
+                      {mail.from.name ?? mail.from.email} &lt;{mail.from.email}&gt;
+                    </p>
+                    <p className="mb-1.5 text-ter-foreground">
+                      {format(new Date(mail.date), 'PPpp')}
+                    </p>
+                    <p className="whitespace-pre-wrap">
+                      {(mail.bodyText ?? mail.snippet ?? '').slice(0, 600)}
+                    </p>
+                  </div>
+                ) : null}
+                <div className="flex items-center px-3.5 pb-2.5 pt-1">
+                  <span className="text-[11px] text-ter-foreground">
+                    {t(locale, 'mail.sendShortcut')}
+                  </span>
                   <Button
                     type="submit"
-                    variant="outline"
-                    size="sm"
-                    className="ml-auto rounded-full px-4"
+                    className="ml-auto h-8 rounded-full bg-foreground px-4 text-background transition-all hover:bg-foreground/90 active:scale-[0.97]"
                     disabled={busy}
                   >
                     {busy ? t(locale, 'mail.sending') : t(locale, 'mail.send')}
