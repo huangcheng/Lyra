@@ -32,6 +32,8 @@ export interface AuthMeResponse {
   locale: string;
   totp_enabled: boolean;
   mark_read_policy: string;
+  /** Server-persisted UI view-state (selected account/folder, …). */
+  ui_state?: Record<string, unknown> | null;
 }
 
 export function userFromMe(me: AuthMeResponse): User {

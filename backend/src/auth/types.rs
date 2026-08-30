@@ -23,6 +23,9 @@ pub struct UserInfo {
     pub locale: String,
     pub totp_enabled: bool,
     pub mark_read_policy: String,
+    /// Per-user UI view-state (selected account/folder, …); absent until set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_state: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +33,9 @@ pub struct PreferencesRequest {
     #[serde(rename = "markReadPolicy")]
     pub mark_read_policy: Option<String>,
     pub locale: Option<String>,
+    /// UI view-state JSON object (e.g. `{"selectedFolderId": "…"}`).
+    #[serde(rename = "uiState")]
+    pub ui_state: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]

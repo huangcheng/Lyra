@@ -25,6 +25,7 @@ pub(crate) struct UserData {
     pub display_name: Option<String>,
     pub locale: String,
     pub mark_read_policy: String,
+    pub ui_state: Option<String>,
 }
 
 pub(crate) fn parse_mark_read_policy(raw: &str) -> Result<String, AuthError> {
@@ -45,6 +46,12 @@ pub(crate) fn parse_stored_mark_read_policy(raw: String) -> String {
 }
 
 pub(crate) fn user_info_from(user: &UserData) -> UserInfo {
+    // The stored blob is a JSON object written by PATCH /auth/preferences;
+    // a corrupt value hides the field rather than failing the request.
+    let ui_state = user
+        .ui_state
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok());
     UserInfo {
         id: user.id.clone(),
         username: user.username.clone(),
@@ -52,6 +59,7 @@ pub(crate) fn user_info_from(user: &UserData) -> UserInfo {
         locale: user.locale.clone(),
         totp_enabled: user.totp_enabled,
         mark_read_policy: user.mark_read_policy.clone(),
+        ui_state,
     }
 }
 
@@ -106,6 +114,7 @@ struct UserRow {
     display_name: Option<String>,
     locale: String,
     mark_read_policy: String,
+    ui_state: Option<String>,
 }
 
 impl From<UserRow> for UserData {
@@ -119,6 +128,7 @@ impl From<UserRow> for UserData {
             display_name: row.display_name,
             locale: row.locale,
             mark_read_policy: parse_stored_mark_read_policy(row.mark_read_policy),
+            ui_state: row.ui_state,
         }
     }
 }

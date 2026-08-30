@@ -3,6 +3,7 @@
  */
 
 import { api, userFromMe, type AuthMeResponse } from '@/lib/api-client';
+import { applyViewState } from '@/lib/persist-view-state';
 import { applyMarkReadPolicy } from '@/lib/user-preferences';
 import { useAuthStore } from '@/stores/auth';
 import { useUIStore } from '@/stores/ui';
@@ -25,6 +26,7 @@ export async function restoreSession(): Promise<void> {
     auth.setUser(userFromMe(me));
     applyLocale(me.locale);
     applyMarkReadPolicy(me.mark_read_policy);
+    applyViewState(me.ui_state);
   } catch {
     localStorage.removeItem('lyra_token');
     useAuthStore.getState().clearSession();

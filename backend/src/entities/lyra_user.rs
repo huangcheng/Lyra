@@ -21,6 +21,8 @@ pub struct Model {
     pub singleton: bool,
     /// `on_open` | `on_read`.
     pub mark_read_policy: String,
+    /// UI view-state JSON blob (selected account/folder, …); NULL until set.
+    pub ui_state: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

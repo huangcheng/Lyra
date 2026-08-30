@@ -121,6 +121,7 @@ pub(super) async fn auth_bootstrap(
                 locale,
                 totp_enabled: false,
                 mark_read_policy: "on_open".to_string(),
+                ui_state: None,
             },
             requires_totp: false,
         }),
@@ -464,9 +465,9 @@ pub(super) async fn patch_preferences(
     AuthUser(user_id): AuthUser,
     Json(req): Json<PreferencesRequest>,
 ) -> Result<Json<UserInfo>, AuthError> {
-    if req.mark_read_policy.is_none() && req.locale.is_none() {
+    if req.mark_read_policy.is_none() && req.locale.is_none() && req.ui_state.is_none() {
         return Err(AuthError::BadRequest(
-            "provide markReadPolicy and/or locale".into(),
+            "provide markReadPolicy, locale, and/or uiState".into(),
         ));
     }
     if let Some(raw) = req.mark_read_policy {
@@ -478,6 +479,19 @@ pub(super) async fn patch_preferences(
             return Err(AuthError::BadRequest("unsupported locale".into()));
         }
         update_locale(&state.db, &user_id, &locale).await?;
+    }
+    if let Some(ui_state) = req.ui_state {
+        if !ui_state.is_object() {
+            return Err(AuthError::BadRequest(
+                "uiState must be a JSON object".into(),
+            ));
+        }
+        let encoded = serde_json::to_string(&ui_state)
+            .map_err(|_| AuthError::BadRequest("uiState is not serializable".into()))?;
+        if encoded.len() > MAX_UI_STATE_BYTES {
+            return Err(AuthError::BadRequest("uiState too large".into()));
+        }
+        update_ui_state(&state.db, &user_id, &encoded).await?;
     }
     let user = find_user_by_id(&state.db, &user_id)
         .await?
@@ -501,6 +515,31 @@ pub(super) async fn update_locale(
     db.orm().execute(&stmt).await.map_err(|e| {
         let e = dberr_to_sqlx(e);
         tracing::error!("DB error updating locale: {e}");
+        AuthError::internal("Failed to update preferences")
+    })?;
+    Ok(())
+}
+
+/// Cap on the serialized UI view-state blob (view state is small by
+/// definition; this stops abuse, not features).
+const MAX_UI_STATE_BYTES: usize = 16 * 1024;
+
+pub(super) async fn update_ui_state(
+    db: &DbPool,
+    user_id: &str,
+    ui_state_json: &str,
+) -> Result<(), AuthError> {
+    let id =
+        id_bind_value(db, user_id).map_err(|_| AuthError::internal("Failed to look up user"))?;
+    let stmt = Query::update()
+        .table(user_entity::Entity)
+        .value(user_entity::Column::UiState, ui_state_json.to_string())
+        .value(user_entity::Column::UpdatedAt, Expr::current_timestamp())
+        .and_where(user_entity::Column::Id.eq(id))
+        .to_owned();
+    db.orm().execute(&stmt).await.map_err(|e| {
+        let e = dberr_to_sqlx(e);
+        tracing::error!("DB error updating ui_state: {e}");
         AuthError::internal("Failed to update preferences")
     })?;
     Ok(())

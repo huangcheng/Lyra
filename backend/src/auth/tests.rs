@@ -11,8 +11,8 @@ use crate::storage::DbPool;
 
 use super::db::{find_user_by_id, insert_user, is_unique_violation};
 use super::handlers::{
-    auth_bootstrap, auth_login, change_password, patch_preferences, totp_disable, totp_enroll,
-    totp_enroll_confirm, totp_verify,
+    auth_bootstrap, auth_login, auth_me, change_password, patch_preferences, totp_disable,
+    totp_enroll, totp_enroll_confirm, totp_verify,
 };
 use super::password::{hash_password, validate_password, verify_password};
 use super::session::{
@@ -1096,6 +1096,7 @@ async fn patch_preferences_updates_locale() {
         AuthUser("user-1".into()),
         Json(PreferencesRequest {
             mark_read_policy: None,
+            ui_state: None,
             locale: Some("zh".into()),
         }),
     )
@@ -1118,6 +1119,7 @@ async fn patch_preferences_rejects_unsupported_locale() {
         AuthUser("user-1".into()),
         Json(PreferencesRequest {
             mark_read_policy: None,
+            ui_state: None,
             locale: Some("fr".into()),
         }),
     )
@@ -1138,9 +1140,85 @@ async fn patch_preferences_rejects_empty_request() {
         Json(PreferencesRequest {
             mark_read_policy: None,
             locale: None,
+            ui_state: None,
         }),
     )
     .await
     .expect_err("empty preferences must fail");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn patch_preferences_roundtrips_ui_state() {
+    let db = test_pool().await;
+    let state = test_state(db.clone());
+    seed_user(&db, "user-1").await;
+
+    let ui = serde_json::json!({
+        "selectedAccountId": "all",
+        "selectedFolderId": "folder-1",
+        "selectedFolderRole": serde_json::Value::Null,
+    });
+    let Json(info) = patch_preferences(
+        State(state.clone()),
+        AuthUser("user-1".into()),
+        Json(PreferencesRequest {
+            mark_read_policy: None,
+            locale: None,
+            ui_state: Some(ui.clone()),
+        }),
+    )
+    .await
+    .expect("ui_state update must succeed");
+    assert_eq!(info.ui_state.as_ref(), Some(&ui));
+
+    // Read back through auth_me (the session-restore path).
+    let Json(me) = auth_me(State(state), AuthUser("user-1".into()))
+        .await
+        .expect("auth_me must succeed");
+    assert_eq!(me.ui_state.as_ref(), Some(&ui));
+
+    let user = find_user_by_id(&db, "user-1").await.unwrap().unwrap();
+    assert!(user.ui_state.as_deref().unwrap().contains("folder-1"));
+}
+
+#[tokio::test]
+async fn patch_preferences_rejects_non_object_ui_state() {
+    let db = test_pool().await;
+    seed_user(&db, "user-1").await;
+    let state = test_state(db);
+
+    let err = patch_preferences(
+        State(state),
+        AuthUser("user-1".into()),
+        Json(PreferencesRequest {
+            mark_read_policy: None,
+            locale: None,
+            ui_state: Some(serde_json::json!(["not", "an", "object"])),
+        }),
+    )
+    .await
+    .expect_err("non-object uiState must fail");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn patch_preferences_rejects_oversized_ui_state() {
+    let db = test_pool().await;
+    seed_user(&db, "user-1").await;
+    let state = test_state(db);
+
+    let big = serde_json::json!({ "pad": "x".repeat(17 * 1024) });
+    let err = patch_preferences(
+        State(state),
+        AuthUser("user-1".into()),
+        Json(PreferencesRequest {
+            mark_read_policy: None,
+            locale: None,
+            ui_state: Some(big),
+        }),
+    )
+    .await
+    .expect_err("oversized uiState must fail");
     assert_eq!(err.status(), StatusCode::BAD_REQUEST);
 }
