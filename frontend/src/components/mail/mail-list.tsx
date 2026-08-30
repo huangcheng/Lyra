@@ -3,7 +3,8 @@
  */
 
 import type { ComponentProps } from 'react';
-import { formatDistanceToNow } from 'date-fns';
+import { formatDistanceToNow, isSameDay, isSameMonth, subDays } from 'date-fns';
+import { zhCN } from 'date-fns/locale';
 import { CornerUpLeft, Inbox, SearchX } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -17,7 +18,7 @@ import { ApiError, api } from '@/lib/api-client';
 import { groupIntoConversations } from '@/lib/conversation';
 import { fetchMessagesForView } from '@/lib/load-mail-messages';
 import { ALL_ACCOUNTS, mapApiMessage, type ApiMessage } from '@/lib/mail-api';
-import { getInitials, cn } from '@/lib/utils';
+import { getInitials, avatarTone, cn } from '@/lib/utils';
 import { syncEvents$ } from '@/rxjs/sync-events';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
@@ -33,6 +34,19 @@ function messageLabels(item: MailMessage): string[] {
     }
   }
   return labels;
+}
+
+type GroupKey = 'groupToday' | 'groupYesterday' | 'groupThisWeek' | 'groupThisMonth' | 'groupOlder';
+
+/** Day-bucket key for a message date — drives the sticky list headers. */
+function dayGroupKey(dateStr: string): GroupKey {
+  const d = new Date(dateStr);
+  const now = new Date();
+  if (isSameDay(d, now)) return 'groupToday';
+  if (isSameDay(d, subDays(now, 1))) return 'groupYesterday';
+  if (d.getTime() > subDays(now, 7).getTime()) return 'groupThisWeek';
+  if (isSameMonth(d, now)) return 'groupThisMonth';
+  return 'groupOlder';
 }
 
 function getBadgeVariantFromLabel(label: string): ComponentProps<typeof Badge>['variant'] {
@@ -178,6 +192,23 @@ export function MailList() {
   // One row per conversation; the latest message drives the row.
   const conversations = useMemo(() => groupIntoConversations(filtered), [filtered]);
 
+  // Interleave sticky day-group headers (Today / Yesterday / This week …).
+  const listRows = useMemo(() => {
+    type Row =
+      { type: 'header'; key: GroupKey } | { type: 'convo'; convo: (typeof conversations)[number] };
+    const rows: Row[] = [];
+    let lastKey: GroupKey | '' = '';
+    for (const convo of conversations) {
+      const k = dayGroupKey(convo.latest.date);
+      if (k !== lastKey) {
+        rows.push({ type: 'header', key: k });
+        lastKey = k;
+      }
+      rows.push({ type: 'convo', convo });
+    }
+    return rows;
+  }, [conversations]);
+
   if (loading && filtered.length === 0 && !fetchError) {
     return (
       <div className="p-8 text-center text-muted-foreground">{t(locale, 'common.loading')}</div>
@@ -213,7 +244,18 @@ export function MailList() {
       ) : null}
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col">
-          {conversations.map((convo) => {
+          {listRows.map((row) => {
+            if (row.type === 'header') {
+              return (
+                <div
+                  key={`h-${row.key}`}
+                  className="sticky top-0 z-10 -mx-0 bg-background/85 px-4 pt-3 pb-1.5 text-[11px] font-medium tracking-wide text-ter-foreground backdrop-blur-sm"
+                >
+                  {t(locale, `mail.${row.key}`)}
+                </div>
+              );
+            }
+            const convo = row.convo;
             const item = convo.latest;
             const account = accounts.find((a) => a.id === item.accountId);
             const accountLabel = account?.displayName || account?.emailAddress;
@@ -223,7 +265,10 @@ export function MailList() {
             const isUnread = convo.unreadCount > 0;
             let relative = '';
             try {
-              relative = formatDistanceToNow(new Date(item.date), { addSuffix: true });
+              relative = formatDistanceToNow(new Date(item.date), {
+                addSuffix: true,
+                locale: locale === 'zh' ? zhCN : undefined,
+              });
             } catch {
               relative = item.date;
             }
@@ -259,7 +304,7 @@ export function MailList() {
                   ) : null}
                 </div>
                 <Avatar className="h-8 w-8 shrink-0">
-                  <AvatarFallback className="bg-muted text-xs text-foreground">
+                  <AvatarFallback className={cn('text-xs', avatarTone(fromLabel))}>
                     {getInitials(fromLabel)}
                   </AvatarFallback>
                 </Avatar>

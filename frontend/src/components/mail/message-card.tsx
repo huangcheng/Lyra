@@ -22,7 +22,7 @@ import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { allowSenderPrivacy } from '@/lib/privacy-api';
 import { sanitizeEmailHtml } from '@/lib/sanitize-email-html';
-import { cn, getInitials } from '@/lib/utils';
+import { cn, getInitials, avatarTone } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -175,7 +175,7 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
           {!mail.isRead ? <span className="size-1.5 rounded-full bg-unread" aria-hidden /> : null}
         </span>
         <Avatar className="h-7 w-7 shrink-0">
-          <AvatarFallback className="bg-muted text-[11px] text-foreground">
+          <AvatarFallback className={cn('text-[11px]', avatarTone(fromLabel))}>
             {getInitials(fromLabel)}
           </AvatarFallback>
         </Avatar>
@@ -199,7 +199,9 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
       >
         <Avatar className="h-10 w-10 shrink-0">
           <AvatarImage alt={fromLabel} />
-          <AvatarFallback>{getInitials(fromLabel)}</AvatarFallback>
+          <AvatarFallback className={avatarTone(fromLabel)}>
+            {getInitials(fromLabel)}
+          </AvatarFallback>
         </Avatar>
         <div className="grid min-w-0 flex-1 gap-1">
           <div className={cn('font-semibold', !mail.isRead && 'text-foreground')}>

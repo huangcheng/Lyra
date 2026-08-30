@@ -255,3 +255,105 @@
   pointer-events: none;
   color: var(--muted-foreground);
 }
+
+/* -- Sender avatar tones --------------------------------------------------
+   Muted correspondence pastels, deterministic per sender. The only
+   decorative (non-status) color in the product, kept desaturated so the
+   amber/green/red status signals still win attention. */
+.avatar-tone-0 {
+  background: hsl(20 40% 89%);
+  color: hsl(20 36% 32%);
+}
+.avatar-tone-1 {
+  background: hsl(50 40% 89%);
+  color: hsl(50 36% 32%);
+}
+.avatar-tone-2 {
+  background: hsl(85 40% 89%);
+  color: hsl(85 36% 32%);
+}
+.avatar-tone-3 {
+  background: hsl(120 40% 89%);
+  color: hsl(120 36% 32%);
+}
+.avatar-tone-4 {
+  background: hsl(155 40% 89%);
+  color: hsl(155 36% 32%);
+}
+.avatar-tone-5 {
+  background: hsl(190 40% 89%);
+  color: hsl(190 36% 32%);
+}
+.avatar-tone-6 {
+  background: hsl(220 40% 89%);
+  color: hsl(220 36% 32%);
+}
+.avatar-tone-7 {
+  background: hsl(250 40% 89%);
+  color: hsl(250 36% 32%);
+}
+.avatar-tone-8 {
+  background: hsl(280 40% 89%);
+  color: hsl(280 36% 32%);
+}
+.avatar-tone-9 {
+  background: hsl(310 40% 89%);
+  color: hsl(310 36% 32%);
+}
+.avatar-tone-10 {
+  background: hsl(340 40% 89%);
+  color: hsl(340 36% 32%);
+}
+.avatar-tone-11 {
+  background: hsl(0 40% 89%);
+  color: hsl(0 36% 32%);
+}
+
+.dark .avatar-tone-0 {
+  background: hsl(20 24% 27%);
+  color: hsl(20 40% 78%);
+}
+.dark .avatar-tone-1 {
+  background: hsl(50 24% 27%);
+  color: hsl(50 40% 78%);
+}
+.dark .avatar-tone-2 {
+  background: hsl(85 24% 27%);
+  color: hsl(85 40% 78%);
+}
+.dark .avatar-tone-3 {
+  background: hsl(120 24% 27%);
+  color: hsl(120 40% 78%);
+}
+.dark .avatar-tone-4 {
+  background: hsl(155 24% 27%);
+  color: hsl(155 40% 78%);
+}
+.dark .avatar-tone-5 {
+  background: hsl(190 24% 27%);
+  color: hsl(190 40% 78%);
+}
+.dark .avatar-tone-6 {
+  background: hsl(220 24% 27%);
+  color: hsl(220 40% 78%);
+}
+.dark .avatar-tone-7 {
+  background: hsl(250 24% 27%);
+  color: hsl(250 40% 78%);
+}
+.dark .avatar-tone-8 {
+  background: hsl(280 24% 27%);
+  color: hsl(280 40% 78%);
+}
+.dark .avatar-tone-9 {
+  background: hsl(310 24% 27%);
+  color: hsl(310 40% 78%);
+}
+.dark .avatar-tone-10 {
+  background: hsl(340 24% 27%);
+  color: hsl(340 40% 78%);
+}
+.dark .avatar-tone-11 {
+  background: hsl(0 24% 27%);
+  color: hsl(0 40% 78%);
+}

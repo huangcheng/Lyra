@@ -43,3 +43,15 @@ export function getInitials(nameOrEmail: string): string {
   if (parts.length === 1) return parts[0].charAt(0).toUpperCase();
   return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
 }
+
+const AVATAR_TONE_COUNT = 12;
+
+/**
+ * Deterministic avatar tone class (`avatar-tone-N`) for a sender. Muted
+ * correspondence pastels — the only decorative color allowed on lists.
+ */
+export function avatarTone(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
+  return `avatar-tone-${Math.abs(h) % AVATAR_TONE_COUNT}`;
+}
