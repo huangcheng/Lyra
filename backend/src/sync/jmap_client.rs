@@ -35,7 +35,7 @@ use jmap_client::core::set::SetErrorType;
 use jmap_client::email::{self, Email, EmailAddress, EmailBodyPart, Property};
 use jmap_client::identity::Identity;
 use jmap_client::mailbox::{Mailbox, Role};
-use jmap_client::{Get, Set, URI};
+use jmap_client::{Get, Method, Set, URI};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -887,18 +887,29 @@ impl JmapSeam {
                 sent_id.as_deref(),
             );
         }
-        let mut responses = request.send().await?.unwrap_method_responses();
-        if responses.len() != 2 {
-            return Err(JmapError::InvalidResponse(format!(
-                "expected Email/set + EmailSubmission/set responses, got {}",
-                responses.len()
-            )));
+        let responses = request.send().await?.unwrap_method_responses();
+        // RFC 8621 §6: the onSuccessUpdateEmail patch comes back as an EXTRA
+        // Email/set response (Fastmail returns 3 entries for this 2-call
+        // batch). Match by variant instead of counting.
+        let mut email_resp = None;
+        let mut sub_resp = None;
+        for resp in responses {
+            if resp.is_type(Method::SetEmail) {
+                if email_resp.is_none() {
+                    email_resp = Some(resp.unwrap_set_email()?);
+                }
+            } else if resp.is_type(Method::SetEmailSubmission) {
+                sub_resp = Some(resp.unwrap_set_email_submission()?);
+            }
         }
         // Unwrap Email/set FIRST (symmetry with query_emails_page): when it
         // fails, the submission's `#draft` reference fails too, and unwrapping
         // the submission first would mask the root error.
-        let mut email_resp = responses.remove(0).unwrap_set_email()?;
-        let mut sub_resp = responses.remove(0).unwrap_set_email_submission()?;
+        let mut email_resp = email_resp
+            .ok_or_else(|| JmapError::InvalidResponse("missing Email/set response".into()))?;
+        let mut sub_resp = sub_resp.ok_or_else(|| {
+            JmapError::InvalidResponse("missing EmailSubmission/set response".into())
+        })?;
         // notCreated surfaces here as Error::Set (→ JmapError::Client).
         email_resp.created("draft")?;
         let mut submission = sub_resp.created("sub")?;
@@ -1100,24 +1111,82 @@ impl JmapSeam {
         Some(url)
     }
 
+    /// `$seen`/`$flagged` keyword patch as raw JSON: `true` sets, `null`
+    /// removes (RFC 8620 §5.3 — `false` is rejected by Fastmail).
+    fn keyword_patch(is_read: Option<bool>, is_starred: Option<bool>) -> serde_json::Map<String, serde_json::Value> {
+        let mut update = serde_json::Map::new();
+        if let Some(read) = is_read {
+            update.insert(
+                "keywords/$seen".into(),
+                if read { serde_json::json!(true) } else { serde_json::Value::Null },
+            );
+        }
+        if let Some(star) = is_starred {
+            update.insert(
+                "keywords/$flagged".into(),
+                if star { serde_json::json!(true) } else { serde_json::Value::Null },
+            );
+        }
+        update
+    }
+
     /// Push read/starred flags: one `Email/set` update patching the
     /// `$seen`/`$flagged` keywords. `None` flags are left untouched.
+    ///
+    /// Raw JSON instead of the crate builder: RFC 8620 §5.3 patch semantics
+    /// remove a Set member with `null`, but jmap-client 0.4.2's patch map is
+    /// String→bool so it can only emit `false`, which Fastmail rejects as
+    /// invalidProperties (verified live). Same workaround as the body-part
+    /// charset: hand the server exactly what it accepts.
     pub(crate) async fn set_email_keywords(
         &self,
         email_id: &str,
         is_read: Option<bool>,
         is_starred: Option<bool>,
     ) -> Result<(), JmapError> {
-        if is_read.is_none() && is_starred.is_none() {
+        let update = Self::keyword_patch(is_read, is_starred);
+        if update.is_empty() {
             return Ok(());
         }
-        let mut request = self.build_request();
-        {
-            let set = request.set_email();
-            fill_keyword_update(set.update(email_id), is_read, is_starred);
+
+        let body = serde_json::json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [[
+                "Email/set",
+                {
+                    "accountId": self.client.default_account_id(),
+                    "update": { email_id: update },
+                },
+                "u",
+            ]],
+        });
+        let http = reqwest::Client::builder()
+            .timeout(JMAP_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(JmapError::Http)?;
+        let resp = http
+            .post(self.client.session().api_url())
+            .header(reqwest::header::AUTHORIZATION, &self.auth_header)
+            .json(&body)
+            .send()
+            .await
+            .map_err(JmapError::Http)?;
+        let payload: serde_json::Value = resp.json().await.map_err(JmapError::Http)?;
+        let args = payload
+            .pointer("/methodResponses/0/1")
+            .cloned()
+            .unwrap_or_default();
+        if let Some(not_updated) = args.pointer(&format!("/notUpdated/{email_id}")) {
+            return Err(JmapError::InvalidResponse(format!(
+                "Email/set keyword patch rejected: {not_updated}"
+            )));
         }
-        let mut resp = request.send_single::<EmailSetResponse>().await?;
-        resp.updated(email_id)?; // notUpdated surfaces here
+        if args.pointer(&format!("/updated/{email_id}")).is_none() {
+            return Err(JmapError::InvalidResponse(format!(
+                "Email/set keyword patch: no updated entry for {email_id}: {args}"
+            )));
+        }
         Ok(())
     }
 
@@ -1133,9 +1202,16 @@ impl JmapSeam {
                 "move requires at least one destination mailbox".into(),
             ));
         }
-        self.client
-            .email_set_mailboxes(email_id, mailbox_ids.iter().cloned())
-            .await?;
+        // build_request() (trimmed `using`), not client.email_set_mailboxes:
+        // the crate's default `using` lists capabilities this token's session
+        // never advertised, and Fastmail answers 400 unknownCapability.
+        let mut request = self.build_request();
+        request
+            .set_email()
+            .update(email_id)
+            .mailbox_ids(mailbox_ids.iter().cloned());
+        let mut resp = request.send_single::<EmailSetResponse>().await?;
+        resp.updated(email_id)?;
         Ok(())
     }
 
@@ -1170,7 +1246,11 @@ impl JmapSeam {
 
     /// Destroy an Email server-side (draft cleanup after send/discard).
     pub(crate) async fn destroy_email(&self, email_id: &str) -> Result<(), JmapError> {
-        Ok(self.client.email_destroy(email_id).await?)
+        // Same trimmed-`using` reasoning as set_email_mailboxes.
+        let mut request = self.build_request();
+        request.set_email().destroy([email_id]);
+        request.send_single::<EmailSetResponse>().await?.destroyed(email_id)?;
+        Ok(())
     }
 }
 
@@ -1337,14 +1417,16 @@ fn crate_address(name: Option<&str>, email: &str) -> EmailAddress {
 /// (nor part-level header setters), so the part is built via serde: without
 /// an explicit charset the server defaults the part to us-ascii (RFC 8621
 /// §4.1.4) and mangles non-ASCII bodies when it builds the outgoing MIME.
-/// The retired hand-rolled client marked bodies utf-8 for the same reason
-/// (on a non-standard bodyValue property); `charset` on the body part is
-/// the standard placement.
+///
+/// Fastmail quirk (verified against api.fastmail.com): `charset` on body
+/// parts is only accepted for text/plain when NO htmlBody is present; with
+/// an html part alongside, any part charset is rejected as invalidProperty.
+/// Fastmail builds the outgoing MIME as UTF-8 regardless, so parts carry no
+/// charset at all.
 fn outbound_text_part(part_id: &str, media_type: &str) -> EmailBodyPart<Get> {
     serde_json::from_value(serde_json::json!({
         "partId": part_id,
         "type": media_type,
-        "charset": "utf-8",
     }))
     .expect("static body-part JSON")
 }
@@ -1506,17 +1588,6 @@ fn parse_sse_frame(frame: &[u8]) -> Option<StateChange> {
         return None;
     }
     serde_json::from_slice(&data).ok()
-}
-
-/// Fill an `Email/set` update with keyword patches for read/starred.
-/// `is_read = true` sets `$seen`; `is_starred = true` sets `$flagged`.
-fn fill_keyword_update(email: &mut Email<Set>, is_read: Option<bool>, is_starred: Option<bool>) {
-    if let Some(read) = is_read {
-        email.keyword("$seen", read);
-    }
-    if let Some(star) = is_starred {
-        email.keyword("$flagged", star);
-    }
 }
 
 /// Map a crate `Mailbox<Get>`; `None` when the server row has no id.
@@ -2058,9 +2129,9 @@ mod tests {
         assert_eq!(draft["bodyValues"]["bd1"]["value"], "Hello");
         assert_eq!(draft["textBody"][0]["partId"], "bd1");
         assert_eq!(draft["textBody"][0]["type"], "text/plain");
-        // CJK exposure: without a part charset the server defaults to
-        // us-ascii (RFC 8621 §4.1.4) when building the outgoing MIME.
-        assert_eq!(draft["textBody"][0]["charset"], "utf-8");
+        // Fastmail rejects part charsets on multi-part mail; it builds
+        // outgoing MIME as UTF-8 on its own (verified live).
+        assert!(draft["textBody"][0].get("charset").is_none());
     }
 
     #[test]
@@ -2074,9 +2145,10 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         let draft = &json["create"]["draft"];
         assert_eq!(draft["bodyValues"]["bd2"]["value"], "<p>Hello</p>");
-        assert_eq!(draft["textBody"][0]["charset"], "utf-8");
+        assert!(draft["textBody"][0].get("charset").is_none());
         assert_eq!(draft["htmlBody"][0]["partId"], "bd2");
-        assert_eq!(draft["htmlBody"][0]["charset"], "utf-8");
+        // Fastmail rejects charset on text/html parts (invalidProperties).
+        assert!(draft["htmlBody"][0].get("charset").is_none());
         assert_eq!(draft["inReplyTo"][0], "<parent@example.com>");
         assert_eq!(draft["references"][1], "<b@example.com>");
     }
@@ -2243,21 +2315,18 @@ mod tests {
     // ── flags push wire shape (Task 6) ──────────────────────────────
 
     #[test]
-    fn keyword_update_serializes_seen_and_flagged_patch() {
-        let mut req = SetRequest::<Email<Set>>::new(RequestParams::new("acc", Method::SetEmail, 0));
-        fill_keyword_update(req.update("em1"), Some(true), Some(false));
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["update"]["em1"]["keywords/$seen"], true);
-        assert_eq!(json["update"]["em1"]["keywords/$flagged"], false);
+    fn keyword_patch_sets_true_and_null() {
+        let patch = JmapSeam::keyword_patch(Some(true), Some(false));
+        assert_eq!(patch["keywords/$seen"], serde_json::json!(true));
+        // RFC 8620 §5.3: removal is `null` — Fastmail rejects `false`.
+        assert_eq!(patch["keywords/$flagged"], serde_json::Value::Null);
     }
 
     #[test]
-    fn keyword_update_skips_absent_flags() {
-        let mut req = SetRequest::<Email<Set>>::new(RequestParams::new("acc", Method::SetEmail, 0));
-        fill_keyword_update(req.update("em1"), None, Some(true));
-        let json = serde_json::to_value(&req).unwrap();
+    fn keyword_patch_skips_absent_flags() {
+        let patch = JmapSeam::keyword_patch(None, Some(true));
         assert_eq!(
-            json["update"]["em1"],
+            serde_json::Value::Object(patch),
             serde_json::json!({ "keywords/$flagged": true })
         );
     }
