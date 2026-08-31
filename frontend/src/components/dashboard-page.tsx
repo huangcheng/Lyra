@@ -22,6 +22,7 @@ import { StampLogo } from '@/components/stamp-logo';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { t } from '@/i18n';
 import { useMediaQuery } from '@/lib/use-media-query';
+import { useMailData } from '@/lib/use-mail-data';
 import { fetchStats } from '@/lib/stats-api';
 import { cn, getInitials } from '@/lib/utils';
 import { useMailStore } from '@/stores/mail';
@@ -34,6 +35,9 @@ export function DashboardPage() {
   const locale = useUIStore((s) => s.locale);
   const accounts = useMailStore((s) => s.accounts);
   const folders = useMailStore((s) => s.folders);
+  // Load accounts/folders even on a cold deep-link to /dashboard (the mail
+  // page normally populates the store); also refreshes on sync completion.
+  useMailData();
   const isMobile = useMediaQuery('(max-width: 1023px)');
   const [days, setDays] = useState<number>(30);
   const [stats, setStats] = useState<StatsResponse | null>(null);

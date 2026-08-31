@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use crate::auth::{AuthState, AuthUser};
 use crate::db_row::{IdParam, id_param};
 use crate::entities::{folder, mail_account, message};
-use crate::privacy::sender_email_from_json;
 use crate::storage::DbPool;
 use crate::sync::SyncError;
 
@@ -214,9 +213,25 @@ async fn query_top_senders(
     user: &Value,
     cutoff: &Value,
 ) -> Result<Vec<SenderCount>, SyncError> {
+    // Group by the sender *email* inside the From JSON, not the whole JSON
+    // blob — the same mailbox with different display-name encodings must be
+    // one sender. JSON accessors are the one genuine dialect branch here
+    // (SQLite stores JSON as TEXT, Postgres as JSONB).
+    let (email_expr, name_expr) = match db {
+        DbPool::Sqlite(_) => (
+            "json_extract(m.from_address, '$.email')",
+            "json_extract(m.from_address, '$.name')",
+        ),
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => ("(m.from_address->>'email')", "(m.from_address->>'name')"),
+    };
     let mut query = Sq::select();
     query
-        .expr_as(Expr::cust("m.from_address"), Alias::new("fa"))
+        .expr_as(Expr::cust(email_expr), Alias::new("sender_email"))
+        .expr_as(
+            Expr::cust(format!("MAX({name_expr})")),
+            Alias::new("sender_name"),
+        )
         .expr_as(Expr::cust("COUNT(*)"), Alias::new("c"));
     add_window_scope(&mut query, user, cutoff);
     query
@@ -224,7 +239,7 @@ async fn query_top_senders(
             "(f.role IS NULL OR f.role NOT IN ('sent', 'drafts'))",
         ))
         .and_where(Expr::cust("m.from_address IS NOT NULL"))
-        .add_group_by([Expr::cust("m.from_address")])
+        .add_group_by([Expr::cust(email_expr)])
         .order_by_expr(Expr::cust("c"), Order::Desc)
         .limit(5);
 
@@ -232,19 +247,20 @@ async fn query_top_senders(
     let rows = rows
         .iter()
         .map(|row| {
-            let from_json: Option<serde_json::Value> = row.try_get("", "fa").map_err(orm_err)?;
+            let address: Option<String> = row.try_get("", "sender_email").map_err(orm_err)?;
+            let name: Option<String> = row.try_get("", "sender_name").map_err(orm_err)?;
             let count: i64 = row.try_get("", "c").map_err(orm_err)?;
-            Ok((from_json.map(|v| v.to_string()), count))
+            Ok((address, name, count))
         })
         .collect::<Result<Vec<_>, SyncError>>()?;
 
     Ok(rows
         .into_iter()
-        .filter_map(|(from_json, count)| {
-            let address = sender_email_from_json(from_json.as_deref())?;
+        .filter_map(|(address, name, count)| {
+            let address = address.filter(|a| !a.trim().is_empty())?;
             Some(SenderCount {
                 address,
-                name: sender_name_from_json(from_json.as_deref()),
+                name,
                 count,
             })
         })
@@ -310,15 +326,6 @@ async fn query_totals(db: &DbPool, user: &Value, cutoff: &Value) -> Result<Stats
         sent,
         unread,
     })
-}
-
-/// Display name from a `from_address` JSON object (`{"name": …}`), if present.
-fn sender_name_from_json(from_address: Option<&str>) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(from_address?).ok()?;
-    parsed
-        .get("name")
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
 }
 
 #[cfg(test)]
