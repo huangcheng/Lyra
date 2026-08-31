@@ -381,7 +381,7 @@ export function SettingsPage() {
       }
       // JMAP-capable providers default to JMAP + API token (Lyra prefers JMAP).
       if (enriched.jmapSupported && !editingAccount) {
-        setFormData((prev) => ({ ...prev, protocol: 'jmap', authType: 'bearer' }));
+        setFormData((prev) => ({ ...prev, protocol: 'jmap', authType: 'password' }));
       }
     } catch (err: any) {
       setError(err.message);
@@ -1375,7 +1375,11 @@ export function SettingsPage() {
                             : 'text-muted-foreground hover:text-foreground',
                         )}
                         onClick={() =>
-                          setFormData((prev) => ({ ...prev, protocol: 'jmap', authType: 'bearer' }))
+                          setFormData((prev) => ({
+                            ...prev,
+                            protocol: 'jmap',
+                            authType: 'password',
+                          }))
                         }
                       >
                         {t(locale, 'settings.accounts.protocolJmap')}
