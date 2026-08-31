@@ -1273,23 +1273,27 @@ export function SettingsPage() {
                   />
                 </Field>
 
-                <Field>
-                  <FieldLabel htmlFor="settings-signature">
-                    {t(locale, 'settings.accounts.signature')}
-                  </FieldLabel>
-                  <Textarea
-                    id="settings-signature"
-                    className="min-h-24"
-                    value={formData.signature}
-                    onChange={(e) =>
-                      setFormData((prev) => ({
-                        ...prev,
-                        signature: e.target.value,
-                      }))
-                    }
-                    placeholder={t(locale, 'settings.accounts.signatureHint')}
-                  />
-                </Field>
+                {/* Signature is an identity concern, not a connection one —
+                    it belongs to editing an existing account only. */}
+                {editingAccount && (
+                  <Field>
+                    <FieldLabel htmlFor="settings-signature">
+                      {t(locale, 'settings.accounts.signature')}
+                    </FieldLabel>
+                    <Textarea
+                      id="settings-signature"
+                      className="min-h-24"
+                      value={formData.signature}
+                      onChange={(e) =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          signature: e.target.value,
+                        }))
+                      }
+                      placeholder={t(locale, 'settings.accounts.signatureHint')}
+                    />
+                  </Field>
+                )}
 
                 <Field>
                   <FieldLabel htmlFor="settings-email">
