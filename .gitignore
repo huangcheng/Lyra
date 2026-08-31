@@ -46,3 +46,4 @@ frontend/-s
 
 # ZCode session artifacts
 .zcode/
+docker-compose.override.yml
