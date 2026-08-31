@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use super::store::{
     AccountSyncRow, get_folder_id, imap_folder_depth, load_account_sync_row, load_cursor,
-    mojibake_message_uids, outcome_from_response, persist_imap_folder_batch, repair_imap_messages,
-    upsert_folder,
+    mojibake_message_uids, outcome_from_response, persist_imap_folder_batch,
+    reconcile_folder_deletions, repair_imap_messages, upsert_folder,
 };
 use super::types::{SyncError, SyncResponse};
 use crate::imap::{ImapClient, ImapConfig, ImapSecurity};
@@ -110,7 +110,7 @@ pub(crate) async fn run_imap_sync(
     // Sync messages in each folder
     let mut total_new = 0;
     let mut total_updated = 0;
-    let total_deleted = 0;
+    let mut total_deleted = 0;
 
     for folder in &folders {
         // Hierarchy placeholders (`Archive/` with \Noselect) cannot be SELECTed;
@@ -137,6 +137,30 @@ pub(crate) async fn run_imap_sync(
             Ok(_) => {}
             Err(err) => {
                 tracing::warn!(account_id, folder = %folder.name, error = %err, "mojibake repair failed");
+            }
+        }
+
+        // Reconcile moves/deletions: soft-delete local rows whose UID vanished
+        // server-side. Without this, messages moved between folders while the
+        // client was offline linger as ghost rows that show an empty body
+        // forever. A failed listing skips the reconcile — never delete on
+        // incomplete data.
+        match client.search_uids(None).await {
+            Ok(server_uids) => {
+                let server_uids: HashSet<u32> = server_uids.into_iter().collect();
+                match reconcile_folder_deletions(db, account_id, &folder_id, &server_uids).await {
+                    Ok(n) if n > 0 => {
+                        total_deleted += n;
+                        tracing::info!(account_id, folder = %folder.name, deleted = n, "reconciled vanished messages");
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::warn!(account_id, folder = %folder.name, error = %err, "deletion reconcile failed");
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(account_id, folder = %folder.name, error = %err, "UID listing failed; skipping deletion reconcile");
             }
         }
 

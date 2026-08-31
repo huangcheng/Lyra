@@ -1015,6 +1015,68 @@ pub(crate) async fn repair_imap_messages(
     Ok(repaired)
 }
 
+/// Local message rows in a folder whose IMAP UID no longer exists on the
+/// server (moved or deleted between syncs) — the "ghost rows" that render as
+/// permanently empty bodies in the reader. Rows with a NULL or unparseable
+/// `external_id` (e.g. local drafts not yet uploaded) are never reported.
+pub(crate) fn stale_imap_row_ids(
+    local_rows: &[(String, Option<String>)],
+    server_uids: &std::collections::HashSet<u32>,
+) -> Vec<String> {
+    local_rows
+        .iter()
+        .filter_map(|(id, external_id)| {
+            let uid = parse_imap_uid(external_id.as_deref()).ok()?;
+            (!server_uids.contains(&uid)).then(|| id.clone())
+        })
+        .collect()
+}
+
+/// Soft-delete local rows whose IMAP UIDs vanished server-side, scoped to one
+/// folder. The caller passes a *complete* current UID listing (`UID SEARCH
+/// 1:*`); a failed listing must never reach this function, or live mail would
+/// be wiped. Returns the number of rows soft-deleted.
+pub(crate) async fn reconcile_folder_deletions(
+    db: &DbPool,
+    account_id: &str,
+    folder_id: &str,
+    server_uids: &std::collections::HashSet<u32>,
+) -> Result<usize, SyncError> {
+    let mut sel = Sq::select();
+    sel.column(message::Column::Id)
+        .column(message::Column::ExternalId)
+        .from(message::Entity)
+        .and_where(message::Column::AccountId.eq(id_value(db, account_id)?))
+        .and_where(message::Column::FolderId.eq(id_value(db, folder_id)?))
+        .and_where(message::Column::IsDeleted.eq(false));
+    let rows = db.orm().query_all(&sel).await.map_err(orm_err)?;
+    let mut local_rows = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let id: String = row.try_get("", "id").map_err(orm_err)?;
+        let external_id: Option<String> = row.try_get("", "external_id").map_err(orm_err)?;
+        local_rows.push((id, external_id));
+    }
+
+    let stale = stale_imap_row_ids(&local_rows, server_uids);
+    if stale.is_empty() {
+        return Ok(0);
+    }
+
+    let id_values = stale
+        .iter()
+        .map(|id| id_value(db, id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut tx = db.begin().await?;
+    let mut upd = Sq::update();
+    upd.table(message::Entity)
+        .value(message::Column::IsDeleted, true)
+        .and_where(message::Column::Id.is_in(id_values));
+    tx_execute(&mut tx, &upd).await?;
+    update_folder_counts_in_tx(&mut tx, db, folder_id).await?;
+    tx.commit().await?;
+    Ok(stale.len())
+}
+
 /// One JMAP message persisted this batch (same order as the input slice).
 #[derive(Debug)]
 pub(crate) struct JmapPersistedMessage {
@@ -1669,5 +1731,43 @@ mod effective_role_tests {
             effective_folder_role(Some("spam"), Some("")).as_deref(),
             Some("spam")
         );
+    }
+}
+
+#[cfg(test)]
+mod stale_imap_row_tests {
+    use super::stale_imap_row_ids;
+
+    fn rows(entries: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        entries
+            .iter()
+            .map(|(id, ext)| ((*id).to_string(), ext.map(str::to_string)))
+            .collect()
+    }
+
+    #[test]
+    fn deletes_only_rows_whose_uid_vanished() {
+        let server: std::collections::HashSet<u32> = [10, 11].into_iter().collect();
+        let local = rows(&[
+            ("keep-1", Some("folder-a:10")),
+            ("keep-2", Some("folder-a:11")),
+            ("ghost", Some("folder-a:12")),
+            ("draft-no-ext", None),
+            ("draft-weird-ext", Some("local-draft-1")),
+            ("legacy-bare-uid", Some("99")),
+        ]);
+        assert_eq!(
+            stale_imap_row_ids(&local, &server),
+            vec!["ghost".to_string(), "legacy-bare-uid".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_server_listing_marks_everything_parseable_stale() {
+        // The caller must never pass a failed/partial listing; given a
+        // complete-but-empty one (folder truly empty), every synced row is stale.
+        let server = std::collections::HashSet::new();
+        let local = rows(&[("a", Some("f:1")), ("b", None)]);
+        assert_eq!(stale_imap_row_ids(&local, &server), vec!["a".to_string()]);
     }
 }
