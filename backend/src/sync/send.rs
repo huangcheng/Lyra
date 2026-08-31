@@ -50,15 +50,13 @@ fn id_value(db: &DbPool, id: &str) -> Result<Value, SyncError> {
     )
 }
 
-/// Decode an id column from either engine (TEXT on SQLite, UUID on Postgres).
+/// Decode an id column from either engine (TEXT on SQLite, UUID on
+/// Postgres). Delegates to `queries::row_id`: its fallback swallows the
+/// text-decode attempt — a UUID column decoded as String is a type error
+/// on Postgres, not a None, so propagating that attempt (as this private
+/// copy once did) breaks every send on PostgreSQL.
 fn row_id(row: &QueryResult, col: &str) -> Result<String, SyncError> {
-    if let Some(text) = row.try_get::<Option<String>>("", col).map_err(orm_err)? {
-        return Ok(text);
-    }
-    row.try_get::<Option<uuid::Uuid>>("", col)
-        .map_err(orm_err)?
-        .map(|u| u.to_string())
-        .ok_or_else(|| orm_err(sea_orm::DbErr::RecordNotFound("id column was NULL".into())))
+    super::queries::row_id(row, col).map_err(orm_err)
 }
 
 /// Look up a send plugin by `send_protocol`. Unknown ids map to HTTP 400.
