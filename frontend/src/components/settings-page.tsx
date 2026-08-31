@@ -1513,12 +1513,22 @@ export function SettingsPage() {
                       id="settings-password"
                       type="password"
                       value={formData.password}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const v = e.target.value;
                         setFormData((prev) => ({
                           ...prev,
-                          password: e.target.value,
-                        }))
-                      }
+                          password: v,
+                          // Fastmail API tokens (fmu1-…) only authenticate as
+                          // Bearer; flip the method on paste so Password +
+                          // token can't reach the server and 401.
+                          authType:
+                            prev.protocol === 'jmap' &&
+                            prev.authType !== 'bearer' &&
+                            /^fmu1-/i.test(v)
+                              ? 'bearer'
+                              : prev.authType,
+                        }));
+                      }}
                       required={!editingAccount && !preferMailOAuth}
                     />
                     {formData.protocol === 'jmap' && formData.authType === 'bearer' && (
