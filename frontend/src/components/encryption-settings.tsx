@@ -98,8 +98,6 @@ export function EncryptionSettings() {
   const [unlockState, unlockSend] = useMachine(opengpgUnlockMachine);
 
   const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
     try {
       const [k, s, a] = await Promise.all([
         listOpengpgKeys(),
@@ -109,6 +107,7 @@ export function EncryptionSettings() {
       setKeys(k);
       setSettings(s);
       setAccounts(a);
+      setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : t(locale, 'settings.encryption.loadError'));
     } finally {
@@ -117,6 +116,9 @@ export function EncryptionSettings() {
   }, [locale]);
 
   useEffect(() => {
+    // Fetch-on-mount: synchronizing with the server (external system);
+    // all setters inside refresh() run after awaits.
+    // oxlint-disable-next-line set-state-in-effect
     void refresh();
   }, [refresh]);
 
@@ -128,10 +130,15 @@ export function EncryptionSettings() {
   useEffect(() => {
     if (!unlockState.matches('success') || !unlockState.context.result) return;
     const { keyId, cached } = unlockState.context.result;
+    // React state reacting to the XState machine's success event — a
+    // genuine external-system sync, kept synchronous on purpose.
     if (cached) {
+      // oxlint-disable-next-line set-state-in-effect
       setUnlockedUntil((prev) => ({ ...prev, [keyId]: Date.now() + IDLE_MS }));
+      // oxlint-disable-next-line set-state-in-effect
       setMessage(t(locale, 'settings.encryption.unlockCached'));
     } else {
+      // oxlint-disable-next-line set-state-in-effect
       setMessage(t(locale, 'settings.encryption.unlockOnce'));
     }
     void refresh();

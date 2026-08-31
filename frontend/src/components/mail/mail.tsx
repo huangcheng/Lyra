@@ -196,7 +196,8 @@ export function Mail() {
   const folders = useMailStore((s) => s.folders);
   const getFoldersForAccount = useMailStore((s) => s.getFoldersForAccount);
   const accountFolders = useMemo(
-    () => (selectedAccountId === ALL_ACCOUNTS ? [] : getFoldersForAccount(selectedAccountId)),
+    () =>
+      selectedAccountId === ALL_ACCOUNTS ? [] : getFoldersForAccount(selectedAccountId, folders),
     [folders, getFoldersForAccount, selectedAccountId],
   );
 
@@ -213,10 +214,14 @@ export function Mail() {
   const isMobile = useMediaQuery('(max-width: 1023px)');
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // Close the drawer once the user has picked an account or folder.
-  useEffect(() => {
+  // Close the drawer once the user has picked an account or folder
+  // (adjusted during render, not in an effect).
+  const drawerSelectionKey = `${selectedAccountId}|${selectedFolderId}|${selectedFolderRole}`;
+  const [drawerClosedFor, setDrawerClosedFor] = useState(drawerSelectionKey);
+  if (drawerSelectionKey !== drawerClosedFor) {
+    setDrawerClosedFor(drawerSelectionKey);
     setDrawerOpen(false);
-  }, [selectedAccountId, selectedFolderId, selectedFolderRole]);
+  }
 
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
     id: 'lyra-mail',

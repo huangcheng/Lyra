@@ -20,7 +20,8 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { t } from '@/i18n';
-import { RecipientsInput, splitAddresses } from '@/components/compose/recipients-input';
+import { RecipientsInput } from '@/components/compose/recipients-input';
+import { splitAddresses } from '@/lib/addresses';
 import { RichTextEditor } from '@/components/compose/rich-text-editor';
 import { api, apiBlob } from '@/lib/api-client';
 import { formatBytes } from '@/lib/attachments';
@@ -298,13 +299,16 @@ export function ComposeDialog() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composeOpen, autosavePayload, files.length, sending]);
 
+  // Emails join to a stable key: re-lookup only when the recipient set
+  // actually changes, not when the source arrays get new identities.
+  const recipientKey = recipientEmails.join(',');
   useEffect(() => {
-    if (!composeOpen || !encryptMessage || recipientEmails.length === 0) {
+    if (!composeOpen || !encryptMessage || recipientKey === '') {
       setRecipientKeys([]);
       return;
     }
     let cancelled = false;
-    void lookupRecipientKeys(recipientEmails)
+    void lookupRecipientKeys(recipientKey.split(','))
       .then((rows) => {
         if (cancelled) return;
         setRecipientKeys(rows);
@@ -324,7 +328,7 @@ export function ComposeDialog() {
     return () => {
       cancelled = true;
     };
-  }, [composeOpen, encryptMessage, recipientEmails.join(',')]);
+  }, [composeOpen, encryptMessage, recipientKey]);
 
   const titleKey =
     composeDraft?.mode === 'reply'

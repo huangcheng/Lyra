@@ -80,11 +80,14 @@ export function MailList() {
   const showAccountBadge = selectedAccountId === ALL_ACCOUNTS;
   const items = useMemo(
     () =>
-      getMessagesForView({
-        accountId: selectedAccountId,
-        folderId: selectedFolderId,
-        folderRole: selectedFolderRole,
-      }),
+      getMessagesForView(
+        {
+          accountId: selectedAccountId,
+          folderId: selectedFolderId,
+          folderRole: selectedFolderRole,
+        },
+        { messages, folders },
+      ),
     [
       getMessagesForView,
       messages,
@@ -163,7 +166,9 @@ export function MailList() {
       return () => window.clearTimeout(handle);
     }
 
-    setSearchHits(null);
+    // Folder/role view reload — a fetch effect synchronizing with the
+    // server; loadMessages shows its loading state synchronously on purpose.
+    // oxlint-disable-next-line set-state-in-effect
     void loadMessages();
   }, [
     token,
@@ -186,7 +191,11 @@ export function MailList() {
     return () => sub.unsubscribe();
   }, [token, searchQuery, selectedAccountId, loadMessages]);
 
-  const source = searchHits ?? items;
+  // Search hits only apply while a query is active — masking the stored
+  // hits during render keeps the exit-from-search path effect-free.
+  const searching = Boolean(token) && searchQuery.trim().length >= 2;
+  const activeHits = searching ? searchHits : null;
+  const source = activeHits ?? items;
   const filtered = (listTab === 'unread' ? source.filter((item) => !item.isRead) : source).filter(
     (item) => !mutedMessageIds.includes(item.id),
   );
@@ -217,7 +226,7 @@ export function MailList() {
   }
 
   if (filtered.length === 0 && !fetchError) {
-    const isSearch = searchHits !== null && searchQuery.trim().length >= 2;
+    const isSearch = activeHits !== null;
     return (
       <EmptyState
         icon={isSearch ? SearchX : Inbox}

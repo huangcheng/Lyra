@@ -8,6 +8,7 @@
 import { X } from 'lucide-react';
 
 import { avatarTone, cn, getInitials } from '@/lib/utils';
+import { splitAddresses } from '@/lib/addresses';
 
 interface RecipientsInputProps {
   id: string;
@@ -18,14 +19,6 @@ interface RecipientsInputProps {
   onInputChange: (value: string) => void;
   placeholder?: string;
   autoFocus?: boolean;
-}
-
-/** Split a raw chunk into addresses on comma/semicolon boundaries. */
-export function splitAddresses(raw: string): string[] {
-  return raw
-    .split(/[,;]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
 }
 
 export function RecipientsInput({

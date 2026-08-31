@@ -41,14 +41,25 @@ interface MailState {
   threads: Record<string, MailThread>;
 
   getAccountById: (id: string) => MailAccount | undefined;
-  getFoldersForAccount: (accountId: string) => MailFolder[];
+  getFoldersForAccount: (
+    accountId: string,
+    /** Explicit folders snapshot — pass the subscribed value so memo deps are honored. */
+    folders?: Record<string, MailFolder>,
+  ) => MailFolder[];
   getUnifiedFolders: () => UnifiedFolder[];
   getMessagesForFolder: (folderId: string) => MailMessage[];
-  getMessagesForView: (opts: {
-    accountId: string | typeof ALL_ACCOUNTS;
-    folderId: string | null;
-    folderRole: string | null;
-  }) => MailMessage[];
+  getMessagesForView: (
+    opts: {
+      accountId: string | typeof ALL_ACCOUNTS;
+      folderId: string | null;
+      folderRole: string | null;
+    },
+    /** Explicit store snapshots — pass the subscribed values so memo deps are honored. */
+    snapshot?: {
+      messages?: Record<string, MailMessage>;
+      folders?: Record<string, MailFolder>;
+    },
+  ) => MailMessage[];
   getThreadById: (id: string) => MailThread | undefined;
 
   setAccounts: (accounts: MailAccount[]) => void;
@@ -77,8 +88,8 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   getAccountById: (id) => get().accounts.find((a) => a.id === id),
 
-  getFoldersForAccount: (accountId) =>
-    Object.values(get().folders)
+  getFoldersForAccount: (accountId, folders) =>
+    Object.values(folders ?? get().folders)
       .filter((f) => f.accountId === accountId)
       .sort((a, b) => a.sortOrder - b.sortOrder),
 
@@ -99,9 +110,9 @@ export const useMailStore = create<MailState>((set, get) => ({
       .filter((m) => m.folderId === folderId)
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()),
 
-  getMessagesForView: ({ accountId, folderId, folderRole }) => {
-    const messages = Object.values(get().messages);
-    const folders = get().folders;
+  getMessagesForView: ({ accountId, folderId, folderRole }, snapshot) => {
+    const messages = Object.values(snapshot?.messages ?? get().messages);
+    const folders = snapshot?.folders ?? get().folders;
     const filtered = messages.filter((m) => {
       if (accountId !== ALL_ACCOUNTS && m.accountId !== accountId) return false;
       if (folderId) return m.folderId === folderId;

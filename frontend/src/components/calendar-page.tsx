@@ -51,16 +51,6 @@ export function CalendarPage() {
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
   const [currentDate, setCurrentDate] = useState(new Date());
 
-  useEffect(() => {
-    fetchCalendars();
-  }, []);
-
-  useEffect(() => {
-    if (selectedCalendar) {
-      fetchEvents(selectedCalendar.id);
-    }
-  }, [selectedCalendar]);
-
   async function fetchCalendars() {
     try {
       setLoading(true);
@@ -84,6 +74,21 @@ export function CalendarPage() {
       setError(err.message);
     }
   }
+
+  useEffect(() => {
+    // Fetch-on-mount: synchronizing with the server (external system);
+    // setters inside fetchCalendars run after awaits.
+    // oxlint-disable-next-line set-state-in-effect
+    fetchCalendars();
+  }, []);
+
+  useEffect(() => {
+    if (selectedCalendar) {
+      // Fetch-on-selection: synchronizing with the server (external system).
+      // oxlint-disable-next-line set-state-in-effect
+      fetchEvents(selectedCalendar.id);
+    }
+  }, [selectedCalendar]);
 
   function formatEventTime(event: CalendarEvent): string {
     if (event.isAllDay) return t(locale, 'calendar.allDay');

@@ -128,11 +128,14 @@ export function MailDisplay() {
   const getMessagesForView = useMailStore((s) => s.getMessagesForView);
 
   const viewConversations = useMemo(() => {
-    const items = getMessagesForView({
-      accountId: selectedAccountId,
-      folderId: selectedFolderId,
-      folderRole: selectedFolderRole,
-    });
+    const items = getMessagesForView(
+      {
+        accountId: selectedAccountId,
+        folderId: selectedFolderId,
+        folderRole: selectedFolderRole,
+      },
+      { messages, folders },
+    );
     const filtered = (listTab === 'unread' ? items.filter((m) => !m.isRead) : items).filter(
       (m) => !mutedMessageIdsList.includes(m.id),
     );
@@ -140,6 +143,7 @@ export function MailDisplay() {
   }, [
     getMessagesForView,
     messages,
+    folders,
     selectedAccountId,
     selectedFolderId,
     selectedFolderRole,
@@ -195,11 +199,14 @@ export function MailDisplay() {
   }, [mail, conversation, folders]);
 
   // Expand state: unread and the latest message open by default; the user
-  // can toggle any card. Overrides reset when the conversation changes.
+  // can toggle any card. Overrides reset when the conversation changes
+  // (state adjusted during render — React's documented reset pattern).
   const [expandOverrides, setExpandOverrides] = useState<Record<string, boolean>>({});
-  useEffect(() => {
+  const [expandOverridesKey, setExpandOverridesKey] = useState<string | null>(conversationKey);
+  if (conversationKey !== expandOverridesKey) {
+    setExpandOverridesKey(conversationKey);
     setExpandOverrides({});
-  }, [conversationKey]);
+  }
   const latestId = visibleConversation.length
     ? visibleConversation[visibleConversation.length - 1].id
     : null;
@@ -208,10 +215,15 @@ export function MailDisplay() {
     [expandOverrides, latestId],
   );
 
-  useEffect(() => {
-    autoMarkedIdRef.current = null;
+  // The inline reply box is remounted per message via `key`; mirror that
+  // for its controlled HTML so a stale draft never leaks into the next
+  // message (adjusted during render, not in an effect). autoMarkedIdRef
+  // needs no reset — its guard is keyed by message id.
+  const [replyForId, setReplyForId] = useState<string | null>(selectedMessageId);
+  if (selectedMessageId !== replyForId) {
+    setReplyForId(selectedMessageId);
     setReplyHtml('');
-  }, [selectedMessageId]);
+  }
 
   const tryAutoMarkRead = useCallback(async () => {
     if (!selectedMessageId || !token || markReadPolicy === 'manual') return;
@@ -226,7 +238,7 @@ export function MailDisplay() {
       void tryAutoMarkRead();
     }, MARK_READ_OPEN_DWELL_MS);
     return () => window.clearTimeout(timer);
-  }, [markReadPolicy, selectedMessageId, mail?.id, mail?.isRead, tryAutoMarkRead]);
+  }, [markReadPolicy, mail, tryAutoMarkRead]);
 
   useEffect(() => {
     if (markReadPolicy !== 'on_scroll_end' || !mail || mail.isRead) return;
@@ -246,7 +258,7 @@ export function MailDisplay() {
       cancelAnimationFrame(raf);
       el.removeEventListener('scroll', onScroll);
     };
-  }, [markReadPolicy, mail?.id, mail?.isRead, tryAutoMarkRead, visibleConversation.length]);
+  }, [markReadPolicy, mail, tryAutoMarkRead, visibleConversation.length]);
 
   const handleReply = (all = false) => {
     if (!mail) return;
@@ -753,126 +765,132 @@ export function MailDisplay() {
       ) : null}
       {mail ? (
         <div className="flex flex-1 flex-col">
-          <div ref={bodyScrollRef} className="min-h-0 flex-1 overflow-auto">
-            {visibleConversation.length > 1 ? (
-              <div className="border-b border-border/70 px-4 pt-4 pb-3">
-                <h2 className="font-display text-lg font-medium">
-                  {baseSubject(mail.subject) || mail.subject}
-                </h2>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  {t(locale, 'mail.conversationCount', { count: visibleConversation.length })}
-                </p>
+          <div ref={bodyScrollRef} className="min-h-0 flex-1 overflow-auto bg-secondary/60">
+            <div className="mx-auto w-full max-w-[880px] px-3 py-4">
+              {visibleConversation.length > 1 ? (
+                <div className="px-1.5 pb-3">
+                  <h2 className="font-display text-lg font-medium">
+                    {baseSubject(mail.subject) || mail.subject}
+                  </h2>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {t(locale, 'mail.conversationCount', { count: visibleConversation.length })}
+                  </p>
+                </div>
+              ) : null}
+              <div className="space-y-3">
+                {visibleConversation.map((member) => (
+                  <MessageCard
+                    key={member.id}
+                    messageId={member.id}
+                    expanded={isExpanded(member.id, member.isRead)}
+                    hideSubject={visibleConversation.length > 1}
+                    onToggle={() =>
+                      setExpandOverrides((prev) => ({
+                        ...prev,
+                        [member.id]: !isExpanded(member.id, member.isRead),
+                      }))
+                    }
+                  />
+                ))}
               </div>
-            ) : null}
-            {visibleConversation.map((member) => (
-              <MessageCard
-                key={member.id}
-                messageId={member.id}
-                expanded={isExpanded(member.id, member.isRead)}
-                hideSubject={visibleConversation.length > 1}
-                onToggle={() =>
-                  setExpandOverrides((prev) => ({
-                    ...prev,
-                    [member.id]: !isExpanded(member.id, member.isRead),
-                  }))
-                }
-              />
-            ))}
+            </div>
           </div>
           <Separator className="mt-auto" />
-          <div className="p-4">
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                void handleInlineSend();
-              }}
-            >
-              <div className="overflow-hidden rounded-xl border border-input bg-card">
-                {/* recipient context line */}
-                <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-2">
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    {t(locale, 'mail.reply')}
-                  </span>
-                  <span className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/70 bg-muted/40 py-0.5 pr-2.5 pl-1 text-xs">
-                    <Avatar className="size-4.5 shrink-0">
-                      <AvatarFallback className={cn('text-[8px]', avatarTone(fromLabel))}>
-                        {getInitials(fromLabel)}
-                      </AvatarFallback>
-                    </Avatar>
-                    <span className="truncate">{fromLabel}</span>
-                  </span>
-                  <span className="ml-auto min-w-0 truncate text-xs text-ter-foreground">
-                    {mail.subject.startsWith('Re:') ? mail.subject : `Re: ${mail.subject}`}
-                  </span>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="size-6 shrink-0 text-ter-foreground hover:bg-accent hover:text-foreground"
-                        onClick={() => handleReply()}
-                      >
-                        <Maximize2 className="size-3" />
-                        <span className="sr-only">{t(locale, 'mail.expandCompose')}</span>
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{t(locale, 'mail.expandCompose')}</TooltipContent>
-                  </Tooltip>
-                </div>
-                <RichTextEditor
-                  key={`${selectedMessageId}:${replyNonce}`}
-                  className="rounded-none border-0"
-                  contentClassName="max-h-48 min-h-16"
-                  initialHtml=""
-                  onChange={setReplyHtml}
-                  placeholder={t(locale, 'mail.replyPlaceholder', { name: fromLabel })}
-                  disabled={busy}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                      e.preventDefault();
-                      void handleInlineSend();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-1.5 border-t border-border/60 px-3.5 py-1.5 text-left text-[11px] text-ter-foreground transition-colors hover:text-muted-foreground"
-                  onClick={() => setQuoteOpen((v) => !v)}
-                >
-                  <ChevronRight
-                    className={cn('size-3 transition-transform', quoteOpen && 'rotate-90')}
-                  />
-                  {t(locale, 'mail.originalMessage')} · {fromLabel} ·{' '}
-                  {format(new Date(mail.date), 'PP')}
-                </button>
-                {quoteOpen ? (
-                  <div className="max-h-40 overflow-y-auto border-t border-border/60 px-3.5 py-2 text-xs leading-relaxed text-muted-foreground">
-                    <p>
-                      {mail.from.name ?? mail.from.email} &lt;{mail.from.email}&gt;
-                    </p>
-                    <p className="mb-1.5 text-ter-foreground">
-                      {format(new Date(mail.date), 'PPpp')}
-                    </p>
-                    <p className="whitespace-pre-wrap">
-                      {(mail.bodyText ?? mail.snippet ?? '').slice(0, 600)}
-                    </p>
+          <div className="bg-secondary/60 p-4">
+            <div className="mx-auto w-full max-w-[880px]">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void handleInlineSend();
+                }}
+              >
+                <div className="overflow-hidden rounded-xl border border-input bg-card">
+                  {/* recipient context line */}
+                  <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-2">
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {t(locale, 'mail.reply')}
+                    </span>
+                    <span className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/70 bg-muted/40 py-0.5 pr-2.5 pl-1 text-xs">
+                      <Avatar className="size-4.5 shrink-0">
+                        <AvatarFallback className={cn('text-[8px]', avatarTone(fromLabel))}>
+                          {getInitials(fromLabel)}
+                        </AvatarFallback>
+                      </Avatar>
+                      <span className="truncate">{fromLabel}</span>
+                    </span>
+                    <span className="ml-auto min-w-0 truncate text-xs text-ter-foreground">
+                      {mail.subject.startsWith('Re:') ? mail.subject : `Re: ${mail.subject}`}
+                    </span>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-6 shrink-0 text-ter-foreground hover:bg-accent hover:text-foreground"
+                          onClick={() => handleReply()}
+                        >
+                          <Maximize2 className="size-3" />
+                          <span className="sr-only">{t(locale, 'mail.expandCompose')}</span>
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{t(locale, 'mail.expandCompose')}</TooltipContent>
+                    </Tooltip>
                   </div>
-                ) : null}
-                <div className="flex items-center px-3.5 pb-2.5 pt-1">
-                  <span className="text-[11px] text-ter-foreground">
-                    {t(locale, 'mail.sendShortcut')}
-                  </span>
-                  <Button
-                    type="submit"
-                    className="ml-auto h-8 rounded-full bg-foreground px-4 text-background transition-all hover:bg-foreground/90 active:scale-[0.97]"
+                  <RichTextEditor
+                    key={`${selectedMessageId}:${replyNonce}`}
+                    className="rounded-none border-0"
+                    contentClassName="max-h-48 min-h-16"
+                    initialHtml=""
+                    onChange={setReplyHtml}
+                    placeholder={t(locale, 'mail.replyPlaceholder', { name: fromLabel })}
                     disabled={busy}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        void handleInlineSend();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-1.5 border-t border-border/60 px-3.5 py-1.5 text-left text-[11px] text-ter-foreground transition-colors hover:text-muted-foreground"
+                    onClick={() => setQuoteOpen((v) => !v)}
                   >
-                    {busy ? t(locale, 'mail.sending') : t(locale, 'mail.send')}
-                  </Button>
+                    <ChevronRight
+                      className={cn('size-3 transition-transform', quoteOpen && 'rotate-90')}
+                    />
+                    {t(locale, 'mail.originalMessage')} · {fromLabel} ·{' '}
+                    {format(new Date(mail.date), 'PP')}
+                  </button>
+                  {quoteOpen ? (
+                    <div className="max-h-40 overflow-y-auto border-t border-border/60 px-3.5 py-2 text-xs leading-relaxed text-muted-foreground">
+                      <p>
+                        {mail.from.name ?? mail.from.email} &lt;{mail.from.email}&gt;
+                      </p>
+                      <p className="mb-1.5 text-ter-foreground">
+                        {format(new Date(mail.date), 'PPpp')}
+                      </p>
+                      <p className="whitespace-pre-wrap">
+                        {(mail.bodyText ?? mail.snippet ?? '').slice(0, 600)}
+                      </p>
+                    </div>
+                  ) : null}
+                  <div className="flex items-center px-3.5 pb-2.5 pt-1">
+                    <span className="text-[11px] text-ter-foreground">
+                      {t(locale, 'mail.sendShortcut')}
+                    </span>
+                    <Button
+                      type="submit"
+                      className="ml-auto h-8 rounded-full bg-foreground px-4 text-background transition-all hover:bg-foreground/90 active:scale-[0.97]"
+                      disabled={busy}
+                    >
+                      {busy ? t(locale, 'mail.sending') : t(locale, 'mail.send')}
+                    </Button>
+                  </div>
                 </div>
-              </div>
-            </form>
+              </form>
+            </div>
           </div>
         </div>
       ) : (

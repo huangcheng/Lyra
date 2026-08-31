@@ -45,13 +45,10 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
   const markMessageRead = useMailStore((s) => s.markMessageRead);
 
   const [allowRemoteContent, setAllowRemoteContent] = useState(false);
-  const [pixelAdvisory, setPixelAdvisory] = useState(false);
   const [bodyLoading, setBodyLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
-  /** Sanitized body HTML with inline `cid:` images resolved to object URLs. */
-  const [renderHtml, setRenderHtml] = useState<string | null>(null);
   const mailBodyRef = useRef<HTMLDivElement>(null);
   const autoMarkedRef = useRef(false);
 
@@ -103,32 +100,42 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
 
   // Sanitize the body, then resolve inline cid: parts against the detail
   // payload's attachment metadata (bytes go through apiBlob for auth).
+  // Resolved HTML is keyed by its source string and applied during render,
+  // so state is only ever set from the async resolution — never synchronously.
+  const bodyHtml = mail?.bodyHtml ?? null;
+  const bodyAttachments = mail?.attachments;
+  const [resolvedBody, setResolvedBody] = useState<{ html: string; source: string } | null>(null);
   useEffect(() => {
-    if (!mail?.bodyHtml) {
-      setRenderHtml(null);
-      return;
-    }
+    if (!bodyHtml) return;
     let revoke: (() => void) | null = null;
     let cancelled = false;
-    const sanitized = sanitizeEmailHtml(mail.bodyHtml);
-    void resolveInlineImages(sanitized, mail.attachments).then((resolved) => {
+    const sanitized = sanitizeEmailHtml(bodyHtml);
+    void resolveInlineImages(sanitized, bodyAttachments).then((resolved) => {
       if (cancelled) {
         resolved.revoke();
         return;
       }
       revoke = resolved.revoke;
-      setRenderHtml(resolved.html);
+      setResolvedBody({ html: resolved.html, source: bodyHtml });
     });
     return () => {
       cancelled = true;
       if (revoke) revoke();
     };
-  }, [mail?.id, mail?.bodyHtml, mail?.attachments]);
+  }, [bodyHtml, bodyAttachments]);
+  const renderHtml = resolvedBody && resolvedBody.source === bodyHtml ? resolvedBody.html : null;
 
-  // Tracking-pixel advisory on the rendered body.
-  useEffect(() => {
+  // Tracking-pixel advisory on the rendered body. The advisory resets
+  // when the rendered body changes (keyed during render), and the effect
+  // only scans/subscribes — state flips happen from image-load callbacks.
+  const [pixelAdvisory, setPixelAdvisory] = useState(false);
+  const [advisoryFor, setAdvisoryFor] = useState<string | null>(renderHtml);
+  if (renderHtml !== advisoryFor) {
+    setAdvisoryFor(renderHtml);
     setPixelAdvisory(false);
-    if (!expanded || !mail?.bodyHtml) return;
+  }
+  useEffect(() => {
+    if (!expanded || !bodyHtml) return;
     const root = mailBodyRef.current;
     if (!root) return;
 
@@ -151,7 +158,7 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
     root.querySelectorAll('img').forEach((img) => markIfPixel(img));
     root.addEventListener('load', onLoad, true);
     return () => root.removeEventListener('load', onLoad, true);
-  }, [expanded, mail?.id, renderHtml, allowRemoteContent]);
+  }, [expanded, bodyHtml, renderHtml, allowRemoteContent]);
 
   if (!mail) return null;
 
@@ -169,7 +176,7 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
       <button
         type="button"
         onClick={handleHeaderClick}
-        className="flex w-full items-center gap-3 border-b border-border/70 px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent/50"
+        className="flex w-full items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5 text-left text-sm shadow-whisper transition-colors hover:bg-accent/50"
       >
         <span className="flex w-2.5 shrink-0 justify-center">
           {!mail.isRead ? <span className="size-1.5 rounded-full bg-unread" aria-hidden /> : null}
@@ -191,7 +198,7 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
   const showRemoteBanner = Boolean(mail.remoteContentBlocked) && !allowRemoteContent;
 
   return (
-    <article className="border-b border-border/70">
+    <article className="overflow-hidden rounded-xl border border-border bg-card shadow-whisper">
       <button
         type="button"
         onClick={handleHeaderClick}
