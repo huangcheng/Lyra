@@ -5,7 +5,7 @@
  * Privacy, Encryption. Provides CRUD operations for mail accounts with i18n support.
  */
 
-import { useState, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { Flag, KeyRound, Plus, Shield, SlidersHorizontal, Users, X } from 'lucide-react';
 import { t } from '../i18n';
@@ -97,6 +97,18 @@ interface ProbeResult {
 const SPAM_SENSITIVITY = ['lenient', 'standard', 'strict'] as const;
 const EXAMPLE_BLOCKED_SENDERS = ['newsletter@example.com', 'promo@example.net'];
 
+/** Backend probe sources are internal slugs — never show them raw to users. */
+function probeSourceLabel(locale: 'en' | 'zh', source?: string | null): string {
+  const labels: Record<string, { en: string; zh: string }> = {
+    mozilla_ispdb: { en: 'the Mozilla ISP database', zh: 'Mozilla ISP 数据库' },
+    common_patterns: { en: 'built-in provider settings', zh: '内置服务商配置' },
+    microsoft_domain: { en: 'Microsoft domain settings', zh: 'Microsoft 域名配置' },
+    yandex_domain: { en: 'Yandex domain settings', zh: 'Yandex 域名配置' },
+  };
+  if (!source) return locale === 'zh' ? '未知来源' : 'an unknown source';
+  return labels[source] ? labels[source][locale] : source;
+}
+
 export function SettingsPage() {
   const locale = useUIStore((s) => s.locale);
   const setLocale = useUIStore((s) => s.setLocale);
@@ -111,6 +123,9 @@ export function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
+  // True once the user clicks the protocol toggle — probe results must not
+  // silently re-write a protocol the user chose while filling the form.
+  const protocolTouchedRef = useRef(false);
   const [editingAccount, setEditingAccount] = useState<MailAccount | null>(null);
 
   // Form state
@@ -372,7 +387,7 @@ export function SettingsPage() {
       if (enriched.found) {
         setFormData((prev) => ({
           ...prev,
-          protocol: enriched.protocol,
+          protocol: protocolTouchedRef.current ? prev.protocol : enriched.protocol,
           imapHost: enriched.imapHost || prev.imapHost,
           imapPort: enriched.imapPort || prev.imapPort,
           imapSecurity: enriched.imapSecurity || prev.imapSecurity,
@@ -381,9 +396,19 @@ export function SettingsPage() {
           smtpSecurity: enriched.smtpSecurity || prev.smtpSecurity,
         }));
       }
-      // JMAP-capable providers default to JMAP + API token (Lyra prefers JMAP).
-      if (enriched.jmapSupported && !editingAccount) {
-        setFormData((prev) => ({ ...prev, protocol: 'jmap', authType: 'password' }));
+      // JMAP-capable providers default to JMAP (Lyra prefers JMAP). Leave
+      // authType untouched — a probe landing after the user pasted a token
+      // must not silently flip the method back to Password — and honor a
+      // protocol the user already picked by hand. A pasted Fastmail token
+      // still upgrades to Bearer here: at paste time the form may still be
+      // on the IMAP default, so the password-field flip alone can miss it.
+      if (enriched.jmapSupported && !editingAccount && !protocolTouchedRef.current) {
+        setFormData((prev) => ({
+          ...prev,
+          protocol: 'jmap',
+          authType:
+            prev.authType !== 'bearer' && /^fmu1-/i.test(prev.password) ? 'bearer' : prev.authType,
+        }));
       }
     } catch (err: any) {
       setError(err.message);
@@ -561,6 +586,7 @@ export function SettingsPage() {
   }
 
   function resetForm() {
+    protocolTouchedRef.current = false;
     setFormData({
       displayName: '',
       signature: '',
@@ -1366,7 +1392,7 @@ export function SettingsPage() {
                   </div>
                 </Field>
 
-                {probeResult?.jmapSupported && !editingAccount && !preferMailOAuth && (
+                {!editingAccount && !preferMailOAuth && (
                   <Field>
                     <FieldLabel>{t(locale, 'settings.accounts.protocol')}</FieldLabel>
                     <div className="flex gap-0.5 rounded-lg bg-accent p-0.5">
@@ -1378,13 +1404,10 @@ export function SettingsPage() {
                             ? 'bg-card text-foreground'
                             : 'text-muted-foreground hover:text-foreground',
                         )}
-                        onClick={() =>
-                          setFormData((prev) => ({
-                            ...prev,
-                            protocol: 'jmap',
-                            authType: 'password',
-                          }))
-                        }
+                        onClick={() => {
+                          protocolTouchedRef.current = true;
+                          setFormData((prev) => ({ ...prev, protocol: 'jmap' }));
+                        }}
                       >
                         {t(locale, 'settings.accounts.protocolJmap')}
                       </button>
@@ -1396,7 +1419,10 @@ export function SettingsPage() {
                             ? 'bg-card text-foreground'
                             : 'text-muted-foreground hover:text-foreground',
                         )}
-                        onClick={() => setFormData((prev) => ({ ...prev, protocol: 'imap' }))}
+                        onClick={() => {
+                          protocolTouchedRef.current = true;
+                          setFormData((prev) => ({ ...prev, protocol: 'imap' }));
+                        }}
                       >
                         {t(locale, 'settings.accounts.protocolImap')}
                       </button>
@@ -1415,7 +1441,7 @@ export function SettingsPage() {
                             ? t(locale, 'settings.accounts.probeYandexOAuth')
                             : t(locale, 'settings.accounts.probeMicrosoftOAuth')
                           : t(locale, 'settings.accounts.probeFound', {
-                              source: probeResult?.source || 'unknown',
+                              source: probeSourceLabel(locale, probeResult?.source),
                             })}
                       </p>
                     )}

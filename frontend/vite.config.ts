@@ -8,9 +8,11 @@ import { defineConfig, type Plugin, type ViteDevServer } from 'vite';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const LOCAL_BACKEND = {
-  target: 'http://127.0.0.1:3000',
+  // Point a second dev UI at another backend, e.g.
+  // LYRA_DEV_BACKEND=http://127.0.0.1:3100 npm run dev -- --port 5174
+  target: process.env.LYRA_DEV_BACKEND ?? 'http://127.0.0.1:3000',
   changeOrigin: true,
-} as const;
+};
 
 /**
  * Vite's default `localhost` bind is IPv6-only (`[::1]`) on Windows, so
