@@ -656,11 +656,15 @@ export function SettingsPage() {
       <SlimPageNav section={t(locale, 'settings.section')} items={navItems} />
       <main className="flex-1 overflow-auto bg-background">
         <header className="border-b border-border px-8 pb-5 pt-7">
-          <h1 className="font-display text-xl font-medium">{sectionMeta[section].title}</h1>
-          <p className="text-[12.5px] text-ter-foreground">{sectionMeta[section].subtitle}</p>
+          {/* Title shares the content measure so it aligns with the cards
+              below, and the whole column centers on wide screens. */}
+          <div className="mx-auto w-full max-w-2xl">
+            <h1 className="font-display text-xl font-medium">{sectionMeta[section].title}</h1>
+            <p className="text-[12.5px] text-ter-foreground">{sectionMeta[section].subtitle}</p>
+          </div>
         </header>
 
-        <div className="max-w-2xl space-y-4 px-8 py-6">
+        <div className="mx-auto w-full max-w-2xl space-y-4 px-8 py-6">
           {section === 'general' && (
             <>
               <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">

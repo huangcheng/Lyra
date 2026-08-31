@@ -145,25 +145,29 @@ export function DashboardPage() {
         ]}
       />
       <main className="flex-1 overflow-auto bg-background">
-        <header className="flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border px-8 pb-5 pt-7">
-          <div>
-            <h1 className="font-display text-xl font-medium">{t(locale, 'dash.section')}</h1>
-            <p className="text-[12.5px] text-ter-foreground">{t(locale, 'dash.subtitle')}</p>
-          </div>
-          <div className="flex-1" />
-          {rangeTabs}
-        </header>
-        <DashboardBody
-          loading={loading}
-          error={error}
-          stats={stats}
-          daily={daily}
-          accountStats={accountStats}
-          maxAccountTotal={maxAccountTotal}
-          locale={locale}
-          days={days}
-          dateLocale={dateLocale}
-        />
+        {/* One centered measure for header + content: cards stop stretching
+            into billboards on ultra-wide displays. */}
+        <div className="mx-auto w-full max-w-5xl">
+          <header className="flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border px-8 pb-5 pt-7">
+            <div>
+              <h1 className="font-display text-xl font-medium">{t(locale, 'dash.section')}</h1>
+              <p className="text-[12.5px] text-ter-foreground">{t(locale, 'dash.subtitle')}</p>
+            </div>
+            <div className="flex-1" />
+            {rangeTabs}
+          </header>
+          <DashboardBody
+            loading={loading}
+            error={error}
+            stats={stats}
+            daily={daily}
+            accountStats={accountStats}
+            maxAccountTotal={maxAccountTotal}
+            locale={locale}
+            days={days}
+            dateLocale={dateLocale}
+          />
+        </div>
       </main>
     </div>
   );
