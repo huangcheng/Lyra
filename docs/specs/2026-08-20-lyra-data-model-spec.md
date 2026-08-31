@@ -268,6 +268,7 @@ Every table that contains user data has a `user_id` column (or, for `lyra_user`,
 | `contact` | `account_id` → `mail_account` | PIM cache |
 | `calendar` | `account_id` → `mail_account` | PIM cache |
 | `calendar_event` | `account_id` → `mail_account` | PIM cache |
+| `spam_settings` / `spam_sender` | `user_id` → `lyra_user.id` | Anti-spam preferences and learned sender lists (`0016_anti_spam`); `message.spam_verdict` records each row's one-time judgment |
 | `opengpg_key` | `user_id` → `lyra_user.id`; `account_id` (nullable) → `mail_account.id` | Direct partition key; identity keys additionally bind to one account (`0012_opengpg_key_account`) |
 | `jobs` | `payload` JSON (`user_id` in `SyncAccount` etc.) | Kernel queue; no row-level `user_id` column yet |
 | `schema_migrations` | — | System metadata; no user data |

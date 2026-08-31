@@ -196,7 +196,8 @@
       "strict": "Strict",
       "blocked": "Blocked senders",
       "blockedDesc": "Mail from these addresses always goes to spam.",
-      "addSender": "Add an email address"
+      "addSender": "Add an email address",
+      "noBlocked": "No blocked senders yet. Mark mail as spam to learn, or add an address above."
     },
     "language": "Language",
     "english": "English",

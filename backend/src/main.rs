@@ -39,6 +39,7 @@ mod sanitize;
 mod scheduler;
 mod search;
 mod smtp;
+mod spam;
 mod stats;
 mod storage;
 mod sync;
@@ -152,6 +153,7 @@ fn api_router(auth_state: auth::AuthState) -> Router {
         .merge(sync::routes())
         .merge(stats::routes())
         .merge(privacy::routes())
+        .merge(spam::routes())
         .merge(media::routes())
         .merge(opengpg::routes())
         .merge(oauth::routes())

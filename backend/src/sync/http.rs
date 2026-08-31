@@ -20,11 +20,11 @@ use uuid::Uuid;
 
 use super::queries::{
     AttachmentResponse, FolderResponse, MessageResponse, MessageRow, add_folder_columns,
-    add_message_folder_join, aliased_col, fetch_messages_by_ids, folder_response_from_row,
-    header_needs_refresh, id_value, load_message_row, message_response_from_row,
-    not_deleted_clause, now_value, opt_id_value, opt_json_value, orm_err, owned_text_value,
-    query_first, query_user_messages, row_id, run_message_list, search_like_fallback,
-    snooze_visible_clause, text_value, ts_value,
+    add_message_account_join, add_message_folder_join, aliased_col, fetch_messages_by_ids,
+    folder_response_from_row, header_needs_refresh, id_value, load_message_row,
+    message_response_from_row, not_deleted_clause, now_value, opt_id_value, opt_json_value,
+    orm_err, owned_text_value, query_first, query_user_messages, row_id, row_json_text,
+    run_message_list, search_like_fallback, snooze_visible_clause, text_value, ts_value,
 };
 use super::send::send_message;
 use super::store::{parse_imap_uid, update_folder_counts};
@@ -1354,7 +1354,17 @@ pub(crate) async fn spam_message(
     Path(message_id): Path<String>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<serde_json::Value>, SyncError> {
-    move_message_to_role(state, message_id, user_id, "spam").await
+    let db = state.db();
+    // Snapshot the sender before the move for spam learning.
+    let sender = load_message_row(db, &user_id, &message_id)
+        .await
+        .ok()
+        .and_then(|row| crate::spam::from_json_email(row.from_address.as_deref()));
+    let res = move_message_to_role(state.clone(), message_id, user_id.clone(), "spam").await?;
+    if let Some(from) = sender {
+        crate::spam::learn_sender(db, &user_id, &from, true).await;
+    }
+    Ok(res)
 }
 
 /// POST /api/v1/messages/{id}/snooze — hide locally until `until`, then unsnooze via job.
@@ -1455,7 +1465,7 @@ pub(crate) async fn move_message_to_role(
     let name: String = dest.try_get("", "name").map_err(orm_err)?;
     let dest_name = external_id.clone().unwrap_or(name);
 
-    apply_message_move(&state, &user_id, &row, &dest_id, external_id, dest_name).await?;
+    apply_message_move(db, &user_id, &row, &dest_id, external_id, dest_name, None).await?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -1519,7 +1529,7 @@ pub(crate) async fn move_message(
     let name: String = dest.try_get("", "name").map_err(orm_err)?;
     let dest_name = external_id.clone().unwrap_or(name);
 
-    apply_message_move(&state, &user_id, &row, &dest_id, external_id, dest_name).await?;
+    apply_message_move(db, &user_id, &row, &dest_id, external_id, dest_name, None).await?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -1939,15 +1949,23 @@ pub(crate) async fn message_id_by_server_id(
 /// Server-side move (IMAP UID MOVE / JMAP `mailboxIds` update) plus the local
 /// `folder_id` rewrite and folder count refresh. `dest_external` is the
 /// protocol-level destination id; IMAP tolerates `None` (name fallback).
-async fn apply_message_move(
-    state: &AuthState,
+pub(crate) async fn apply_message_move(
+    db: &DbPool,
     user_id: &str,
     row: &MessageRow,
     dest_id: &str,
     dest_external: Option<String>,
     dest_name: String,
+    dest_role: Option<&str>,
 ) -> Result<(), SyncError> {
-    let db = state.db();
+    // Learn: moving out of the spam folder is the "not spam" signal.
+    if row.folder_role.as_deref() == Some("spam")
+        && dest_role.is_some_and(|r| r != "spam")
+        && !row.is_draft
+        && let Some(from) = crate::spam::from_json_email(row.from_address.as_deref())
+    {
+        let _ = crate::spam::learn_sender(db, user_id, &from, false).await;
+    }
     match row.protocol.as_str() {
         "imap" => {
             let uid = parse_imap_uid(row.external_id.as_deref())?;
@@ -1988,6 +2006,272 @@ async fn apply_message_move(
 
     update_folder_counts(db, &row.folder_id).await?;
     update_folder_counts(db, dest_id).await?;
+    Ok(())
+}
+
+// ── Anti-spam pass ───────────────────────────────────────────────────
+
+/// Post-sync anti-spam pass for one user: judge not-yet-judged inbox
+/// messages under their settings/lists, move flagged ones to the account's
+/// spam folder, and (when auto-delete is on) destroy spam-folder messages
+/// older than 30 days. Cheap no-op unless the feature is configured.
+pub(crate) async fn spam_pass(db: &DbPool, user_id: &str) {
+    if let Err(err) = spam_pass_inner(db, user_id).await {
+        tracing::warn!(user_id, error = %err, "spam pass failed");
+    }
+}
+
+const SPAM_PASS_BATCH: u64 = 100;
+const SPAM_PURGE_DAYS: i64 = 30;
+
+fn spam_db_err(e: crate::spam::SpamStoreError) -> sqlx::Error {
+    match e {
+        crate::spam::SpamStoreError::Database(db) => db,
+        crate::spam::SpamStoreError::InvalidId(m) => sqlx::Error::Protocol(m),
+    }
+}
+
+async fn spam_pass_inner(db: &DbPool, user_id: &str) -> Result<(), SyncError> {
+    let settings = crate::spam::load_settings(db, user_id)
+        .await
+        .map_err(|e| SyncError::Database(spam_db_err(e)))?;
+    if !settings.enabled && !settings.auto_delete {
+        return Ok(());
+    }
+    let senders = crate::spam::list_senders(db, user_id)
+        .await
+        .map_err(|e| SyncError::Database(spam_db_err(e)))?;
+
+    if settings.enabled {
+        judge_inbox_batch(db, user_id, &settings, &senders).await?;
+    }
+    if settings.auto_delete {
+        purge_old_spam(db, user_id).await?;
+    }
+    Ok(())
+}
+
+/// Judge one batch of unjudged inbox messages; spam/blocked verdicts move
+/// to the spam folder. Move failures are logged and skipped — the verdict
+/// stays recorded so one bad server response cannot re-judge forever.
+async fn judge_inbox_batch(
+    db: &DbPool,
+    user_id: &str,
+    settings: &crate::spam::SpamSettings,
+    senders: &[crate::spam::SenderEntry],
+) -> Result<(), SyncError> {
+    let rows = unjudged_rows(db, user_id, "inbox", SPAM_PASS_BATCH).await?;
+    for row in rows {
+        let env = crate::spam::SpamEnvelope {
+            from_email: row.from_email.as_deref(),
+            from_name: None,
+            subject: row.subject.as_deref(),
+        };
+        let Some(verdict) = crate::spam::judge_message(&env, settings, senders) else {
+            continue;
+        };
+        set_spam_verdict(db, &row.id, &verdict).await?;
+        if verdict == "spam" || verdict == "blocked" {
+            match move_row_to_spam(db, user_id, &row.id).await {
+                Ok(()) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        message_id = %row.id,
+                        error = %err,
+                        "spam move failed; verdict recorded"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+struct SpamCandidate {
+    id: String,
+    from_email: Option<String>,
+    subject: Option<String>,
+    date: Option<String>,
+}
+
+/// Read the `date` column dialect-aware (TEXT on SQLite, timestamp on PG).
+fn row_date_text(row: &sea_orm::QueryResult) -> Option<String> {
+    row.try_get::<Option<String>>("", "date")
+        .ok()
+        .flatten()
+        .or_else(|| {
+            row.try_get::<Option<chrono::DateTime<chrono::Utc>>>("", "date")
+                .ok()
+                .flatten()
+                .map(|d| d.to_rfc3339())
+        })
+}
+
+/// Messages in folders with `role` that have no spam verdict yet.
+async fn unjudged_rows(
+    db: &DbPool,
+    user_id: &str,
+    role: &str,
+    limit: u64,
+) -> Result<Vec<SpamCandidate>, SyncError> {
+    let user_value = id_value(db, user_id)?;
+    let mut q = Sq::select();
+    q.expr_as(aliased_col("m", "id"), Alias::new("id"));
+    add_message_account_join(&mut q);
+    add_message_folder_join(&mut q);
+    q.and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)))
+        .and_where(aliased_col("m", "is_deleted").eq(Expr::val(false)))
+        .and_where(aliased_col("m", "spam_verdict").is_null())
+        .and_where(Expr::cust("COALESCE(f.role_override, f.role)").eq(Expr::val(role)))
+        .order_by_expr(Expr::cust("m.date"), Order::Desc)
+        .limit(limit);
+    let rows = db.orm().query_all(&q).await.map_err(orm_err)?;
+    Ok(rows
+        .iter()
+        .map(|row| SpamCandidate {
+            id: row_id(row, "id").map_err(orm_err).unwrap_or_default(),
+            from_email: row_json_text(row, "from_address")
+                .ok()
+                .and_then(|raw| crate::spam::from_json_email(raw.as_deref())),
+            subject: row.try_get("", "subject").ok().flatten(),
+            date: row_date_text(row),
+        })
+        .collect())
+}
+
+async fn set_spam_verdict(db: &DbPool, message_id: &str, verdict: &str) -> Result<(), SyncError> {
+    let mut upd = Sq::update();
+    upd.table(message::Entity)
+        .value(message::Column::SpamVerdict, Expr::val(verdict))
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, message_id)?));
+    db.orm().execute(&upd).await.map_err(orm_err)?;
+    Ok(())
+}
+
+/// Full-row move of one message to its account's spam folder.
+async fn move_row_to_spam(db: &DbPool, user_id: &str, message_id: &str) -> Result<(), SyncError> {
+    let row = load_message_row(db, user_id, message_id).await?;
+    let account_value = id_value(db, &row.account_id)?;
+    let dest = query_first(db, |q| {
+        q.expr_as(Expr::col(folder::Column::Id), Alias::new("id"))
+            .expr_as(
+                Expr::col(folder::Column::ExternalId),
+                Alias::new("external_id"),
+            )
+            .expr_as(Expr::col(folder::Column::Name), Alias::new("name"))
+            .from(folder::Entity)
+            .and_where(Expr::col(folder::Column::AccountId).eq(account_value))
+            .and_where(Expr::cust("COALESCE(role_override, role)").eq(Expr::val("spam")))
+            .order_by_expr(Expr::col(folder::Column::SortOrder), Order::Asc)
+            .limit(1);
+    })
+    .await?
+    .ok_or_else(|| SyncError::InvalidInput("account has no spam folder".into()))?;
+    let dest_id = row_id(&dest, "id").map_err(orm_err)?;
+    let external: Option<String> = dest.try_get("", "external_id").map_err(orm_err)?;
+    let name: String = dest.try_get("", "name").map_err(orm_err)?;
+    apply_message_move(
+        db,
+        user_id,
+        &row,
+        &dest_id,
+        external.clone(),
+        external.unwrap_or(name),
+        Some("spam"),
+    )
+    .await
+}
+
+/// Destroy spam-folder messages older than the purge window, server-side
+/// first, then locally.
+async fn purge_old_spam(db: &DbPool, user_id: &str) -> Result<(), SyncError> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(SPAM_PURGE_DAYS);
+    let rows = spam_folder_rows(db, user_id).await?;
+    for row in rows {
+        let old = row
+            .date
+            .as_deref()
+            .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
+            .is_some_and(|d| d.with_timezone(&chrono::Utc) < cutoff);
+        if !old {
+            continue;
+        }
+        match destroy_row_server_side(db, user_id, &row.id).await {
+            Ok(()) => {}
+            Err(err) => {
+                tracing::warn!(message_id = %row.id, error = %err, "spam purge destroy failed");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Spam-folder rows (any verdict) for the purge scan.
+async fn spam_folder_rows(db: &DbPool, user_id: &str) -> Result<Vec<SpamCandidate>, SyncError> {
+    let user_value = id_value(db, user_id)?;
+    let mut q = Sq::select();
+    q.expr_as(aliased_col("m", "id"), Alias::new("id"));
+    add_message_account_join(&mut q);
+    add_message_folder_join(&mut q);
+    q.and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)))
+        .and_where(aliased_col("m", "is_deleted").eq(Expr::val(false)))
+        .and_where(Expr::cust("COALESCE(f.role_override, f.role)").eq(Expr::val("spam")))
+        .order_by_expr(Expr::cust("m.date"), Order::Asc)
+        .limit(200);
+    let rows = db.orm().query_all(&q).await.map_err(orm_err)?;
+    Ok(rows
+        .iter()
+        .map(|row| SpamCandidate {
+            id: row_id(row, "id").map_err(orm_err).unwrap_or_default(),
+            from_email: None,
+            subject: None,
+            date: row_date_text(row),
+        })
+        .collect())
+}
+
+/// Server-side destroy (IMAP delete/expunge, JMAP Email/destroy) plus the
+/// local soft-delete. Mirrors `discard_draft`'s per-protocol structure.
+async fn destroy_row_server_side(
+    db: &DbPool,
+    user_id: &str,
+    message_id: &str,
+) -> Result<(), SyncError> {
+    let row = load_message_row(db, user_id, message_id).await?;
+    match row.protocol.as_str() {
+        "imap" => {
+            let uid = parse_imap_uid(row.external_id.as_deref())?;
+            let (mut client, _) = connect_imap_for_account(db, user_id, &row.account_id).await?;
+            client.select(&row.folder_name).await?;
+            client.delete_uid(uid).await?;
+        }
+        "jmap" => {
+            let email_id = row
+                .external_id
+                .as_deref()
+                .ok_or_else(|| SyncError::InvalidInput("JMAP message has no server id".into()))?;
+            let seam = connect_jmap_for_account(db, user_id, &row.account_id).await?;
+            if let Err(err) = seam.destroy_email(email_id).await {
+                if err.is_auth() {
+                    crate::sync::jmap_client::JmapSeam::evict(&row.account_id);
+                }
+                return Err(err.into());
+            }
+        }
+        other => {
+            return Err(SyncError::InvalidInput(format!(
+                "unsupported receive protocol: {other}"
+            )));
+        }
+    }
+    let mut upd = Sq::update();
+    upd.table(message::Entity)
+        .value(message::Column::IsDeleted, true)
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
+    db.orm().execute(&upd).await.map_err(orm_err)?;
+    update_folder_counts(db, &row.folder_id).await?;
     Ok(())
 }
 

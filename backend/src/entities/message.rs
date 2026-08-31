@@ -16,6 +16,9 @@ pub struct Model {
     pub thread_id: Option<Uuid>,
     /// JMAP `threadId` (server-opaque string; no FK — `thread.id` is a local UUID).
     pub jmap_thread_id: Option<String>,
+    /// Anti-spam verdict once the post-sync filter judged this row:
+    /// 'spam' | 'clean' | 'blocked' | 'allowed' (NULL = not yet judged).
+    pub spam_verdict: Option<String>,
     pub message_id_header: Option<String>,
     pub subject: Option<String>,
     pub from_address: Option<Json>,

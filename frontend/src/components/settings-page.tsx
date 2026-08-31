@@ -28,6 +28,15 @@ import {
 } from '@/lib/privacy-api';
 import { fetchOAuthProviders, startOAuth } from '@/lib/oauth-api';
 import {
+  addSpamSender,
+  fetchSpamSettings,
+  removeSpamSender,
+  saveSpamSettings,
+  type SpamSettings,
+  type SpamSettingsResponse,
+  type SpamSensitivity,
+} from '@/lib/spam-api';
+import {
   nextAuthTypeOnSecret,
   oauthErrorKey,
   probeFormPatch,
@@ -101,7 +110,6 @@ interface ProbeResult {
 }
 
 const SPAM_SENSITIVITY = ['lenient', 'standard', 'strict'] as const;
-const EXAMPLE_BLOCKED_SENDERS = ['newsletter@example.com', 'promo@example.net'];
 
 export function SettingsPage() {
   const locale = useUIStore((s) => s.locale);
@@ -160,6 +168,9 @@ export function SettingsPage() {
   const [prefsError, setPrefsError] = useState<string | null>(null);
   const [prefsSaving, setPrefsSaving] = useState(false);
   const [privacySettings, setPrivacySettings] = useState<PrivacySettings | null>(null);
+  const [spamSettings, setSpamSettings] = useState<SpamSettingsResponse | null>(null);
+  const [spamSaving, setSpamSaving] = useState(false);
+  const [newBlockedSender, setNewBlockedSender] = useState('');
   const [privacySaving, setPrivacySaving] = useState(false);
   const [privacyError, setPrivacyError] = useState<string | null>(null);
   const [removingAllowSender, setRemovingAllowSender] = useState<string | null>(null);
@@ -219,6 +230,9 @@ export function SettingsPage() {
     void fetchAccounts();
     void fetchPrivacySettings()
       .then(setPrivacySettings)
+      .catch(() => {});
+    void fetchSpamSettings()
+      .then(setSpamSettings)
       .catch(() => {});
     void fetchOAuthProviders()
       .then(({ providers }) => {
@@ -342,6 +356,50 @@ export function SettingsPage() {
     } catch (err: unknown) {
       setOauthError(err instanceof Error ? err.message : String(err));
       setOauthStarting(false);
+    }
+  }
+
+  async function applySpamSettings(patch: Partial<SpamSettings>): Promise<void> {
+    if (!spamSettings) return;
+    const next = {
+      enabled: spamSettings.enabled,
+      learn: spamSettings.learn,
+      autoDelete: spamSettings.autoDelete,
+      sensitivity: spamSettings.sensitivity,
+      ...patch,
+    };
+    setSpamSaving(true);
+    try {
+      setSpamSettings(await saveSpamSettings(next));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSpamSaving(false);
+    }
+  }
+
+  async function handleAddBlockedSender(): Promise<void> {
+    const email = newBlockedSender.trim();
+    if (!email) return;
+    setSpamSaving(true);
+    try {
+      setSpamSettings(await addSpamSender(email, 'blocked'));
+      setNewBlockedSender('');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSpamSaving(false);
+    }
+  }
+
+  async function handleRemoveSender(email: string): Promise<void> {
+    setSpamSaving(true);
+    try {
+      setSpamSettings(await removeSpamSender(email));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSpamSaving(false);
     }
   }
 
@@ -1044,21 +1102,20 @@ export function SettingsPage() {
           )}
 
           {section === 'spam' && (
-            <div className="space-y-4 opacity-60">
+            <div className="space-y-4">
               <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
                 <div className="flex items-center gap-2">
                   <h2 className="text-[13px] font-medium">
                     {t(locale, 'settings.spam.filtering')}
                   </h2>
-                  {soonBadge}
                 </div>
                 {(
                   [
-                    ['enable', 'enableDesc'],
-                    ['learn', 'learnDesc'],
-                    ['autoDelete', 'autoDeleteDesc'],
+                    ['enable', 'enableDesc', 'enabled'],
+                    ['learn', 'learnDesc', 'learn'],
+                    ['autoDelete', 'autoDeleteDesc', 'autoDelete'],
                   ] as const
-                ).map(([key, descKey], i) => (
+                ).map(([key, descKey, field], i) => (
                   <div
                     key={key}
                     className={
@@ -1075,7 +1132,11 @@ export function SettingsPage() {
                         {t(locale, `settings.spam.${descKey}`)}
                       </div>
                     </div>
-                    <Switch disabled />
+                    <Switch
+                      checked={spamSettings ? spamSettings[field] : false}
+                      onCheckedChange={(checked) => void applySpamSettings({ [field]: checked })}
+                      disabled={spamSaving || !spamSettings}
+                    />
                   </div>
                 ))}
               </section>
@@ -1085,7 +1146,6 @@ export function SettingsPage() {
                   <h2 className="text-[13px] font-medium">
                     {t(locale, 'settings.spam.sensitivity')}
                   </h2>
-                  {soonBadge}
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-xs text-ter-foreground">
@@ -1096,11 +1156,14 @@ export function SettingsPage() {
                       <button
                         key={level}
                         type="button"
-                        disabled
+                        disabled={spamSaving || !spamSettings}
                         className={
-                          level === 'standard'
+                          spamSettings?.sensitivity === level
                             ? 'h-7 rounded-md bg-card px-3 text-sm font-medium text-foreground'
                             : 'h-7 rounded-md px-3 text-sm font-medium'
+                        }
+                        onClick={() =>
+                          void applySpamSettings({ sensitivity: level as SpamSensitivity })
                         }
                       >
                         {t(locale, `settings.spam.${level}`)}
@@ -1113,35 +1176,53 @@ export function SettingsPage() {
               <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
                 <div className="flex items-center gap-2">
                   <h2 className="text-[13px] font-medium">{t(locale, 'settings.spam.blocked')}</h2>
-                  {soonBadge}
                 </div>
                 <p className="text-xs text-ter-foreground">
                   {t(locale, 'settings.spam.blockedDesc')}
                 </p>
-                {EXAMPLE_BLOCKED_SENDERS.map((sender) => (
-                  <div
-                    key={sender}
-                    className="flex items-center justify-between gap-3 border-t border-border pt-3"
-                  >
-                    <span className="text-[13px] text-muted-foreground">{sender}</span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled
-                      aria-label={t(locale, 'common.delete')}
+                {(spamSettings?.senders ?? [])
+                  .filter((sender) => sender.list === 'blocked')
+                  .map((sender) => (
+                    <div
+                      key={`${sender.list}:${sender.email}`}
+                      className="flex items-center justify-between gap-3 border-t border-border pt-3"
                     >
-                      <X size={14} />
-                    </Button>
-                  </div>
-                ))}
+                      <span className="text-[13px]">{sender.email}</span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={spamSaving}
+                        aria-label={t(locale, 'common.delete')}
+                        onClick={() => void handleRemoveSender(sender.email)}
+                      >
+                        <X size={14} />
+                      </Button>
+                    </div>
+                  ))}
+                {spamSettings &&
+                  spamSettings.senders.filter((s) => s.list === 'blocked').length === 0 && (
+                    <p className="border-t border-border pt-3 text-xs text-muted-foreground">
+                      {t(locale, 'settings.spam.noBlocked')}
+                    </p>
+                  )}
                 <div className="flex items-center gap-2 border-t border-border pt-3">
                   <input
-                    type="email"
-                    disabled
+                    type="text"
+                    value={newBlockedSender}
+                    onChange={(e) => setNewBlockedSender(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void handleAddBlockedSender();
+                    }}
                     placeholder={t(locale, 'settings.spam.addSender')}
+                    disabled={spamSaving || !spamSettings}
                     className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
                   />
-                  <Button variant="outline" size="sm" disabled>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={spamSaving || !newBlockedSender.trim()}
+                    onClick={() => void handleAddBlockedSender()}
+                  >
                     {t(locale, 'common.add')}
                   </Button>
                 </div>

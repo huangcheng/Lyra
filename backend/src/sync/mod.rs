@@ -122,6 +122,10 @@ pub async fn run_account_sync(
         .await
         .map_err(|e| SyncError::Database(unpack_db_err(e)))?;
 
+    // Anti-spam pass rides along after a successful sync (no-op unless the
+    // user has the feature configured).
+    crate::sync::http::spam_pass(db, user_id).await;
+
     Ok(SyncResponse {
         account_id: account_id.to_string(),
         status: "completed".into(),

@@ -196,7 +196,8 @@
       "strict": "严格",
       "blocked": "黑名单发件人",
       "blockedDesc": "来自这些地址的邮件将始终进入垃圾邮件。",
-      "addSender": "添加邮箱地址"
+      "addSender": "添加邮箱地址",
+      "noBlocked": "暂无屏蔽的发件人。将邮件标记为垃圾邮件即可自动学习，或在上方手动添加。"
     },
     "language": "语言",
     "english": "English",
