@@ -857,12 +857,16 @@ pub fn from_json_email(raw: Option<&str>) -> Option<String> {
         if let Some(e) = o.get("email").and_then(|e| e.as_str()) {
             return Some(e.to_string());
         }
-        // {"raw": "Name <a@b.com>"} — the shape our sync writes.
-        o.get("raw")
-            .and_then(|r| r.as_str())
-            .and_then(|r| r.split('<').nth(1))
-            .and_then(|r| r.split('>').next())
-            .map(str::to_string)
+        // {"raw": "..."} — either "Name <a@b.com>" or a bare "a@b.com"
+        // (the shape every IMAP/JMAP upsert writes for simple senders).
+        o.get("raw").and_then(|r| r.as_str()).and_then(|r| {
+            let angled = r.split('<').nth(1).and_then(|a| a.split('>').next());
+            match angled {
+                Some(a) => Some(a.to_string()),
+                None if r.contains('@') => Some(r.trim().to_string()),
+                None => None,
+            }
+        })
     };
     match &v {
         serde_json::Value::Object(_) => extract(&v).or_else(|| {
@@ -875,5 +879,42 @@ pub fn from_json_email(raw: Option<&str>) -> Option<String> {
         serde_json::Value::Array(a) => a.first().and_then(extract),
         serde_json::Value::String(s) => extract(&serde_json::json!({"raw": s})),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod from_json_email_tests {
+    use super::from_json_email;
+
+    #[test]
+    fn bare_raw_address_is_parsed() {
+        // The exact shape every IMAP/JMAP upsert writes today.
+        assert_eq!(
+            from_json_email(Some(r#"{"raw": "cheng@thundermail.com"}"#)),
+            Some("cheng@thundermail.com".into())
+        );
+    }
+
+    #[test]
+    fn angled_raw_is_parsed() {
+        assert_eq!(
+            from_json_email(Some(r#"{"raw": "Thundermail <no-reply@thundermail.com>"}"#)),
+            Some("no-reply@thundermail.com".into())
+        );
+    }
+
+    #[test]
+    fn email_field_array_and_garbage() {
+        assert_eq!(
+            from_json_email(Some(r#"{"email": "a@b.com"}"#)),
+            Some("a@b.com".into())
+        );
+        assert_eq!(
+            from_json_email(Some(r#"[{"email": "x@y.com"}]"#)),
+            Some("x@y.com".into())
+        );
+        assert_eq!(from_json_email(Some("not json")), None);
+        assert_eq!(from_json_email(Some(r#"{"raw": "no-address"}"#)), None);
+        assert_eq!(from_json_email(None), None);
     }
 }
