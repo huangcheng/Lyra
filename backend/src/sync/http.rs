@@ -1464,8 +1464,18 @@ pub(crate) async fn move_message_to_role(
     let external_id: Option<String> = dest.try_get("", "external_id").map_err(orm_err)?;
     let name: String = dest.try_get("", "name").map_err(orm_err)?;
     let dest_name = external_id.clone().unwrap_or(name);
+    let dest_role: Option<String> = dest.try_get("", "dest_role").ok().flatten();
 
-    apply_message_move(db, &user_id, &row, &dest_id, external_id, dest_name, None).await?;
+    apply_message_move(
+        db,
+        &user_id,
+        &row,
+        &dest_id,
+        external_id,
+        dest_name,
+        dest_role.as_deref(),
+    )
+    .await?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -1504,6 +1514,10 @@ pub(crate) async fn move_message(
                 Alias::new("external_id"),
             )
             .expr_as(Expr::col(folder::Column::Name), Alias::new("name"))
+            .expr_as(
+                Expr::cust("COALESCE(role_override, role)"),
+                Alias::new("dest_role"),
+            )
             .from(folder::Entity)
             .and_where(Expr::col(folder::Column::Id).eq(Expr::val(folder_value)));
     })
