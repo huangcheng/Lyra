@@ -2116,7 +2116,10 @@ async fn unjudged_rows(
 ) -> Result<Vec<SpamCandidate>, SyncError> {
     let user_value = id_value(db, user_id)?;
     let mut q = Sq::select();
-    q.expr_as(aliased_col("m", "id"), Alias::new("id"));
+    q.expr_as(aliased_col("m", "id"), Alias::new("id"))
+        .expr_as(aliased_col("m", "from_address"), Alias::new("from_address"))
+        .expr_as(aliased_col("m", "subject"), Alias::new("subject"))
+        .expr_as(aliased_col("m", "date"), Alias::new("date"));
     add_message_account_join(&mut q);
     add_message_folder_join(&mut q);
     q.and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)))
@@ -2284,6 +2287,38 @@ mod postgres_live {
 
     use crate::pgtest::support;
     use crate::sync::store;
+
+    #[test]
+    #[ignore = "needs postgres"]
+    fn unjudged_rows_project_envelope_columns() {
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_account(&db, &user_id, "judge@example.com").await;
+            let folder_id = support::seed_inbox(&db, &account_id).await;
+            store::upsert_message(
+                &db,
+                &account_id,
+                &folder_id,
+                &support::message(41, "Judge me", "judge@example.com"),
+            )
+            .await
+            .unwrap();
+
+            let rows = super::unjudged_rows(&db, &user_id, "inbox", 10)
+                .await
+                .unwrap();
+            let hit = rows
+                .iter()
+                .find(|r| r.subject.as_deref() == Some("Judge me"))
+                .expect("unjudged inbox row is visible");
+            assert_eq!(
+                hit.from_email.as_deref(),
+                Some("judge@example.com"),
+                "envelope columns must be projected, not just the id"
+            );
+            assert!(hit.date.is_some());
+        });
+    }
 
     fn draft_outbound() -> crate::smtp::OutboundMessage {
         crate::smtp::OutboundMessage {
