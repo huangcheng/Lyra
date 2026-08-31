@@ -446,11 +446,11 @@ export function MailDisplay() {
   const fromLabel = mail ? (mail.from.name ?? mail.from.email) : '';
   const disabled = !mail || busy;
   const toolbarIconClass =
-    'rounded-[7px] text-ter-foreground hover:bg-accent hover:text-foreground disabled:opacity-50';
+    'shrink-0 rounded-[7px] text-ter-foreground hover:bg-accent hover:text-foreground disabled:opacity-50';
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center overflow-x-auto p-2">
+      <div className="flex shrink-0 items-center overflow-x-auto p-2">
         <div className="flex items-center gap-1.5">
           {isMobile ? (
             <Button
@@ -764,9 +764,9 @@ export function MailDisplay() {
         </div>
       ) : null}
       {mail ? (
-        <div className="flex flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 flex-col">
           <div ref={bodyScrollRef} className="min-h-0 flex-1 overflow-auto bg-secondary/60">
-            <div className="mx-auto w-full max-w-[880px] px-3 py-4">
+            <div className="w-full px-4 py-4">
               {visibleConversation.length > 1 ? (
                 <div className="px-1.5 pb-3">
                   <h2 className="font-display text-lg font-medium">
@@ -796,8 +796,8 @@ export function MailDisplay() {
             </div>
           </div>
           <Separator className="mt-auto" />
-          <div className="bg-secondary/60 p-4">
-            <div className="mx-auto w-full max-w-[880px]">
+          <div className="shrink-0 bg-secondary/60 p-4">
+            <div className="w-full">
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
