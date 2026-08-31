@@ -302,6 +302,7 @@
       "oauthReconnected": "Mail account reconnected.",
       "oauthDenied": "Sign-in was cancelled or denied.",
       "oauthError": "Could not complete mail sign-in.",
+      "oauthTokenExchange": "The provider accepted the sign-in but rejected the token exchange. Check the OAuth client secret on this server — use the secret’s Value, not its ID.",
       "oauthEmailRequired": "Enter your mailbox address before signing in with OAuth.",
       "protocol": "Protocol",
       "protocolJmap": "JMAP (recommended)",

@@ -214,7 +214,9 @@ export function SettingsPage() {
       setOauthError(
         detail === 'oauth_denied'
           ? t(locale, 'settings.accounts.oauthDenied')
-          : t(locale, 'settings.accounts.oauthError'),
+          : detail === 'token_exchange'
+            ? t(locale, 'settings.accounts.oauthTokenExchange')
+            : t(locale, 'settings.accounts.oauthError'),
       );
       setSection('accounts');
     }
