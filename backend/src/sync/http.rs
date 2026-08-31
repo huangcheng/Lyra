@@ -1899,8 +1899,13 @@ async fn upsert_jmap_draft_row(
             Expr::val(server_id.to_owned()),
             Expr::val(outbound.message_id.clone().unwrap_or_default()),
             Expr::val(outbound.subject.clone()),
-            Expr::val(serde_json::json!({"email": outbound.from_email}).to_string()),
-            Expr::val(to_json),
+            // JSON columns are jsonb on PostgreSQL: bind dialect-aware
+            // (plain Expr::val(String) is a text expression PG rejects).
+            Expr::val(opt_json_value(
+                db,
+                Some(&serde_json::json!({"email": outbound.from_email}).to_string()),
+            )),
+            Expr::val(opt_json_value(db, Some(&to_json))),
             Expr::val(outbound.body_text.clone().unwrap_or_default()),
             Expr::val(snippet),
             true.into(),
