@@ -44,73 +44,73 @@
 :root {
   --radius: 0.5rem;
   --background: #ffffff;
-  --foreground: #1d1b17;
+  --foreground: #18181b;
   --card: #ffffff;
-  --card-foreground: #1d1b17;
+  --card-foreground: #18181b;
   --popover: #ffffff;
-  --popover-foreground: #1d1b17;
-  --primary: #1d1b17; /* ink — used for text emphasis, not paint */
+  --popover-foreground: #18181b;
+  --primary: #18181b; /* ink — used for text emphasis, not paint */
   --primary-foreground: #ffffff;
-  --secondary: #f7f6f2; /* LIST — warm paper mist */
-  --secondary-foreground: #1d1b17;
-  --muted: #f1efe9; /* PANEL — warm fog */
-  --muted-foreground: #6f6a5f; /* SEC */
-  --accent: #e9e6df; /* HOV */
-  --accent-foreground: #1d1b17;
+  --secondary: #f4f4f5; /* LIST — neutral mist */
+  --secondary-foreground: #18181b;
+  --muted: #f4f4f5; /* PANEL */
+  --muted-foreground: #71717a; /* SEC */
+  --accent: #e9e9ec; /* HOV */
+  --accent-foreground: #18181b;
   --destructive: #b4453c; /* muted red, text/borders only */
   --destructive-foreground: #ffffff;
-  --border: #e5e2da; /* HAIR */
-  --input: #e3e0d8; /* BTNB */
-  --ring: #a39d90; /* TER */
-  --sidebar: #f1efe9;
-  --sidebar-foreground: #1d1b17;
-  --sidebar-primary: #1d1b17;
+  --border: #e4e4e7; /* HAIR */
+  --input: #e0e0e4; /* BTNB */
+  --ring: #a1a1aa; /* TER */
+  --sidebar: #f4f4f5;
+  --sidebar-foreground: #18181b;
+  --sidebar-primary: #18181b;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #e9e6df;
-  --sidebar-accent-foreground: #1d1b17;
-  --sidebar-border: #e5e2da;
-  --sidebar-ring: #a39d90;
+  --sidebar-accent: #e9e9ec;
+  --sidebar-accent-foreground: #18181b;
+  --sidebar-border: #e4e4e7;
+  --sidebar-ring: #a1a1aa;
   /* Lyra v2 extras */
   --unread: #e2a336; /* amber — unread dots, today bar */
   --ok: #3d9a5f; /* green — sync dot, toggles on */
-  --ter-foreground: #a39d90; /* TER */
-  --canvas: #f8f7f4; /* login backdrop */
-  --shadow-whisper: 0 1px 2px rgba(29, 27, 23, 0.04), 0 0 0 1px rgba(229, 226, 218, 0.8);
+  --ter-foreground: #a1a1aa; /* TER */
+  --canvas: #fafafa; /* login backdrop */
+  --shadow-whisper: 0 1px 2px rgba(24, 24, 27, 0.04), 0 0 0 1px rgba(228, 228, 231, 0.8);
 }
 
 .dark {
-  --background: #171614; /* LIST dark = app canvas */
-  --foreground: #edebe5;
-  --card: #21201c; /* READER dark */
-  --card-foreground: #edebe5;
-  --popover: #21201c;
-  --popover-foreground: #edebe5;
-  --primary: #edebe5;
-  --primary-foreground: #1d1b17;
-  --secondary: #1b1a17; /* PANEL dark */
-  --secondary-foreground: #edebe5;
-  --muted: #1b1a17;
-  --muted-foreground: #9d988d;
-  --accent: #282622; /* HOV dark */
-  --accent-foreground: #edebe5;
+  --background: #141416; /* LIST dark = app canvas */
+  --foreground: #f4f4f5;
+  --card: #1d1d21; /* READER dark */
+  --card-foreground: #f4f4f5;
+  --popover: #1d1d21;
+  --popover-foreground: #f4f4f5;
+  --primary: #f4f4f5;
+  --primary-foreground: #18181b;
+  --secondary: #1a1a1e; /* PANEL dark */
+  --secondary-foreground: #f4f4f5;
+  --muted: #1a1a1e;
+  --muted-foreground: #a1a1aa;
+  --accent: #27272c; /* HOV dark */
+  --accent-foreground: #f4f4f5;
   --destructive: #d4756b;
   --destructive-foreground: #1d1b17;
-  --border: #302d28;
-  --input: #383530;
-  --ring: #706b60;
-  --sidebar: #1b1a17;
-  --sidebar-foreground: #edebe5;
-  --sidebar-primary: #edebe5;
-  --sidebar-primary-foreground: #1d1b17;
-  --sidebar-accent: #282622;
-  --sidebar-accent-foreground: #edebe5;
-  --sidebar-border: #302d28;
-  --sidebar-ring: #706b60;
+  --border: #2c2c31;
+  --input: #36363c;
+  --ring: #71717a;
+  --sidebar: #1a1a1e;
+  --sidebar-foreground: #f4f4f5;
+  --sidebar-primary: #f4f4f5;
+  --sidebar-primary-foreground: #18181b;
+  --sidebar-accent: #27272c;
+  --sidebar-accent-foreground: #f4f4f5;
+  --sidebar-border: #2c2c31;
+  --sidebar-ring: #71717a;
   --unread: #e2a336;
   --ok: #3d9a5f;
-  --ter-foreground: #706b60;
-  --canvas: #12110f;
-  --shadow-whisper: 0 1px 2px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(48, 45, 40, 0.8);
+  --ter-foreground: #71717a;
+  --canvas: #101012;
+  --shadow-whisper: 0 1px 2px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(44, 44, 49, 0.8);
 }
 
 @layer utilities {
@@ -187,14 +187,14 @@
    of letting app dark tokens bleed into third-party markup. */
 .dark .mail-body {
   background: #ffffff;
-  color: #1d1b17;
+  color: #18181b;
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 16px;
 }
 
 .dark .mail-body a {
-  color: #1d1b17;
+  color: #18181b;
 }
 
 .mail-body blockquote {
