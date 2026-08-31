@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sea_orm::sea_query::Query;
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{ColumnTrait, ConnectionTrait};
 use tokio::sync::Mutex;
 
 use crate::entities::{jobs, mail_account};
@@ -198,15 +198,22 @@ pub async fn pending_or_running_sync_job_id(
     db: &DbPool,
     account_id: &str,
 ) -> Result<Option<String>, sqlx::Error> {
-    let rows = jobs::Entity::find()
-        .filter(jobs::Column::Kind.eq("sync_account"))
-        .filter(jobs::Column::Status.is_in(["pending", "running"]))
-        .all(&db.orm())
-        .await
-        .map_err(orm_err)?;
+    // Column-select with text decoding: the jobs table keeps TEXT timestamp
+    // columns on Postgres (0004), which the typed entity cannot decode there.
+    let mut stmt = sea_orm::sea_query::Query::select();
+    stmt.columns([jobs::Column::Id, jobs::Column::Payload])
+        .from(jobs::Entity)
+        .and_where(jobs::Column::Kind.eq("sync_account"))
+        .and_where(jobs::Column::Status.is_in(["pending", "running"]))
+        .order_by(jobs::Column::RunAt, sea_orm::sea_query::Order::Asc)
+        .order_by(jobs::Column::CreatedAt, sea_orm::sea_query::Order::Asc);
+    let rows = db.orm().query_all(&stmt).await.map_err(orm_err)?;
 
-    for job in rows {
-        let Ok(payload) = serde_json::from_str::<JobPayload>(&job.payload) else {
+    for row in rows {
+        let Ok(payload_json) = row.try_get::<String>("", "payload") else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<JobPayload>(&payload_json) else {
             continue;
         };
         if let JobPayload::SyncAccount {
@@ -214,7 +221,8 @@ pub async fn pending_or_running_sync_job_id(
         } = payload
             && aid == account_id
         {
-            return Ok(Some(job.id));
+            let id = row.try_get::<String>("", "id").map_err(orm_err)?;
+            return Ok(Some(id));
         }
     }
     Ok(None)
@@ -235,17 +243,25 @@ async fn latest_terminal_sync(
     db: &DbPool,
     account_id: &str,
 ) -> Result<Option<(String, String)>, sqlx::Error> {
-    let rows = jobs::Entity::find()
-        .filter(jobs::Column::Kind.eq("sync_account"))
-        .filter(jobs::Column::Status.is_in(["completed", "failed"]))
-        .order_by_desc(jobs::Column::UpdatedAt)
-        .order_by_desc(jobs::Column::CreatedAt)
-        .all(&db.orm())
-        .await
-        .map_err(orm_err)?;
+    // Column-select with text decoding (see pending_or_running_sync_job_id).
+    let mut stmt = sea_orm::sea_query::Query::select();
+    stmt.columns([
+        jobs::Column::Id,
+        jobs::Column::Payload,
+        jobs::Column::Status,
+    ])
+    .from(jobs::Entity)
+    .and_where(jobs::Column::Kind.eq("sync_account"))
+    .and_where(jobs::Column::Status.is_in(["completed", "failed"]))
+    .order_by(jobs::Column::UpdatedAt, sea_orm::sea_query::Order::Desc)
+    .order_by(jobs::Column::CreatedAt, sea_orm::sea_query::Order::Desc);
+    let rows = db.orm().query_all(&stmt).await.map_err(orm_err)?;
 
-    for job in rows {
-        let Ok(payload) = serde_json::from_str::<JobPayload>(&job.payload) else {
+    for row in rows {
+        let Ok(payload_json) = row.try_get::<String>("", "payload") else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<JobPayload>(&payload_json) else {
             continue;
         };
         if let JobPayload::SyncAccount {
@@ -253,7 +269,9 @@ async fn latest_terminal_sync(
         } = payload
             && aid == account_id
         {
-            return Ok(Some((job.id, job.status)));
+            let id = row.try_get::<String>("", "id").map_err(orm_err)?;
+            let status = row.try_get::<String>("", "status").map_err(orm_err)?;
+            return Ok(Some((id, status)));
         }
     }
     Ok(None)

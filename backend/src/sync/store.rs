@@ -1222,6 +1222,7 @@ async fn find_message_id_in_tx(
 
 /// One message row ready for the shared envelope insert.
 struct MessageInsert<'a> {
+    id_bind: Value,
     account_bind: Value,
     folder_bind: Value,
     external_id: &'a str,
@@ -1275,7 +1276,7 @@ fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStatement {
             message::Column::JmapThreadId,
         ])
         .values_panic(vec![
-            Expr::val(new_uuid_text()),
+            Expr::val(m.id_bind),
             Expr::val(m.account_bind),
             Expr::val(m.folder_bind),
             Expr::val(m.external_id),
@@ -1407,6 +1408,7 @@ pub(crate) async fn upsert_message_in_tx(
     let insert = apply_fill_in_on_conflict(message_insert(
         db,
         MessageInsert {
+            id_bind: id_value(db, &new_uuid_text())?,
             account_bind: id_value(db, account_id)?,
             folder_bind: id_value(db, folder_id)?,
             external_id: &external_id,
@@ -1507,6 +1509,7 @@ pub(crate) async fn upsert_jmap_message_in_tx(
         let insert = message_insert(
             db,
             MessageInsert {
+                id_bind: id_value(db, &new_uuid_text())?,
                 account_bind: id_value(db, account_id)?,
                 folder_bind: id_value(db, folder_id)?,
                 external_id,
@@ -1561,7 +1564,7 @@ pub(crate) async fn save_cursor_in_tx(
             sync_cursor::Column::UpdatedAt,
         ])
         .values_panic([
-            Expr::val(new_uuid_text()),
+            Expr::val(id_value(db, &new_uuid_text())?),
             Expr::val(id_value(db, account_id)?),
             Expr::val(id_value(db, folder_id)?),
             Expr::val(protocol),
@@ -1617,7 +1620,7 @@ async fn save_state_cursor_in_tx(
             sync_cursor::Column::UpdatedAt,
         ])
         .values_panic([
-            Expr::val(new_uuid_text()),
+            Expr::val(id_value(db, &new_uuid_text())?),
             Expr::val(id_value(db, account_id)?),
             Expr::val(id_value(db, folder_id)?),
             Expr::val("jmap"),
