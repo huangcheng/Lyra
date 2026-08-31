@@ -1427,10 +1427,7 @@ pub(crate) async fn move_message_to_role(
             .expr_as(Expr::col(folder::Column::Name), Alias::new("name"))
             .from(folder::Entity)
             .and_where(Expr::col(folder::Column::AccountId).eq(account_value))
-            .and_where(Expr::cust_with_values(
-                "COALESCE(role_override, role) = ?",
-                [role],
-            ))
+            .and_where(Expr::cust("COALESCE(role_override, role)").eq(Expr::val(role)))
             .order_by_expr(Expr::col(folder::Column::SortOrder), Order::Asc)
             .limit(1);
     })
@@ -1581,10 +1578,7 @@ async fn drafts_folder(
             .expr_as(Expr::col(folder::Column::Name), Alias::new("name"))
             .from(folder::Entity)
             .and_where(Expr::col(folder::Column::AccountId).eq(account_value))
-            .and_where(Expr::cust_with_values(
-                "COALESCE(role_override, role) = ?",
-                ["drafts"],
-            ))
+            .and_where(Expr::cust("COALESCE(role_override, role)").eq(Expr::val("drafts")))
             .order_by_expr(Expr::col(folder::Column::SortOrder), Order::Asc)
             .limit(1);
     })

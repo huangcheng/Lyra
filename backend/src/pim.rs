@@ -383,18 +383,28 @@ async fn list_contacts(
     if let Some(account_id) = &query.account_id {
         stmt.and_where(contact::Column::AccountId.eq(id_value(db, account_id)?));
     } else if let Some(search) = &query.q {
+        use sea_orm::sea_query::extension::postgres::PgExpr as _;
         // Postgres needs a JSONB text cast for the address search; SQLite's
-        // LIKE is already ASCII case-insensitive like ILIKE. Conditions are
-        // typed (`.eq`), not raw `?` placeholders — Postgres needs `$N`.
+        // LIKE is already ASCII case-insensitive like ILIKE. Match operators
+        // are typed (`.like`/`.ilike`), not raw `?` placeholders — Postgres
+        // prepared statements require `$N`.
         let (op, email_col) = match db.backend() {
             sea_orm::DbBackend::Postgres => ("ILIKE", "email_addresses::text"),
             _ => ("LIKE", "email_addresses"),
         };
         let pattern = format!("%{search}%");
+        let like = |field: String, pat: String| {
+            let f = Expr::cust(field);
+            if op == "ILIKE" {
+                f.ilike(pat)
+            } else {
+                f.like(pat)
+            }
+        };
         stmt.cond_where(
             Condition::any()
-                .add(Expr::cust(format!("display_name {op}")).eq(Expr::val(pattern.clone())))
-                .add(Expr::cust(format!("{email_col} {op}")).eq(Expr::val(pattern))),
+                .add(like("display_name".to_owned(), pattern.clone()))
+                .add(like(email_col.to_owned(), pattern)),
         );
     }
 

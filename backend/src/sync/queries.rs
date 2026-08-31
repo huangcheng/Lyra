@@ -220,8 +220,6 @@ pub(super) fn add_message_folder_join(query: &mut SelectStatement) {
 }
 
 /// Soft-deleted filter, bound through the entity-shaped column name.
-const NOT_DELETED_SQL: &str = "m.is_deleted = ?";
-
 /// Backend-correct `alias.column` reference for equality/range conditions.
 ///
 /// Raw `?` placeholders via `Expr::cust_with_values` are SQLite-only:
@@ -232,7 +230,7 @@ pub(super) fn aliased_col(alias: &str, column: &str) -> Expr {
 }
 
 pub(super) fn not_deleted_clause() -> Expr {
-    Expr::cust_with_values(NOT_DELETED_SQL, [false])
+    aliased_col("m", "is_deleted").eq(Expr::val(false))
 }
 
 /// Snooze visibility kept explicitly dialect-branched: SQLite compares
@@ -426,10 +424,7 @@ pub(crate) async fn query_user_messages(
             .and_where(not_deleted_clause())
             .and_where(snooze_visible_clause(db));
         if let Some(role) = role {
-            q.and_where(Expr::cust_with_values(
-                "COALESCE(f.role_override, f.role) = ?",
-                [role],
-            ));
+            q.and_where(Expr::cust("COALESCE(f.role_override, f.role)").eq(Expr::val(role)));
         }
         if let Some(account_value) = account_value {
             q.and_where(aliased_col("m", "account_id").eq(Expr::val(account_value)));
@@ -454,32 +449,17 @@ pub(super) async fn search_like_fallback(
     folder_id: Option<&str>,
     limit: i64,
 ) -> Result<Vec<MessageResponse>, SyncError> {
-    const LIKE_SQLITE: [&str; 4] = [
-        "COALESCE(m.subject, '') LIKE ?",
-        "COALESCE(m.snippet, '') LIKE ?",
-        "COALESCE(m.body_text, '') LIKE ?",
-        "COALESCE(m.from_address, '') LIKE ?",
-    ];
-    #[cfg(feature = "postgres")]
-    const LIKE_POSTGRES: [&str; 4] = [
-        "COALESCE(m.subject, '') ILIKE ?",
-        "COALESCE(m.snippet, '') ILIKE ?",
-        "COALESCE(m.body_text, '') ILIKE ?",
-        "COALESCE(m.from_address, '') ILIKE ?",
-    ];
-
-    let templates: &[&str] = match db {
-        DbPool::Sqlite(_) => &LIKE_SQLITE,
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => &LIKE_POSTGRES,
-    };
+    let use_ilike = matches!(db, DbPool::Postgres(_));
+    let columns = ["m.subject", "m.snippet", "m.body_text", "m.from_address"];
 
     let folder_value = opt_id_value(db, folder_id)?;
     let pattern = format!("%{q}%");
 
     let mut any = Condition::any();
-    for template in templates {
-        any = any.add(Expr::cust_with_values(*template, [pattern.clone()]));
+    for col in columns {
+        let op = if use_ilike { "ILIKE" } else { "LIKE" };
+        any =
+            any.add(Expr::cust(format!("COALESCE({col}, '') {op}")).eq(Expr::val(pattern.clone())));
     }
 
     run_message_list(db, |sel| {
@@ -516,10 +496,7 @@ pub(super) async fn fetch_messages_by_ids(
             add_message_account_join(q);
             add_message_folder_join(q);
             q.and_where(aliased_col("m", "id").eq(Expr::val(msg_value.clone())))
-                .and_where(Expr::cust_with_values(
-                    "a.user_id = ?",
-                    [user_value.clone()],
-                ))
+                .and_where(aliased_col("a", "user_id").eq(Expr::val(user_value.clone())))
                 .and_where(not_deleted_clause());
         })
         .await?;
@@ -716,14 +693,20 @@ mod tests {
         let pg = q.to_string(PostgresQueryBuilder);
         // sea-query 1.x folds typed values to backend-safe literals (or
         // numbered params); either way a bare `?` must never reach Postgres.
-        assert!(!pg.contains('?'), "raw ? is invalid postgres syntax: {pg}");
         assert!(
-            pg.contains("= '00000000-"),
+            !pg.as_str().contains('?'),
+            "raw ? is invalid postgres syntax: {pg}"
+        );
+        assert!(
+            pg.as_str().contains("= '00000000-"),
             "value must be bound or folded: {pg}"
         );
-        assert!(pg.contains("= FALSE"), "bool folded: {pg}");
+        assert!(pg.as_str().contains("= FALSE"), "bool folded: {pg}");
 
         let sqlite = q.to_string(SqliteQueryBuilder);
-        assert!(!sqlite.contains("= ?") || sqlite.matches('?').count() <= pg.matches('?').count());
+        assert!(
+            !sqlite.as_str().contains("= ?")
+                || sqlite.as_str().matches('?').count() <= pg.as_str().matches('?').count()
+        );
     }
 }

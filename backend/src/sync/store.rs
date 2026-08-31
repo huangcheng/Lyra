@@ -827,10 +827,7 @@ pub(crate) async fn folder_id_for_role(
     sel.column(folder::Column::Id)
         .from(folder::Entity)
         .and_where(folder::Column::AccountId.eq(id_value(db, account_id)?))
-        .and_where(Expr::cust_with_values(
-            "COALESCE(role_override, role) = ?",
-            [role],
-        ))
+        .and_where(Expr::cust("COALESCE(role_override, role)").eq(Expr::val(role)))
         .order_by_expr(
             Expr::col(folder::Column::SortOrder),
             sea_orm::sea_query::Order::Asc,

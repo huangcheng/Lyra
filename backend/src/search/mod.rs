@@ -252,11 +252,11 @@ async fn postgres_search_message_ids(
                ts_rank(m.search_vector, plainto_tsquery('simple', $1)) AS rank
         FROM message m
         JOIN mail_account a ON m.account_id = a.id
-        WHERE a.user_id = $2
+        WHERE a.user_id = $2::uuid
           AND m.is_deleted = FALSE
           AND m.search_vector @@ plainto_tsquery('simple', $1)
-          AND ($3 IS NULL OR m.account_id = $4)
-          AND ($5 IS NULL OR m.folder_id = $6)
+          AND ($3 IS NULL OR m.account_id = $4::uuid)
+          AND ($5 IS NULL OR m.folder_id = $6::uuid)
         ORDER BY rank DESC
         LIMIT $7
         ",
