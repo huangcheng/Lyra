@@ -1985,3 +1985,78 @@ async fn apply_message_move(
     update_folder_counts(db, dest_id).await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+mod postgres_live {
+    //! Draft-row roundtrips: `upsert_jmap_draft_row` binds JSON columns —
+    //! a plain `Expr::val(String)` is a text expression that PostgreSQL
+    //! rejects against jsonb columns.
+
+    use crate::pgtest::support;
+    use crate::sync::store;
+
+    fn draft_outbound() -> crate::smtp::OutboundMessage {
+        crate::smtp::OutboundMessage {
+            from_email: "sender@example.com".into(),
+            from_name: None,
+            to: vec![(Some("Rcpt".into()), "rcpt@example.com".into())],
+            cc: vec![],
+            bcc: vec![],
+            subject: "[pg live] draft".into(),
+            body_text: Some("draft body".into()),
+            body_html: None,
+            message_id: Some("<draft-pglive@example.com>".into()),
+            in_reply_to: None,
+            references: None,
+            attachments: vec![],
+            mime_content_type: None,
+            mime_body: None,
+        }
+    }
+
+    #[test]
+    #[ignore = "needs postgres"]
+    fn jmap_draft_row_upsert_roundtrip() {
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_jmap_account(&db, &user_id, "drafts@example.com").await;
+            let folder_id = support::seed_inbox(&db, &account_id).await;
+
+            let first = super::upsert_jmap_draft_row(
+                &db,
+                &account_id,
+                &folder_id,
+                "server-draft-1",
+                &draft_outbound(),
+            )
+            .await
+            .expect("draft row insert survives jsonb typing");
+            let second = super::upsert_jmap_draft_row(
+                &db,
+                &account_id,
+                &folder_id,
+                "server-draft-1",
+                &draft_outbound(),
+            )
+            .await
+            .expect("second upsert updates, not duplicates");
+            assert_eq!(first, second, "same server id maps to the same local row");
+
+            let crate::storage::DbPool::Postgres(pool) = &db else {
+                panic!()
+            };
+            let (count, subject): (i64, String) = sqlx::query_as(
+                "SELECT COUNT(*), MIN(subject) FROM message \
+                 WHERE account_id = $1::uuid AND external_id = 'server-draft-1'",
+            )
+            .bind(&account_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            assert_eq!(count, 1);
+            assert_eq!(subject, "[pg live] draft");
+            let _ = store::upsert_message; // module touch (keeps imports honest)
+        });
+    }
+}
