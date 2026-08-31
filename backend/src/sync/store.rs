@@ -946,7 +946,10 @@ pub(crate) async fn persist_imap_folder_batch(
 /// Text-cast projection of a message column — address columns are JSONB on
 /// PostgreSQL and cannot feed text operators (`LIKE`, `=`) directly.
 fn as_text_col(col: message::Column) -> Expr {
-    Expr::col(col).cast_as(Alias::new("text"))
+    // Table-qualified so the expression also embeds cleanly in
+    // `ON CONFLICT DO UPDATE` bodies, where bare refs are ambiguous on
+    // PostgreSQL.
+    Expr::col((message::Entity, col)).cast_as(Alias::new("text"))
 }
 
 /// IMAP UIDs of up to `limit` messages in a folder whose stored subject,
@@ -1191,9 +1194,12 @@ pub(crate) fn parse_imap_uid(external_id: Option<&str>) -> Result<u32, SyncError
         .map_err(|_| SyncError::InvalidInput("message has no IMAP UID".into()))
 }
 
-/// Local row within `ON CONFLICT … DO UPDATE SET` (unqualified column ref).
+/// Local row within `ON CONFLICT … DO UPDATE SET`. Column refs there MUST be
+/// table-qualified on PostgreSQL — a bare `"col"` is ambiguous against
+/// `excluded."col"` — while SQLite resolves the qualified form to the current
+/// row just as well.
 fn cur_row_col(col: message::Column) -> Expr {
-    Expr::col(col)
+    Expr::col((message::Entity, col))
 }
 
 /// Incoming candidate row within `DO UPDATE SET` (`excluded."col"`).
@@ -1209,7 +1215,7 @@ fn excluded_col(col: message::Column) -> Expr {
 /// where `jsonb LIKE text` and `jsonb = text` have no operator. `CAST(x AS
 /// text)` is a no-op for the TEXT columns and for every SQLite type.
 fn stale_text(col: message::Column) -> Expr {
-    let cast = || Expr::col(col).cast_as(Alias::new("text"));
+    let cast = || as_text_col(col);
     cast()
         .is_null()
         .or(cast().eq(""))
@@ -1763,21 +1769,23 @@ mod jsonb_text_cast_tests {
 
     /// Address columns are JSONB on PostgreSQL; a bare `LIKE`/`=` against them
     /// is a prepare-time `operator does not exist: jsonb ~~ text` failure.
+    /// Inside `ON CONFLICT DO UPDATE`, current-row refs must additionally be
+    /// table-qualified or Postgres rejects them as ambiguous vs `excluded`.
     #[test]
-    fn stale_text_casts_to_text_for_postgres() {
+    fn stale_text_casts_and_qualifies_for_postgres() {
         for col in [
             message::Column::FromAddress,
             message::Column::ToAddresses,
             message::Column::CcAddresses,
         ] {
             let sql = where_sql(stale_text(col));
-            let name = format!("\"{}\"", col.to_string().to_lowercase());
+            let name = col.to_string().to_lowercase();
             assert!(
-                sql.contains(&format!(r"CAST({name} AS text) LIKE")),
-                "missing text cast for {name}: {sql}"
+                sql.contains(&format!(r#"CAST("message"."{name}" AS text) LIKE"#)),
+                "missing qualified text cast for {name}: {sql}"
             );
             assert!(
-                !sql.contains(&format!(r"{name} LIKE")),
+                !sql.contains(&format!(r#""{name}" LIKE"#)),
                 "bare jsonb LIKE survived for {name}: {sql}"
             );
         }
@@ -1790,11 +1798,11 @@ mod jsonb_text_cast_tests {
             .or(as_text_col(message::Column::ToAddresses).like("%\u{FFFD}%"));
         let sql = where_sql(cond);
         assert!(
-            sql.contains(r#"CAST("from_address" AS text) LIKE"#),
+            sql.contains(r#"CAST("message"."from_address" AS text) LIKE"#),
             "{sql}"
         );
         assert!(
-            sql.contains(r#"CAST("to_addresses" AS text) LIKE"#),
+            sql.contains(r#"CAST("message"."to_addresses" AS text) LIKE"#),
             "{sql}"
         );
     }
