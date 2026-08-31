@@ -1873,39 +1873,47 @@ mod postgres_live {
     use crate::imap::ImapMessage;
     use crate::storage::{DbPool, Storage};
 
-    /// One pool + one migration pass shared by every test in this module:
-    /// libtest runs them in parallel, and concurrent migrations race on
-    /// catalog objects (`pg_type_typname_nsp_index` duplicates).
-    async fn pg() -> DbPool {
-        static PG: tokio::sync::OnceCell<DbPool> = tokio::sync::OnceCell::const_new();
+    /// One pool + one migration pass + one shared user for the whole module:
+    /// libtest runs tests in parallel (concurrent migrations race on catalog
+    /// objects), and `lyra_user` is a singleton table, so every test must
+    /// reuse the same user row and only per-test accounts/folders.
+    async fn pg() -> (DbPool, String) {
+        static PG: tokio::sync::OnceCell<(DbPool, String)> = tokio::sync::OnceCell::const_new();
         PG.get_or_init(|| async {
             let url = std::env::var("LYRA_TEST_DATABASE_URL")
                 .expect("LYRA_TEST_DATABASE_URL=postgres://…");
             let storage = Storage::new(&url).await.expect("connect postgres");
             storage.run_migrations().await.expect("run migrations");
-            storage.pool().clone()
+            let DbPool::Postgres(pool) = storage.pool().clone() else {
+                panic!("expected postgres pool");
+            };
+            // Idempotent across runs against a non-ephemeral test database.
+            sqlx::query(
+                "INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) \
+                 VALUES ($1::uuid, 'pg-live', 'hash', '[]') ON CONFLICT DO NOTHING",
+            )
+            .bind(new_uuid_text())
+            .execute(&pool)
+            .await
+            .unwrap();
+            let user_id: String = sqlx::query_scalar("SELECT id::text FROM lyra_user LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            (storage.pool().clone(), user_id)
         })
         .await
         .clone()
     }
 
-    /// `(account_id, folder_id)` for a fresh IMAP account with an INBOX.
-    async fn seed_account_with_inbox(db: &DbPool) -> (String, String) {
-        let user_id = new_uuid_text();
+    /// `(account_id, folder_id)` for a fresh IMAP account with an INBOX,
+    /// under the shared singleton user.
+    async fn seed_account_with_inbox(db: &DbPool, user_id: &str) -> (String, String) {
         let account_id = new_uuid_text();
         let DbPool::Postgres(pool) = db else {
             panic!("expected postgres pool");
         };
         // Ids are UUID columns; sqlx binds strings as text, so cast.
-        sqlx::query(
-            "INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) \
-             VALUES ($1::uuid, $2, 'hash', '[]')",
-        )
-        .bind(&user_id)
-        .bind(format!("pg-live-{user_id}"))
-        .execute(pool)
-        .await
-        .unwrap();
         sqlx::query(
             "INSERT INTO mail_account (\
                  id, user_id, display_name, email_address, protocol, auth_type, credential, \
@@ -1914,7 +1922,7 @@ mod postgres_live {
                        'password', '{}', 'imap.example.com', 993, 'tls', true, true)",
         )
         .bind(&account_id)
-        .bind(&user_id)
+        .bind(user_id)
         .execute(pool)
         .await
         .unwrap();
@@ -1952,8 +1960,8 @@ mod postgres_live {
     #[tokio::test]
     #[ignore = "needs postgres"]
     async fn upsert_fill_in_roundtrip() {
-        let db = pg().await;
-        let (account_id, folder_id) = seed_account_with_inbox(&db).await;
+        let (db, user_id) = pg().await;
+        let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
         let msg = message(42, "Subject A", "sender@example.com");
 
         assert!(
@@ -1992,8 +2000,8 @@ mod postgres_live {
     #[tokio::test]
     #[ignore = "needs postgres"]
     async fn mojibake_scan_finds_address_mojibake() {
-        let db = pg().await;
-        let (account_id, folder_id) = seed_account_with_inbox(&db).await;
+        let (db, user_id) = pg().await;
+        let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
         upsert_message(
             &db,
             &account_id,
@@ -2020,8 +2028,8 @@ mod postgres_live {
     #[tokio::test]
     #[ignore = "needs postgres"]
     async fn deletion_reconcile_soft_deletes_vanished_uids() {
-        let db = pg().await;
-        let (account_id, folder_id) = seed_account_with_inbox(&db).await;
+        let (db, user_id) = pg().await;
+        let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
         upsert_message(
             &db,
             &account_id,
