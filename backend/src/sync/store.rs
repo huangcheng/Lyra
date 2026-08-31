@@ -943,6 +943,12 @@ pub(crate) async fn persist_imap_folder_batch(
     Ok((new, updated))
 }
 
+/// Text-cast projection of a message column — address columns are JSONB on
+/// PostgreSQL and cannot feed text operators (`LIKE`, `=`) directly.
+fn as_text_col(col: message::Column) -> Expr {
+    Expr::col(col).cast_as(Alias::new("text"))
+}
+
 /// IMAP UIDs of up to `limit` messages in a folder whose stored subject,
 /// snippet, addresses, or body still carries U+FFFD mojibake — rows synced
 /// before full legacy-charset decoding (mail-parser `full_encoding`) was
@@ -957,13 +963,13 @@ pub(crate) async fn mojibake_message_uids(
         .from(message::Entity)
         .and_where(message::Column::FolderId.eq(id_value(db, folder_id)?))
         .and_where(
-            message::Column::Subject
+            as_text_col(message::Column::Subject)
                 .like("%\u{FFFD}%")
-                .or(message::Column::Snippet.like("%\u{FFFD}%"))
-                .or(message::Column::FromAddress.like("%\u{FFFD}%"))
-                .or(message::Column::ToAddresses.like("%\u{FFFD}%"))
-                .or(message::Column::BodyText.like("%\u{FFFD}%"))
-                .or(message::Column::BodyHtml.like("%\u{FFFD}%")),
+                .or(as_text_col(message::Column::Snippet).like("%\u{FFFD}%"))
+                .or(as_text_col(message::Column::FromAddress).like("%\u{FFFD}%"))
+                .or(as_text_col(message::Column::ToAddresses).like("%\u{FFFD}%"))
+                .or(as_text_col(message::Column::BodyText).like("%\u{FFFD}%"))
+                .or(as_text_col(message::Column::BodyHtml).like("%\u{FFFD}%")),
         )
         .limit(limit);
     let rows = db.orm().query_all(&sel).await.map_err(orm_err)?;
@@ -1198,11 +1204,17 @@ fn excluded_col(col: message::Column) -> Expr {
 /// Refresh-only-if-stale guard used for subject/snippet fill-in: replace the
 /// stored text when it is NULL, empty, still RFC-2047-encoded, or carries
 /// U+FFFD mojibake baked in before full legacy-charset decoding landed.
+///
+/// The column is compared as text: address columns are JSONB on PostgreSQL,
+/// where `jsonb LIKE text` and `jsonb = text` have no operator. `CAST(x AS
+/// text)` is a no-op for the TEXT columns and for every SQLite type.
 fn stale_text(col: message::Column) -> Expr {
-    col.is_null()
-        .or(col.eq(""))
-        .or(col.like("%=?%?=%"))
-        .or(col.like("%\u{FFFD}%"))
+    let cast = || Expr::col(col).cast_as(Alias::new("text"));
+    cast()
+        .is_null()
+        .or(cast().eq(""))
+        .or(cast().like("%=?%?=%"))
+        .or(cast().like("%\u{FFFD}%"))
 }
 
 /// Existing-message id lookup by `(account_id, external_id)` inside the txn.
@@ -1735,9 +1747,62 @@ mod effective_role_tests {
 }
 
 #[cfg(test)]
+mod jsonb_text_cast_tests {
+    use super::{as_text_col, stale_text};
+    use crate::entities::message;
+    use sea_orm::sea_query::Query as Sq;
+    use sea_orm::{ExprTrait, Iden};
+
+    fn where_sql(expr: sea_orm::sea_query::Expr) -> String {
+        let mut sel = Sq::select();
+        sel.column(message::Column::Id)
+            .from(message::Entity)
+            .and_where(expr);
+        sel.build(super::PostgresQueryBuilder).0
+    }
+
+    /// Address columns are JSONB on PostgreSQL; a bare `LIKE`/`=` against them
+    /// is a prepare-time `operator does not exist: jsonb ~~ text` failure.
+    #[test]
+    fn stale_text_casts_to_text_for_postgres() {
+        for col in [
+            message::Column::FromAddress,
+            message::Column::ToAddresses,
+            message::Column::CcAddresses,
+        ] {
+            let sql = where_sql(stale_text(col));
+            let name = format!("\"{}\"", col.to_string().to_lowercase());
+            assert!(
+                sql.contains(&format!(r"CAST({name} AS text) LIKE")),
+                "missing text cast for {name}: {sql}"
+            );
+            assert!(
+                !sql.contains(&format!(r"{name} LIKE")),
+                "bare jsonb LIKE survived for {name}: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn mojibake_scan_casts_address_columns() {
+        let cond = as_text_col(message::Column::FromAddress)
+            .like("%\u{FFFD}%")
+            .or(as_text_col(message::Column::ToAddresses).like("%\u{FFFD}%"));
+        let sql = where_sql(cond);
+        assert!(
+            sql.contains(r#"CAST("from_address" AS text) LIKE"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"CAST("to_addresses" AS text) LIKE"#),
+            "{sql}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod stale_imap_row_tests {
     use super::stale_imap_row_ids;
-
     fn rows(entries: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
         entries
             .iter()
