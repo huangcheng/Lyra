@@ -5,6 +5,7 @@
 use crate::kernel::events::EventBus;
 use crate::kernel::plugin::Plugin;
 use crate::protocol::{ReceiveHandle, SendHandle};
+use crate::sync::SyncError;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -113,7 +114,7 @@ mod tests {
                 delete_on_fetch: false,
             }
         }
-        async fn sync_account(&self, ctx: &SyncCtx) -> Result<SyncOutcome, String> {
+        async fn sync_account(&self, ctx: &SyncCtx) -> Result<SyncOutcome, SyncError> {
             assert_eq!(ctx.account_id, "acc-1");
             Ok(SyncOutcome {
                 folders_synced: 1,

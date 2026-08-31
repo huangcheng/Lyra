@@ -6,6 +6,7 @@ use async_trait::async_trait;
 
 use crate::kernel::{App, Plugin};
 use crate::protocol::{ReceivePlugin, SyncCtx, SyncOutcome};
+use crate::sync::SyncError;
 
 pub struct ImapReceivePlugin;
 
@@ -29,11 +30,9 @@ impl ReceivePlugin for ImapReceivePlugin {
         "imap"
     }
 
-    async fn sync_account(&self, ctx: &SyncCtx) -> Result<SyncOutcome, String> {
-        let db = super::storage()?;
-        crate::sync::imap_sync_account(&db, &ctx.user_id, &ctx.account_id)
-            .await
-            .map_err(|e| e.to_string())
+    async fn sync_account(&self, ctx: &SyncCtx) -> Result<SyncOutcome, SyncError> {
+        let db = super::storage().map_err(SyncError::Protocol)?;
+        crate::sync::imap_sync_account(&db, &ctx.user_id, &ctx.account_id).await
     }
 
     fn capabilities(&self) -> crate::protocol::ReceiveCaps {

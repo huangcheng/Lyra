@@ -103,8 +103,7 @@ pub async fn run_account_sync(
             account_id: account_id.to_string(),
             user_id: user_id.to_string(),
         })
-        .await
-        .map_err(SyncError::Protocol)?;
+        .await?;
 
     let stmt = Query::update()
         .table(account_entity::Entity)

@@ -590,8 +590,8 @@ mod tests {
             "imap"
         }
 
-        async fn sync_account(&self, _ctx: &SyncCtx) -> Result<SyncOutcome, String> {
-            Err("auth failed password=hunter2".into())
+        async fn sync_account(&self, _ctx: &SyncCtx) -> Result<SyncOutcome, SyncError> {
+            Err(SyncError::Protocol("auth failed password=hunter2".into()))
         }
     }
 

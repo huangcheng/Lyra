@@ -65,6 +65,8 @@ interface MailAccount {
   imapHost?: string;
   imapPort?: number;
   imapSecurity?: string;
+  authType?: string | null;
+  jmapBaseUrl?: string | null;
   smtpHost?: string;
   smtpPort?: number;
   smtpSecurity?: string;
@@ -462,6 +464,8 @@ export function SettingsPage() {
       }
       if (editingAccount) {
         body.signature = formData.signature || null;
+        body.authType = isJmap ? formData.authType : undefined;
+        body.jmapBaseUrl = isJmap && formData.jmapBaseUrl ? formData.jmapBaseUrl : null;
       }
       await api(url, {
         method,
@@ -538,14 +542,14 @@ export function SettingsPage() {
       emailAddress: account.emailAddress,
       password: '',
       protocol: account.protocol,
-      authType: 'password',
-      jmapBaseUrl: '',
       imapHost: account.imapHost || '',
       imapPort: account.imapPort || 993,
       // Legacy 'none' values (removed insecure mode) coerce to 'tls' so the
       // select never shows a blank value and saving doesn't 400.
       imapSecurity:
         !account.imapSecurity || account.imapSecurity === 'none' ? 'tls' : account.imapSecurity,
+      authType: account.authType === 'bearer' ? 'bearer' : 'password',
+      jmapBaseUrl: account.jmapBaseUrl || '',
       smtpHost: account.smtpHost || '',
       smtpPort: account.smtpPort || 587,
       smtpSecurity:
@@ -1466,7 +1470,7 @@ export function SettingsPage() {
                   </div>
                 )}
 
-                {!preferMailOAuth && formData.protocol === 'jmap' && !editingAccount && (
+                {!preferMailOAuth && formData.protocol === 'jmap' && (
                   <Field>
                     <FieldLabel>{t(locale, 'settings.accounts.authMethod')}</FieldLabel>
                     <div className="flex gap-0.5 rounded-lg bg-accent p-0.5">
@@ -1525,7 +1529,7 @@ export function SettingsPage() {
                   </Field>
                 )}
 
-                {!preferMailOAuth && formData.protocol === 'jmap' && !editingAccount && (
+                {!preferMailOAuth && formData.protocol === 'jmap' && (
                   <Field>
                     <FieldLabel htmlFor="settings-jmap-url">
                       {t(locale, 'settings.accounts.jmapServerUrl')}

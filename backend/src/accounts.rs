@@ -60,6 +60,9 @@ pub struct Account {
     pub caldav_url: Option<String>,
     /// Compose signature (plain text or simple HTML), prepended on reply/forward.
     pub signature: Option<String>,
+    /// `password` (HTTP Basic) or `bearer` (API token).
+    pub auth_type: Option<String>,
+    pub jmap_base_url: Option<String>,
     pub is_active: bool,
     pub sync_enabled: bool,
     pub last_sync_at: Option<String>,
@@ -103,6 +106,10 @@ pub struct UpdateAccountRequest {
     pub carddav_url: Option<String>,
     pub caldav_url: Option<String>,
     pub signature: Option<String>,
+    /// `password` (HTTP Basic) or `bearer` (API token) — repairable after
+    /// creation so a mis-defaulted account need not be deleted.
+    pub auth_type: Option<String>,
+    pub jmap_base_url: Option<String>,
     pub is_active: Option<bool>,
     pub sync_enabled: Option<bool>,
 }
@@ -254,6 +261,8 @@ fn add_account_columns(query: &mut SelectStatement) {
         mail_account::Column::CarddavUrl,
         mail_account::Column::CaldavUrl,
         mail_account::Column::Signature,
+        mail_account::Column::AuthType,
+        mail_account::Column::JmapBaseUrl,
         mail_account::Column::IsActive,
         mail_account::Column::SyncEnabled,
         mail_account::Column::LastSyncAt,
@@ -279,6 +288,8 @@ fn account_from_row(row: &QueryResult) -> Result<Account, AccountError> {
         smtp_security: row.try_get("", "smtp_security").map_err(orm_err)?,
         carddav_url: row.try_get("", "carddav_url").map_err(orm_err)?,
         signature: row.try_get("", "signature").map_err(orm_err)?,
+        auth_type: row.try_get("", "auth_type").map_err(orm_err)?,
+        jmap_base_url: row.try_get("", "jmap_base_url").map_err(orm_err)?,
         caldav_url: row.try_get("", "caldav_url").map_err(orm_err)?,
         is_active: row.try_get("", "is_active").map_err(orm_err)?,
         sync_enabled: row.try_get("", "sync_enabled").map_err(orm_err)?,
@@ -474,6 +485,8 @@ async fn create_account(
             carddav_url: None,
             caldav_url: None,
             signature: None,
+            auth_type: Some(auth_type),
+            jmap_base_url: jmap_base_url.clone(),
             is_active: true,
             sync_enabled: true,
             last_sync_at: None,
@@ -543,6 +556,8 @@ async fn update_account(
         || body.carddav_url.is_some()
         || body.caldav_url.is_some()
         || body.signature.is_some()
+        || body.auth_type.is_some()
+        || body.jmap_base_url.is_some()
         || body.smtp_host.is_some()
         || body.smtp_port.is_some()
         || body.smtp_security.is_some();
@@ -596,6 +611,26 @@ async fn update_account(
     }
     if let Some(v) = &body.signature {
         updater = updater.col_expr(mail_account::Column::Signature, Expr::val(v.as_str()));
+    }
+    if let Some(v) = &body.auth_type {
+        let normalized = match v.as_str() {
+            "bearer" => "bearer",
+            _ => "password",
+        };
+        updater = updater.col_expr(mail_account::Column::AuthType, Expr::val(normalized));
+    }
+    if let Some(v) = &body.jmap_base_url {
+        if !v.trim().is_empty() {
+            crate::netsec::validate_server_url(v).map_err(AccountError::InvalidInput)?;
+        }
+        updater = updater.col_expr(
+            mail_account::Column::JmapBaseUrl,
+            if v.trim().is_empty() {
+                Expr::val(Option::<String>::None)
+            } else {
+                Expr::val(v.trim_end_matches('/').to_owned())
+            },
+        );
     }
     if let Some(v) = &body.smtp_host {
         updater = updater.col_expr(mail_account::Column::SmtpHost, Expr::val(v.as_str()));

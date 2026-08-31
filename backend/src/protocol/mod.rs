@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::struct_excessive_bools)]
 
+use crate::sync::SyncError;
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -35,7 +36,7 @@ pub trait ReceivePlugin: Send + Sync {
             ..ReceiveCaps::default()
         }
     }
-    async fn sync_account(&self, ctx: &SyncCtx) -> Result<SyncOutcome, String>;
+    async fn sync_account(&self, ctx: &SyncCtx) -> Result<SyncOutcome, SyncError>;
 }
 
 pub type ReceiveHandle = Arc<dyn ReceivePlugin>;
