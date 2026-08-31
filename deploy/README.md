@@ -26,8 +26,49 @@ Data persists in the `lyra-data` volume (`/data` in the container → SQLite by 
 ### SQLite vs PostgreSQL
 
 - **SQLite (default):** simplest single-box install. `DATABASE_URL=sqlite:/data/lyra.db`
-- **PostgreSQL:** uncomment the `postgres` service in `docker-compose.yml` and set
-  `DATABASE_URL=postgres://lyra:lyra@postgres:5432/lyra` on the `lyra` service.
+- **PostgreSQL:** recommended for production instances. Add to `.env`:
+
+  ```bash
+  PW=$(openssl rand -hex 24)
+  printf 'POSTGRES_PASSWORD=%s\nDATABASE_URL=postgres://lyra:%s@postgres:5432/lyra\n' "$PW" "$PW" >> .env
+  ```
+
+  Then drop a `docker-compose.override.yml` next to the compose file (server-local,
+  not committed — keeps the checkout clean for `git pull`):
+
+  ```yaml
+  services:
+    postgres:
+      image: postgres:16-alpine
+      environment:
+        POSTGRES_USER: lyra
+        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+        POSTGRES_DB: lyra
+      volumes:
+        - lyra-pg:/var/lib/postgresql/data
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U lyra -d lyra"]
+        interval: 5s
+        timeout: 3s
+        retries: 10
+      restart: unless-stopped
+
+    lyra:
+      environment:
+        DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      depends_on:
+        postgres:
+          condition: service_healthy
+
+  volumes:
+    lyra-pg:
+  ```
+
+  `docker compose up -d` starts Postgres, waits for readiness, and Lyra runs
+  the Postgres migrations on boot. Switching from an existing SQLite install
+  starts a **fresh database** (re-create the user, re-add mail accounts); the
+  SQLite volume is untouched — removing the override and resetting
+  `DATABASE_URL` rolls back to it.
 
 The same migrations run on both backends.
 
