@@ -31,6 +31,10 @@ tags:
     description: Privacy and OpenGPG preferences
   - name: oauth
     description: Microsoft mail OAuth (Outlook)
+  - name: pim
+    description: CardDAV contacts and CalDAV calendars
+  - name: media
+    description: Remote-image proxy (anti-tracking)
   - name: stats
     description: Read-only message analytics
 
@@ -779,6 +783,253 @@ paths:
         "200":
           description: Updated folder
 
+  /api/v1/folders/{folder_id}/messages:
+    get:
+      tags: [messages]
+      summary: List messages in a folder (newest first, cap 500)
+      parameters:
+        - name: folder_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Message list
+        "404":
+          description: Folder not found or not owned by user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/contacts:
+    get:
+      tags: [pim]
+      summary: List contacts (CardDAV-synced address book)
+      parameters:
+        - name: accountId
+          in: query
+          description: Only contacts from this mail account
+          schema:
+            type: string
+        - name: q
+          in: query
+          description: Substring match on display name or email addresses
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Contact list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Contact"
+
+  /api/v1/contacts/{id}:
+    get:
+      tags: [pim]
+      summary: Get a contact
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Contact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/accounts/{account_id}/contacts/sync:
+    get:
+      tags: [pim]
+      summary: Sync contacts for an account via CardDAV
+      description: Requires `carddavUrl` on the account; otherwise returns `skipped`.
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Sync result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, skipped]
+                  synced:
+                    type: integer
+        "404":
+          description: Account not found or not accessible
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/calendars:
+    get:
+      tags: [pim]
+      summary: List calendars (CalDAV-synced)
+      parameters:
+        - name: accountId
+          in: query
+          description: Only calendars from this mail account
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Calendar list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Calendar"
+
+  /api/v1/calendars/{id}:
+    get:
+      tags: [pim]
+      summary: Get a calendar
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Calendar
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Calendar"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/calendars/{id}/events:
+    get:
+      tags: [pim]
+      summary: List events of a calendar (ordered by start)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: start
+          in: query
+          description: Only events starting at or after this timestamp
+          schema:
+            type: string
+        - name: end
+          in: query
+          description: Only events ending at or before this timestamp
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Event list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CalendarEvent"
+        "404":
+          description: Calendar not found or not owned by user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/events/{id}:
+    get:
+      tags: [pim]
+      summary: Get a calendar event
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Event
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarEvent"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/accounts/{account_id}/calendars/sync:
+    get:
+      tags: [pim]
+      summary: Sync calendars for an account via CalDAV
+      description: Requires `caldavUrl` on the account; otherwise returns `skipped`.
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Sync result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, skipped]
+                  synced:
+                    type: integer
+                  calendarId:
+                    type: string
+        "404":
+          description: Account not found or not accessible
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   /api/v1/opengpg/keys:
     get:
       tags: [opengpg]
@@ -931,6 +1182,33 @@ paths:
         "200":
           description: Armored key material
 
+  /api/v1/opengpg/recipient-keys:
+    get:
+      tags: [opengpg]
+      summary: Resolve public keys for outbound encryption
+      parameters:
+        - name: emails
+          in: query
+          required: true
+          description: Comma-separated recipient emails
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Per-recipient key lookup result
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RecipientKeyLookup"
+        "400":
+          description: Missing or empty emails parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   /api/v1/opengpg/unlock:
     post:
       tags: [opengpg]
@@ -1033,6 +1311,47 @@ paths:
       responses:
         "200":
           description: Updated allowlist
+
+  /api/v1/proxy/{*target}:
+    get:
+      tags: [media]
+      summary: Remote-image proxy (anti-tracking)
+      description: |
+        Fetches a remote image referenced by a sanitized email body. No bearer
+        token — `<img>` tags cannot send one — so access is gated by an
+        HMAC signature minted per message render (`uid`, `exp`, `sig`).
+        Unsigned or expired requests get a 1×1 placeholder GIF, not an error.
+      security: []
+      parameters:
+        - name: target
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Base64url-encoded absolute http(s) image URL
+        - name: uid
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: exp
+          in: query
+          required: true
+          schema:
+            type: integer
+        - name: sig
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Image bytes (cache headers set when served from disk cache)
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
 
   /api/v1/oauth/providers:
     get:
@@ -1355,6 +1674,122 @@ components:
           nullable: true
           type: string
           description: CID of inline parts, for `src="cid:…"` resolution
+
+    Contact:
+      type: object
+      properties:
+        id:
+          type: string
+        accountId:
+          type: string
+        displayName:
+          nullable: true
+          type: string
+        emailAddresses:
+          type: array
+          items:
+            type: string
+        phoneNumbers:
+          type: array
+          items:
+            type: string
+        organisation:
+          nullable: true
+          type: string
+        photoPath:
+          nullable: true
+          type: string
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    Calendar:
+      type: object
+      properties:
+        id:
+          type: string
+        accountId:
+          type: string
+        name:
+          type: string
+        color:
+          nullable: true
+          type: string
+        description:
+          nullable: true
+          type: string
+        timezone:
+          nullable: true
+          type: string
+        isActive:
+          type: boolean
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    CalendarEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        calendarId:
+          nullable: true
+          type: string
+        summary:
+          nullable: true
+          type: string
+        description:
+          nullable: true
+          type: string
+        dtstart:
+          nullable: true
+          type: string
+        dtend:
+          nullable: true
+          type: string
+        location:
+          nullable: true
+          type: string
+        isAllDay:
+          type: boolean
+        status:
+          nullable: true
+          type: string
+        recurrenceRule:
+          nullable: true
+          type: string
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    RecipientKeyLookup:
+      type: object
+      properties:
+        email:
+          type: string
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipientKeyMatch"
+        ambiguous:
+          type: boolean
+          description: True when multiple candidate keys exist and none is primary
+        selectedKeyId:
+          nullable: true
+          type: string
+
+    RecipientKeyMatch:
+      type: object
+      properties:
+        id:
+          type: string
+        fingerprint:
+          type: string
+        primaryEmail:
+          type: string
 
 security:
   - bearerAuth: []

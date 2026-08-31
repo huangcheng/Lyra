@@ -7,8 +7,6 @@
 //!
 //! See `docs/specs/2026-08-20-lyra-data-model-spec.md` for the schema.
 
-use axum::{Json, Router, extract::State, routing::get};
-use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Sqlite};
 use std::path::PathBuf;
@@ -533,48 +531,6 @@ fn collect_migration_files(dir: &PathBuf, direction: &str) -> anyhow::Result<Vec
     }
 
     Ok(migrations)
-}
-
-/// Create the shared application state from environment configuration.
-#[allow(dead_code)]
-pub async fn create_app_state() -> anyhow::Result<AppState> {
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        tracing::warn!("DATABASE_URL not set; defaulting to sqlite:./data/lyra.db");
-        "sqlite:./data/lyra.db".to_string()
-    });
-
-    let storage = Storage::new(&database_url).await?;
-    storage.run_migrations().await?;
-
-    Ok(AppState {
-        db: storage.pool().clone(),
-    })
-}
-
-// ── Axum routes ──────────────────────────────────────────────────────
-
-use crate::auth::AuthState;
-
-/// Routes for storage-related endpoints.
-#[allow(dead_code)]
-pub fn routes() -> Router<AuthState> {
-    Router::new().route("/api/v1/storage/status", get(storage_status))
-}
-
-#[derive(Serialize)]
-#[allow(dead_code)]
-pub struct StorageStatus {
-    pub engine: String,
-    pub ready: bool,
-}
-
-/// Reports storage readiness and engine type.
-#[allow(dead_code)]
-async fn storage_status(State(state): State<AuthState>) -> Json<StorageStatus> {
-    Json(StorageStatus {
-        engine: state.db.engine_name().to_string(),
-        ready: true,
-    })
 }
 
 /// Create a test application state with in-memory `SQLite`.
