@@ -12,6 +12,7 @@ import { t } from '../i18n';
 import { SlimPageNav, type SlimNavItem } from '@/components/slim-page-nav';
 import { FolderRoleMapping } from './folder-role-mapping';
 import { EncryptionSettings } from './encryption-settings';
+import { NotificationSettings } from './notification-settings';
 import { TotpEnroll } from './totp-enroll';
 import { useUIStore } from '../stores/ui';
 import { useAuthStore } from '../stores/auth';
@@ -730,6 +731,8 @@ export function SettingsPage() {
                 </div>
                 {prefsError ? <div className="text-sm text-destructive">{prefsError}</div> : null}
               </section>
+
+              <NotificationSettings />
 
               <section className="space-y-4 rounded-[10px] border border-border bg-card px-5 py-4">
                 <h2 className="text-[13px] font-medium">{t(locale, 'settings.security.title')}</h2>

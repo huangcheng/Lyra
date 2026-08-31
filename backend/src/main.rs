@@ -43,6 +43,7 @@ mod sync;
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::Request,
     http::{HeaderValue, StatusCode, header},
     middleware,
@@ -115,7 +116,8 @@ async fn main() -> anyhow::Result<()> {
     let frontend_dir = std::env::var("FRONTEND_DIR").unwrap_or_else(|_| "frontend/dist".into());
     let app = if PathBuf::from(&frontend_dir).is_dir() {
         let index = PathBuf::from(&frontend_dir).join("index.html");
-        api.fallback_service(ServeDir::new(&frontend_dir).not_found_service(ServeFile::new(index)))
+        api.merge(pwa_routes(&frontend_dir))
+            .fallback_service(ServeDir::new(&frontend_dir).not_found_service(ServeFile::new(index)))
     } else {
         tracing::warn!("FRONTEND_DIR {frontend_dir} missing; API-only mode");
         api
@@ -160,6 +162,43 @@ async fn health() -> StatusCode {
     StatusCode::OK
 }
 
+/// PWA assets served with explicit content types and no-cache so browsers
+/// pick up manifest changes immediately and service-worker updates are not
+/// wedged behind a cached copy (`ServeDir` would serve `.webmanifest` with a
+/// guessed MIME type and default caching).
+async fn serve_pwa_file(
+    path: std::path::PathBuf,
+    content_type: &'static str,
+) -> Result<Response, StatusCode> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let mut res = Response::new(Body::from(bytes));
+            res.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+            res.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            Ok(res)
+        }
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+fn pwa_routes(frontend_dir: &str) -> Router {
+    let manifest = std::path::PathBuf::from(frontend_dir).join("manifest.webmanifest");
+    let sw = std::path::PathBuf::from(frontend_dir).join("sw.js");
+    Router::new()
+        .route(
+            "/manifest.webmanifest",
+            axum::routing::get(move || {
+                serve_pwa_file(manifest.clone(), "application/manifest+json")
+            }),
+        )
+        .route(
+            "/sw.js",
+            axum::routing::get(move || serve_pwa_file(sw.clone(), "text/javascript")),
+        )
+}
+
 async fn version() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -174,6 +213,63 @@ mod tests {
     use storage::DbPool;
     use tower::ServiceExt as _;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn pwa_assets_serve_explicit_content_type_and_no_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("manifest.webmanifest"), b"{}").unwrap();
+        std::fs::write(dir.path().join("sw.js"), b"// sw").unwrap();
+        let app = pwa_routes(&dir.path().to_string_lossy());
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/manifest.webmanifest")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()[header::CONTENT_TYPE],
+            "application/manifest+json"
+        );
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "no-cache");
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/sw.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "text/javascript");
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "no-cache");
+    }
+
+    #[tokio::test]
+    async fn pwa_assets_missing_file_is_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = pwa_routes(&dir.path().to_string_lossy());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/manifest.webmanifest")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
 
     async fn response_json(res: axum::response::Response) -> (StatusCode, serde_json::Value) {
         let status = res.status();

@@ -392,6 +392,21 @@
       "importTargetLabel": "导入目标",
       "importNoAccount": "不绑定账户（联系人密钥）",
       "generateAccountLabel": "账户"
+    },
+    "notifications": {
+      "title": "通知",
+      "hint": "新邮件到达时发送系统通知。",
+      "test": "发送测试通知",
+      "denied": "浏览器已阻止此网站的通知。请先在浏览器设置中允许 Lyra，再重新开启。",
+      "unsupported": "此浏览器不支持网页通知。",
+      "runningNote": "通知需要 Lyra 处于运行状态（标签页或已安装应用）；应用关闭后的推送将在后续版本提供。"
+    },
+    "install": {
+      "title": "安装 Lyra",
+      "hint": "安装为独立应用，获得全屏、可从启动器打开的体验。",
+      "button": "安装应用",
+      "iosHint": "在 iPhone/iPad 上：点按 Safari 的分享按钮，选择“添加到主屏幕”。",
+      "installed": "已安装"
     }
   },
   "contacts": {

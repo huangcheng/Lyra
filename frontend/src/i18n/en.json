@@ -392,6 +392,21 @@
       "importTargetLabel": "Import into",
       "importNoAccount": "No account (contact key)",
       "generateAccountLabel": "Account"
+    },
+    "notifications": {
+      "title": "Notifications",
+      "hint": "Show a system notification when new mail arrives.",
+      "test": "Send test notification",
+      "denied": "Notifications are blocked for this site in your browser settings. Unblock Lyra there, then toggle again.",
+      "unsupported": "This browser does not support web notifications.",
+      "runningNote": "Delivery needs Lyra to be running (open tab or installed app); push for closed apps comes later."
+    },
+    "install": {
+      "title": "Install Lyra",
+      "hint": "Install as a standalone app for a fullscreen, dock/launcher experience.",
+      "button": "Install app",
+      "iosHint": "On iPhone/iPad: tap the Share button in Safari, then choose “Add to Home Screen”.",
+      "installed": "Installed"
     }
   },
   "contacts": {

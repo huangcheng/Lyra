@@ -20,6 +20,7 @@ import { CalendarPage } from './components/calendar-page';
 import { DashboardPage } from './components/dashboard-page';
 import { useAuthStore } from './stores/auth';
 import { useSyncEventSource } from './lib/use-sync-event-source';
+import { useMailNotifications } from '@/lib/use-mail-notifications';
 
 // ── Routes ─────────────────────────────────────────────────────
 
@@ -29,6 +30,7 @@ const rootRoute = createRootRoute({
 
 function RootLayout() {
   useSyncEventSource();
+  useMailNotifications();
   return (
     <div className="app-root">
       <Outlet />
