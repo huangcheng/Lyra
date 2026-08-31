@@ -1113,18 +1113,29 @@ impl JmapSeam {
 
     /// `$seen`/`$flagged` keyword patch as raw JSON: `true` sets, `null`
     /// removes (RFC 8620 §5.3 — `false` is rejected by Fastmail).
-    fn keyword_patch(is_read: Option<bool>, is_starred: Option<bool>) -> serde_json::Map<String, serde_json::Value> {
+    fn keyword_patch(
+        is_read: Option<bool>,
+        is_starred: Option<bool>,
+    ) -> serde_json::Map<String, serde_json::Value> {
         let mut update = serde_json::Map::new();
         if let Some(read) = is_read {
             update.insert(
                 "keywords/$seen".into(),
-                if read { serde_json::json!(true) } else { serde_json::Value::Null },
+                if read {
+                    serde_json::json!(true)
+                } else {
+                    serde_json::Value::Null
+                },
             );
         }
         if let Some(star) = is_starred {
             update.insert(
                 "keywords/$flagged".into(),
-                if star { serde_json::json!(true) } else { serde_json::Value::Null },
+                if star {
+                    serde_json::json!(true)
+                } else {
+                    serde_json::Value::Null
+                },
             );
         }
         update
@@ -1249,7 +1260,10 @@ impl JmapSeam {
         // Same trimmed-`using` reasoning as set_email_mailboxes.
         let mut request = self.build_request();
         request.set_email().destroy([email_id]);
-        request.send_single::<EmailSetResponse>().await?.destroyed(email_id)?;
+        request
+            .send_single::<EmailSetResponse>()
+            .await?
+            .destroyed(email_id)?;
         Ok(())
     }
 }
