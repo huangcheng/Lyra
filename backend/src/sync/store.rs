@@ -1849,3 +1849,205 @@ mod stale_imap_row_tests {
         assert_eq!(stale_imap_row_ids(&local, &server), vec!["a".to_string()]);
     }
 }
+
+/// Live-PostgreSQL roundtrips for the IMAP sync seam.
+///
+/// Every dialect bug that ever reached production (`jsonb ~~ text`,
+/// ambiguous `ON CONFLICT` refs, UUID-id decodes) lived in this module and
+/// passed the SQLite suite, because SQLite's loose typing forgives all of
+/// them. These tests run the real seam functions against a migrated
+/// PostgreSQL so the SQLite suite can never green-light a statement
+/// PostgreSQL refuses to prepare.
+///
+/// Set `LYRA_TEST_DATABASE_URL=postgres://…` and run
+/// `cargo test --features postgres -- --ignored sync::store::postgres_live`.
+/// Each test seeds rows under fresh UUIDs; the throwaway test database is
+/// expected to be ephemeral (CI service container).
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+mod postgres_live {
+    use super::{
+        get_folder_id, mojibake_message_uids, new_uuid_text, reconcile_folder_deletions,
+        upsert_folder, upsert_message,
+    };
+    use crate::imap::ImapMessage;
+    use crate::storage::{DbPool, Storage};
+
+    async fn pg() -> DbPool {
+        let url =
+            std::env::var("LYRA_TEST_DATABASE_URL").expect("LYRA_TEST_DATABASE_URL=postgres://…");
+        let storage = Storage::new(&url).await.expect("connect postgres");
+        storage.run_migrations().await.expect("run migrations");
+        storage.pool().clone()
+    }
+
+    /// `(account_id, folder_id)` for a fresh IMAP account with an INBOX.
+    async fn seed_account_with_inbox(db: &DbPool) -> (String, String) {
+        let user_id = new_uuid_text();
+        let account_id = new_uuid_text();
+        let DbPool::Postgres(pool) = db else {
+            panic!("expected postgres pool");
+        };
+        sqlx::query(
+            "INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) \
+             VALUES ($1, $2, 'hash', '[]')",
+        )
+        .bind(&user_id)
+        .bind(format!("pg-live-{user_id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mail_account (\
+                 id, user_id, display_name, email_address, protocol, auth_type, credential, \
+                 imap_host, imap_port, imap_security, is_active, sync_enabled\
+             ) VALUES ($1, $2, 'PG Live', 'pg-live@example.com', 'imap', 'password', '{}', \
+                       'imap.example.com', 993, 'tls', true, true)",
+        )
+        .bind(&account_id)
+        .bind(&user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        upsert_folder(db, &account_id, "INBOX", None, &[])
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(db, &account_id, "INBOX").await.unwrap();
+        (account_id, folder_id)
+    }
+
+    fn message(uid: u32, subject: &str, from: &str) -> ImapMessage {
+        ImapMessage {
+            uid,
+            message_id: Some(format!("<{uid}@pg-live.example.com>")),
+            subject: Some(subject.into()),
+            from: Some(from.into()),
+            to: Some("to@example.com".into()),
+            cc: None,
+            date: None,
+            in_reply_to: None,
+            references: None,
+            flags: vec!["\\Seen".into()],
+            size: Some(1024),
+            body: None,
+            body_text: None,
+            body_html: None,
+            has_attachments: false,
+            attachments: vec![],
+        }
+    }
+
+    /// The ON CONFLICT fill-in path: insert, then re-upsert the same
+    /// external_id. Exercises the jsonb text-casts and table-qualified
+    /// current-row refs that SQLite accepts unqualified.
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn upsert_fill_in_roundtrip() {
+        let db = pg().await;
+        let (account_id, folder_id) = seed_account_with_inbox(&db).await;
+        let msg = message(42, "Subject A", "sender@example.com");
+
+        assert!(
+            upsert_message(&db, &account_id, &folder_id, &msg)
+                .await
+                .unwrap()
+        );
+
+        let mut again = msg.clone();
+        again.flags = vec!["\\Seen".into(), "\\Flagged".into()];
+        assert!(
+            !upsert_message(&db, &account_id, &folder_id, &again)
+                .await
+                .unwrap()
+        );
+
+        let DbPool::Postgres(pool) = &db else {
+            panic!()
+        };
+        let (count, is_starred, subject): (i64, bool, String) = sqlx::query_as(
+            "SELECT COUNT(*), bool_or(is_starred), MIN(subject) \
+             FROM message WHERE account_id = $1 AND external_id = $2",
+        )
+        .bind(&account_id)
+        .bind(super::imap_message_external_id(&folder_id, 42))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "upsert must not duplicate the row");
+        assert!(is_starred, "re-upsert refreshes flags");
+        assert_eq!(subject, "Subject A", "non-stale subject is not clobbered");
+    }
+
+    /// The mojibake self-heal scan: a U+FFFD inside the JSONB from_address
+    /// must still be found (`jsonb LIKE text` has no operator on Postgres).
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn mojibake_scan_finds_address_mojibake() {
+        let db = pg().await;
+        let (account_id, folder_id) = seed_account_with_inbox(&db).await;
+        upsert_message(
+            &db,
+            &account_id,
+            &folder_id,
+            &message(7, "Clean", "S\u{FFFD}nder@example.com"),
+        )
+        .await
+        .unwrap();
+        upsert_message(
+            &db,
+            &account_id,
+            &folder_id,
+            &message(8, "Also clean", "ok@example.com"),
+        )
+        .await
+        .unwrap();
+
+        let uids = mojibake_message_uids(&db, &folder_id, 10).await.unwrap();
+        assert_eq!(uids, vec![7], "only the mojibake row is flagged");
+    }
+
+    /// Deletion reconcile: reading UUID ids as text, then soft-deleting
+    /// vanished UIDs.
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn deletion_reconcile_soft_deletes_vanished_uids() {
+        let db = pg().await;
+        let (account_id, folder_id) = seed_account_with_inbox(&db).await;
+        upsert_message(
+            &db,
+            &account_id,
+            &folder_id,
+            &message(1, "Keep", "a@example.com"),
+        )
+        .await
+        .unwrap();
+        upsert_message(
+            &db,
+            &account_id,
+            &folder_id,
+            &message(2, "Vanish", "b@example.com"),
+        )
+        .await
+        .unwrap();
+
+        let server_uids: std::collections::HashSet<u32> = [1u32].into_iter().collect();
+        let deleted = reconcile_folder_deletions(&db, &account_id, &folder_id, &server_uids)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        let DbPool::Postgres(pool) = &db else {
+            panic!()
+        };
+        let soft_deleted: Vec<bool> = sqlx::query_scalar(
+            "SELECT is_deleted FROM message \
+             WHERE account_id = $1 AND folder_id = $2 ORDER BY external_id",
+        )
+        .bind(&account_id)
+        .bind(&folder_id)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        assert_eq!(soft_deleted, vec![false, true], "vanished UID soft-deleted");
+    }
+}

@@ -56,6 +56,15 @@ Rules:
 - Data access goes through SeaORM 2.0 entities (`backend/src/entities/`) — the CI postgres job enforces the dual-DB invariant on every PR; dialect-specific raw SQL is allowed only for FTS and engine-unique statements, behind an explicit backend tag.
 - Shape data for single-user now, with ownership keys (or equivalent) so multi-user can land later — without building multi-user UX in v1.
 
+### Dual-DB dialect rules (learned the hard way)
+
+SQLite's loose typing forgives SQL that PostgreSQL refuses to even prepare. Every statement touching these shapes must be written dialect-safe from the start, and any new sync/storage seam function gets a `sync::store::postgres_live`-style roundtrip (`#[ignore = "needs postgres"]`, run by the CI postgres job):
+
+- **JSON columns** (`from_address`, `to_addresses`, `cc_addresses`, `flags`, … — JSONB on PG, TEXT on SQLite) must be wrapped in `CAST(col AS text)` before any text operator (`LIKE`, `= ''`). Raw `col LIKE` is a prepare-time `operator does not exist: jsonb ~~ text`.
+- **`ON CONFLICT … DO UPDATE` bodies**: every current-row column reference must be table-qualified (`"message"."subject"`); a bare reference is ambiguous against `excluded` on PostgreSQL. SQLite accepts the qualified form for the current row.
+- **UUID id columns** bind and decode dialect-aware: writes via `id_value()` (TEXT on SQLite, native Uuid on PG); reads via `CAST(id AS text)` projections or the `tx_fetch_id`-style per-pool decode — never a raw `try_get::<String>` on an id column.
+- Timestamps on the `jobs` table stay TEXT on both dialects; do not "normalize" them to native timestamps.
+
 ## Protocol standards compliance
 
 Mail protocol adapters (**IMAP**, **JMAP**, **SMTP**, and **POP3** when implemented) MUST conform to the relevant IETF / JMAP specifications for wire behavior, negotiated capabilities, opaque state, and error handling.
