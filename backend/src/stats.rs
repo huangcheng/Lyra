@@ -214,20 +214,55 @@ async fn query_top_senders(
     cutoff: &Value,
 ) -> Result<Vec<SenderCount>, SyncError> {
     // Group by the sender *email* inside the From JSON, not the whole JSON
-    // blob — the same mailbox with different display-name encodings must be
-    // one sender. JSON accessors are the one genuine dialect branch here
-    // (SQLite stores JSON as TEXT, Postgres as JSONB).
+    // blob — one mailbox with different display-name encodings is one
+    // sender. The expressions mirror `privacy::sender_email_from_json`:
+    // prefer the "raw" header string, then an "email" key, then treat the
+    // whole value as an address; pull the <…> angle-bracket part when
+    // present; lowercase. The JSON/text accessor spelling is the one
+    // genuine dialect branch (SQLite TEXT vs Postgres JSONB).
+    let s = match db {
+        DbPool::Sqlite(_) => {
+            "COALESCE(json_extract(m.from_address, '$.raw'), \
+             json_extract(m.from_address, '$.email'), m.from_address)"
+        }
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => {
+            "COALESCE(m.from_address->>'raw', m.from_address->>'email', m.from_address::text)"
+        }
+    };
     let (email_expr, name_expr) = match db {
         DbPool::Sqlite(_) => (
-            "json_extract(m.from_address, '$.email')",
-            "json_extract(m.from_address, '$.name')",
+            format!(
+                "LOWER(CASE WHEN instr({s}, '<') > 0 AND instr({s}, '>') > instr({s}, '<') \
+                 THEN substr({s}, instr({s}, '<') + 1, instr({s}, '>') - instr({s}, '<') - 1) \
+                 ELSE {s} END)"
+            ),
+            format!(
+                "NULLIF(TRIM(CASE WHEN json_extract(m.from_address, '$.name') IS NOT NULL \
+                 THEN json_extract(m.from_address, '$.name') \
+                 WHEN instr({s}, '<') > 0 THEN substr({s}, 1, instr({s}, '<') - 1) \
+                 ELSE '' END), '')"
+            ),
         ),
         #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => ("(m.from_address->>'email')", "(m.from_address->>'name')"),
+        DbPool::Postgres(_) => (
+            format!(
+                "LOWER(CASE WHEN position('<' in {s}) > 0 AND position('>' in {s}) > position('<' in {s}) \
+                 THEN substring({s} from position('<' in {s}) + 1 \
+                      for position('>' in {s}) - position('<' in {s}) - 1) \
+                 ELSE {s} END)"
+            ),
+            format!(
+                "NULLIF(TRIM(CASE WHEN m.from_address->>'name' IS NOT NULL \
+                 THEN m.from_address->>'name' \
+                 WHEN position('<' in {s}) > 0 THEN substring({s} from 1 for position('<' in {s}) - 1) \
+                 ELSE '' END), '')"
+            ),
+        ),
     };
     let mut query = Sq::select();
     query
-        .expr_as(Expr::cust(email_expr), Alias::new("sender_email"))
+        .expr_as(Expr::cust(email_expr.clone()), Alias::new("sender_email"))
         .expr_as(
             Expr::cust(format!("MAX({name_expr})")),
             Alias::new("sender_name"),
@@ -239,7 +274,7 @@ async fn query_top_senders(
             "(f.role IS NULL OR f.role NOT IN ('sent', 'drafts'))",
         ))
         .and_where(Expr::cust("m.from_address IS NOT NULL"))
-        .add_group_by([Expr::cust(email_expr)])
+        .add_group_by([Expr::cust(email_expr.clone())])
         .order_by_expr(Expr::cust("c"), Order::Desc)
         .limit(5);
 
@@ -257,7 +292,7 @@ async fn query_top_senders(
     Ok(rows
         .into_iter()
         .filter_map(|(address, name, count)| {
-            let address = address.filter(|a| !a.trim().is_empty())?;
+            let address = address.filter(|a| a.contains('@'))?;
             Some(SenderCount {
                 address,
                 name,
