@@ -1734,7 +1734,22 @@ async fn maybe_fill_imap_body(
         }
     };
 
-    let (mut client, _) = connect_imap_for_account(db, user_id, &row.account_id).await?;
+    let (mut client, _) = match connect_imap_for_account(db, user_id, &row.account_id).await {
+        Ok(pair) => pair,
+        // Account was deleted or deactivated (credential failure) after the
+        // message was synced — the reader must still render stored metadata
+        // instead of failing the whole request.
+        Err(SyncError::AccountNotFound) => {
+            tracing::warn!(
+                message_id = %row.id,
+                account_id = %row.account_id,
+                "skipping lazy body fill: account not found or inactive"
+            );
+            super::recovery::mark_message_fetch_error(db, &row.id, "account not found").await?;
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
     client.select(&row.folder_name).await?;
     let bodies = client.fetch_bodies(&[uid]).await?;
     let Some(fetched) = bodies.into_iter().next() else {

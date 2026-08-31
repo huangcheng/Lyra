@@ -901,7 +901,11 @@ export function SettingsPage() {
                           {account.emailAddress}
                         </div>
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px] text-muted-foreground">
-                          <span className="size-1.5 rounded-full bg-ok" />
+                          <span
+                            className={`size-1.5 rounded-full ${
+                              syncErrors[account.id] ? 'bg-destructive' : 'bg-ok'
+                            }`}
+                          />
                           {account.lastSyncAt && (
                             <span>
                               {t(locale, 'sync.lastSync')}: {formatLastSync(account.lastSyncAt)}
