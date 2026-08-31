@@ -638,3 +638,58 @@ mod tests {
         assert_eq!(ids.len(), 1);
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+mod postgres_live {
+    //! FTS roundtrip on PostgreSQL: the migration trigger maintains
+    //! `search_vector` on insert, and the PG search branch (websearch
+    //! syntax + uuid binds) must find the row.
+
+    use crate::pgtest::support;
+    use crate::sync::store;
+
+    #[test]
+    #[ignore = "needs postgres"]
+    fn search_finds_seeded_message() {
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_account(&db, &user_id, "search@example.com").await;
+            let folder_id = support::seed_inbox(&db, &account_id).await;
+            let msg = support::message(21, "Xylophone dialect audit", "s@example.com");
+            let external_id = crate::sync::store::imap_message_external_id(&folder_id, msg.uid);
+            store::upsert_message(&db, &account_id, &folder_id, &msg)
+                .await
+                .unwrap();
+
+            assert!(super::fts_available(&db).await.unwrap());
+
+            let hits = super::search_message_ids(&db, &user_id, "xylophone", None, None, 10)
+                .await
+                .unwrap();
+            let expected: Option<String> = sqlx_match_id(&db, &account_id, &external_id).await;
+            assert!(
+                expected.as_ref().is_some_and(|want| hits.contains(want)),
+                "search must find the seeded message, got {hits:?}"
+            );
+        });
+    }
+
+    async fn sqlx_match_id(
+        db: &crate::storage::DbPool,
+        account_id: &str,
+        external_id: &str,
+    ) -> Option<String> {
+        let crate::storage::DbPool::Postgres(pool) = db else {
+            panic!("expected postgres pool")
+        };
+        sqlx::query_scalar::<_, String>(
+            "SELECT id::text FROM message WHERE account_id = $1::uuid AND external_id = $2",
+        )
+        .bind(account_id)
+        .bind(external_id)
+        .fetch_one(pool)
+        .await
+        .ok()
+    }
+}

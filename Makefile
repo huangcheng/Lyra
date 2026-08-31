@@ -36,4 +36,8 @@ fmt-check: ## Check formatting without writing
 
 lint: frontend-lint backend-lint ## Lint frontend and backend
 
-check: fmt-check lint secretscan ## Format check + lint + secret scan
+test: ## Run unit tests (frontend vitest + backend sqlite suite)
+	cd frontend && npm test
+	cd backend && cargo test --bin lyra_backend
+
+check: fmt-check lint test secretscan ## Format check + lint + tests + secret scan

@@ -118,7 +118,7 @@ Lyra/
 |------|------|--------|
 | Web UI | `frontend/` | React, TanStack Router, Tailwind + shadcn mail, en/zh i18n; typed `api()` client |
 | API + sync | `backend/` | Rust + Axum; `/api/v1`; health + version unversioned |
-| Tests | `backend/` | Binary crate: `cargo test --bin lyra_backend` (not `--lib`) |
+| Tests | `backend/` + `frontend/` | Binary crate: `cargo test --bin lyra_backend` (not `--lib`); frontend vitest (`npm test`). New SQL seams get `postgres_live` roundtrips; new frontend form logic goes in `src/lib/` with colocated tests |
 | DB | `backend/migrations/` | sqlx; SQLite + PostgreSQL; auto-migrate on startup |
 
 ### Lint & format
@@ -127,7 +127,9 @@ Lyra/
 |---------|----------------|
 | `make fmt` | Prettier (frontend) + `cargo fmt` (backend) |
 | `make lint` | oxlint + tsc (frontend) + clippy `-D warnings` (backend) |
-| `make check` | format check + lint + secret scan |
+| `make test` | vitest (frontend) + `cargo test` SQLite suite (backend) |
+| `make check` | format check + lint + tests + secret scan |
+| `cargo test --bin lyra_backend -- postgres_live --ignored` | live-PostgreSQL seam roundtrips (needs `LYRA_TEST_DATABASE_URL`; CI runs them) |
 | `cd frontend && npm run check` | frontend only |
 | `cd backend && cargo clippy --all-targets --all-features -- -D warnings` | backend only |
 | `cd backend && cargo test --bin lyra_backend` | backend unit tests |

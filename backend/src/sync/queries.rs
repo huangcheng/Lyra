@@ -710,3 +710,54 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+mod postgres_live {
+    //! Read-path roundtrips: the API-facing message list + single-message
+    //! load must survive PostgreSQL typing (uuid binds, TEXT timestamps,
+    //! jsonb reads). See `pgtest` for the harness contract.
+
+    use crate::pgtest::support;
+    use crate::sync::store;
+
+    #[test]
+    #[ignore = "needs postgres"]
+    fn message_list_and_row_roundtrip() {
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_account(&db, &user_id, "queries@example.com").await;
+            let folder_id = support::seed_inbox(&db, &account_id).await;
+            store::upsert_message(
+                &db,
+                &account_id,
+                &folder_id,
+                &support::message(11, "Query me on postgres", "q@example.com"),
+            )
+            .await
+            .unwrap();
+
+            let list = super::query_user_messages(&db, &user_id, Some("inbox"), None)
+                .await
+                .unwrap();
+            let hit = list
+                .iter()
+                .find(|m| m.subject.as_deref() == Some("Query me on postgres"))
+                .expect("seeded message is listed for its user");
+
+            let row = super::load_message_row(&db, &user_id, &hit.id)
+                .await
+                .unwrap();
+            assert_eq!(row.subject.as_deref(), Some("Query me on postgres"));
+            assert_eq!(row.folder_name, "INBOX");
+            assert_eq!(row.protocol, "imap");
+
+            // Ownership: another user's id sees nothing.
+            let other = "00000000-0000-7000-8000-000000000000";
+            assert!(
+                super::load_message_row(&db, other, &hit.id).await.is_err(),
+                "cross-user message load must fail"
+            );
+        });
+    }
+}

@@ -239,7 +239,7 @@ pub async fn has_pending_or_running_sync(
 }
 
 /// Most recent completed/failed sync job for an account, if any.
-async fn latest_terminal_sync(
+pub(crate) async fn latest_terminal_sync(
     db: &DbPool,
     account_id: &str,
 ) -> Result<Option<(String, String)>, sqlx::Error> {

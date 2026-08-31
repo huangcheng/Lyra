@@ -42,14 +42,28 @@ jobs:
         run: make check
 
   test:
-    name: backend tests
+    name: unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: cargo test
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: frontend tests (vitest)
+        working-directory: frontend
+        run: npm test
+
+      - name: backend tests (sqlite)
         working-directory: backend
         run: cargo test --bin lyra_backend
 
@@ -79,11 +93,10 @@ jobs:
 
       - name: cargo test (ignored postgres tests)
         working-directory: backend
-        # Scoped to the modules with #[ignore = "needs postgres"] tests:
-        # storage:: and the sync-store seam. Blanket --ignored also sweeps
-        # kv::redis's live Redis roundtrip, which has no service container
-        # here. The sync roundtrips are the dual-dialect gate: SQLite's loose
-        # typing must never green-light SQL PostgreSQL refuses to prepare.
-        run: |
-          cargo test --bin lyra_backend -- storage:: --ignored
-          cargo test --bin lyra_backend -- sync::store::postgres_live --ignored
+        # Every SQL-bearing seam module ships a `mod postgres_live` with
+        # #[ignore = "needs postgres"] roundtrips — SQLite's loose typing
+        # must never green-light SQL PostgreSQL refuses to prepare. The
+        # name filter catches them all (including storage::). Blanket
+        # --ignored also sweeps kv::redis's live Redis roundtrip, which has
+        # no service container here.
+        run: "cargo test --bin lyra_backend -- postgres_live --ignored"

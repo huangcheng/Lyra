@@ -169,7 +169,7 @@ fn opt_date_value(db: &DbPool, raw: Option<&str>) -> Value {
 }
 
 /// App-generated UUIDv7 id, stored as text.
-fn new_uuid_text() -> String {
+pub(crate) fn new_uuid_text() -> String {
     Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string()
 }
 
@@ -1850,123 +1850,20 @@ mod stale_imap_row_tests {
     }
 }
 
-/// Live-PostgreSQL roundtrips for the IMAP sync seam.
+/// Live-PostgreSQL roundtrips for the IMAP sync store seam.
 ///
 /// Every dialect bug that ever reached production (`jsonb ~~ text`,
-/// ambiguous `ON CONFLICT` refs, UUID-id decodes) lived in this module and
+/// ambiguous `ON CONFLICT` refs, UUID id decodes) lived in this module and
 /// passed the SQLite suite, because SQLite's loose typing forgives all of
-/// them. These tests run the real seam functions against a migrated
-/// PostgreSQL so the SQLite suite can never green-light a statement
-/// PostgreSQL refuses to prepare.
-///
-/// Set `LYRA_TEST_DATABASE_URL=postgres://…` and run
-/// `cargo test --features postgres -- --ignored sync::store::postgres_live`.
-/// Each test seeds rows under fresh UUIDs; the throwaway test database is
-/// expected to be ephemeral (CI service container).
+/// them. See `pgtest` for the harness contract.
 #[cfg(test)]
 #[cfg(feature = "postgres")]
 mod postgres_live {
     use super::{
-        get_folder_id, mojibake_message_uids, new_uuid_text, reconcile_folder_deletions,
-        upsert_folder, upsert_message,
+        imap_message_external_id, mojibake_message_uids, reconcile_folder_deletions, upsert_message,
     };
-    use crate::imap::ImapMessage;
-    use crate::storage::{DbPool, Storage};
-
-    /// sqlx pools pin background tasks to the runtime that created them.
-    /// `#[tokio::test]` builds a fresh runtime per test, so a module-wide
-    /// OnceCell pool would outlive its runtime and later tests' acquires
-    /// time out. Run every test body on this one shared runtime instead.
-    fn shared_runtime() -> &'static tokio::runtime::Runtime {
-        static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-        RT.get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("build test runtime")
-        })
-    }
-
-    /// One pool + one migration pass + one shared user for the whole module:
-    /// libtest runs tests in parallel (concurrent migrations race on catalog
-    /// objects), and `lyra_user` is a singleton table, so every test must
-    /// reuse the same user row and only per-test accounts/folders.
-    async fn pg() -> (DbPool, String) {
-        static PG: tokio::sync::OnceCell<(DbPool, String)> = tokio::sync::OnceCell::const_new();
-        PG.get_or_init(|| async {
-            let url = std::env::var("LYRA_TEST_DATABASE_URL")
-                .expect("LYRA_TEST_DATABASE_URL=postgres://…");
-            let storage = Storage::new(&url).await.expect("connect postgres");
-            storage.run_migrations().await.expect("run migrations");
-            let DbPool::Postgres(pool) = storage.pool().clone() else {
-                panic!("expected postgres pool");
-            };
-            // Idempotent across runs against a non-ephemeral test database.
-            sqlx::query(
-                "INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) \
-                 VALUES ($1::uuid, 'pg-live', 'hash', '[]') ON CONFLICT DO NOTHING",
-            )
-            .bind(new_uuid_text())
-            .execute(&pool)
-            .await
-            .unwrap();
-            let user_id: String = sqlx::query_scalar("SELECT id::text FROM lyra_user LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-            (storage.pool().clone(), user_id)
-        })
-        .await
-        .clone()
-    }
-
-    /// `(account_id, folder_id)` for a fresh IMAP account with an INBOX,
-    /// under the shared singleton user.
-    async fn seed_account_with_inbox(db: &DbPool, user_id: &str) -> (String, String) {
-        let account_id = new_uuid_text();
-        let DbPool::Postgres(pool) = db else {
-            panic!("expected postgres pool");
-        };
-        // Ids are UUID columns; sqlx binds strings as text, so cast.
-        sqlx::query(
-            "INSERT INTO mail_account (\
-                 id, user_id, display_name, email_address, protocol, auth_type, credential, \
-                 imap_host, imap_port, imap_security, is_active, sync_enabled\
-             ) VALUES ($1::uuid, $2::uuid, 'PG Live', 'pg-live@example.com', 'imap', \
-                       'password', '{}', 'imap.example.com', 993, 'tls', true, true)",
-        )
-        .bind(&account_id)
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .unwrap();
-        upsert_folder(db, &account_id, "INBOX", None, &[])
-            .await
-            .unwrap();
-        let folder_id = get_folder_id(db, &account_id, "INBOX").await.unwrap();
-        (account_id, folder_id)
-    }
-
-    fn message(uid: u32, subject: &str, from: &str) -> ImapMessage {
-        ImapMessage {
-            uid,
-            message_id: Some(format!("<{uid}@pg-live.example.com>")),
-            subject: Some(subject.into()),
-            from: Some(from.into()),
-            to: Some("to@example.com".into()),
-            cc: None,
-            date: None,
-            in_reply_to: None,
-            references: None,
-            flags: vec!["\\Seen".into()],
-            size: Some(1024),
-            body: None,
-            body_text: None,
-            body_html: None,
-            has_attachments: false,
-            attachments: vec![],
-        }
-    }
+    use crate::pgtest::support;
+    use crate::storage::DbPool;
 
     /// The ON CONFLICT fill-in path: insert, then re-upsert the same
     /// external_id. Exercises the jsonb text-casts and table-qualified
@@ -1974,10 +1871,11 @@ mod postgres_live {
     #[test]
     #[ignore = "needs postgres"]
     fn upsert_fill_in_roundtrip() {
-        shared_runtime().block_on(async {
-            let (db, user_id) = pg().await;
-            let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
-            let msg = message(42, "Subject A", "sender@example.com");
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_account(&db, &user_id, "upsert@example.com").await;
+            let folder_id = support::seed_inbox(&db, &account_id).await;
+            let msg = support::message(42, "Subject A", "sender@example.com");
 
             assert!(
                 upsert_message(&db, &account_id, &folder_id, &msg)
@@ -2001,7 +1899,7 @@ mod postgres_live {
                  FROM message WHERE account_id = $1::uuid AND external_id = $2",
             )
             .bind(&account_id)
-            .bind(super::imap_message_external_id(&folder_id, 42))
+            .bind(imap_message_external_id(&folder_id, 42))
             .fetch_one(pool)
             .await
             .unwrap();
@@ -2016,14 +1914,15 @@ mod postgres_live {
     #[test]
     #[ignore = "needs postgres"]
     fn mojibake_scan_finds_address_mojibake() {
-        shared_runtime().block_on(async {
-            let (db, user_id) = pg().await;
-            let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_account(&db, &user_id, "mojibake@example.com").await;
+            let folder_id = support::seed_inbox(&db, &account_id).await;
             upsert_message(
                 &db,
                 &account_id,
                 &folder_id,
-                &message(7, "Clean", "S\u{FFFD}nder@example.com"),
+                &support::message(7, "Clean", "S\u{FFFD}nder@example.com"),
             )
             .await
             .unwrap();
@@ -2031,7 +1930,7 @@ mod postgres_live {
                 &db,
                 &account_id,
                 &folder_id,
-                &message(8, "Also clean", "ok@example.com"),
+                &support::message(8, "Also clean", "ok@example.com"),
             )
             .await
             .unwrap();
@@ -2046,14 +1945,15 @@ mod postgres_live {
     #[test]
     #[ignore = "needs postgres"]
     fn deletion_reconcile_soft_deletes_vanished_uids() {
-        shared_runtime().block_on(async {
-            let (db, user_id) = pg().await;
-            let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_account(&db, &user_id, "reconcile@example.com").await;
+            let folder_id = support::seed_inbox(&db, &account_id).await;
             upsert_message(
                 &db,
                 &account_id,
                 &folder_id,
-                &message(1, "Keep", "a@example.com"),
+                &support::message(1, "Keep", "a@example.com"),
             )
             .await
             .unwrap();
@@ -2061,7 +1961,7 @@ mod postgres_live {
                 &db,
                 &account_id,
                 &folder_id,
-                &message(2, "Vanish", "b@example.com"),
+                &support::message(2, "Vanish", "b@example.com"),
             )
             .await
             .unwrap();

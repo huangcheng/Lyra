@@ -27,6 +27,12 @@ import {
   type PrivacySettings,
 } from '@/lib/privacy-api';
 import { fetchOAuthProviders, startOAuth } from '@/lib/oauth-api';
+import {
+  nextAuthTypeOnSecret,
+  oauthErrorKey,
+  probeFormPatch,
+  probeSourceLabel,
+} from '@/lib/account-form';
 import { isMicrosoftMailHost } from '@/lib/microsoft-mail';
 import { isYandexMailHost } from '@/lib/yandex-mail';
 import {
@@ -96,18 +102,6 @@ interface ProbeResult {
 
 const SPAM_SENSITIVITY = ['lenient', 'standard', 'strict'] as const;
 const EXAMPLE_BLOCKED_SENDERS = ['newsletter@example.com', 'promo@example.net'];
-
-/** Backend probe sources are internal slugs — never show them raw to users. */
-function probeSourceLabel(locale: 'en' | 'zh', source?: string | null): string {
-  const labels: Record<string, { en: string; zh: string }> = {
-    mozilla_ispdb: { en: 'the Mozilla ISP database', zh: 'Mozilla ISP 数据库' },
-    common_patterns: { en: 'built-in provider settings', zh: '内置服务商配置' },
-    microsoft_domain: { en: 'Microsoft domain settings', zh: 'Microsoft 域名配置' },
-    yandex_domain: { en: 'Yandex domain settings', zh: 'Yandex 域名配置' },
-  };
-  if (!source) return locale === 'zh' ? '未知来源' : 'an unknown source';
-  return labels[source] ? labels[source][locale] : source;
-}
 
 export function SettingsPage() {
   const locale = useUIStore((s) => s.locale);
@@ -211,13 +205,7 @@ export function SettingsPage() {
       );
       setSection('accounts');
     } else if (oauth === 'error') {
-      setOauthError(
-        detail === 'oauth_denied'
-          ? t(locale, 'settings.accounts.oauthDenied')
-          : detail === 'token_exchange'
-            ? t(locale, 'settings.accounts.oauthTokenExchange')
-            : t(locale, 'settings.accounts.oauthError'),
-      );
+      setOauthError(t(locale, oauthErrorKey(detail)));
       setSection('accounts');
     }
     if (oauth) {
@@ -404,13 +392,16 @@ export function SettingsPage() {
       // protocol the user already picked by hand. A pasted Fastmail token
       // still upgrades to Bearer here: at paste time the form may still be
       // on the IMAP default, so the password-field flip alone can miss it.
-      if (enriched.jmapSupported && !editingAccount && !protocolTouchedRef.current) {
-        setFormData((prev) => ({
-          ...prev,
-          protocol: 'jmap',
-          authType:
-            prev.authType !== 'bearer' && /^fmu1-/i.test(prev.password) ? 'bearer' : prev.authType,
-        }));
+      if (!editingAccount) {
+        setFormData((prev) => {
+          const patch = probeFormPatch(enriched, {
+            protocolTouched: protocolTouchedRef.current,
+            protocol: prev.protocol,
+            authType: prev.authType,
+            secret: prev.password,
+          });
+          return patch ? { ...prev, ...patch } : prev;
+        });
       }
     } catch (err: any) {
       setError(err.message);
@@ -1546,15 +1537,10 @@ export function SettingsPage() {
                         setFormData((prev) => ({
                           ...prev,
                           password: v,
-                          // Fastmail API tokens (fmu1-…) only authenticate as
-                          // Bearer; flip the method on paste so Password +
-                          // token can't reach the server and 401.
-                          authType:
-                            prev.protocol === 'jmap' &&
-                            prev.authType !== 'bearer' &&
-                            /^fmu1-/i.test(v)
-                              ? 'bearer'
-                              : prev.authType,
+                          // Fastmail API tokens (fmu1-…) only authenticate
+                          // as Bearer; flip the method on paste so Password
+                          // + token can't reach the server and 401.
+                          authType: nextAuthTypeOnSecret(prev.authType, prev.protocol, v),
                         }));
                       }}
                       required={!editingAccount && !preferMailOAuth}

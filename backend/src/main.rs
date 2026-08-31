@@ -28,6 +28,8 @@ mod media;
 mod netsec;
 mod oauth;
 mod opengpg;
+#[cfg(test)]
+mod pgtest;
 mod pim;
 mod plugins;
 mod privacy;

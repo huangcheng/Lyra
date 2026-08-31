@@ -14,6 +14,9 @@ mod jmap_loop;
 mod queries;
 mod recovery;
 mod send;
+#[cfg(test)]
+pub(crate) mod store;
+#[cfg(not(test))]
 mod store;
 mod types;
 

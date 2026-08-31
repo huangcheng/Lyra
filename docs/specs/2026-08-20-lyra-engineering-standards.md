@@ -94,7 +94,8 @@ Lyra’s UI surface is a **versioned HTTP API**. The React app is a peer client,
 ## Verification
 
 - Test through the module interface (sync, protocol adapters, auth), not only UI snapshots.
-- Prefer a failing test that proves the bug, then the fix.
+- Prefer a failing test that proves the bug, then the fix (TDD): for storage seams that means a `postgres_live` roundtrip first, for UI logic a `src/lib/` pure-function test first.
+- Form/network decision logic lives in pure functions under `frontend/src/lib/` with colocated vitest files — not inline in components.
 - Before considering work done: `make fmt` / `make lint` (or `make check`). Frontend uses **oxlint** + **Prettier**; backend uses **rustfmt** + **clippy** (`-D warnings`).
 - **Run `make secretscan`** (gitleaks) before merging or releasing. Pre-commit hooks enforce this locally; CI should run the full-history scan.
 

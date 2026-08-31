@@ -322,7 +322,7 @@ fn sanitize_error(err: &SyncError) -> &'static str {
     }
 }
 
-async fn mark_completed(db: &DbPool, id: &str) -> Result<(), sqlx::Error> {
+pub(crate) async fn mark_completed(db: &DbPool, id: &str) -> Result<(), sqlx::Error> {
     jobs::Entity::update_many()
         .col_expr(jobs::Column::Status, Expr::val("completed"))
         .col_expr(jobs::Column::LastError, Expr::val(Value::String(None)))
@@ -1064,5 +1064,69 @@ mod tests {
         assert_eq!(row.0, "pending");
         assert_eq!(row.1.as_deref(), Some("SMTP transient"));
         assert_eq!(row.2, 1);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+mod postgres_live {
+    //! Job lifecycle roundtrip on PostgreSQL: enqueue (TEXT id + RFC3339
+    //! stamps), the dialect-specific claim UPDATE…RETURNING, terminal
+    //! writes via the entity (TEXT timestamps on PG), and the scheduler's
+    //! column-select decodes.
+
+    use crate::jobs::{self, JobPayload};
+    use crate::pgtest::support;
+    use crate::scheduler;
+
+    #[test]
+    #[ignore = "needs postgres"]
+    fn enqueue_claim_complete_scheduler_reads_roundtrip() {
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_account(&db, &user_id, "jobs@example.com").await;
+            let payload = JobPayload::SyncAccount {
+                account_id: account_id.clone(),
+                user_id: user_id.clone(),
+            };
+
+            let job_id = jobs::enqueue(&db, &payload, "2026-01-01T00:00:00Z")
+                .await
+                .unwrap();
+
+            assert_eq!(
+                scheduler::pending_or_running_sync_job_id(&db, &account_id)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(job_id.as_str()),
+                "scheduler must see the enqueued job as pending"
+            );
+
+            let claimed = jobs::claim_due(&db, "2026-01-02T00:00:00Z")
+                .await
+                .unwrap()
+                .expect("due job is claimable");
+            assert_eq!(claimed.id, job_id);
+            assert_eq!(claimed.status, "running");
+
+            jobs::mark_completed(&db, &job_id).await.unwrap();
+
+            assert!(
+                scheduler::pending_or_running_sync_job_id(&db, &account_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "completed job is no longer pending"
+            );
+            assert_eq!(
+                scheduler::latest_terminal_sync(&db, &account_id)
+                    .await
+                    .unwrap()
+                    .map(|(_, status)| status),
+                Some("completed".to_string()),
+                "terminal read returns the completed job"
+            );
+        });
     }
 }
