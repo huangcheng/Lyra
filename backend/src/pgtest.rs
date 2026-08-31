@@ -61,10 +61,34 @@ pub(crate) mod support {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
+            // A *decryptable* DEK so credential-path tests (send, oauth)
+            // can run: wrapped under the shared test master key, with the
+            // plaintext kept around for seeding encrypted credentials.
+            crate::auth::install_test_master_key();
+            let dek = crate::crypto::generate_key();
+            let kek = crate::crypto::derive_user_kek(crate::auth::TEST_MASTER_KEY, &user_id);
+            let wrapped = crate::crypto::wrap_dek(&kek, &dek).unwrap();
+            sqlx::query("UPDATE lyra_user SET encrypted_dek = $1 WHERE id = $2::uuid")
+                .bind(&wrapped)
+                .bind(&user_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let _ = TEST_DEK.set(dek.to_vec());
             (storage.pool().clone(), user_id)
         })
         .await
         .clone()
+    }
+
+    /// Plaintext DEK backing the shared user's `encrypted_dek` wrap.
+    static TEST_DEK: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+    /// Credential blob that decrypts to `app-pass-1` under the shared DEK.
+    pub(crate) fn encrypted_credential() -> String {
+        let dek = TEST_DEK.get().expect("call setup() first");
+        let encrypted = crate::crypto::encrypt(dek, b"app-pass-1").unwrap();
+        serde_json::to_string(&encrypted).unwrap()
     }
 
     /// Fresh IMAP account row under the shared user; returns its id.
@@ -73,17 +97,21 @@ pub(crate) mod support {
         let DbPool::Postgres(pool) = db else {
             panic!("expected postgres pool");
         };
+        let credential = encrypted_credential();
         sqlx::query(
             "INSERT INTO mail_account (\
                  id, user_id, display_name, email_address, protocol, auth_type, credential, \
-                 imap_host, imap_port, imap_security, is_active, sync_enabled\
-             ) VALUES ($1::uuid, $2::uuid, $3, $4, 'imap', 'password', '{}', \
-                       'imap.example.com', 993, 'tls', true, true)",
+                 imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, \
+                 send_protocol, is_active, sync_enabled\
+             ) VALUES ($1::uuid, $2::uuid, $3, $4, 'imap', 'password', $5, \
+                       'imap.example.com', 993, 'tls', 'smtp.example.com', 587, 'starttls', \
+                       'smtp', true, true)",
         )
         .bind(&account_id)
         .bind(user_id)
         .bind(format!("PG Live {email}"))
         .bind(email)
+        .bind(&credential)
         .execute(pool)
         .await
         .unwrap();
@@ -98,6 +126,26 @@ pub(crate) mod support {
         crate::sync::store::get_folder_id(db, account_id, "INBOX")
             .await
             .unwrap()
+    }
+
+    /// Fresh JMAP account row (protocol + send jmap, base URL set).
+    pub(crate) async fn seed_jmap_account(db: &DbPool, user_id: &str, email: &str) -> String {
+        let account_id = crate::sync::store::new_uuid_text();
+        let DbPool::Postgres(pool) = db else {
+            panic!("expected postgres pool");
+        };
+        sqlx::query(
+            "INSERT INTO mail_account (                 id, user_id, display_name, email_address, protocol, receive_protocol,                  send_protocol, auth_type, credential, jmap_base_url, is_active, sync_enabled             ) VALUES ($1::uuid, $2::uuid, $3, $4, 'jmap', 'jmap', 'jmap', 'password', $5,                        'https://api.example.com', true, true)",
+        )
+        .bind(&account_id)
+        .bind(user_id)
+        .bind(format!("PG Live {email}"))
+        .bind(email)
+        .bind(encrypted_credential())
+        .execute(pool)
+        .await
+        .unwrap();
+        account_id
     }
 
     /// Minimal envelope for store-seam seeding.

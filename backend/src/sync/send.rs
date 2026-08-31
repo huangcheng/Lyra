@@ -603,3 +603,44 @@ pub(crate) fn subject_from_raw(raw: &str) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+mod postgres_live {
+    //! Send-path roundtrips: `prepare_*_send` decode UUID ids (the first
+    //! production send on PostgreSQL shipped a `row_id` copy that
+    //! propagated the text-decode error instead of falling back to Uuid)
+    //! and decrypt the stored credential via the user DEK.
+
+    use crate::pgtest::support;
+
+    const RAW: &str = "From: sender@example.com\r\nTo: rcpt@example.com\r\n\
+         Subject: pg live send\r\nDate: Mon, 1 Sep 2026 00:00:00 +0000\r\n\
+         Message-ID: <send-pg@example.com>\r\n\r\nbody";
+
+    #[test]
+    #[ignore = "needs postgres"]
+    fn prepare_sends_decode_uuid_ids_and_credentials() {
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+
+            let jmap_id = support::seed_jmap_account(&db, &user_id, "send-jmap@example.com").await;
+            let smtp_id = support::seed_account(&db, &user_id, "send-smtp@example.com").await;
+
+            let jmap = super::prepare_jmap_send(&db, &jmap_id, RAW).await;
+            assert!(jmap.is_ok(), "jmap prepare failed: {jmap:?}");
+            let (_, _, email, auth_type, outbound) = jmap.unwrap();
+            assert_eq!(email, "send-jmap@example.com");
+            assert_eq!(auth_type, "password");
+            assert!(
+                outbound
+                    .to
+                    .iter()
+                    .any(|(_, email)| email == "rcpt@example.com")
+            );
+
+            let smtp = super::prepare_smtp_send(&db, &smtp_id, RAW).await;
+            assert!(smtp.is_ok(), "smtp prepare failed: {smtp:?}");
+        });
+    }
+}
