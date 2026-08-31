@@ -743,7 +743,7 @@ export function ComposeDialog() {
         <div className="flex h-14 shrink-0 items-center gap-1.5 border-t border-border/60 px-3">
           <Button
             type="button"
-            className="h-9 rounded-full bg-foreground px-4 text-background transition-all hover:bg-foreground/90 active:scale-[0.97]"
+            className="h-9 rounded-full bg-primary px-4 text-primary-foreground transition-all hover:bg-primary/90 active:scale-[0.97]"
             onClick={() => void handleSend()}
             disabled={sending}
             title={t(locale, 'mail.sendShortcut')}

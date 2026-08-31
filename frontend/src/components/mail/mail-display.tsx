@@ -882,7 +882,7 @@ export function MailDisplay() {
                     </span>
                     <Button
                       type="submit"
-                      className="ml-auto h-8 rounded-full bg-foreground px-4 text-background transition-all hover:bg-foreground/90 active:scale-[0.97]"
+                      className="ml-auto h-8 rounded-full bg-primary px-4 text-primary-foreground transition-all hover:bg-primary/90 active:scale-[0.97]"
                       disabled={busy}
                     >
                       {busy ? t(locale, 'mail.sending') : t(locale, 'mail.send')}
