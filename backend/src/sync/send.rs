@@ -627,8 +627,10 @@ mod postgres_live {
 
             let jmap = super::prepare_jmap_send(&db, &jmap_id, RAW).await;
             assert!(jmap.is_ok(), "jmap prepare failed: {jmap:?}");
-            let (_, _, email, auth_type, outbound) = jmap.unwrap();
+            let (_, email, password, auth_type, outbound) = jmap.unwrap();
             assert_eq!(email, "send-jmap@example.com");
+            // The stored credential decrypts through the user DEK.
+            assert_eq!(password, "app-pass-1");
             assert_eq!(auth_type, "password");
             assert!(
                 outbound
