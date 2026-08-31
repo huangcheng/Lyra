@@ -1049,12 +1049,17 @@ pub(crate) async fn reconcile_folder_deletions(
     server_uids: &std::collections::HashSet<u32>,
 ) -> Result<usize, SyncError> {
     let mut sel = Sq::select();
-    sel.column(message::Column::Id)
-        .column(message::Column::ExternalId)
-        .from(message::Entity)
-        .and_where(message::Column::AccountId.eq(id_value(db, account_id)?))
-        .and_where(message::Column::FolderId.eq(id_value(db, folder_id)?))
-        .and_where(message::Column::IsDeleted.eq(false));
+    sel.expr_as(
+        // Read the id as text: the column is UUID on PostgreSQL, where
+        // decoding it as String (like the bind fix, 19b9141) type-errors.
+        Expr::col((message::Entity, message::Column::Id)).cast_as(Alias::new("text")),
+        Alias::new("id"),
+    )
+    .column(message::Column::ExternalId)
+    .from(message::Entity)
+    .and_where(message::Column::AccountId.eq(id_value(db, account_id)?))
+    .and_where(message::Column::FolderId.eq(id_value(db, folder_id)?))
+    .and_where(message::Column::IsDeleted.eq(false));
     let rows = db.orm().query_all(&sel).await.map_err(orm_err)?;
     let mut local_rows = Vec::with_capacity(rows.len());
     for row in &rows {
