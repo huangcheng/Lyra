@@ -521,7 +521,7 @@ async fn preflight_discovery(
     base: &str,
     auth_header: &str,
     origin: &str,
-) -> Result<bool, JmapError> {
+) -> Result<(bool, String), JmapError> {
     let http = reqwest::Client::builder()
         .timeout(JMAP_TIMEOUT)
         // Automatic following stays disabled: every hop is checked below.
@@ -536,7 +536,7 @@ async fn preflight_discovery(
             .send()
             .await?;
         if !resp.status().is_redirection() {
-            return Ok(redirected);
+            return Ok((redirected, url));
         }
         redirected = true;
         let location = resp
@@ -594,18 +594,33 @@ impl JmapSeam {
 
         let credentials = credentials_for(auth_type, email, secret);
         let auth_header = authorization_header(&credentials);
-        let redirected = preflight_discovery(base, &auth_header, &origin).await?;
+        let (redirected, discovery_url) = preflight_discovery(base, &auth_header, &origin).await?;
+        // Hand the crate the chain's *final* URL: the preflight follower
+        // already validated every hop (same site, https), so the crate's
+        // first session GET lands directly on a 200 instead of re-walking
+        // redirects under its own, host-scoped policy.
+        let session_base = discovery_url
+            .strip_suffix("/.well-known/jmap")
+            .unwrap_or(discovery_url.as_str())
+            .to_owned();
 
         let mut builder = Client::new().credentials(credentials).timeout(JMAP_TIMEOUT);
         if redirected {
             // The crate's redirect policy is host-scoped and denies all hosts
             // by default (`Client::redirect_policy`). Our follower already
-            // validated this exact chain origin-scoped; allow precisely the
-            // configured host so connect() can re-follow it. The allowlist
-            // stays empty for non-redirecting servers.
-            builder = builder.follow_redirects([host]);
+            // validated this exact chain; allow precisely the hosts on it so
+            // any residual hop can re-follow. The allowlist stays empty for
+            // non-redirecting servers.
+            let final_host = reqwest::Url::parse(&discovery_url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned));
+            let hosts = match final_host {
+                Some(h) if h != host => vec![host, h],
+                _ => vec![host],
+            };
+            builder = builder.follow_redirects(hosts);
         }
-        let mut client = builder.connect(base).await?;
+        let mut client = builder.connect(&session_base).await?;
 
         let session = client.session();
         validate_session_urls(
