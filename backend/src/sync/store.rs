@@ -1873,12 +1873,20 @@ mod postgres_live {
     use crate::imap::ImapMessage;
     use crate::storage::{DbPool, Storage};
 
+    /// One pool + one migration pass shared by every test in this module:
+    /// libtest runs them in parallel, and concurrent migrations race on
+    /// catalog objects (`pg_type_typname_nsp_index` duplicates).
     async fn pg() -> DbPool {
-        let url =
-            std::env::var("LYRA_TEST_DATABASE_URL").expect("LYRA_TEST_DATABASE_URL=postgres://…");
-        let storage = Storage::new(&url).await.expect("connect postgres");
-        storage.run_migrations().await.expect("run migrations");
-        storage.pool().clone()
+        static PG: tokio::sync::OnceCell<DbPool> = tokio::sync::OnceCell::const_new();
+        PG.get_or_init(|| async {
+            let url = std::env::var("LYRA_TEST_DATABASE_URL")
+                .expect("LYRA_TEST_DATABASE_URL=postgres://…");
+            let storage = Storage::new(&url).await.expect("connect postgres");
+            storage.run_migrations().await.expect("run migrations");
+            storage.pool().clone()
+        })
+        .await
+        .clone()
     }
 
     /// `(account_id, folder_id)` for a fresh IMAP account with an INBOX.
@@ -1888,9 +1896,10 @@ mod postgres_live {
         let DbPool::Postgres(pool) = db else {
             panic!("expected postgres pool");
         };
+        // Ids are UUID columns; sqlx binds strings as text, so cast.
         sqlx::query(
             "INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) \
-             VALUES ($1, $2, 'hash', '[]')",
+             VALUES ($1::uuid, $2, 'hash', '[]')",
         )
         .bind(&user_id)
         .bind(format!("pg-live-{user_id}"))
@@ -1901,8 +1910,8 @@ mod postgres_live {
             "INSERT INTO mail_account (\
                  id, user_id, display_name, email_address, protocol, auth_type, credential, \
                  imap_host, imap_port, imap_security, is_active, sync_enabled\
-             ) VALUES ($1, $2, 'PG Live', 'pg-live@example.com', 'imap', 'password', '{}', \
-                       'imap.example.com', 993, 'tls', true, true)",
+             ) VALUES ($1::uuid, $2::uuid, 'PG Live', 'pg-live@example.com', 'imap', \
+                       'password', '{}', 'imap.example.com', 993, 'tls', true, true)",
         )
         .bind(&account_id)
         .bind(&user_id)
@@ -1966,7 +1975,7 @@ mod postgres_live {
         };
         let (count, is_starred, subject): (i64, bool, String) = sqlx::query_as(
             "SELECT COUNT(*), bool_or(is_starred), MIN(subject) \
-             FROM message WHERE account_id = $1 AND external_id = $2",
+             FROM message WHERE account_id = $1::uuid AND external_id = $2",
         )
         .bind(&account_id)
         .bind(super::imap_message_external_id(&folder_id, 42))
@@ -2041,7 +2050,7 @@ mod postgres_live {
         };
         let soft_deleted: Vec<bool> = sqlx::query_scalar(
             "SELECT is_deleted FROM message \
-             WHERE account_id = $1 AND folder_id = $2 ORDER BY external_id",
+             WHERE account_id = $1::uuid AND folder_id = $2::uuid ORDER BY external_id",
         )
         .bind(&account_id)
         .bind(&folder_id)
