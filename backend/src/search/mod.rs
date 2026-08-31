@@ -103,7 +103,12 @@ fn hit_from_row(row: &QueryResult) -> Result<SearchHit, SearchError> {
     };
     Ok(SearchHit {
         message_id,
-        rank: row.try_get("", "rank").map_err(orm_err)?,
+        // SQLite's bm25() ranks are float8; Postgres ts_rank() is float4 —
+        // decode whichever the engine returned.
+        rank: row
+            .try_get::<f64>("", "rank")
+            .or_else(|_| row.try_get::<f32>("", "rank").map(f64::from))
+            .map_err(orm_err)?,
     })
 }
 
