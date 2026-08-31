@@ -788,6 +788,12 @@ async fn test_connection(
     }
 }
 
+/// Providers whose JMAP endpoint lives on a dedicated host: the naive
+/// `https://{domain}` guess lands on a login page or a redirect to a host
+/// that does not serve `/.well-known/jmap` at all. Matched on the mailbox
+/// domain exactly or as a parent (mail.fastmail.com → fastmail.com).
+const JMAP_ENDPOINT_HINTS: &[(&str, &str)] = &[("fastmail.com", "https://api.fastmail.com")];
+
 fn resolve_jmap_base_url(
     protocol: &str,
     explicit: Option<&str>,
@@ -802,6 +808,11 @@ fn resolve_jmap_base_url(
     let domain = extract_domain(email_address);
     if domain.is_empty() {
         return None;
+    }
+    for (pattern, base) in JMAP_ENDPOINT_HINTS {
+        if domain == *pattern || domain.ends_with(&format!(".{pattern}")) {
+            return Some((*base).to_owned());
+        }
     }
     Some(format!("https://{domain}"))
 }
@@ -1254,6 +1265,27 @@ async fn try_tcp_connect(host: &str, port: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jmap_base_url_uses_provider_hints_and_explicit_urls() {
+        assert_eq!(
+            resolve_jmap_base_url("jmap", None, "huangcheng@fastmail.com"),
+            Some("https://api.fastmail.com".to_string())
+        );
+        assert_eq!(
+            resolve_jmap_base_url("jmap", None, "x@mail.fastmail.com"),
+            Some("https://api.fastmail.com".to_string())
+        );
+        assert_eq!(
+            resolve_jmap_base_url("jmap", Some("https://custom.example.com"), "x@fastmail.com"),
+            Some("https://custom.example.com".to_string())
+        );
+        assert_eq!(
+            resolve_jmap_base_url("jmap", None, "x@example.org"),
+            Some("https://example.org".to_string())
+        );
+        assert_eq!(resolve_jmap_base_url("imap", None, "x@fastmail.com"), None);
+    }
+
     use super::*;
 
     #[test]
