@@ -5,7 +5,9 @@
 //! Split from `http.rs` so handlers stay thin and the SQL seam has one home.
 
 use chrono::{DateTime, Utc};
-use sea_orm::sea_query::{Alias, Condition, Expr, JoinType, Order, Query as Sq, SelectStatement};
+use sea_orm::sea_query::{
+    Alias, Condition, Expr, ExprTrait, JoinType, Order, Query as Sq, SelectStatement,
+};
 use sea_orm::{ConnectionTrait, IdenStatic, QueryResult, Value};
 use serde::Serialize;
 use uuid::Uuid;
@@ -220,6 +222,15 @@ pub(super) fn add_message_folder_join(query: &mut SelectStatement) {
 /// Soft-deleted filter, bound through the entity-shaped column name.
 const NOT_DELETED_SQL: &str = "m.is_deleted = ?";
 
+/// Backend-correct `alias.column` reference for equality/range conditions.
+///
+/// Raw `?` placeholders via `Expr::cust_with_values` are SQLite-only:
+/// Postgres prepared statements require `$N`, which sea_query emits only
+/// for typed conditions. Compose as `aliased_col("a", "user_id").eq(v)`.
+pub(super) fn aliased_col(alias: &str, column: &str) -> Expr {
+    Expr::cust(format!("{alias}.{column}"))
+}
+
 pub(super) fn not_deleted_clause() -> Expr {
     Expr::cust_with_values(NOT_DELETED_SQL, [false])
 }
@@ -411,7 +422,7 @@ pub(crate) async fn query_user_messages(
     run_message_list(db, |q| {
         add_message_account_join(q);
         add_message_folder_join(q);
-        q.and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
+        q.and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)))
             .and_where(not_deleted_clause())
             .and_where(snooze_visible_clause(db));
         if let Some(role) = role {
@@ -421,7 +432,7 @@ pub(crate) async fn query_user_messages(
             ));
         }
         if let Some(account_value) = account_value {
-            q.and_where(Expr::cust_with_values("m.account_id = ?", [account_value]));
+            q.and_where(aliased_col("m", "account_id").eq(Expr::val(account_value)));
         }
         q.order_by_expr(Expr::cust("m.date"), Order::Desc)
             .limit(500);
@@ -474,13 +485,13 @@ pub(super) async fn search_like_fallback(
     run_message_list(db, |sel| {
         add_message_account_join(sel);
         add_message_folder_join(sel);
-        sel.and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
+        sel.and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)))
             .and_where(not_deleted_clause());
         if let Some(account_value) = account_value {
-            sel.and_where(Expr::cust_with_values("m.account_id = ?", [account_value]));
+            sel.and_where(aliased_col("m", "account_id").eq(Expr::val(account_value)));
         }
         if let Some(folder_value) = folder_value {
-            sel.and_where(Expr::cust_with_values("m.folder_id = ?", [folder_value]));
+            sel.and_where(aliased_col("m", "folder_id").eq(Expr::val(folder_value)));
         }
         sel.cond_where(any)
             .order_by_expr(Expr::cust("m.date"), Order::Desc)
@@ -504,7 +515,7 @@ pub(super) async fn fetch_messages_by_ids(
             add_message_list_columns(q);
             add_message_account_join(q);
             add_message_folder_join(q);
-            q.and_where(Expr::cust_with_values("m.id = ?", [msg_value.clone()]))
+            q.and_where(aliased_col("m", "id").eq(Expr::val(msg_value.clone())))
                 .and_where(Expr::cust_with_values(
                     "a.user_id = ?",
                     [user_value.clone()],
@@ -644,8 +655,8 @@ pub(crate) async fn load_message_row(
     add_message_account_join(&mut query);
     add_message_folder_join(&mut query);
     query
-        .and_where(Expr::cust_with_values("m.id = ?", [msg_value]))
-        .and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
+        .and_where(aliased_col("m", "id").eq(Expr::val(msg_value)))
+        .and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)))
         .and_where(not_deleted_clause());
 
     let row = db
@@ -678,4 +689,41 @@ pub(crate) async fn load_message_row(
         has_attachments: row.try_get("", "has_attachments").map_err(orm_err)?,
         size_bytes: row.try_get("", "size_bytes").map_err(orm_err)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::sea_query::{PostgresQueryBuilder, Query as Sq, SqliteQueryBuilder};
+
+    /// Regression: raw `?` placeholders (`Expr::cust_with_values`) are
+    /// SQLite-only — Postgres requires `$N`, which sea_query emits only for
+    /// typed conditions (`aliased_col(..).eq(..)`). This broke every
+    /// message/folder/stats read on the Postgres deployment while SQLite
+    /// (and the SQLite test suite) stayed green.
+    #[test]
+    fn typed_conditions_render_per_backend_placeholders() {
+        let uid = uuid::Uuid::nil();
+        let mut q = Sq::select();
+        q.expr_as(aliased_col("m", "id"), Alias::new("id"));
+        q.from_as(message::Entity, Alias::new("m"));
+        q.and_where(aliased_col("a", "user_id").eq(Value::Uuid(Some(uid))));
+        q.and_where(aliased_col("m", "is_deleted").eq(Expr::val(false)));
+        q.and_where(aliased_col("m", "account_id").eq("acc-1"));
+        q.order_by_expr(Expr::cust("m.date"), Order::Desc);
+        q.limit(500);
+
+        let pg = q.to_string(PostgresQueryBuilder);
+        // sea-query 1.x folds typed values to backend-safe literals (or
+        // numbered params); either way a bare `?` must never reach Postgres.
+        assert!(!pg.contains('?'), "raw ? is invalid postgres syntax: {pg}");
+        assert!(
+            pg.contains("= '00000000-"),
+            "value must be bound or folded: {pg}"
+        );
+        assert!(pg.contains("= FALSE"), "bool folded: {pg}");
+
+        let sqlite = q.to_string(SqliteQueryBuilder);
+        assert!(!sqlite.contains("= ?") || sqlite.matches('?').count() <= pg.matches('?').count());
+    }
 }

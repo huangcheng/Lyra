@@ -20,10 +20,11 @@ use uuid::Uuid;
 
 use super::queries::{
     AttachmentResponse, FolderResponse, MessageResponse, MessageRow, add_folder_columns,
-    add_message_folder_join, fetch_messages_by_ids, folder_response_from_row, header_needs_refresh,
-    id_value, load_message_row, message_response_from_row, not_deleted_clause, now_value,
-    opt_id_value, opt_json_value, orm_err, owned_text_value, query_first, query_user_messages,
-    row_id, run_message_list, search_like_fallback, snooze_visible_clause, text_value, ts_value,
+    add_message_folder_join, aliased_col, fetch_messages_by_ids, folder_response_from_row,
+    header_needs_refresh, id_value, load_message_row, message_response_from_row,
+    not_deleted_clause, now_value, opt_id_value, opt_json_value, orm_err, owned_text_value,
+    query_first, query_user_messages, row_id, run_message_list, search_like_fallback,
+    snooze_visible_clause, text_value, ts_value,
 };
 use super::send::send_message;
 use super::store::{parse_imap_uid, update_folder_counts};
@@ -259,7 +260,7 @@ pub(crate) async fn list_folders(
             Alias::new("a"),
             Expr::cust("f.account_id = a.id"),
         )
-        .and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
+        .and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)))
         .order_by_expr(
             Expr::col((Alias::new("f"), Alias::new("sort_order"))),
             Order::Asc,
@@ -315,8 +316,8 @@ pub(crate) async fn patch_folder(
             Alias::new("a"),
             Expr::cust("f.account_id = a.id"),
         )
-        .and_where(Expr::cust_with_values("f.id = ?", [folder_value.clone()]))
-        .and_where(Expr::cust_with_values("a.user_id = ?", [user_value]));
+        .and_where(aliased_col("f", "id").eq(Expr::val(folder_value.clone())))
+        .and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)));
     })
     .await?
     .ok_or(SyncError::InvalidInput("folder not found".into()))?;
@@ -334,7 +335,7 @@ pub(crate) async fn patch_folder(
             .table(folder::Entity)
             .value(folder::Column::RoleOverride, Value::String(None))
             .value(folder::Column::UpdatedAt, now_value(db))
-            .and_where(Expr::col(folder::Column::Id).eq(folder_value.clone()));
+            .and_where(Expr::col(folder::Column::Id).eq(Expr::val(folder_value.clone())));
         db.orm().execute(&update).await.map_err(orm_err)?;
         Some(None)
     } else if let Some(ref role) = body.role_override {
@@ -359,7 +360,7 @@ pub(crate) async fn patch_folder(
             .table(folder::Entity)
             .value(folder::Column::RoleOverride, text_value(Some(role)))
             .value(folder::Column::UpdatedAt, now_value(db))
-            .and_where(Expr::col(folder::Column::Id).eq(folder_value.clone()));
+            .and_where(Expr::col(folder::Column::Id).eq(Expr::val(folder_value.clone())));
         db.orm().execute(&promote).await.map_err(orm_err)?;
         Some(Some(role.clone()))
     } else {
@@ -381,7 +382,7 @@ pub(crate) async fn patch_folder(
     add_folder_columns(&mut select);
     select
         .from_as(folder::Entity, Alias::new("f"))
-        .and_where(Expr::cust_with_values("f.id = ?", [folder_value]));
+        .and_where(aliased_col("f", "id").eq(Expr::val(folder_value)));
 
     let row = db
         .orm()
@@ -414,7 +415,7 @@ async fn best_effort_push_specialuse(
             Alias::new("external_id"),
         )
         .from(folder::Entity)
-        .and_where(Expr::col(folder::Column::Id).eq(folder_value));
+        .and_where(Expr::col(folder::Column::Id).eq(Expr::val(folder_value)));
     })
     .await
     .ok()
@@ -460,8 +461,8 @@ pub(crate) async fn list_messages(
             Alias::new("a"),
             Expr::cust("f.account_id = a.id"),
         )
-        .and_where(Expr::cust_with_values("f.id = ?", [folder_value.clone()]))
-        .and_where(Expr::cust_with_values("a.user_id = ?", [user_value]));
+        .and_where(aliased_col("f", "id").eq(Expr::val(folder_value.clone())))
+        .and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)));
     })
     .await?;
     if check.is_none() {
@@ -471,7 +472,7 @@ pub(crate) async fn list_messages(
     let messages = run_message_list(db, |q| {
         q.from_as(message::Entity, Alias::new("m"));
         add_message_folder_join(q);
-        q.and_where(Expr::cust_with_values("m.folder_id = ?", [folder_value]))
+        q.and_where(aliased_col("m", "folder_id").eq(Expr::val(folder_value)))
             .and_where(not_deleted_clause())
             .and_where(snooze_visible_clause(db))
             .order_by_expr(Expr::cust("m.date"), Order::Desc)
@@ -664,8 +665,8 @@ pub(crate) async fn download_attachment(
             Alias::new("acc"),
             Expr::cust("m.account_id = acc.id"),
         )
-        .and_where(Expr::cust_with_values("a.id = ?", [att_value]))
-        .and_where(Expr::cust_with_values("acc.user_id = ?", [user_value]));
+        .and_where(aliased_col("a", "id").eq(Expr::val(att_value)))
+        .and_where(aliased_col("acc", "user_id").eq(Expr::val(user_value)));
     })
     .await?
     .ok_or(SyncError::MessageNotFound)?;
@@ -881,7 +882,7 @@ pub(crate) async fn connect_imap_for_account(
         )
         .from(mail_account::Entity)
         .and_where(Expr::col(mail_account::Column::Id).eq(acct_value))
-        .and_where(Expr::col(mail_account::Column::UserId).eq(user_value))
+        .and_where(Expr::col(mail_account::Column::UserId).eq(Expr::val(user_value)))
         .and_where(Expr::col(mail_account::Column::IsActive).eq(true));
     })
     .await?
@@ -973,7 +974,7 @@ pub(crate) async fn connect_jmap_for_account(
         )
         .from(mail_account::Entity)
         .and_where(Expr::col(mail_account::Column::Id).eq(acct_value))
-        .and_where(Expr::col(mail_account::Column::UserId).eq(user_value))
+        .and_where(Expr::col(mail_account::Column::UserId).eq(Expr::val(user_value)))
         .and_where(Expr::col(mail_account::Column::IsActive).eq(true));
     })
     .await?
@@ -1497,7 +1498,7 @@ pub(crate) async fn move_message(
             )
             .expr_as(Expr::col(folder::Column::Name), Alias::new("name"))
             .from(folder::Entity)
-            .and_where(Expr::col(folder::Column::Id).eq(folder_value));
+            .and_where(Expr::col(folder::Column::Id).eq(Expr::val(folder_value)));
     })
     .await?
     .ok_or(SyncError::MessageNotFound)?;
@@ -1554,7 +1555,7 @@ async fn draft_account_probe(
         )
         .from(mail_account::Entity)
         .and_where(Expr::col(mail_account::Column::Id).eq(account_value))
-        .and_where(Expr::col(mail_account::Column::UserId).eq(user_value))
+        .and_where(Expr::col(mail_account::Column::UserId).eq(Expr::val(user_value)))
         .and_where(Expr::col(mail_account::Column::IsActive).eq(true));
     })
     .await?

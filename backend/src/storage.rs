@@ -339,11 +339,14 @@ async fn run_postgres_migrations(
     .execute(pool)
     .await?;
 
-    // Get already-applied versions
-    let applied: Vec<i64> =
-        sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
-            .fetch_all(pool)
-            .await?;
+    // Get already-applied versions. The explicit BIGINT cast matters on
+    // Postgres: `version INTEGER` decodes as INT4 and `Vec<i64>` fails —
+    // every boot after the first would crash otherwise.
+    let applied: Vec<i64> = sqlx::query_scalar(
+        "SELECT CAST(version AS BIGINT) FROM schema_migrations ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await?;
 
     // Find and sort migration files
     let mut migrations = collect_migration_files(migrations_dir, "up")?;

@@ -8,7 +8,7 @@ use axum::{
     extract::{Query, State},
     routing::get,
 };
-use sea_orm::sea_query::{Alias, Expr, JoinType, Order, Query as Sq, SelectStatement};
+use sea_orm::sea_query::{Alias, Expr, ExprTrait, JoinType, Order, Query as Sq, SelectStatement};
 use sea_orm::{ConnectionTrait, Value};
 use serde::{Deserialize, Serialize};
 
@@ -163,10 +163,10 @@ fn add_message_joins(query: &mut SelectStatement) {
 fn add_window_scope(query: &mut SelectStatement, user: &Value, cutoff: &Value) {
     add_message_joins(query);
     query
-        .and_where(Expr::cust_with_values("a.user_id = ?", [user.clone()]))
-        .and_where(Expr::cust_with_values("m.is_deleted = ?", [false]))
+        .and_where(Expr::cust("a.user_id").eq(Expr::val(user.clone())))
+        .and_where(Expr::cust("m.is_deleted").eq(Expr::val(false)))
         .and_where(Expr::cust("m.date IS NOT NULL"))
-        .and_where(Expr::cust_with_values("m.date >= ?", [cutoff.clone()]));
+        .and_where(Expr::cust("m.date").gte(Expr::val(cutoff.clone())));
 }
 
 /// Per-day received counts over the window, ascending by date.
@@ -313,10 +313,10 @@ async fn query_totals(db: &DbPool, user: &Value, cutoff: &Value) -> Result<Stats
         add_message_joins(query);
         let snooze_cmp = format!("(m.snoozed_until IS NULL OR m.snoozed_until <= {now_expr})");
         query
-            .and_where(Expr::cust_with_values("a.user_id = ?", [user.clone()]))
+            .and_where(Expr::cust("a.user_id").eq(Expr::val(user.clone())))
             .and_where(Expr::cust("f.role = 'inbox'"))
-            .and_where(Expr::cust_with_values("m.is_read = ?", [false]))
-            .and_where(Expr::cust_with_values("m.is_deleted = ?", [false]))
+            .and_where(Expr::cust("m.is_read").eq(Expr::val(false)))
+            .and_where(Expr::cust("m.is_deleted").eq(Expr::val(false)))
             .and_where(Expr::cust(snooze_cmp));
     })
     .await?;

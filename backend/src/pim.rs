@@ -15,7 +15,7 @@ use axum::{
     routing::get,
 };
 use chrono::{DateTime, Utc};
-use sea_orm::sea_query::{Alias, Expr, Order, Query as Sq, SelectStatement};
+use sea_orm::sea_query::{Alias, Condition, Expr, ExprTrait, Order, Query as Sq, SelectStatement};
 use sea_orm::{ColumnTrait, ConnectionTrait, QueryResult, Value};
 use serde::{Deserialize, Serialize};
 
@@ -384,16 +384,18 @@ async fn list_contacts(
         stmt.and_where(contact::Column::AccountId.eq(id_value(db, account_id)?));
     } else if let Some(search) = &query.q {
         // Postgres needs a JSONB text cast for the address search; SQLite's
-        // LIKE is already ASCII case-insensitive like ILIKE.
+        // LIKE is already ASCII case-insensitive like ILIKE. Conditions are
+        // typed (`.eq`), not raw `?` placeholders — Postgres needs `$N`.
         let (op, email_col) = match db.backend() {
             sea_orm::DbBackend::Postgres => ("ILIKE", "email_addresses::text"),
             _ => ("LIKE", "email_addresses"),
         };
         let pattern = format!("%{search}%");
-        stmt.and_where(Expr::cust_with_values(
-            format!("(display_name {op} ? OR {email_col} {op} ?)"),
-            [pattern.clone(), pattern],
-        ));
+        stmt.cond_where(
+            Condition::any()
+                .add(Expr::cust(format!("display_name {op}")).eq(Expr::val(pattern.clone())))
+                .add(Expr::cust(format!("{email_col} {op}")).eq(Expr::val(pattern))),
+        );
     }
 
     stmt.limit(u64::try_from(limit).unwrap_or(u64::MAX))
