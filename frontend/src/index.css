@@ -194,8 +194,19 @@
   padding: 16px;
 }
 
+/* Links inside third-party mail must stay visible: the sanitizer strips
+   author styles, so anchors would otherwise inherit body ink. The sheet is
+   a light canvas in both themes, so one rule covers light and dark. */
+.mail-body a,
 .dark .mail-body a {
-  color: #18181b;
+  color: #1f6feb;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.mail-body a:hover,
+.dark .mail-body a:hover {
+  color: #1a5fd0;
 }
 
 .mail-body blockquote {
