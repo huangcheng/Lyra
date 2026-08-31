@@ -18,7 +18,7 @@ import {
   Trash2,
   type LucideIcon,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useMemo } from 'react';
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
@@ -181,29 +181,26 @@ function AccountSection({
   // Subscribe to `folders` so this section re-renders on folder updates.
   const folders = useMailStore((s) => s.folders);
   const getFoldersForAccount = useMailStore((s) => s.getFoldersForAccount);
-  const [expanded, setExpanded] = useState(true);
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
+  // Expansion state lives in the UI store so it persists server-side.
+  const expansion = useUIStore((s) => s.folderExpansion[account.id]);
+  const setAccountExpanded = useUIStore((s) => s.setAccountExpanded);
+  const toggleExpanded = useUIStore((s) => s.toggleFolderExpanded);
+  const expanded = expansion?.expanded ?? true;
+  const expandedIds = useMemo(() => new Set(expansion?.folderIds ?? []), [expansion]);
 
   const accountFolders = getFoldersForAccount(account.id);
   const roleFolders = accountFolders.filter((folder) => folder.role);
   const customTree = buildCustomFolderTree(accountFolders, folders);
   const totalUnread = accountFolders.reduce((sum, folder) => sum + folder.unreadCount, 0);
 
-  const toggleExpanded = (id: string) => {
-    setExpandedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
+  const onToggleExpanded = (id: string) => toggleExpanded(account.id, id);
 
   return (
     <div>
       {bare ? null : (
         <button
           type="button"
-          onClick={() => setExpanded((value) => !value)}
+          onClick={() => setAccountExpanded(account.id, !expanded)}
           aria-expanded={expanded}
           className="flex h-8 w-full items-center gap-1.5 rounded-[7px] px-2.5 hover:bg-accent/60"
         >
@@ -244,7 +241,7 @@ function AccountSection({
                     <button
                       type="button"
                       className="flex size-5 shrink-0 items-center justify-center text-ter-foreground"
-                      onClick={() => toggleExpanded(folder.id)}
+                      onClick={() => onToggleExpanded(folder.id)}
                       aria-expanded={childrenExpanded}
                       aria-label={
                         childrenExpanded
@@ -285,7 +282,7 @@ function AccountSection({
                         accountId={account.id}
                         selectedFolderId={selectedFolderId}
                         expandedIds={expandedIds}
-                        toggleExpanded={toggleExpanded}
+                        toggleExpanded={onToggleExpanded}
                       />
                     ))
                   : null}
@@ -300,7 +297,7 @@ function AccountSection({
               accountId={account.id}
               selectedFolderId={selectedFolderId}
               expandedIds={expandedIds}
-              toggleExpanded={toggleExpanded}
+              toggleExpanded={onToggleExpanded}
             />
           ))}
         </div>

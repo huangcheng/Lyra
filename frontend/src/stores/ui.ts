@@ -22,6 +22,12 @@ export interface ComposeDraft {
   forwardAttachments?: Array<{ id: string; filename?: string; contentType?: string }>;
 }
 
+/** Sidebar expansion for one account: section open + expanded folder ids. */
+export interface AccountExpansion {
+  expanded: boolean;
+  folderIds: string[];
+}
+
 interface UIState {
   /** `all` = unified inbox across accounts. */
   selectedAccountId: string;
@@ -35,6 +41,8 @@ interface UIState {
   composeDraft: ComposeDraft | null;
   /** Local mute (session): hide these message ids from the list. */
   mutedMessageIds: string[];
+  /** Sidebar tree expansion, keyed by account id (persisted server-side). */
+  folderExpansion: Record<string, AccountExpansion>;
   locale: SupportedLocale;
   markReadPolicy: MarkReadPolicy;
   theme: ThemeMode;
@@ -49,6 +57,10 @@ interface UIState {
   openCompose: (draft?: Partial<ComposeDraft>) => void;
   clearComposeDraft: () => void;
   toggleMuteMessage: (id: string) => void;
+  setAccountExpanded: (accountId: string, expanded: boolean) => void;
+  toggleFolderExpanded: (accountId: string, folderId: string) => void;
+  /** Bulk-restore from the server-persisted view-state blob. */
+  setFolderExpansion: (map: Record<string, AccountExpansion>) => void;
   setLocale: (locale: SupportedLocale) => void;
   setMarkReadPolicy: (policy: MarkReadPolicy) => void;
   setTheme: (theme: ThemeMode) => void;
@@ -64,6 +76,7 @@ export const useUIStore = create<UIState>((set) => ({
   composeOpen: false,
   composeDraft: null,
   mutedMessageIds: [],
+  folderExpansion: {},
   locale: 'en',
   markReadPolicy: 'on_open' as MarkReadPolicy,
   theme: getStoredTheme(),
@@ -114,6 +127,27 @@ export const useUIStore = create<UIState>((set) => ({
         ? s.mutedMessageIds.filter((x) => x !== id)
         : [...s.mutedMessageIds, id],
     })),
+
+  setAccountExpanded: (accountId, expanded) =>
+    set((s) => ({
+      folderExpansion: {
+        ...s.folderExpansion,
+        [accountId]: { expanded, folderIds: s.folderExpansion[accountId]?.folderIds ?? [] },
+      },
+    })),
+
+  toggleFolderExpanded: (accountId, folderId) =>
+    set((s) => {
+      const current = s.folderExpansion[accountId] ?? { expanded: true, folderIds: [] };
+      const folderIds = current.folderIds.includes(folderId)
+        ? current.folderIds.filter((id) => id !== folderId)
+        : [...current.folderIds, folderId];
+      return {
+        folderExpansion: { ...s.folderExpansion, [accountId]: { ...current, folderIds } },
+      };
+    }),
+
+  setFolderExpansion: (map) => set({ folderExpansion: map }),
 
   setLocale: (locale) => set({ locale }),
 
