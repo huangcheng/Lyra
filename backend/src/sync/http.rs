@@ -2295,14 +2295,11 @@ mod postgres_live {
             let (db, user_id) = support::setup().await;
             let account_id = support::seed_account(&db, &user_id, "judge@example.com").await;
             let folder_id = support::seed_inbox(&db, &account_id).await;
-            store::upsert_message(
-                &db,
-                &account_id,
-                &folder_id,
-                &support::message(41, "Judge me", "judge@example.com"),
-            )
-            .await
-            .unwrap();
+            let mut msg = support::message(41, "Judge me", "judge@example.com");
+            msg.date = Some("2026-09-01T00:00:00Z".into());
+            store::upsert_message(&db, &account_id, &folder_id, &msg)
+                .await
+                .unwrap();
 
             let rows = super::unjudged_rows(&db, &user_id, "inbox", 10)
                 .await
