@@ -1873,6 +1873,20 @@ mod postgres_live {
     use crate::imap::ImapMessage;
     use crate::storage::{DbPool, Storage};
 
+    /// sqlx pools pin background tasks to the runtime that created them.
+    /// `#[tokio::test]` builds a fresh runtime per test, so a module-wide
+    /// OnceCell pool would outlive its runtime and later tests' acquires
+    /// time out. Run every test body on this one shared runtime instead.
+    fn shared_runtime() -> &'static tokio::runtime::Runtime {
+        static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RT.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime")
+        })
+    }
+
     /// One pool + one migration pass + one shared user for the whole module:
     /// libtest runs tests in parallel (concurrent migrations race on catalog
     /// objects), and `lyra_user` is a singleton table, so every test must
@@ -1957,114 +1971,120 @@ mod postgres_live {
     /// The ON CONFLICT fill-in path: insert, then re-upsert the same
     /// external_id. Exercises the jsonb text-casts and table-qualified
     /// current-row refs that SQLite accepts unqualified.
-    #[tokio::test]
+    #[test]
     #[ignore = "needs postgres"]
-    async fn upsert_fill_in_roundtrip() {
-        let (db, user_id) = pg().await;
-        let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
-        let msg = message(42, "Subject A", "sender@example.com");
+    fn upsert_fill_in_roundtrip() {
+        shared_runtime().block_on(async {
+            let (db, user_id) = pg().await;
+            let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
+            let msg = message(42, "Subject A", "sender@example.com");
 
-        assert!(
-            upsert_message(&db, &account_id, &folder_id, &msg)
-                .await
-                .unwrap()
-        );
+            assert!(
+                upsert_message(&db, &account_id, &folder_id, &msg)
+                    .await
+                    .unwrap()
+            );
 
-        let mut again = msg.clone();
-        again.flags = vec!["\\Seen".into(), "\\Flagged".into()];
-        assert!(
-            !upsert_message(&db, &account_id, &folder_id, &again)
-                .await
-                .unwrap()
-        );
+            let mut again = msg.clone();
+            again.flags = vec!["\\Seen".into(), "\\Flagged".into()];
+            assert!(
+                !upsert_message(&db, &account_id, &folder_id, &again)
+                    .await
+                    .unwrap()
+            );
 
-        let DbPool::Postgres(pool) = &db else {
-            panic!()
-        };
-        let (count, is_starred, subject): (i64, bool, String) = sqlx::query_as(
-            "SELECT COUNT(*), bool_or(is_starred), MIN(subject) \
-             FROM message WHERE account_id = $1::uuid AND external_id = $2",
-        )
-        .bind(&account_id)
-        .bind(super::imap_message_external_id(&folder_id, 42))
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        assert_eq!(count, 1, "upsert must not duplicate the row");
-        assert!(is_starred, "re-upsert refreshes flags");
-        assert_eq!(subject, "Subject A", "non-stale subject is not clobbered");
+            let DbPool::Postgres(pool) = &db else {
+                panic!()
+            };
+            let (count, is_starred, subject): (i64, bool, String) = sqlx::query_as(
+                "SELECT COUNT(*), bool_or(is_starred), MIN(subject) \
+                 FROM message WHERE account_id = $1::uuid AND external_id = $2",
+            )
+            .bind(&account_id)
+            .bind(super::imap_message_external_id(&folder_id, 42))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            assert_eq!(count, 1, "upsert must not duplicate the row");
+            assert!(is_starred, "re-upsert refreshes flags");
+            assert_eq!(subject, "Subject A", "non-stale subject is not clobbered");
+        });
     }
 
     /// The mojibake self-heal scan: a U+FFFD inside the JSONB from_address
     /// must still be found (`jsonb LIKE text` has no operator on Postgres).
-    #[tokio::test]
+    #[test]
     #[ignore = "needs postgres"]
-    async fn mojibake_scan_finds_address_mojibake() {
-        let (db, user_id) = pg().await;
-        let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
-        upsert_message(
-            &db,
-            &account_id,
-            &folder_id,
-            &message(7, "Clean", "S\u{FFFD}nder@example.com"),
-        )
-        .await
-        .unwrap();
-        upsert_message(
-            &db,
-            &account_id,
-            &folder_id,
-            &message(8, "Also clean", "ok@example.com"),
-        )
-        .await
-        .unwrap();
+    fn mojibake_scan_finds_address_mojibake() {
+        shared_runtime().block_on(async {
+            let (db, user_id) = pg().await;
+            let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
+            upsert_message(
+                &db,
+                &account_id,
+                &folder_id,
+                &message(7, "Clean", "S\u{FFFD}nder@example.com"),
+            )
+            .await
+            .unwrap();
+            upsert_message(
+                &db,
+                &account_id,
+                &folder_id,
+                &message(8, "Also clean", "ok@example.com"),
+            )
+            .await
+            .unwrap();
 
-        let uids = mojibake_message_uids(&db, &folder_id, 10).await.unwrap();
-        assert_eq!(uids, vec![7], "only the mojibake row is flagged");
+            let uids = mojibake_message_uids(&db, &folder_id, 10).await.unwrap();
+            assert_eq!(uids, vec![7], "only the mojibake row is flagged");
+        });
     }
 
     /// Deletion reconcile: reading UUID ids as text, then soft-deleting
     /// vanished UIDs.
-    #[tokio::test]
+    #[test]
     #[ignore = "needs postgres"]
-    async fn deletion_reconcile_soft_deletes_vanished_uids() {
-        let (db, user_id) = pg().await;
-        let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
-        upsert_message(
-            &db,
-            &account_id,
-            &folder_id,
-            &message(1, "Keep", "a@example.com"),
-        )
-        .await
-        .unwrap();
-        upsert_message(
-            &db,
-            &account_id,
-            &folder_id,
-            &message(2, "Vanish", "b@example.com"),
-        )
-        .await
-        .unwrap();
-
-        let server_uids: std::collections::HashSet<u32> = [1u32].into_iter().collect();
-        let deleted = reconcile_folder_deletions(&db, &account_id, &folder_id, &server_uids)
+    fn deletion_reconcile_soft_deletes_vanished_uids() {
+        shared_runtime().block_on(async {
+            let (db, user_id) = pg().await;
+            let (account_id, folder_id) = seed_account_with_inbox(&db, &user_id).await;
+            upsert_message(
+                &db,
+                &account_id,
+                &folder_id,
+                &message(1, "Keep", "a@example.com"),
+            )
             .await
             .unwrap();
-        assert_eq!(deleted, 1);
+            upsert_message(
+                &db,
+                &account_id,
+                &folder_id,
+                &message(2, "Vanish", "b@example.com"),
+            )
+            .await
+            .unwrap();
 
-        let DbPool::Postgres(pool) = &db else {
-            panic!()
-        };
-        let soft_deleted: Vec<bool> = sqlx::query_scalar(
-            "SELECT is_deleted FROM message \
-             WHERE account_id = $1::uuid AND folder_id = $2::uuid ORDER BY external_id",
-        )
-        .bind(&account_id)
-        .bind(&folder_id)
-        .fetch_all(pool)
-        .await
-        .unwrap();
-        assert_eq!(soft_deleted, vec![false, true], "vanished UID soft-deleted");
+            let server_uids: std::collections::HashSet<u32> = [1u32].into_iter().collect();
+            let deleted = reconcile_folder_deletions(&db, &account_id, &folder_id, &server_uids)
+                .await
+                .unwrap();
+            assert_eq!(deleted, 1);
+
+            let DbPool::Postgres(pool) = &db else {
+                panic!()
+            };
+            let soft_deleted: Vec<bool> = sqlx::query_scalar(
+                "SELECT is_deleted FROM message \
+                 WHERE account_id = $1::uuid AND folder_id = $2::uuid ORDER BY external_id",
+            )
+            .bind(&account_id)
+            .bind(&folder_id)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+            assert_eq!(soft_deleted, vec![false, true], "vanished UID soft-deleted");
+        });
     }
 }
