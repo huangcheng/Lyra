@@ -313,7 +313,11 @@
       "apiTokenHint": "Generate one in your provider's API-token settings (e.g. Fastmail → Privacy & Security → Integrations)",
       "jmapServerUrl": "JMAP server URL (optional)",
       "jmapServerUrlHint": "Leave empty to auto-discover from the email domain",
-      "probeJmap": "This provider supports JMAP — selected by default above"
+      "probeJmap": "This provider supports JMAP — selected by default above",
+      "testConnection": "Test connection",
+      "testing": "Testing…",
+      "testOk": "Connected",
+      "testFail": "Connection failed"
     },
     "encryption": {
       "title": "Encryption",

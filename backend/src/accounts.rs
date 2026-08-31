@@ -39,6 +39,7 @@ pub fn routes() -> Router<AuthState> {
             get(get_account).put(update_account).delete(delete_account),
         )
         .route("/api/v1/accounts/probe", post(probe_server_config))
+        .route("/api/v1/accounts/test-connection", post(test_connection))
 }
 
 /// A mail account as returned by the API.
@@ -666,6 +667,127 @@ async fn delete_account(
 }
 
 /// Resolve JMAP discovery base URL for a new account.
+/// POST /api/v1/accounts/test-connection — dial the mailbox with the
+/// dialog's credentials without persisting anything.
+///
+/// The test *executing* is a 200 even when the connection fails; `ok`
+/// carries the verdict so the UI can render it inline. Receive path only:
+/// IMAP login or JMAP session discovery (the SMTP leg is exercised by the
+/// first real send).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TestConnectionRequest {
+    pub email_address: String,
+    pub protocol: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub auth_type: Option<String>,
+    #[serde(default)]
+    pub jmap_base_url: Option<String>,
+    #[serde(default)]
+    pub imap_host: Option<String>,
+    #[serde(default)]
+    pub imap_port: Option<i32>,
+    #[serde(default)]
+    pub imap_security: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionTestResponse {
+    ok: bool,
+    detail: String,
+    folder_count: Option<i64>,
+}
+
+async fn test_connection(
+    Json(body): Json<TestConnectionRequest>,
+) -> Result<Json<ConnectionTestResponse>, AccountError> {
+    let email = body.email_address.trim();
+    let domain = extract_domain(email);
+    crate::netsec::validate_domain(&domain).map_err(AccountError::InvalidInput)?;
+
+    match body.protocol.as_str() {
+        "jmap" => {
+            let base = resolve_jmap_base_url("jmap", body.jmap_base_url.as_deref(), email)
+                .ok_or_else(|| AccountError::InvalidInput("cannot resolve JMAP URL".into()))?;
+            crate::netsec::validate_server_url(&base).map_err(AccountError::InvalidInput)?;
+            match crate::sync::jmap_client::JmapSeam::connect_ephemeral(
+                &base,
+                email,
+                &body.password,
+                body.auth_type.as_deref().unwrap_or("password"),
+            )
+            .await
+            {
+                Ok(_) => Ok(Json(ConnectionTestResponse {
+                    ok: true,
+                    detail: "JMAP session established".into(),
+                    folder_count: None,
+                })),
+                Err(e) => Ok(Json(ConnectionTestResponse {
+                    ok: false,
+                    detail: e.to_string(),
+                    folder_count: None,
+                })),
+            }
+        }
+        "imap" => {
+            let host = body
+                .imap_host
+                .as_deref()
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
+                .ok_or_else(|| AccountError::InvalidInput("IMAP host is required".into()))?;
+            crate::netsec::validate_domain(extract_domain(host).as_str())
+                .map_err(|_| AccountError::InvalidInput(format!("invalid IMAP host '{host}'")))?;
+            let port = body.imap_port.unwrap_or(993);
+            let security = crate::netsec::normalize_security_mode(
+                body.imap_security.as_deref().unwrap_or("tls"),
+            )
+            .map_err(AccountError::InvalidInput)?;
+            let config = crate::imap::ImapConfig {
+                host: host.to_owned(),
+                port: u16::try_from(port).map_err(|_| AccountError::InvalidInput("port".into()))?,
+                security: match security {
+                    "starttls" => crate::imap::ImapSecurity::Starttls,
+                    _ => crate::imap::ImapSecurity::Tls,
+                },
+                username: email.to_owned(),
+                password: zeroize::Zeroizing::new(body.password.clone()),
+                xoauth2: false,
+            };
+            match crate::imap::ImapClient::connect(&config).await {
+                Ok(mut client) => {
+                    let folders = client.list_folders().await;
+                    let count = folders
+                        .as_ref()
+                        .ok()
+                        .and_then(|f| i64::try_from(f.len()).ok());
+                    let detail = match folders {
+                        Ok(f) => format!("IMAP login succeeded · {} folders", f.len()),
+                        Err(e) => format!("login succeeded, LIST failed: {e}"),
+                    };
+                    Ok(Json(ConnectionTestResponse {
+                        ok: true,
+                        detail,
+                        folder_count: count,
+                    }))
+                }
+                Err(e) => Ok(Json(ConnectionTestResponse {
+                    ok: false,
+                    detail: e.to_string(),
+                    folder_count: None,
+                })),
+            }
+        }
+        other => Err(AccountError::InvalidInput(format!(
+            "unsupported protocol '{other}'"
+        ))),
+    }
+}
+
 fn resolve_jmap_base_url(
     protocol: &str,
     explicit: Option<&str>,

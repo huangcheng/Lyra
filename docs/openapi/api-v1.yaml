@@ -263,6 +263,63 @@ paths:
         "401":
           $ref: "#/components/responses/Error"
 
+  /api/v1/accounts/test-connection:
+    post:
+      tags: [accounts]
+      summary: Dial the mailbox with draft credentials; persist nothing
+      description: >
+        Attempts a real receive-path connection (IMAP login or JMAP session
+        discovery) using the supplied settings. Intended for the Add/Edit
+        Account dialog's "Test connection" button. Always returns 200 when
+        the test executes; `ok` carries the verdict.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [emailAddress, protocol]
+              properties:
+                emailAddress:
+                  type: string
+                  format: email
+                protocol:
+                  type: string
+                  enum: [imap, jmap]
+                password:
+                  type: string
+                authType:
+                  type: string
+                jmapBaseUrl:
+                  type: string
+                  nullable: true
+                imapHost:
+                  type: string
+                  nullable: true
+                imapPort:
+                  type: integer
+                  nullable: true
+                imapSecurity:
+                  type: string
+                  enum: [tls, starttls]
+                  nullable: true
+      responses:
+        "200":
+          description: Test executed. `ok` is false when the mailbox was not reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, detail]
+                properties:
+                  ok:
+                    type: boolean
+                  detail:
+                    type: string
+                  folderCount:
+                    type: integer
+                    nullable: true
+
   /api/v1/accounts/probe:
     post:
       tags: [accounts]

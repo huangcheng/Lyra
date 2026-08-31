@@ -140,6 +140,8 @@ export function SettingsPage() {
   const [newPassword, setNewPassword] = useState('');
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
   const [securityError, setSecurityError] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; detail: string } | null>(null);
   const [totpPassword, setTotpPassword] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
   const [disablingTotp, setDisablingTotp] = useState(false);
@@ -401,6 +403,40 @@ export function SettingsPage() {
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- debounced probe on any complete address
   }, [formData.emailAddress, showAddForm, editingAccount]);
+
+  /** Dial the mailbox with the form's current values; nothing is saved. */
+  async function handleTestConnection() {
+    if (!formData.emailAddress.trim()) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const isJmap = formData.protocol === 'jmap';
+      const res = await api<{ ok: boolean; detail: string; folderCount: number | null }>(
+        '/accounts/test-connection',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            emailAddress: formData.emailAddress,
+            protocol: formData.protocol,
+            password: formData.password,
+            authType: isJmap ? formData.authType : undefined,
+            jmapBaseUrl: isJmap && formData.jmapBaseUrl ? formData.jmapBaseUrl : undefined,
+            imapHost: isJmap ? null : formData.imapHost || null,
+            imapPort: isJmap ? null : formData.imapPort || null,
+            imapSecurity: isJmap ? null : formData.imapSecurity,
+          }),
+        },
+      );
+      setTestResult({ ok: res.ok, detail: res.detail });
+    } catch (err: unknown) {
+      setTestResult({
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setTesting(false);
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -1611,7 +1647,28 @@ export function SettingsPage() {
                 ) : null}
               </FieldGroup>
 
-              <div className="flex justify-end gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={testing || !formData.emailAddress.trim()}
+                  onClick={() => void handleTestConnection()}
+                  className="mr-auto"
+                >
+                  {testing
+                    ? t(locale, 'settings.accounts.testing')
+                    : t(locale, 'settings.accounts.testConnection')}
+                </Button>
+                {testResult && (
+                  <span
+                    className={cn('text-[12.5px]', testResult.ok ? 'text-ok' : 'text-destructive')}
+                    role="status"
+                  >
+                    {testResult.ok
+                      ? `${t(locale, 'settings.accounts.testOk')} — ${testResult.detail}`
+                      : `${t(locale, 'settings.accounts.testFail')}: ${testResult.detail}`}
+                  </span>
+                )}
                 <Button
                   type="button"
                   variant="outline"

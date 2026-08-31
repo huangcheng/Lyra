@@ -313,7 +313,11 @@
       "apiTokenHint": "在服务商的 API 令牌设置里生成（如 Fastmail → 隐私与安全 → Integrations）",
       "jmapServerUrl": "JMAP 服务器地址（可选）",
       "jmapServerUrlHint": "留空则按邮箱域名自动发现",
-      "probeJmap": "该服务商支持 JMAP，已默认为你选中"
+      "probeJmap": "该服务商支持 JMAP，已默认为你选中",
+      "testConnection": "测试连接",
+      "testing": "正在测试…",
+      "testOk": "已连接",
+      "testFail": "连接失败"
     },
     "encryption": {
       "title": "加密",
