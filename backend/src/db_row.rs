@@ -195,6 +195,13 @@ pub fn parse_ts(raw: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+/// SQLite `DATETIME`-column literal: `UTC` seconds precision, matching how
+/// timestamps are stored (and compared) on the SQLite side.
+#[cfg(test)] // test-only today; un-gate when prod code needs SQLite literals
+pub(crate) fn sqlite_utc_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

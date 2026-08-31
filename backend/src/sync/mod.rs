@@ -11,6 +11,7 @@ mod http;
 mod imap_loop;
 pub(crate) mod jmap_client;
 mod jmap_loop;
+mod queries;
 mod recovery;
 mod send;
 mod store;
@@ -38,10 +39,11 @@ pub(crate) use store::{
 };
 
 #[cfg(test)]
-pub(crate) use http::{
-    query_user_messages, sqlite_utc_datetime, sync_event_json, trigger_sync,
-    user_has_active_sync_job,
-};
+use crate::db_row::sqlite_utc_datetime;
+#[cfg(test)]
+pub(crate) use http::{sync_event_json, trigger_sync, user_has_active_sync_job};
+#[cfg(test)]
+pub(crate) use queries::query_user_messages;
 
 use sea_orm::sea_query::{Expr, Query};
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Value};

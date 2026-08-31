@@ -11,22 +11,25 @@ use axum::{
     },
     routing::{get, post},
 };
-use chrono::{DateTime, Utc};
-use sea_orm::sea_query::{
-    Alias, Condition, Expr, ExprTrait, Func, JoinType, Order, Query as Sq, SelectStatement,
-};
+use sea_orm::sea_query::{Alias, Condition, Expr, ExprTrait, Func, JoinType, Order, Query as Sq};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, IdenStatic, QueryFilter, QueryResult, QuerySelect,
-    Value,
+    ColumnTrait, ConnectionTrait, EntityTrait, IdenStatic, QueryFilter, QuerySelect, Value,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
 
+use super::queries::{
+    AttachmentResponse, FolderResponse, MessageResponse, MessageRow, add_folder_columns,
+    add_message_folder_join, fetch_messages_by_ids, folder_response_from_row, header_needs_refresh,
+    id_value, load_message_row, message_response_from_row, not_deleted_clause, now_value,
+    opt_id_value, opt_json_value, orm_err, owned_text_value, query_first, query_user_messages,
+    row_id, run_message_list, search_like_fallback, snooze_visible_clause, text_value, ts_value,
+};
 use super::send::send_message;
-use super::store::{effective_folder_role, parse_imap_uid, update_folder_counts};
+use super::store::{parse_imap_uid, update_folder_counts};
 use super::types::{EnqueuedSync, SyncError, SyncStatus};
 use crate::auth::{AuthState, AuthUser};
-use crate::db_row::{IdParam, id_param, parse_ts};
+use crate::db_row::parse_ts;
 use crate::entities::{attachment, folder, jobs, mail_account, message};
 use crate::imap::{ImapClient, ImapConfig, ImapSecurity};
 use crate::kernel::AppEvent;
@@ -80,287 +83,6 @@ pub fn routes() -> Router<AuthState> {
         )
         .route("/api/v1/messages/{message_id}/spam", post(spam_message))
         .route("/api/v1/messages/{message_id}/snooze", post(snooze_message))
-}
-
-// ── SeaORM seam ─────────────────────────────────────────────────────
-//
-// Handlers build sea_query statements over entity Columns so the SQL cannot
-// drift from the schema. Entity PKs are `Uuid`, but SQLite rows carry legacy
-// TEXT ids (tests use `"user-1"` etc.), so ids bind as strings on SQLite and
-// native UUIDs on Postgres — the same split `db_row::id_param` makes — and
-// read back through dialect-tolerant row decoders below.
-
-/// Unwrap the driver error SeaORM wraps so [`SyncError::Database`] keeps
-/// reporting the underlying `sqlx::Error`; non-driver SeaORM errors become
-/// `sqlx::Error::Protocol` with the original message.
-fn orm_err(err: sea_orm::DbErr) -> SyncError {
-    use sea_orm::RuntimeErr;
-    let sqlx_err = match err {
-        sea_orm::DbErr::Exec(RuntimeErr::SqlxError(e))
-        | sea_orm::DbErr::Query(RuntimeErr::SqlxError(e))
-        | sea_orm::DbErr::Conn(RuntimeErr::SqlxError(e)) => std::sync::Arc::try_unwrap(e)
-            .unwrap_or_else(|shared| sqlx::Error::Protocol(shared.to_string())),
-        other => sqlx::Error::Protocol(other.to_string()),
-    };
-    SyncError::Database(sqlx_err)
-}
-
-/// Dialect-aware bind for a UUID-column value: TEXT on SQLite, native UUID on
-/// Postgres.
-fn id_value(db: &DbPool, id: &str) -> Result<Value, SyncError> {
-    Ok(match id_param(db, id)? {
-        IdParam::Text(s) => Value::String(Some(s)),
-        IdParam::Uuid(u) => Value::Uuid(Some(u)),
-    })
-}
-
-/// Optional id bind (`InvalidIdError` still maps to 400 on Postgres).
-fn opt_id_value(db: &DbPool, id: Option<&str>) -> Result<Option<Value>, SyncError> {
-    id.map(|s| id_value(db, s)).transpose()
-}
-
-/// Plain text value (`None` becomes a typed NULL).
-fn text_value(raw: Option<&str>) -> Value {
-    Value::String(raw.map(str::to_owned))
-}
-
-/// Owned-string variant of [`text_value`].
-fn owned_text_value(raw: Option<String>) -> Value {
-    Value::String(raw)
-}
-
-/// Typed JSON NULL matching the dialect (TEXT vs JSONB).
-fn json_null_value(db: &DbPool) -> Value {
-    match db {
-        DbPool::Sqlite(_) => Value::String(None),
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => Value::Json(None),
-    }
-}
-
-/// Bind optional JSON text for JSONB/TEXT columns (lenient like the macro
-/// layer's [`crate::db_row::JsonParam`]: non-JSON strings stay raw on SQLite
-/// and become string scalars on Postgres).
-fn opt_json_value(db: &DbPool, raw: Option<&str>) -> Value {
-    let Some(raw) = raw else {
-        return json_null_value(db);
-    };
-    match db {
-        DbPool::Sqlite(_) => Value::String(Some(raw.to_owned())),
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => Value::Json(Some(Box::new(
-            serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_owned())),
-        ))),
-    }
-}
-
-/// Bind an optional UTC instant for `TIMESTAMPTZ` / TEXT timestamp columns,
-/// shaped like the legacy `datetime()` writers.
-fn ts_value(db: &DbPool, dt: Option<DateTime<Utc>>) -> Value {
-    match db {
-        DbPool::Sqlite(_) => Value::String(dt.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())),
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => Value::ChronoDateTimeUtc(dt),
-    }
-}
-
-/// `updated_at` write, shaped like the legacy `datetime('now')` / `NOW()`
-/// defaults so sqlite rows keep their `YYYY-MM-DD HH:MM:SS` text format.
-fn now_value(db: &DbPool) -> Value {
-    match db {
-        DbPool::Sqlite(_) => {
-            Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
-        }
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => Value::ChronoDateTimeUtc(Some(Utc::now())),
-    }
-}
-
-fn missing_column(col: &str) -> sea_orm::DbErr {
-    sea_orm::DbErr::Query(sea_orm::RuntimeErr::Internal(format!(
-        "missing column {col}"
-    )))
-}
-
-/// Decode a UUID/TEXT id column: `String` on SQLite, native UUID on Postgres.
-fn row_id(row: &QueryResult, col: &str) -> Result<String, sea_orm::DbErr> {
-    if let Some(s) = row.try_get::<Option<String>>("", col).ok().flatten() {
-        return Ok(s);
-    }
-    row.try_get::<Option<Uuid>>("", col)?
-        .map(|u| u.to_string())
-        .ok_or_else(|| missing_column(col))
-}
-
-/// Nullable id column ([`row_id`] semantics).
-fn row_opt_id(row: &QueryResult, col: &str) -> Result<Option<String>, sea_orm::DbErr> {
-    if let Ok(text) = row.try_get::<Option<String>>("", col) {
-        return Ok(text);
-    }
-    Ok(row.try_get::<Option<Uuid>>("", col)?.map(|u| u.to_string()))
-}
-
-/// Nullable timestamp column: stored text on SQLite, RFC3339 on Postgres.
-fn row_opt_ts(row: &QueryResult, col: &str) -> Result<Option<String>, sea_orm::DbErr> {
-    if let Ok(text) = row.try_get::<Option<String>>("", col) {
-        return Ok(text.map(crate::db_row::normalize_ts_text));
-    }
-    row.try_get::<Option<DateTime<Utc>>>("", col)
-        .map(|opt| opt.map(|t| t.to_rfc3339()))
-}
-
-/// JSONB / TEXT json → JSON text for the API (`from_address`, …).
-///
-/// Stored TEXT is returned verbatim when present (SQLite keeps raw header
-/// text too); Postgres falls back to native JSONB decode.
-fn row_json_text(row: &QueryResult, col: &str) -> Result<Option<String>, sea_orm::DbErr> {
-    if let Ok(text) = row.try_get::<Option<String>>("", col) {
-        return Ok(text);
-    }
-    let value: Option<serde_json::Value> = row.try_get("", col)?;
-    Ok(value.filter(|v| !v.is_null()).map(|v| v.to_string()))
-}
-
-/// Qualified projection expression for the aliased message table (`m.<col>`).
-fn m_col(col: message::Column) -> Expr {
-    Expr::col((Alias::new("m"), Alias::new(col.as_str())))
-}
-
-/// Message columns shared by every listing handler, projected as
-/// `m.<col> AS <col>` with entity-owned names.
-const MESSAGE_LIST_COLS: &[message::Column] = &[
-    message::Column::Id,
-    message::Column::AccountId,
-    message::Column::FolderId,
-    message::Column::MessageIdHeader,
-    message::Column::Subject,
-    message::Column::FromAddress,
-    message::Column::ToAddresses,
-    message::Column::CcAddresses,
-    message::Column::Date,
-    message::Column::Snippet,
-    message::Column::BodyText,
-    message::Column::BodyHtml,
-    message::Column::IsRead,
-    message::Column::IsStarred,
-    message::Column::IsDraft,
-    message::Column::HasAttachments,
-];
-
-fn add_message_list_columns(query: &mut SelectStatement) {
-    for col in MESSAGE_LIST_COLS {
-        query.expr_as(m_col(*col), Alias::new(col.as_str()));
-    }
-    // Folder role with override: derives `is_draft` (and future role-driven
-    // display state). Every caller must also join `folder AS f`.
-    query.expr_as(
-        Expr::cust("COALESCE(f.role_override, f.role)"),
-        Alias::new("folder_role"),
-    );
-}
-
-/// `FROM message AS m JOIN mail_account AS a ON m.account_id = a.id`.
-fn add_message_account_join(query: &mut SelectStatement) {
-    query.from_as(message::Entity, Alias::new("m")).join_as(
-        JoinType::InnerJoin,
-        mail_account::Entity,
-        Alias::new("a"),
-        Expr::cust("m.account_id = a.id"),
-    );
-}
-
-/// Additionally `JOIN folder AS f ON m.folder_id = f.id`.
-fn add_message_folder_join(query: &mut SelectStatement) {
-    query.join_as(
-        JoinType::InnerJoin,
-        folder::Entity,
-        Alias::new("f"),
-        Expr::cust("m.folder_id = f.id"),
-    );
-}
-
-/// Soft-deleted filter, bound through the entity-shaped column name.
-const NOT_DELETED_SQL: &str = "m.is_deleted = ?";
-
-fn not_deleted_clause() -> Expr {
-    Expr::cust_with_values(NOT_DELETED_SQL, [false])
-}
-
-/// Snooze visibility kept explicitly dialect-branched: SQLite compares
-/// `snoozed_until` text against `datetime('now')`; Postgres compares
-/// TIMESTAMPTZ against NOW().
-const SNOOZE_VISIBLE_SQLITE: &str =
-    "(m.snoozed_until IS NULL OR m.snoozed_until <= datetime('now'))";
-#[cfg(feature = "postgres")]
-const SNOOZE_VISIBLE_POSTGRES: &str = "(m.snoozed_until IS NULL OR m.snoozed_until <= NOW())";
-
-fn snooze_visible_clause(db: &DbPool) -> Expr {
-    match db {
-        DbPool::Sqlite(_) => Expr::cust(SNOOZE_VISIBLE_SQLITE),
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => Expr::cust(SNOOZE_VISIBLE_POSTGRES),
-    }
-}
-
-fn message_response_from_query_row(row: &QueryResult) -> Result<MessageResponse, sea_orm::DbErr> {
-    Ok(MessageResponse {
-        id: row_id(row, "id")?,
-        account_id: row_id(row, "account_id")?,
-        folder_id: row_id(row, "folder_id")?,
-        message_id_header: row.try_get("", "message_id_header")?,
-        subject: row
-            .try_get::<Option<String>>("", "subject")?
-            .map(|s| crate::imap::decode_mime_header(&s)),
-        from_address: row_json_text(row, "from_address")?
-            .map(|s| crate::imap::decode_mime_header(&s)),
-        to_addresses: row_json_text(row, "to_addresses")?
-            .map(|s| crate::imap::decode_mime_header(&s)),
-        cc_addresses: row_json_text(row, "cc_addresses")?
-            .map(|s| crate::imap::decode_mime_header(&s)),
-        date: row_opt_ts(row, "date")?,
-        snippet: row
-            .try_get::<Option<String>>("", "snippet")?
-            .map(|s| crate::imap::decode_mime_header(&s)),
-        body_text: row.try_get("", "body_text")?,
-        body_html: row.try_get("", "body_html")?,
-        is_read: row.try_get("", "is_read")?,
-        is_starred: row.try_get("", "is_starred")?,
-        is_draft: {
-            let stored: bool = row.try_get("", "is_draft")?;
-            let folder_role: Option<String> = row.try_get("", "folder_role")?;
-            stored || folder_role.as_deref() == Some("drafts")
-        },
-        has_attachments: row.try_get("", "has_attachments")?,
-        remote_content_blocked: false,
-        opengpg: None,
-        attachments: None,
-    })
-}
-
-/// Build + run one of the listing queries and map rows to the API DTO.
-async fn run_message_list(
-    db: &DbPool,
-    build: impl FnOnce(&mut SelectStatement),
-) -> Result<Vec<MessageResponse>, SyncError> {
-    let mut query = Sq::select();
-    add_message_list_columns(&mut query);
-    build(&mut query);
-
-    let rows = db.orm().query_all(&query).await.map_err(orm_err)?;
-    rows.iter()
-        .map(message_response_from_query_row)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(orm_err)
-}
-
-/// Fetch the first row of a probe/aggregating statement, or `None`.
-async fn query_first(
-    db: &DbPool,
-    build: impl FnOnce(&mut SelectStatement),
-) -> Result<Option<QueryResult>, SyncError> {
-    let mut query = Sq::select();
-    build(&mut query);
-    db.orm().query_one(&query).await.map_err(orm_err)
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -517,95 +239,6 @@ pub(crate) async fn trigger_sync(
             status: "queued".into(),
         }),
     ))
-}
-
-/// Folder response for the API.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderResponse {
-    pub id: String,
-    pub account_id: String,
-    pub name: String,
-    /// Effective role: `COALESCE(role_override, role)`.
-    pub role: Option<String>,
-    /// Explicit local override (null = use detected SPECIAL-USE / name).
-    pub role_override: Option<String>,
-    pub parent_id: Option<String>,
-    pub sort_order: i32,
-    pub total_messages: i32,
-    pub unread_messages: i32,
-}
-
-/// Message response for the API.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(clippy::struct_excessive_bools)] // API DTO mirrors message flag columns.
-pub struct MessageResponse {
-    pub id: String,
-    pub account_id: String,
-    pub folder_id: String,
-    /// RFC 5322 Message-ID — clients use it to recognize cross-folder
-    /// copies of the same message (e.g. INBOX + Archive).
-    pub message_id_header: Option<String>,
-    pub subject: Option<String>,
-    pub from_address: Option<String>,
-    pub to_addresses: Option<String>,
-    pub cc_addresses: Option<String>,
-    pub date: Option<String>,
-    pub snippet: Option<String>,
-    pub body_text: Option<String>,
-    pub body_html: Option<String>,
-    pub is_read: bool,
-    pub is_starred: bool,
-    pub is_draft: bool,
-    pub has_attachments: bool,
-    /// True when remote images were replaced with placeholders in this response.
-    pub remote_content_blocked: bool,
-    /// OpenGPG decrypt/verify status when the message looks encrypted or signed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub opengpg: Option<crate::opengpg::OpengpgMessageStatus>,
-    /// Attachment metadata; set by the detail endpoint only (lists carry
-    /// `has_attachments` instead).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attachments: Option<Vec<AttachmentResponse>>,
-}
-
-/// Folder columns needed by [`FolderResponse`], projected from alias `f`.
-const FOLDER_COLS: &[folder::Column] = &[
-    folder::Column::Id,
-    folder::Column::AccountId,
-    folder::Column::Name,
-    folder::Column::Role,
-    folder::Column::RoleOverride,
-    folder::Column::ParentId,
-    folder::Column::SortOrder,
-    folder::Column::TotalMessages,
-    folder::Column::UnreadMessages,
-];
-
-fn add_folder_columns(query: &mut SelectStatement) {
-    for col in FOLDER_COLS {
-        query.expr_as(
-            Expr::col((Alias::new("f"), Alias::new(col.as_str()))),
-            Alias::new(col.as_str()),
-        );
-    }
-}
-
-fn folder_response_from_row(row: &QueryResult) -> Result<FolderResponse, sea_orm::DbErr> {
-    let detected: Option<String> = row.try_get("", "role")?;
-    let override_role: Option<String> = row.try_get("", "role_override")?;
-    Ok(FolderResponse {
-        id: row_id(row, "id")?,
-        account_id: row_id(row, "account_id")?,
-        name: row.try_get("", "name")?,
-        role: effective_folder_role(detected.as_deref(), override_role.as_deref()),
-        role_override: override_role,
-        parent_id: row_opt_id(row, "parent_id")?,
-        sort_order: row.try_get("", "sort_order")?,
-        total_messages: row.try_get("", "total_messages")?,
-        unread_messages: row.try_get("", "unread_messages")?,
-    })
 }
 
 /// List all folders for the authenticated user.
@@ -874,40 +507,6 @@ pub(crate) async fn list_messages_query(
     Ok(Json(messages))
 }
 
-/// List messages for a user, optionally filtered by folder role and account.
-///
-/// Optional filters become conditional `WHERE`s instead of the legacy
-/// `(? IS NULL OR … = ?)` duality — the resulting predicate set is identical.
-pub(crate) async fn query_user_messages(
-    db: &DbPool,
-    user_id: &str,
-    role: Option<&str>,
-    account_id: Option<&str>,
-) -> Result<Vec<MessageResponse>, SyncError> {
-    let user_value = id_value(db, user_id)?;
-    let account_value = opt_id_value(db, account_id)?;
-
-    run_message_list(db, |q| {
-        add_message_account_join(q);
-        add_message_folder_join(q);
-        q.and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
-            .and_where(not_deleted_clause())
-            .and_where(snooze_visible_clause(db));
-        if let Some(role) = role {
-            q.and_where(Expr::cust_with_values(
-                "COALESCE(f.role_override, f.role) = ?",
-                [role],
-            ));
-        }
-        if let Some(account_value) = account_value {
-            q.and_where(Expr::cust_with_values("m.account_id = ?", [account_value]));
-        }
-        q.order_by_expr(Expr::cust("m.date"), Order::Desc)
-            .limit(500);
-    })
-    .await
-}
-
 /// Query for GET /api/v1/messages/search.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -974,111 +573,6 @@ pub(crate) async fn search_messages(
     };
 
     Ok(Json(messages))
-}
-
-/// LIKE fallback branch (used only when the FTS index is unavailable).
-///
-/// The keyword spelling follows the legacy rewrite exactly (SQLite `LIKE`,
-/// already case-insensitive for ASCII; Postgres `ILIKE`), so the templates are
-/// static strings chosen by dialect; the pattern binds through the trailing
-/// placeholder.
-async fn search_like_fallback(
-    db: &DbPool,
-    q: &str,
-    user_value: Value,
-    account_value: Option<Value>,
-    folder_id: Option<&str>,
-    limit: i64,
-) -> Result<Vec<MessageResponse>, SyncError> {
-    const LIKE_SQLITE: [&str; 4] = [
-        "COALESCE(m.subject, '') LIKE ?",
-        "COALESCE(m.snippet, '') LIKE ?",
-        "COALESCE(m.body_text, '') LIKE ?",
-        "COALESCE(m.from_address, '') LIKE ?",
-    ];
-    #[cfg(feature = "postgres")]
-    const LIKE_POSTGRES: [&str; 4] = [
-        "COALESCE(m.subject, '') ILIKE ?",
-        "COALESCE(m.snippet, '') ILIKE ?",
-        "COALESCE(m.body_text, '') ILIKE ?",
-        "COALESCE(m.from_address, '') ILIKE ?",
-    ];
-
-    let templates: &[&str] = match db {
-        DbPool::Sqlite(_) => &LIKE_SQLITE,
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => &LIKE_POSTGRES,
-    };
-
-    let folder_value = opt_id_value(db, folder_id)?;
-    let pattern = format!("%{q}%");
-
-    let mut any = Condition::any();
-    for template in templates {
-        any = any.add(Expr::cust_with_values(*template, [pattern.clone()]));
-    }
-
-    run_message_list(db, |sel| {
-        add_message_account_join(sel);
-        add_message_folder_join(sel);
-        sel.and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
-            .and_where(not_deleted_clause());
-        if let Some(account_value) = account_value {
-            sel.and_where(Expr::cust_with_values("m.account_id = ?", [account_value]));
-        }
-        if let Some(folder_value) = folder_value {
-            sel.and_where(Expr::cust_with_values("m.folder_id = ?", [folder_value]));
-        }
-        sel.cond_where(any)
-            .order_by_expr(Expr::cust("m.date"), Order::Desc)
-            .limit(u64::try_from(limit).unwrap_or(500));
-    })
-    .await
-}
-
-/// Fetch FTS hits (in rank order), mapping each to a response the requesting
-/// user owns and that is not soft-deleted.
-async fn fetch_messages_by_ids(
-    db: &DbPool,
-    ids: &[String],
-    user_id: &str,
-) -> Result<Vec<MessageResponse>, SyncError> {
-    let user_value = id_value(db, user_id)?;
-    let mut messages = Vec::with_capacity(ids.len());
-    for id in ids {
-        let msg_value = id_value(db, id)?;
-        let row = query_first(db, |q| {
-            add_message_list_columns(q);
-            add_message_account_join(q);
-            add_message_folder_join(q);
-            q.and_where(Expr::cust_with_values("m.id = ?", [msg_value.clone()]))
-                .and_where(Expr::cust_with_values(
-                    "a.user_id = ?",
-                    [user_value.clone()],
-                ))
-                .and_where(not_deleted_clause());
-        })
-        .await?;
-        if let Some(row) = row {
-            messages.push(message_response_from_query_row(&row).map_err(orm_err)?);
-        }
-    }
-    Ok(messages)
-}
-
-/// Attachment metadata for list responses.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AttachmentResponse {
-    id: String,
-    message_id: String,
-    filename: Option<String>,
-    content_type: Option<String>,
-    size_bytes: Option<i64>,
-    is_inline: bool,
-    /// CID for inline parts (`<image.png@…>` in HTML `src="cid:…"`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_id: Option<String>,
 }
 
 pub(crate) async fn list_attachments(
@@ -1281,71 +775,6 @@ pub(crate) struct PatchMessageRequest {
     is_starred: Option<bool>,
 }
 
-/// Loaded message row with account/folder context for mutations.
-// Schema-mapped row: bool columns mirror the DB 1:1.
-#[allow(clippy::struct_excessive_bools)]
-pub(crate) struct MessageRow {
-    id: String,
-    account_id: String,
-    folder_id: String,
-    folder_name: String,
-    external_id: Option<String>,
-    message_id_header: Option<String>,
-    protocol: String,
-    body_text: Option<String>,
-    body_html: Option<String>,
-    is_read: bool,
-    is_starred: bool,
-    is_draft: bool,
-    folder_role: Option<String>,
-    subject: Option<String>,
-    from_address: Option<String>,
-    to_addresses: Option<String>,
-    cc_addresses: Option<String>,
-    date: Option<String>,
-    snippet: Option<String>,
-    has_attachments: bool,
-    size_bytes: Option<i64>,
-}
-
-pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
-    MessageResponse {
-        id: row.id.clone(),
-        account_id: row.account_id.clone(),
-        folder_id: row.folder_id.clone(),
-        message_id_header: row.message_id_header.clone(),
-        subject: row.subject.as_deref().map(crate::imap::decode_mime_header),
-        from_address: row
-            .from_address
-            .as_deref()
-            .map(crate::imap::decode_mime_header),
-        to_addresses: row
-            .to_addresses
-            .as_deref()
-            .map(crate::imap::decode_mime_header),
-        cc_addresses: row
-            .cc_addresses
-            .as_deref()
-            .map(crate::imap::decode_mime_header),
-        date: row.date.clone(),
-        snippet: row.snippet.as_deref().map(crate::imap::decode_mime_header),
-        body_text: row.body_text.clone(),
-        body_html: row.body_html.clone(),
-        is_read: row.is_read,
-        is_starred: row.is_starred,
-        is_draft: row.is_draft || row.folder_role.as_deref() == Some("drafts"),
-        has_attachments: row.has_attachments,
-        remote_content_blocked: false,
-        opengpg: None,
-        attachments: None,
-    }
-}
-
-fn header_needs_refresh(existing: Option<&str>) -> bool {
-    let value = existing.unwrap_or("");
-    value.is_empty() || (value.contains("=?") && value.contains("?=")) || value.contains('\u{FFFD}')
-}
-
 /// Apply remote-image policy and optional OpenGPG decrypt at serve time.
 pub(crate) async fn finalize_message_response_with_opengpg(
     state: &AuthState,
@@ -1411,87 +840,6 @@ pub(crate) async fn finalize_message_response_with_opengpg(
     }
 
     Ok(response)
-}
-
-/// Message columns loaded by [`load_message_row`] (plus `f.external_id AS
-/// folder_name` and `a.protocol` joined below).
-const MESSAGE_LOAD_COLS: &[message::Column] = &[
-    message::Column::Id,
-    message::Column::AccountId,
-    message::Column::FolderId,
-    message::Column::ExternalId,
-    message::Column::MessageIdHeader,
-    message::Column::Subject,
-    message::Column::FromAddress,
-    message::Column::ToAddresses,
-    message::Column::CcAddresses,
-    message::Column::Date,
-    message::Column::Snippet,
-    message::Column::BodyText,
-    message::Column::BodyHtml,
-    message::Column::IsRead,
-    message::Column::IsStarred,
-    message::Column::IsDraft,
-    message::Column::HasAttachments,
-    message::Column::SizeBytes,
-];
-
-pub(crate) async fn load_message_row(
-    db: &DbPool,
-    user_id: &str,
-    message_id: &str,
-) -> Result<MessageRow, SyncError> {
-    let msg_value = id_value(db, message_id)?;
-    let user_value = id_value(db, user_id)?;
-
-    let mut query = Sq::select();
-    for col in MESSAGE_LOAD_COLS {
-        query.expr_as(m_col(*col), Alias::new(col.as_str()));
-    }
-    query
-        .expr_as(Expr::cust("f.external_id"), Alias::new("folder_name"))
-        .expr_as(
-            Expr::cust("COALESCE(f.role_override, f.role)"),
-            Alias::new("folder_role"),
-        )
-        .expr_as(Expr::cust("a.protocol"), Alias::new("protocol"));
-    add_message_account_join(&mut query);
-    add_message_folder_join(&mut query);
-    query
-        .and_where(Expr::cust_with_values("m.id = ?", [msg_value]))
-        .and_where(Expr::cust_with_values("a.user_id = ?", [user_value]))
-        .and_where(not_deleted_clause());
-
-    let row = db
-        .orm()
-        .query_one(&query)
-        .await
-        .map_err(orm_err)?
-        .ok_or(SyncError::MessageNotFound)?;
-
-    Ok(MessageRow {
-        id: row_id(&row, "id").map_err(orm_err)?,
-        account_id: row_id(&row, "account_id").map_err(orm_err)?,
-        folder_id: row_id(&row, "folder_id").map_err(orm_err)?,
-        folder_name: row.try_get("", "folder_name").map_err(orm_err)?,
-        external_id: row.try_get("", "external_id").map_err(orm_err)?,
-        message_id_header: row.try_get("", "message_id_header").map_err(orm_err)?,
-        protocol: row.try_get("", "protocol").map_err(orm_err)?,
-        body_text: row.try_get("", "body_text").map_err(orm_err)?,
-        body_html: row.try_get("", "body_html").map_err(orm_err)?,
-        is_read: row.try_get("", "is_read").map_err(orm_err)?,
-        is_starred: row.try_get("", "is_starred").map_err(orm_err)?,
-        is_draft: row.try_get("", "is_draft").map_err(orm_err)?,
-        folder_role: row.try_get("", "folder_role").map_err(orm_err)?,
-        subject: row.try_get("", "subject").map_err(orm_err)?,
-        from_address: row_json_text(&row, "from_address").map_err(orm_err)?,
-        to_addresses: row_json_text(&row, "to_addresses").map_err(orm_err)?,
-        cc_addresses: row_json_text(&row, "cc_addresses").map_err(orm_err)?,
-        date: row_opt_ts(&row, "date").map_err(orm_err)?,
-        snippet: row.try_get("", "snippet").map_err(orm_err)?,
-        has_attachments: row.try_get("", "has_attachments").map_err(orm_err)?,
-        size_bytes: row.try_get("", "size_bytes").map_err(orm_err)?,
-    })
 }
 
 pub(crate) async fn connect_imap_for_account(
@@ -2020,10 +1368,6 @@ pub(crate) struct SnoozeRequest {
 /// separator sorts after the same wall time with a space, so same-day overdue rows would
 /// stay hidden if we stored client RFC3339 literally.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn sqlite_utc_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
-    dt.format("%Y-%m-%d %H:%M:%S").to_string()
-}
-
 pub(crate) async fn snooze_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,

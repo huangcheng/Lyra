@@ -10,7 +10,7 @@
 //! | Dual-DB SQL macros | [`crate::db_sql`] | `db_fetch!`, `db_execute!`, … compile against SQLite and Postgres |
 //! | ID / timestamp params | [`crate::db_row`] | `id_param`, `message_date_param`, row decoding |
 //! | Sync persistence | [`crate::sync::store`] | Folder/message upserts, cursors, `load_account_sync_row` |
-//! | Mail HTTP reads | [`crate::sync::http`] | `query_user_messages`, account-scoped message/folder handlers |
+//! | Mail HTTP reads | [`crate::sync::http`] + [`crate::sync::queries`] | account-scoped message/folder handlers, read-side query builders |
 //! | PIM cache reads | [`crate::pim`] | `contact`, `calendar`, `calendar_event` queries |
 //!
 //! Handlers stay thin: they call domain modules that accept `user_id` and use
