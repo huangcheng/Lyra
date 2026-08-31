@@ -421,14 +421,48 @@ pub(crate) fn resolve_discovery_redirect(
     let resolved = resolved.as_str().to_string();
     let target_origin = crate::netsec::origin_of(&resolved).map_err(JmapError::InvalidServerUrl)?;
     if target_origin != origin {
-        tracing::warn!(
+        // Providers legitimately move discovery across their own hosts
+        // (apex → www, or onto api.*): redirecting within the same
+        // registrable domain keeps the credentials inside the provider the
+        // user configured. Anything else is treated as exfiltration.
+        // Same-site *and* still https: an http target is a downgrade leak
+        // even within the provider's own domain.
+        let same_site = target_origin.starts_with("https://")
+            && same_registrable_domain(target_origin.as_str(), origin);
+        if !same_site {
+            tracing::warn!(
+                target_origin = %target_origin,
+                expected_origin = %origin,
+                "JMAP: discovery redirect leaves the configured origin; refusing to follow"
+            );
+            return Err(JmapError::CrossOrigin(resolved));
+        }
+        tracing::info!(
             target_origin = %target_origin,
             expected_origin = %origin,
-            "JMAP: discovery redirect leaves the configured origin; refusing to follow"
+            "JMAP: following same-site discovery redirect"
         );
-        return Err(JmapError::CrossOrigin(resolved));
     }
     Ok(resolved)
+}
+
+/// Registrable-domain approximation without a public-suffix list: the last
+/// two DNS labels. `www.fastmail.com` and `fastmail.com` share
+/// `fastmail.com`; a redirect to a different site never will.
+fn same_registrable_domain(a_origin: &str, b_origin: &str) -> bool {
+    let host = |o: &str| -> String {
+        let host = reqwest::Url::parse(o)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_else(|| o.to_string());
+        let labels: Vec<&str> = host.trim_end_matches('.').split('.').collect();
+        if labels.len() >= 2 {
+            labels[labels.len() - 2..].join(".").to_ascii_lowercase()
+        } else {
+            host.to_ascii_lowercase()
+        }
+    };
+    host(a_origin) == host(b_origin)
 }
 
 /// Validate the session's credential-bearing URLs (`apiUrl` / `uploadUrl` /
@@ -1718,6 +1752,39 @@ mod tests {
         let err = resolve_discovery_redirect(
             "https://jmap.example.com/.well-known/jmap",
             "https://evil.example/session",
+            "https://jmap.example.com:443",
+        )
+        .unwrap_err();
+        assert!(matches!(err, JmapError::CrossOrigin(_)), "got: {err}");
+    }
+
+    #[test]
+    fn discovery_redirect_apex_to_www_same_site_accepted() {
+        let resolved = resolve_discovery_redirect(
+            "https://fastmail.com/.well-known/jmap",
+            "https://www.fastmail.com/.well-known/jmap",
+            "https://fastmail.com:443",
+        )
+        .expect("apex-to-www redirect is the provider itself; must be followed");
+        assert_eq!(resolved, "https://www.fastmail.com/.well-known/jmap");
+    }
+
+    #[test]
+    fn discovery_redirect_deep_subdomain_same_site_accepted() {
+        let resolved = resolve_discovery_redirect(
+            "https://example.com/.well-known/jmap",
+            "https://api.mail.example.com/.well-known/jmap",
+            "https://example.com:443",
+        )
+        .expect("sibling subdomains share the registrable domain");
+        assert_eq!(resolved, "https://api.mail.example.com/.well-known/jmap");
+    }
+
+    #[test]
+    fn discovery_redirect_scheme_downgrade_same_site_rejected() {
+        let err = resolve_discovery_redirect(
+            "https://jmap.example.com/.well-known/jmap",
+            "http://www.jmap.example.com/session",
             "https://jmap.example.com:443",
         )
         .unwrap_err();
