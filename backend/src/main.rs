@@ -12,6 +12,7 @@
 mod accounts;
 mod api_error;
 mod auth;
+mod avatars;
 mod blobs;
 mod config;
 mod crypto;
@@ -156,6 +157,7 @@ fn api_router(auth_state: auth::AuthState) -> Router {
         .merge(privacy::routes())
         .merge(spam::routes())
         .merge(media::routes())
+        .merge(avatars::routes())
         .merge(opengpg::routes())
         .merge(oauth::routes())
         .merge(auth::routes())

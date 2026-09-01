@@ -2696,6 +2696,7 @@ dependencies = [
  "lettre",
  "mail-auth",
  "mail-parser",
+ "md-5 0.10.6",
  "native-tls",
  "pgp",
  "rand 0.8.7",
