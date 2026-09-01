@@ -10,11 +10,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
 import { ErrorBanner, type ErrorBannerVariant } from '@/components/error-banner';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { t } from '@/i18n';
 import { ApiError, api } from '@/lib/api-client';
+import { useAvatar } from '@/lib/avatar';
 import { groupIntoConversations } from '@/lib/conversation';
 import { fetchMessagesForView } from '@/lib/load-mail-messages';
 import { ALL_ACCOUNTS, mapApiMessage, type ApiMessage } from '@/lib/mail-api';
@@ -57,6 +58,19 @@ function getBadgeVariantFromLabel(label: string): ComponentProps<typeof Badge>['
     return 'outline';
   }
   return 'secondary';
+}
+
+/** Sender avatar for a list row — hook lives here since rows render in a map. */
+function ListAvatar({ email, label }: { email: string; label: string }) {
+  const avatarUrl = useAvatar(email);
+  return (
+    <Avatar className="h-8 w-8 shrink-0">
+      <AvatarImage src={avatarUrl ?? undefined} alt={label} />
+      <AvatarFallback className={cn('text-xs', avatarTone(label))}>
+        {getInitials(label)}
+      </AvatarFallback>
+    </Avatar>
+  );
 }
 
 export function MailList() {
@@ -352,11 +366,7 @@ export function MailList() {
                     <span className="size-1.5 rounded-full bg-unread" aria-hidden />
                   ) : null}
                 </div>
-                <Avatar className="h-8 w-8 shrink-0">
-                  <AvatarFallback className={cn('text-xs', avatarTone(fromLabel))}>
-                    {getInitials(fromLabel)}
-                  </AvatarFallback>
-                </Avatar>
+                <ListAvatar email={item.from.email} label={fromLabel} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <div className={cn('min-w-0 truncate', isUnread && 'font-semibold')}>

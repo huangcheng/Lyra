@@ -255,7 +255,9 @@
       "allowlistTitle": "允许的发件人",
       "allowlistHint": "始终允许加载远程图片的发件人。",
       "allowlistEmpty": "允许列表为空。可在邮件阅读界面使用「始终允许此发件人」添加。",
-      "removeAllowSender": "从允许列表移除发件人"
+      "removeAllowSender": "从允许列表移除发件人",
+      "gravatarAvatars": "Gravatar 头像",
+      "gravatarAvatarsHint": "当没有联系人照片或品牌标识时，从 Gravatar 查询发件人头像。查询时 Gravatar 会看到发件人地址的哈希值。"
     },
     "syncNow": "立即同步",
     "syncQueued": "已加入同步队列",

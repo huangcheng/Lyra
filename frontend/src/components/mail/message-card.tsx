@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/button';
 import { t } from '@/i18n';
 import { api } from '@/lib/api-client';
 import { downloadAttachment, formatBytes, resolveInlineImages } from '@/lib/attachments';
+import { useAvatar } from '@/lib/avatar';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
@@ -65,6 +66,7 @@ export function MessageCard({
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const mailBodyRef = useRef<HTMLDivElement>(null);
   const autoMarkedRef = useRef(false);
+  const avatarUrl = useAvatar(mail?.from.email);
 
   // Always fetch the detail payload on expand (mirrors the old reader):
   // only GET /messages/:id sets remoteContentBlocked / opengpg, and list
@@ -229,6 +231,7 @@ export function MessageCard({
             {!mail.isRead ? <span className="size-1.5 rounded-full bg-unread" aria-hidden /> : null}
           </span>
           <Avatar className="h-7 w-7 shrink-0">
+            <AvatarImage src={avatarUrl ?? undefined} alt={fromLabel} />
             <AvatarFallback className={cn('text-[11px]', avatarTone(fromLabel))}>
               {getInitials(fromLabel)}
             </AvatarFallback>
@@ -257,7 +260,7 @@ export function MessageCard({
         className="flex w-full items-start gap-4 px-4 pt-4 pb-3 text-left text-sm"
       >
         <Avatar className="h-10 w-10 shrink-0">
-          <AvatarImage alt={fromLabel} />
+          <AvatarImage src={avatarUrl ?? undefined} alt={fromLabel} />
           <AvatarFallback className={avatarTone(fromLabel)}>
             {getInitials(fromLabel)}
           </AvatarFallback>

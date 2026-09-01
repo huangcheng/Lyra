@@ -685,6 +685,19 @@ export function SettingsPage() {
     }
   }
 
+  async function handleGravatarAvatarsChange(checked: boolean) {
+    setPrivacyError(null);
+    setPrivacySaving(true);
+    try {
+      const updated = await updatePrivacySettings({ gravatarAvatars: checked });
+      setPrivacySettings(updated);
+    } catch (err: unknown) {
+      setPrivacyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPrivacySaving(false);
+    }
+  }
+
   async function handleRemoveAllowSender(sender: string) {
     setPrivacyError(null);
     setRemovingAllowSender(sender);
@@ -1259,6 +1272,27 @@ export function SettingsPage() {
                       ))}
                     </SelectContent>
                   </Select>
+                </div>
+                {privacyError ? (
+                  <div className="text-sm text-destructive">{privacyError}</div>
+                ) : null}
+              </section>
+
+              <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-[13px] font-medium">
+                      {t(locale, 'settings.privacy.gravatarAvatars')}
+                    </h2>
+                    <p className="text-xs text-ter-foreground">
+                      {t(locale, 'settings.privacy.gravatarAvatarsHint')}
+                    </p>
+                  </div>
+                  <Switch
+                    checked={privacySettings?.gravatarAvatars ?? false}
+                    onCheckedChange={(checked) => void handleGravatarAvatarsChange(checked)}
+                    disabled={privacySaving || !privacySettings}
+                  />
                 </div>
                 {privacyError ? (
                   <div className="text-sm text-destructive">{privacyError}</div>

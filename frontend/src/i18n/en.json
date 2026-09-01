@@ -255,7 +255,9 @@
       "allowlistTitle": "Allowed senders",
       "allowlistHint": "Senders you always allow to load remote images.",
       "allowlistEmpty": "No senders on the allow list yet. Use “Always allow this sender” in a message to add one.",
-      "removeAllowSender": "Remove sender from allow list"
+      "removeAllowSender": "Remove sender from allow list",
+      "gravatarAvatars": "Gravatar avatars",
+      "gravatarAvatarsHint": "Look up sender photos from Gravatar when no contact photo or brand logo exists. Gravatar sees a hash of each sender's address on lookup."
     },
     "syncNow": "Sync now",
     "syncQueued": "Sync queued",

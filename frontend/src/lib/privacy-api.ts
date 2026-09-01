@@ -3,6 +3,7 @@ import { api } from '@/lib/api-client';
 export interface PrivacySettings {
   remoteImages: 'block' | 'proxy';
   remoteContentAllowlist: string[];
+  gravatarAvatars: boolean;
 }
 
 export async function fetchPrivacySettings(): Promise<PrivacySettings> {
@@ -10,11 +11,11 @@ export async function fetchPrivacySettings(): Promise<PrivacySettings> {
 }
 
 export async function updatePrivacySettings(
-  patch: Pick<PrivacySettings, 'remoteImages'>,
+  patch: Partial<Pick<PrivacySettings, 'remoteImages' | 'gravatarAvatars'>>,
 ): Promise<PrivacySettings> {
   return api<PrivacySettings>('/settings/privacy', {
     method: 'PATCH',
-    body: JSON.stringify({ remoteImages: patch.remoteImages }),
+    body: JSON.stringify(patch),
   });
 }
 

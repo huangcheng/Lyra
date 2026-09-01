@@ -8,6 +8,7 @@ import { useState, useEffect } from 'react';
 import { UserRound, Users } from 'lucide-react';
 import { t } from '../i18n';
 import { api } from '../lib/api-client';
+import { useAvatar } from '@/lib/avatar';
 import { EmptyState } from './empty-state';
 import { SecondaryPage } from './secondary-page';
 import { Button } from '@/components/ui/button';
@@ -25,6 +26,45 @@ interface Contact {
   photoPath?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+function getInitials(name?: string): string {
+  if (!name) return '?';
+  const parts = name.split(/\s+/);
+  if (parts.length === 1) return parts[0].charAt(0).toUpperCase();
+  return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
+}
+
+/** Contact photo when the backend has one; monogram otherwise. */
+function ContactAvatar({
+  email,
+  name,
+  className,
+}: {
+  email?: string;
+  name?: string;
+  className: string;
+}) {
+  const avatarUrl = useAvatar(email);
+  if (avatarUrl) {
+    return (
+      <img
+        src={avatarUrl}
+        alt={name ?? ''}
+        className={cn('rounded-full object-cover', className)}
+      />
+    );
+  }
+  return (
+    <span
+      className={cn(
+        'flex items-center justify-center rounded-full bg-primary/10 font-medium text-primary',
+        className,
+      )}
+    >
+      {getInitials(name)}
+    </span>
+  );
 }
 
 export function ContactsPage() {
@@ -56,13 +96,6 @@ export function ContactsPage() {
   function handleSearch(e: React.FormEvent) {
     e.preventDefault();
     fetchContacts(searchQuery);
-  }
-
-  function getInitials(name?: string): string {
-    if (!name) return '?';
-    const parts = name.split(/\s+/);
-    if (parts.length === 1) return parts[0].charAt(0).toUpperCase();
-    return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
   }
 
   return (
@@ -102,9 +135,11 @@ export function ContactsPage() {
                   )}
                   onClick={() => setSelectedContact(contact)}
                 >
-                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-medium text-primary">
-                    {getInitials(contact.displayName)}
-                  </span>
+                  <ContactAvatar
+                    email={contact.emailAddresses[0]}
+                    name={contact.displayName}
+                    className="h-9 w-9 shrink-0 text-sm"
+                  />
                   <span className="min-w-0">
                     <span className="block truncate text-sm font-medium">
                       {contact.displayName || t(locale, 'contacts.noName')}
@@ -125,9 +160,11 @@ export function ContactsPage() {
           {selectedContact ? (
             <div className="space-y-6 rounded-lg border p-6">
               <div className="flex items-center gap-4">
-                <span className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-xl font-medium text-primary">
-                  {getInitials(selectedContact.displayName)}
-                </span>
+                <ContactAvatar
+                  email={selectedContact.emailAddresses[0]}
+                  name={selectedContact.displayName}
+                  className="h-14 w-14 text-xl"
+                />
                 <h2 className="text-lg font-semibold">
                   {selectedContact.displayName || t(locale, 'contacts.noName')}
                 </h2>
