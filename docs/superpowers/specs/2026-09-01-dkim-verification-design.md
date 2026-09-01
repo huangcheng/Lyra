@@ -59,7 +59,9 @@ order — (1) passing signature whose d= aligns with the From domain,
    — IMAP: reconnect + `UID FETCH … BODY.PEEK[]`; JMAP: re-resolve `blobId`
    via `Email/get` (`JmapSeam::get_emails`, `jmap_client.rs:870`) then
    `JmapSeam::download_blob` (`jmap_client.rs:891`) — verify inline (bounded:
-   skip when `size_bytes` > 10MB; one-shot attempt per open, no retry loop),
+   reuses the existing body-size limit, `body_exceeds_limit` (25 MiB), and a
+   5s DNS+verify time budget whose expiry stores `temperror`; one-shot
+   attempt per open, no retry loop),
    store the verdict, and include it in the response. On refetch/verify
    failure the message serves normally without a verdict; the row stays
    NULL/`temperror` so a later open retries.

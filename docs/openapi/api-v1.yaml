@@ -582,6 +582,49 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Attachment"
+                  dkim:
+                    type: object
+                    description: >
+                      DKIM verdict (RFC 6376) for this message; detail payload
+                      only, absent when never verified. Verification runs at
+                      view time (body-fill hook or lazy refetch on open).
+                    properties:
+                      status:
+                        type: string
+                        enum: [pass, fail, none, temperror]
+                        description: >
+                          `temperror` = DNS/verify timeout; retried on a later
+                          open.
+                      sdid:
+                        type: string
+                        description: d= signing domain
+                      auid:
+                        type: string
+                        description: i= agent/user identity
+                      selector:
+                        type: string
+                        description: s= selector
+                      algorithm:
+                        type: string
+                        example: RsaSha256
+                      signedHeaders:
+                        type: array
+                        items:
+                          type: string
+                        description: h= signed header list
+                      warnings:
+                        type: array
+                        items:
+                          type: string
+                        example: ["Header 'Subject' is not signed"]
+                      signedAt:
+                        type: string
+                        format: date-time
+                        description: t= signature timestamp
+                      expiresAt:
+                        type: string
+                        format: date-time
+                        description: x= signature expiry
         "404":
           $ref: "#/components/responses/Error"
     patch:
