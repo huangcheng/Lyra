@@ -42,6 +42,7 @@
     "bodyUnavailable": "这封邮件的内容尚未下载，将在下次同步成功后显示。",
     "moveToJunk": "移到垃圾邮件",
     "moveToTrash": "移到废纸篓",
+    "messageActions": "邮件操作",
     "snooze": "延后",
     "snoozeUntil": "延后至",
     "groupToday": "今天",

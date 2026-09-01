@@ -56,6 +56,7 @@ import { useMediaQuery } from '@/lib/use-media-query';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
+import type { MailMessage } from '@/types';
 
 function quoteBody(message: {
   from: { email: string };
@@ -234,49 +235,89 @@ export function MailDisplay() {
     };
   }, [markReadPolicy, mail, tryAutoMarkRead, visibleConversation.length]);
 
-  const handleReply = (all = false) => {
-    if (!mail) return;
+  const replyToMessage = (m: MailMessage, all: boolean) => {
     const to = all
-      ? [mail.from.email, ...mail.to.map((a) => a.email)].filter(Boolean).join(', ')
-      : mail.from.email;
+      ? [m.from.email, ...m.to.map((a) => a.email)].filter(Boolean).join(', ')
+      : m.from.email;
     const source = {
-      fromName: mail.from.name ?? '',
-      fromEmail: mail.from.email,
-      date: mail.date,
-      bodyHtml: mail.bodyHtml ? sanitizeEmailHtml(mail.bodyHtml) : undefined,
-      bodyText: mail.bodyText,
+      fromName: m.from.name ?? '',
+      fromEmail: m.from.email,
+      date: m.date,
+      bodyHtml: m.bodyHtml ? sanitizeEmailHtml(m.bodyHtml) : undefined,
+      bodyText: m.bodyText,
     };
     openCompose({
       mode: 'reply',
       to,
-      subject: mail.subject.startsWith('Re:') ? mail.subject : `Re: ${mail.subject}`,
-      body: quoteBody(mail),
-      initialHtml: quotedReplyHtml(source, signatureOf(mail.accountId)),
+      subject: m.subject.startsWith('Re:') ? m.subject : `Re: ${m.subject}`,
+      body: quoteBody(m),
+      initialHtml: quotedReplyHtml(source, signatureOf(m.accountId)),
+    });
+  };
+
+  const handleReply = (all = false) => {
+    if (!mail) return;
+    replyToMessage(mail, all);
+  };
+
+  /** Hover-panel reply on a specific card: select it, then compose. */
+  const handleReplyFor = (id: string, all: boolean) => {
+    const m = useMailStore.getState().messages[id];
+    if (!m) return;
+    setSelectedMessage(id);
+    replyToMessage(m, all);
+  };
+
+  const forwardMessage = (m: MailMessage) => {
+    // Forward carries the original's regular attachments (inline images stay
+    // in the quoted body). Reply intentionally drops them.
+    const forwardAttachments = (m.attachments ?? [])
+      .filter((a) => !a.isInline)
+      .map((a) => ({ id: a.id, filename: a.filename, contentType: a.contentType }));
+    const source = {
+      fromName: m.from.name ?? '',
+      fromEmail: m.from.email,
+      date: m.date,
+      bodyHtml: m.bodyHtml ? sanitizeEmailHtml(m.bodyHtml) : undefined,
+      bodyText: m.bodyText,
+    };
+    openCompose({
+      mode: 'forward',
+      to: '',
+      subject: m.subject.startsWith('Fwd:') ? m.subject : `Fwd: ${m.subject}`,
+      body: quoteBody(m),
+      initialHtml: forwardHtml(source, signatureOf(m.accountId)),
+      forwardAttachments: forwardAttachments.length > 0 ? forwardAttachments : undefined,
     });
   };
 
   const handleForward = () => {
     if (!mail) return;
-    // Forward carries the original's regular attachments (inline images stay
-    // in the quoted body). Reply intentionally drops them.
-    const forwardAttachments = (mail.attachments ?? [])
-      .filter((a) => !a.isInline)
-      .map((a) => ({ id: a.id, filename: a.filename, contentType: a.contentType }));
-    const source = {
-      fromName: mail.from.name ?? '',
-      fromEmail: mail.from.email,
-      date: mail.date,
-      bodyHtml: mail.bodyHtml ? sanitizeEmailHtml(mail.bodyHtml) : undefined,
-      bodyText: mail.bodyText,
-    };
-    openCompose({
-      mode: 'forward',
-      to: '',
-      subject: mail.subject.startsWith('Fwd:') ? mail.subject : `Fwd: ${mail.subject}`,
-      body: quoteBody(mail),
-      initialHtml: forwardHtml(source, signatureOf(mail.accountId)),
-      forwardAttachments: forwardAttachments.length > 0 ? forwardAttachments : undefined,
-    });
+    forwardMessage(mail);
+  };
+
+  /** Hover-panel forward on a specific card: select it, then compose. */
+  const handleForwardFor = (id: string) => {
+    const m = useMailStore.getState().messages[id];
+    if (!m) return;
+    setSelectedMessage(id);
+    forwardMessage(m);
+  };
+
+  /** Hover-panel trash on a specific card (selection cleared only if it was selected). */
+  const handleTrashFor = async (id: string) => {
+    if (!token || busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await api(`/messages/${id}/trash`, { method: 'POST' });
+      removeMessage(id);
+      if (selectedMessageId === id) setSelectedMessage(null);
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : t(locale, 'common.error'));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleAction = async (action: 'trash' | 'archive' | 'spam') => {
@@ -721,6 +762,9 @@ export function MailDisplay() {
                         [member.id]: !isExpanded(member.id, member.isRead),
                       }))
                     }
+                    onReply={(all) => handleReplyFor(member.id, all)}
+                    onForward={() => handleForwardFor(member.id)}
+                    onTrash={() => void handleTrashFor(member.id)}
                   />
                 ))}
               </div>

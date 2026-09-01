@@ -4,11 +4,12 @@
  * Owns its full-body fetch (list payloads carry no body), remote-content
  * gating, OpenGPG banner, and tracking-pixel advisory. Collapsed cards
  * render a single header row with a snippet; expanding selects the
- * message so the toolbar and reply box act on it.
+ * message so the toolbar acts on it. Both states show a hover action
+ * panel (trash / reply / reply-all / forward) when handlers are passed.
  */
 
 import { format } from 'date-fns';
-import { File, Paperclip, Shield } from 'lucide-react';
+import { File, Forward, Paperclip, Reply, ReplyAll, Shield, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import { OpengpgMessageBanner } from '@/components/mail/opengpg-message-banner';
@@ -33,9 +34,21 @@ interface MessageCardProps {
   /** Hide the subject line (redundant when the stack has a shared title). */
   hideSubject?: boolean;
   onToggle: () => void;
+  /** Hover-panel actions; all three must be present for the panel to render. */
+  onReply?: (all: boolean) => void;
+  onForward?: () => void;
+  onTrash?: () => void;
 }
 
-export function MessageCard({ messageId, expanded, hideSubject, onToggle }: MessageCardProps) {
+export function MessageCard({
+  messageId,
+  expanded,
+  hideSubject,
+  onToggle,
+  onReply,
+  onForward,
+  onTrash,
+}: MessageCardProps) {
   const locale = useUIStore((s) => s.locale);
   const markReadPolicy = useUIStore((s) => s.markReadPolicy);
   const setSelectedMessage = useUIStore((s) => s.setSelectedMessage);
@@ -171,34 +184,72 @@ export function MessageCard({ messageId, expanded, hideSubject, onToggle }: Mess
     onToggle();
   };
 
+  // Apple Mail-style hover actions: trash / reply / reply-all / forward on
+  // this message. Revealed on card hover or keyboard focus within the card.
+  const hoverPanel =
+    onReply && onForward && onTrash ? (
+      <div
+        role="toolbar"
+        aria-label={t(locale, 'mail.messageActions')}
+        className="hidden items-center gap-0.5 rounded-[7px] border border-input bg-card p-0.5 shadow-whisper group-focus-within:flex group-hover:flex"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {(
+          [
+            { icon: Trash2, label: t(locale, 'mail.moveToTrash'), action: onTrash },
+            { icon: Reply, label: t(locale, 'mail.reply'), action: () => onReply(false) },
+            { icon: ReplyAll, label: t(locale, 'mail.replyAll'), action: () => onReply(true) },
+            { icon: Forward, label: t(locale, 'mail.forward'), action: onForward },
+          ] as const
+        ).map(({ icon: Icon, label, action }) => (
+          <button
+            key={label}
+            type="button"
+            title={label}
+            aria-label={label}
+            onClick={action}
+            className="flex size-7 items-center justify-center rounded-[5px] text-ter-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <Icon className="size-3.5" />
+          </button>
+        ))}
+      </div>
+    ) : null;
+
   if (!expanded) {
     return (
-      <button
-        type="button"
-        onClick={handleHeaderClick}
-        className="flex w-full items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5 text-left text-sm shadow-whisper transition-colors hover:bg-accent/50"
-      >
-        <span className="flex w-2.5 shrink-0 justify-center">
-          {!mail.isRead ? <span className="size-1.5 rounded-full bg-unread" aria-hidden /> : null}
-        </span>
-        <Avatar className="h-7 w-7 shrink-0">
-          <AvatarFallback className={cn('text-[11px]', avatarTone(fromLabel))}>
-            {getInitials(fromLabel)}
-          </AvatarFallback>
-        </Avatar>
-        <span className={cn('shrink-0', !mail.isRead && 'font-semibold')}>{fromLabel}</span>
-        <span className="min-w-0 flex-1 truncate text-muted-foreground">{snippet}</span>
-        <span className="shrink-0 text-[11px] tabular-nums text-ter-foreground">
-          {format(new Date(mail.date), 'MMM d, h:mm a')}
-        </span>
-      </button>
+      <div className="group relative">
+        <button
+          type="button"
+          onClick={handleHeaderClick}
+          className="flex w-full items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5 text-left text-sm shadow-whisper transition-colors hover:bg-accent/50"
+        >
+          <span className="flex w-2.5 shrink-0 justify-center">
+            {!mail.isRead ? <span className="size-1.5 rounded-full bg-unread" aria-hidden /> : null}
+          </span>
+          <Avatar className="h-7 w-7 shrink-0">
+            <AvatarFallback className={cn('text-[11px]', avatarTone(fromLabel))}>
+              {getInitials(fromLabel)}
+            </AvatarFallback>
+          </Avatar>
+          <span className={cn('shrink-0', !mail.isRead && 'font-semibold')}>{fromLabel}</span>
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">{snippet}</span>
+          <span className="shrink-0 text-[11px] tabular-nums text-ter-foreground">
+            {format(new Date(mail.date), 'MMM d, h:mm a')}
+          </span>
+        </button>
+        {hoverPanel ? (
+          <div className="absolute top-1/2 right-2 -translate-y-1/2">{hoverPanel}</div>
+        ) : null}
+      </div>
     );
   }
 
   const showRemoteBanner = Boolean(mail.remoteContentBlocked) && !allowRemoteContent;
 
   return (
-    <article className="overflow-hidden rounded-xl border border-border bg-card shadow-whisper">
+    <article className="group relative overflow-hidden rounded-xl border border-border bg-card shadow-whisper">
+      {hoverPanel ? <div className="absolute top-3.5 right-4 z-10">{hoverPanel}</div> : null}
       <button
         type="button"
         onClick={handleHeaderClick}
