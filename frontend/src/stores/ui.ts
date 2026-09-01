@@ -43,6 +43,8 @@ interface UIState {
   mutedMessageIds: string[];
   /** Sidebar tree expansion, keyed by account id (persisted server-side). */
   folderExpansion: Record<string, AccountExpansion>;
+  /** Custom sidebar account order (account ids; persisted server-side). */
+  accountOrder: string[];
   locale: SupportedLocale;
   markReadPolicy: MarkReadPolicy;
   theme: ThemeMode;
@@ -61,6 +63,7 @@ interface UIState {
   toggleFolderExpanded: (accountId: string, folderId: string) => void;
   /** Bulk-restore from the server-persisted view-state blob. */
   setFolderExpansion: (map: Record<string, AccountExpansion>) => void;
+  setAccountOrder: (ids: string[]) => void;
   setLocale: (locale: SupportedLocale) => void;
   setMarkReadPolicy: (policy: MarkReadPolicy) => void;
   setTheme: (theme: ThemeMode) => void;
@@ -77,6 +80,7 @@ export const useUIStore = create<UIState>((set) => ({
   composeDraft: null,
   mutedMessageIds: [],
   folderExpansion: {},
+  accountOrder: [],
   locale: 'en',
   markReadPolicy: 'on_open' as MarkReadPolicy,
   theme: getStoredTheme(),
@@ -148,6 +152,8 @@ export const useUIStore = create<UIState>((set) => ({
     }),
 
   setFolderExpansion: (map) => set({ folderExpansion: map }),
+
+  setAccountOrder: (ids) => set({ accountOrder: ids }),
 
   setLocale: (locale) => set({ locale }),
 
