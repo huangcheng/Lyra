@@ -51,7 +51,7 @@ describe('i18n dictionaries', () => {
   });
 
   it('t() interpolates {{params}}', () => {
-    expect(t('en', 'mail.replyPlaceholder', { name: 'Ada' })).toContain('Ada');
-    expect(t('zh', 'mail.replyPlaceholder', { name: 'Ada' })).toContain('Ada');
+    expect(t('en', 'mail.conversationCount', { count: 3 })).toContain('3');
+    expect(t('zh', 'mail.conversationCount', { count: 3 })).toContain('3');
   });
 });

@@ -4,7 +4,7 @@
  * Messages that share an account + normalized subject (Re:/Fwd: stripped)
  * render as Fastmail-style stacked cards: oldest first, unread and the
  * latest expanded, the rest collapsed to a one-line header. Toolbar
- * actions and the inline reply act on the selected message.
+ * actions act on the selected message; reply/forward open the composer.
  */
 
 import { addDays, addHours, format, nextSaturday } from 'date-fns';
@@ -18,7 +18,6 @@ import {
   FolderInput,
   Forward,
   MailOpen,
-  Maximize2,
   MoreVertical,
   Reply,
   ReplyAll,
@@ -28,9 +27,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
 import { MessageCard } from '@/components/mail/message-card';
-import { RichTextEditor } from '@/components/compose/rich-text-editor';
 
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Calendar } from '@/components/ui/calendar';
 import {
@@ -56,7 +53,6 @@ import { forwardHtml, quotedReplyHtml, textToHtml } from '@/lib/compose-html';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { sanitizeEmailHtml } from '@/lib/sanitize-email-html';
 import { useMediaQuery } from '@/lib/use-media-query';
-import { avatarTone, cn, getInitials } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -80,15 +76,6 @@ function isScrolledToBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_END_THRESHOLD_PX;
 }
 
-/** Plain-text fallback for an HTML reply body (block tags become newlines). */
-function htmlToPlainText(html: string): string {
-  const withBreaks = html
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|li|blockquote|h[1-6])>/gi, '\n');
-  const doc = new DOMParser().parseFromString(withBreaks, 'text/html');
-  return (doc.body.textContent ?? '').replace(/\n{3,}/g, '\n\n').trim();
-}
-
 export function MailDisplay() {
   const locale = useUIStore((s) => s.locale);
   const markReadPolicy = useUIStore((s) => s.markReadPolicy);
@@ -110,9 +97,6 @@ export function MailDisplay() {
 
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [replyHtml, setReplyHtml] = useState('');
-  const [replyNonce, setReplyNonce] = useState(0);
-  const [quoteOpen, setQuoteOpen] = useState(false);
   const bodyScrollRef = useRef<HTMLDivElement>(null);
   const autoMarkedIdRef = useRef<string | null>(null);
   const today = new Date();
@@ -214,16 +198,6 @@ export function MailDisplay() {
     (id: string, isRead: boolean) => expandOverrides[id] ?? (!isRead || id === latestId),
     [expandOverrides, latestId],
   );
-
-  // The inline reply box is remounted per message via `key`; mirror that
-  // for its controlled HTML so a stale draft never leaks into the next
-  // message (adjusted during render, not in an effect). autoMarkedIdRef
-  // needs no reset — its guard is keyed by message id.
-  const [replyForId, setReplyForId] = useState<string | null>(selectedMessageId);
-  if (selectedMessageId !== replyForId) {
-    setReplyForId(selectedMessageId);
-    setReplyHtml('');
-  }
 
   const tryAutoMarkRead = useCallback(async () => {
     if (!selectedMessageId || !token || markReadPolicy === 'manual') return;
@@ -369,48 +343,6 @@ export function MailDisplay() {
     }
   };
 
-  const handleInlineSend = async () => {
-    if (!token || !mail || busy) return;
-    const html = replyHtml;
-    const text = htmlToPlainText(html);
-    if (!text) {
-      handleReply();
-      return;
-    }
-    const accountId = mail.accountId || accounts[0]?.id;
-    if (!accountId) {
-      setActionError(t(locale, 'settings.accounts.empty'));
-      return;
-    }
-    setBusy(true);
-    setActionError(null);
-    try {
-      const source = {
-        fromName: mail.from.name ?? '',
-        fromEmail: mail.from.email,
-        date: mail.date,
-        bodyHtml: mail.bodyHtml ? sanitizeEmailHtml(mail.bodyHtml) : undefined,
-        bodyText: mail.bodyText,
-      };
-      await api('/messages/send', {
-        method: 'POST',
-        body: JSON.stringify({
-          accountId,
-          to: [{ email: mail.from.email }],
-          subject: mail.subject.startsWith('Re:') ? mail.subject : `Re: ${mail.subject}`,
-          bodyText: text + quoteBody(mail),
-          bodyHtml: html + quotedReplyHtml(source, undefined),
-        }),
-      });
-      setReplyHtml('');
-      setReplyNonce((n) => n + 1); // remount the editor cleared
-    } catch (err: unknown) {
-      setActionError(err instanceof Error ? err.message : t(locale, 'mail.sendError'));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const handlePatch = async (body: { isRead?: boolean; isStarred?: boolean }) => {
     if (!token || !mail) return;
     try {
@@ -443,7 +375,6 @@ export function MailDisplay() {
     [folders, mail?.accountId],
   );
 
-  const fromLabel = mail ? (mail.from.name ?? mail.from.email) : '';
   const disabled = !mail || busy;
   const toolbarIconClass =
     'shrink-0 rounded-[7px] text-ter-foreground hover:bg-accent hover:text-foreground disabled:opacity-50';
@@ -793,103 +724,6 @@ export function MailDisplay() {
                   />
                 ))}
               </div>
-            </div>
-          </div>
-          <Separator className="mt-auto" />
-          <div className="shrink-0 bg-secondary/60 p-4">
-            <div className="w-full">
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void handleInlineSend();
-                }}
-              >
-                <div className="overflow-hidden rounded-xl border border-input bg-card">
-                  {/* recipient context line */}
-                  <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-2">
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      {t(locale, 'mail.reply')}
-                    </span>
-                    <span className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/70 bg-muted/40 py-0.5 pr-2.5 pl-1 text-xs">
-                      <Avatar className="size-4.5 shrink-0">
-                        <AvatarFallback className={cn('text-[8px]', avatarTone(fromLabel))}>
-                          {getInitials(fromLabel)}
-                        </AvatarFallback>
-                      </Avatar>
-                      <span className="truncate">{fromLabel}</span>
-                    </span>
-                    <span className="ml-auto min-w-0 truncate text-xs text-ter-foreground">
-                      {mail.subject.startsWith('Re:') ? mail.subject : `Re: ${mail.subject}`}
-                    </span>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="size-6 shrink-0 text-ter-foreground hover:bg-accent hover:text-foreground"
-                          onClick={() => handleReply()}
-                        >
-                          <Maximize2 className="size-3" />
-                          <span className="sr-only">{t(locale, 'mail.expandCompose')}</span>
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>{t(locale, 'mail.expandCompose')}</TooltipContent>
-                    </Tooltip>
-                  </div>
-                  <RichTextEditor
-                    key={`${selectedMessageId}:${replyNonce}`}
-                    className="rounded-none border-0"
-                    contentClassName="max-h-48 min-h-16"
-                    initialHtml=""
-                    onChange={setReplyHtml}
-                    placeholder={t(locale, 'mail.replyPlaceholder', { name: fromLabel })}
-                    disabled={busy}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                        e.preventDefault();
-                        void handleInlineSend();
-                      }
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-1.5 border-t border-border/60 px-3.5 py-1.5 text-left text-[11px] text-ter-foreground transition-colors hover:text-muted-foreground"
-                    onClick={() => setQuoteOpen((v) => !v)}
-                  >
-                    <ChevronRight
-                      className={cn('size-3 transition-transform', quoteOpen && 'rotate-90')}
-                    />
-                    {t(locale, 'mail.originalMessage')} · {fromLabel} ·{' '}
-                    {format(new Date(mail.date), 'PP')}
-                  </button>
-                  {quoteOpen ? (
-                    <div className="max-h-40 overflow-y-auto border-t border-border/60 px-3.5 py-2 text-xs leading-relaxed text-muted-foreground">
-                      <p>
-                        {mail.from.name ?? mail.from.email} &lt;{mail.from.email}&gt;
-                      </p>
-                      <p className="mb-1.5 text-ter-foreground">
-                        {format(new Date(mail.date), 'PPpp')}
-                      </p>
-                      <p className="whitespace-pre-wrap">
-                        {(mail.bodyText ?? mail.snippet ?? '').slice(0, 600)}
-                      </p>
-                    </div>
-                  ) : null}
-                  <div className="flex items-center px-3.5 pb-2.5 pt-1">
-                    <span className="text-[11px] text-ter-foreground">
-                      {t(locale, 'mail.sendShortcut')}
-                    </span>
-                    <Button
-                      type="submit"
-                      className="ml-auto h-8 rounded-full bg-primary px-4 text-primary-foreground transition-all hover:bg-primary/90 active:scale-[0.97]"
-                      disabled={busy}
-                    >
-                      {busy ? t(locale, 'mail.sending') : t(locale, 'mail.send')}
-                    </Button>
-                  </div>
-                </div>
-              </form>
             </div>
           </div>
         </div>
