@@ -831,12 +831,15 @@ pub fn judge_message(
 /// the address is missing.
 pub async fn learn_sender(db: &DbPool, user_id: &str, email: &str, block: bool) -> bool {
     if email.trim().is_empty() || !email.contains('@') {
+        tracing::info!("learn skip: bad address");
         return false;
     }
     let Ok(settings) = load_settings(db, user_id).await else {
+        tracing::info!("learn skip: settings load failed");
         return false;
     };
     if !settings.learn {
+        tracing::info!("learn skip: learn disabled");
         return false;
     }
     let list = if block {

@@ -1973,12 +1973,20 @@ pub(crate) async fn apply_message_move(
     dest_role: Option<&str>,
 ) -> Result<(), SyncError> {
     // Learn: moving out of the spam folder is the "not spam" signal.
+    tracing::info!(
+        folder_role = ?row.folder_role,
+        dest_role = ?dest_role,
+        is_draft = row.is_draft,
+        from = ?row.from_address,
+        "spam learn hook reached"
+    );
     if row.folder_role.as_deref() == Some("spam")
         && dest_role.is_some_and(|r| r != "spam")
         && !row.is_draft
         && let Some(from) = crate::spam::from_json_email(row.from_address.as_deref())
     {
-        let _ = crate::spam::learn_sender(db, user_id, &from, false).await;
+        let learned = crate::spam::learn_sender(db, user_id, &from, false).await;
+        tracing::info!(learned, from = %from, "spam learn outcome");
     }
     match row.protocol.as_str() {
         "imap" => {
@@ -2393,5 +2401,94 @@ mod postgres_live {
             assert_eq!(subject, "[pg live] draft");
             let _ = store::upsert_message; // module touch (keeps imports honest)
         });
+    }
+}
+
+#[cfg(test)]
+mod learn_hook_tests {
+    use super::*;
+    use crate::sync::queries::MessageRow;
+
+    fn spam_row() -> MessageRow {
+        MessageRow {
+            id: "00000000-0000-7000-8000-0000000000aa".into(),
+            account_id: "acc".into(),
+            folder_id: "fld".into(),
+            folder_name: "Spam".into(),
+            external_id: None,
+            message_id_header: None,
+            protocol: "imap".into(),
+            folder_role: Some("spam".into()),
+            body_text: None,
+            body_html: None,
+            is_draft: false,
+            is_read: true,
+            is_starred: false,
+            has_attachments: false,
+            from_address: Some(r#"{"raw": "cheng@thundermail.com"}"#.into()),
+            subject: Some("Learn".into()),
+            to_addresses: None,
+            cc_addresses: None,
+            date: None,
+            snippet: None,
+            size_bytes: None,
+        }
+    }
+
+    /// The learn-allow hook runs *before* the (here failing) protocol move,
+    /// so the allowed sender must be recorded even though the move errors.
+    #[tokio::test]
+    async fn moving_out_of_spam_learns_allowed_sender() {
+        let storage = crate::storage::Storage::new("sqlite::memory:").await.unwrap();
+        storage.run_migrations().await.unwrap();
+        let db = storage.pool().clone();
+        let DbPool::Sqlite(pool) = &db else { panic!() };
+        sqlx::query(
+            "INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) \
+             VALUES ('u1', 't', 'h', '[]')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        crate::spam::save_settings(
+            &db,
+            "u1",
+            &crate::spam::SpamSettings {
+                enabled: true,
+                learn: true,
+                auto_delete: false,
+                sensitivity: crate::spam::Sensitivity::Standard,
+            },
+        )
+        .await
+        .unwrap();
+        crate::spam::add_sender(
+            &db,
+            "u1",
+            "cheng@thundermail.com",
+            crate::spam::SenderList::Blocked,
+        )
+        .await
+        .unwrap();
+
+        // Protocol move fails (no server); the learn hook must still fire.
+        let _ = apply_message_move(
+            &db,
+            "u1",
+            &spam_row(),
+            "dest-folder",
+            None,
+            "INBOX".into(),
+            Some("inbox"),
+        )
+        .await;
+
+        let senders = crate::spam::list_senders(&db, "u1").await.unwrap();
+        assert!(
+            senders
+                .iter()
+                .any(|s| s.list == crate::spam::SenderList::Allowed),
+            "moving out of spam must learn the allowed sender, got {senders:?}"
+        );
     }
 }
