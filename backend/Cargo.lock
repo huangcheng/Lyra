@@ -2702,6 +2702,7 @@ dependencies = [
  "redis",
  "regex",
  "reqwest 0.12.28",
+ "rustls-pki-types",
  "sea-orm",
  "serde",
  "serde_json",

@@ -1011,8 +1011,9 @@ pub(crate) async fn get_message(
 ) -> Result<Json<MessageResponse>, SyncError> {
     let db = state.db();
     let mut row = load_message_row(db, &session.user_id, &message_id).await?;
-    maybe_fill_imap_body(db, &state.data_dir, &session.user_id, &mut row).await?;
-    maybe_verify_dkim(db, &session.user_id, &mut row).await;
+    let fill_verified =
+        maybe_fill_imap_body(db, &state.data_dir, &session.user_id, &mut row).await?;
+    maybe_verify_dkim(db, &session.user_id, &mut row, fill_verified).await;
 
     let allow_remote = query.remote_content.as_deref() == Some("allow");
     let mut response = finalize_message_response_with_opengpg(
@@ -1038,10 +1039,12 @@ fn from_domain_of(row: &MessageRow) -> String {
 /// Lazy DKIM for rows without a verdict: refetch raw bytes once, verify,
 /// store, and reflect into the row. Failure-safe: on any error the message
 /// serves without a verdict and the row stays NULL for a later retry.
-async fn maybe_verify_dkim(db: &DbPool, user_id: &str, row: &mut MessageRow) {
+/// `fill_verified` is true when the body-fill hook already ran verification
+/// this same request — its verdict (even `temperror`) is fresh, so skip the
+/// lazy refetch instead of verifying twice per open.
+async fn maybe_verify_dkim(db: &DbPool, user_id: &str, row: &mut MessageRow, fill_verified: bool) {
     let needs = row.dkim_status.is_none() || row.dkim_status.as_deref() == Some("temperror");
-    // The fill hook already verified when it fetched the body this request.
-    if !needs || super::recovery::body_exceeds_limit(row.size_bytes) {
+    if fill_verified || !needs || super::recovery::body_exceeds_limit(row.size_bytes) {
         return;
     }
     let raw: Option<Vec<u8>> = match row.protocol.as_str() {
@@ -1127,16 +1130,19 @@ fn refresh_if_stale(column: message::Column, replacement: Value) -> Expr {
         .into()
 }
 
+/// Lazily fetch and persist the IMAP body for a message row. Returns `true`
+/// when DKIM verification ran on the fetched raw bytes during this call, so
+/// the caller can skip the lazy verify path.
 #[allow(clippy::too_many_lines)]
 async fn maybe_fill_imap_body(
     db: &DbPool,
     data_dir: &std::path::Path,
     user_id: &str,
     row: &mut MessageRow,
-) -> Result<(), SyncError> {
+) -> Result<bool, SyncError> {
     let needs_body = row.body_text.is_none() && row.body_html.is_none();
     if !needs_body || row.protocol != "imap" {
-        return Ok(());
+        return Ok(false);
     }
 
     if super::recovery::body_exceeds_limit(row.size_bytes) {
@@ -1146,7 +1152,7 @@ async fn maybe_fill_imap_body(
             "skipping oversized message body fetch"
         );
         super::recovery::mark_message_fetch_error(db, &row.id, "message too large").await?;
-        return Ok(());
+        return Ok(false);
     }
 
     let uid = match parse_imap_uid(row.external_id.as_deref()) {
@@ -1159,7 +1165,7 @@ async fn maybe_fill_imap_body(
                 "cannot lazy-fill body: unparseable IMAP UID"
             );
             super::recovery::mark_message_fetch_error(db, &row.id, "unparseable IMAP UID").await?;
-            return Ok(());
+            return Ok(false);
         }
     };
 
@@ -1175,7 +1181,7 @@ async fn maybe_fill_imap_body(
                 "skipping lazy body fill: account not found or inactive"
             );
             super::recovery::mark_message_fetch_error(db, &row.id, "account not found").await?;
-            return Ok(());
+            return Ok(false);
         }
         Err(err) => return Err(err),
     };
@@ -1190,7 +1196,7 @@ async fn maybe_fill_imap_body(
         );
         super::recovery::mark_message_fetch_error(db, &row.id, "body fetch returned no data")
             .await?;
-        return Ok(());
+        return Ok(false);
     };
 
     if let Some(size) = fetched.size
@@ -1202,7 +1208,7 @@ async fn maybe_fill_imap_body(
             "skipping oversized IMAP body"
         );
         super::recovery::mark_message_fetch_error(db, &row.id, "message too large").await?;
-        return Ok(());
+        return Ok(false);
     }
 
     // DKIM: the raw RFC 822 bytes are in hand exactly once — verify now.
@@ -1372,7 +1378,7 @@ async fn maybe_fill_imap_body(
         row.dkim_expires_at = v.expires_at.map(|d| d.to_rfc3339());
     }
     persist_attachments(db, data_dir, &row.account_id, &row.id, &fetched.attachments).await?;
-    Ok(())
+    Ok(dkim_verdict.is_some())
 }
 
 /// PATCH /api/v1/messages/{id} — update read/starred flags (IMAP STORE / JMAP Email/set keywords).

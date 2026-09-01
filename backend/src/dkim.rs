@@ -86,6 +86,9 @@ pub(crate) fn select_best(outputs: &[SigOutcome], from_domain: &str) -> DkimVerd
         .iter()
         .find(|o| {
             o.status == DkimStatus::Pass
+                // Without a From domain nothing can align; `aligns` would
+                // suffix-match any d= ending in "." against "".
+                && !from_domain.is_empty()
                 && o.sdid
                     .as_deref()
                     .is_some_and(|d| aligns(&d.to_ascii_lowercase(), &from_domain))
@@ -154,6 +157,10 @@ fn flatten(o: &mail_auth::DkimOutput<'_>) -> SigOutcome {
     }
 }
 
+/// Overall DNS+verify budget per message (spec: inline verification must be
+/// time-bounded; expiry maps to a retriable temperror verdict).
+const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn authenticator() -> Result<&'static MessageAuthenticator, DkimStatus> {
     static AUTH: std::sync::OnceLock<MessageAuthenticator> = std::sync::OnceLock::new();
     if let Some(a) = AUTH.get() {
@@ -168,34 +175,44 @@ fn authenticator() -> Result<&'static MessageAuthenticator, DkimStatus> {
     }
 }
 
+/// Bare `temperror` verdict — no signature fields are known when the failure
+/// is infrastructural (resolver init failed, DNS+verify timed out).
+fn temperror_verdict(from_domain: &str) -> DkimVerdict {
+    select_best(
+        &[SigOutcome {
+            status: DkimStatus::TempError,
+            sdid: None,
+            auid: None,
+            selector: None,
+            algorithm: None,
+            signed_headers: Vec::new(),
+            signed_at: None,
+            expires_at: None,
+        }],
+        from_domain,
+    )
+}
+
 /// Verify all DKIM signatures on a raw RFC 822 message. `from_domain` is the
 /// lowercased domain of the message's primary From address.
 ///
 /// Never fails the caller: unparseable messages yield `none`; DNS resolver
-/// init failure yields `temperror`.
+/// init failure or exhaustion of [`VERIFY_TIMEOUT`] yields `temperror`.
 pub(crate) async fn verify_raw(raw: &[u8], from_domain: &str) -> DkimVerdict {
     let Ok(auth) = authenticator() else {
-        return select_best(
-            &[SigOutcome {
-                status: DkimStatus::TempError,
-                sdid: None,
-                auid: None,
-                selector: None,
-                algorithm: None,
-                signed_headers: Vec::new(),
-                signed_at: None,
-                expires_at: None,
-            }],
-            from_domain,
-        );
+        return temperror_verdict(from_domain);
     };
     let Some(msg) = AuthenticatedMessage::parse(raw) else {
         // Not parseable as RFC 5322 — treat as unsigned rather than broken.
         return select_best(&[], from_domain);
     };
-    let outputs = auth.verify_dkim(&msg).await;
-    let outcomes: Vec<SigOutcome> = outputs.iter().map(flatten).collect();
-    select_best(&outcomes, from_domain)
+    if let Ok(outputs) = tokio::time::timeout(VERIFY_TIMEOUT, auth.verify_dkim(&msg)).await {
+        let outcomes: Vec<SigOutcome> = outputs.iter().map(flatten).collect();
+        select_best(&outcomes, from_domain)
+    } else {
+        tracing::warn!("DKIM: verify exceeded time budget");
+        temperror_verdict(from_domain)
+    }
 }
 
 #[cfg(test)]
@@ -285,5 +302,202 @@ mod tests {
         let raw = b"From: a@example.com\r\nTo: b@example.org\r\nSubject: hi\r\n\r\nbody\r\n";
         let v = tests_rt().block_on(verify_raw(raw, "example.com"));
         assert_eq!(v.status, DkimStatus::None);
+    }
+
+    #[test]
+    fn empty_from_domain_never_aligns() {
+        // d= "rogue." ends_with(".") — without the guard it would
+        // false-align against an empty From domain and jump the queue.
+        let outputs = vec![
+            sig_outcome(DkimStatus::Pass, "first.example.com", "sel1"),
+            sig_outcome(DkimStatus::Pass, "rogue.", "sel2"),
+        ];
+        let v = select_best(&outputs, "");
+        assert_eq!(v.status, DkimStatus::Pass);
+        assert_eq!(v.sdid.as_deref(), Some("first.example.com"));
+    }
+
+    #[test]
+    fn timeout_budget_maps_to_temperror() {
+        // A timeout test with a real resolver would be flaky, so the
+        // elapsed-to-verdict mapping is factored into `temperror_verdict`
+        // (shared by the resolver-init path) and covered here.
+        let v = temperror_verdict("example.com");
+        assert_eq!(v.status, DkimStatus::TempError);
+        assert!(v.sdid.is_none());
+        assert!(v.selector.is_none());
+    }
+
+    // Real crypto/extraction path: sign with a fixed test-only RSA key
+    // (generated once with `openssl genrsa -traditional 2048`; never used
+    // anywhere else), then verify against a static TXT record served through
+    // mail-auth's public `ResolverCache` seam — no network, no DNS fixture
+    // process. This exercises `flatten`/`map_status` against real
+    // `DkimOutput`s.
+    mod signed {
+        use super::*;
+        use mail_auth::common::crypto::{RsaKey, Sha256};
+        use mail_auth::common::parse::TxtRecordParser;
+        use mail_auth::common::verify::DomainKey;
+        use mail_auth::dkim::DkimSigner;
+        use mail_auth::hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
+        use mail_auth::{Parameters, ResolverCache, Txt};
+        use rustls_pki_types::{PrivateKeyDer, PrivatePkcs1KeyDer, pem::PemObject};
+        use std::borrow::Borrow;
+        use std::hash::Hash;
+        use std::net::{IpAddr, Ipv4Addr};
+        use std::sync::Arc;
+
+        const TEST_RSA_PRIVATE_PEM: &str = concat!(
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "MIIEowIBAAKCAQEArnSRIyb6+zty/SR/vjDsqRCeqgwoA1Bsn5fNMaDMm+0zL5sl\n",
+            "W2QcXBTVu4F25nXvAPxOBEztsHYhMFvMGkd2wfKQCoIy2GskMZsoVEVGgkXAeuhS\n",
+            "g4y2s1CWbpjC/o9LuCAV0neWG3UnXDZFn7kgTIZ5GLENJ4sduPPem+yfFklts8jd\n",
+            "ohHxHv9sy8uxPzVDYUMKszRPiUaqtHNEuo5O8CQ5hQIphj4eneeuHgSZMPUABjEI\n",
+            "g1SuCu/F9Ts7KMYGLKRUor8Nx0qppaVHyE2shBIe/2lhrKBuOBCZ48FgkiJAf5AL\n",
+            "TT+jCcYPsJpXHPTAYKUoQaBSGbI82s8pa4a76QIDAQABAoIBAEspPpSqCSzvdoG4\n",
+            "1W6QLo5CclFqDl0rK7lwkf/FOxIc1lY23hfrYEqN0W3I//yXp+LBUS2KJUfHBVKL\n",
+            "4joaOwChbEySvqw+MOhMZEo2VIPw4FYzvMUffWFxIXbByxUYkLNh43T7f8kRpuUU\n",
+            "HtgLTu6Zaxfnw/aa+bHDI9AC2KGlSAA5feh4CPxGO1P/jCPQqfrDBP5mYnB0PUQJ\n",
+            "OsKOn+EQ8K7dFGhHmmTsdYPPSJWZRNnTCN93c0Mz6gXzvMUsk6+4iDfZF/GO49RZ\n",
+            "kzNB5GoJ0sVoRQnZKtUearO2aI8xTbSF25zpZ0p2B1LFb3wRSsbvxLlQwW6KR+Rk\n",
+            "PHEr/Y8CgYEA2DrXB2Z3Z5IZpXd8jGsdPPdaPUdapbb3+m7HbiA3H8Sj5GHAb0Bl\n",
+            "cby/bZyg0Ezm86KIu7GD1cFB+suOSnp98XBP3AtixgWc8jdaWk6ZPcZL+mWdLsIG\n",
+            "hXSeCtYlw8FH+DTUXkJe0Viq/bSLObM4xB1cvp7yXkPzxzHnWY2PauMCgYEAzorH\n",
+            "W86PZ2hEO8mox5DvTeU84j5T9IN9Y30468VTjJOsc/KjpiRIH/rSUuYtCqNroA+J\n",
+            "3cIdMnn3S2NulSUrM1r8A2k7N18wih5KNNXqdFFhcSS5jKSYm0Xuhy6i8MDljZgU\n",
+            "Z6440Ct727Dq0H8aDqzN2Cbrq86jbHJRomKiO8MCgYB9cd1wIKUjRCJ22ZQ7TqU+\n",
+            "ym3i4TOYska5Vm2C2VPBrW47v+5JXL29t3gDWnv9fK/8Jo5W/cxzRVRG8LMTSG8q\n",
+            "lDLwgPaD1ZvQ9gYIIFNNAG7xzOPczZnE8PwDY2uzXr2nJNcT/ENQBrXkzEp9ZhmH\n",
+            "xVUaDdKkl52lMbF7ReIvawKBgDla0meNIcdubdxIcKUSe1GfQdv1wOyagvxYrrDS\n",
+            "OBRGgdIk5Arj8l9nEHbS0lks7lshVYCOQftdYS2/K9sg2jFFp8vusfH7bgg8xxCL\n",
+            "ArNQUgXQU/JZVsNvlQBXFApVFqnOPIRaHg64tIlaRKqnUP4YQIUwsashE8KusDqu\n",
+            "tyxvAoGBAI5kc5ZtXBFA54o/ah58K+3JTsXQBz9hNgvRD9LuzUwKEVN+M0TTPYSq\n",
+            "i1SsCyT6g9BkOl1Fn6m+kzRETVmJS6k79dKV3VtUpYpTnEa7hWQ9FM6aKwMvCZze\n",
+            "JvTaZP7M7MwacpCehX51/FQDFU5IxgnNxwYe2GfZlKU3+5eLJBae\n",
+            "-----END RSA PRIVATE KEY-----\n",
+        );
+
+        /// TXT record for `testsel._domainkey.example.com` (SPKI of the
+        /// test-only key above).
+        const TEST_DKIM_TXT: &str = concat!(
+            "v=DKIM1; k=rsa; ",
+            "p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArnSRIyb6+zty/SR/vjDs",
+            "qRCeqgwoA1Bsn5fNMaDMm+0zL5slW2QcXBTVu4F25nXvAPxOBEztsHYhMFvMGkd2",
+            "wfKQCoIy2GskMZsoVEVGgkXAeuhSg4y2s1CWbpjC/o9LuCAV0neWG3UnXDZFn7kg",
+            "TIZ5GLENJ4sduPPem+yfFklts8jdohHxHv9sy8uxPzVDYUMKszRPiUaqtHNEuo5O",
+            "8CQ5hQIphj4eneeuHgSZMPUABjEIg1SuCu/F9Ts7KMYGLKRUor8Nx0qppaVHyE2s",
+            "hBIe/2lhrKBuOBCZ48FgkiJAf5ALTT+jCcYPsJpXHPTAYKUoQaBSGbI82s8pa4a7",
+            "6QIDAQAB",
+        );
+
+        const TEST_MESSAGE: &str = concat!(
+            "From: bill@example.com\r\n",
+            "To: jdoe@example.com\r\n",
+            "Subject: TPS Report\r\n",
+            "\r\n",
+            "I'm going to need those TPS reports ASAP.\r\n",
+        );
+
+        /// Answers the one selector TXT query from memory; mail-auth checks
+        /// the cache before any DNS, so the resolver is never contacted.
+        struct StaticTxtCache {
+            name: Box<str>,
+            record: Txt,
+        }
+
+        impl ResolverCache<Box<str>, Txt> for StaticTxtCache {
+            fn get<Q>(&self, name: &Q) -> Option<Txt>
+            where
+                Box<str>: Borrow<Q>,
+                Q: Hash + Eq + ?Sized,
+            {
+                (Borrow::<Q>::borrow(&self.name) == name).then(|| self.record.clone())
+            }
+
+            fn remove<Q>(&self, _: &Q) -> Option<Txt>
+            where
+                Box<str>: Borrow<Q>,
+                Q: Hash + Eq + ?Sized,
+            {
+                None
+            }
+
+            fn insert(&self, _: Box<str>, _: Txt, _: std::time::Instant) {}
+        }
+
+        fn sign(message: &str) -> Vec<u8> {
+            let key = RsaKey::<Sha256>::from_key_der(PrivateKeyDer::Pkcs1(
+                PrivatePkcs1KeyDer::from_pem_slice(TEST_RSA_PRIVATE_PEM.as_bytes())
+                    .expect("test key PEM"),
+            ))
+            .expect("test key");
+            let signature = DkimSigner::from_key(key)
+                .domain("example.com")
+                .selector("testsel")
+                .headers(["From", "To", "Subject"])
+                .sign(message.as_bytes())
+                .expect("sign");
+            let mut raw = Vec::new();
+            signature.write(&mut raw, true);
+            raw.extend_from_slice(message.as_bytes());
+            raw
+        }
+
+        fn verify_fixture(raw: &[u8]) -> DkimVerdict {
+            let parsed = AuthenticatedMessage::parse(raw).expect("parse");
+            let cache = StaticTxtCache {
+                name: "testsel._domainkey.example.com.".into(),
+                record: Txt::DomainKey(Arc::new(
+                    DomainKey::parse(TEST_DKIM_TXT.as_bytes()).expect("record"),
+                )),
+            };
+            // Localhost resolver config: construction never touches system
+            // DNS config, and the cache answers every lookup.
+            let auth = MessageAuthenticator::new(
+                ResolverConfig::from_parts(
+                    None,
+                    vec![],
+                    vec![NameServerConfig::udp_and_tcp(IpAddr::V4(
+                        Ipv4Addr::LOCALHOST,
+                    ))],
+                ),
+                ResolverOpts::default(),
+            )
+            .expect("resolver");
+            let outputs = tests_rt()
+                .block_on(auth.verify_dkim(Parameters::new(&parsed).with_txt_cache(&cache)));
+            let outcomes: Vec<SigOutcome> = outputs.iter().map(flatten).collect();
+            select_best(&outcomes, "example.com")
+        }
+
+        #[test]
+        fn signed_message_verifies_pass() {
+            let v = verify_fixture(&sign(TEST_MESSAGE));
+            assert_eq!(v.status, DkimStatus::Pass);
+            assert_eq!(v.sdid.as_deref(), Some("example.com"));
+            assert_eq!(v.selector.as_deref(), Some("testsel"));
+            assert_eq!(v.algorithm.as_deref(), Some("RsaSha256"));
+            for header in ["from", "to", "subject"] {
+                assert!(
+                    v.signed_headers
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(header)),
+                    "signed_headers {header}: {:?}",
+                    v.signed_headers
+                );
+            }
+            assert_eq!(v.warnings, vec!["Header 'Date' is not signed"]);
+            assert!(v.signed_at.is_some());
+            assert!(v.expires_at.is_none());
+        }
+
+        #[test]
+        fn tampered_body_fails() {
+            let mut raw = sign(TEST_MESSAGE);
+            raw.extend_from_slice(b"TAMPERED\r\n");
+            let v = verify_fixture(&raw);
+            assert_eq!(v.status, DkimStatus::Fail);
+        }
     }
 }

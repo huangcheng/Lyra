@@ -83,6 +83,9 @@ pgp = "0.19"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+# Test-only: load the hardcoded DKIM test key PEM (same version mail-auth
+# already pulls transitively — no lockfile churn).
+rustls-pki-types = "1"
 
 [lints.clippy]
 # Clippy warnings as errors (matches Makefile: -D warnings)
