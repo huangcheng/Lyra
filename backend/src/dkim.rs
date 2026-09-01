@@ -4,7 +4,6 @@
 //! bodies), so verification runs where bytes appear: the IMAP body-fill hook
 //! and the lazy on-open refetch. The verdict model and the best-signature
 //! selection policy are pure and unit-tested; mail-auth does crypto + DNS.
-#![allow(dead_code)] // seam module; callers land with the body-fill hook task
 
 use mail_auth::{AuthenticatedMessage, DkimResult, MessageAuthenticator};
 

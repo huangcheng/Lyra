@@ -131,7 +131,7 @@ fn opt_id_value(db: &DbPool, id: Option<&str>) -> Result<Value, SyncError> {
 }
 
 /// Optional plain-text bind.
-fn opt_str_value(raw: Option<&str>) -> Value {
+pub(crate) fn opt_str_value(raw: Option<&str>) -> Value {
     Value::String(raw.map(str::to_owned))
 }
 
@@ -1326,8 +1326,6 @@ fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStatement {
 }
 
 /// Persist one message's DKIM verdict (view-time verification writes).
-// Callers land with the body-fill/open-verify hook task.
-#[allow(dead_code)]
 pub(crate) async fn update_dkim_verdict(
     db: &DbPool,
     message_id: &str,

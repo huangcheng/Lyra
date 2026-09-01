@@ -27,7 +27,7 @@ use super::queries::{
     run_message_list, search_like_fallback, snooze_visible_clause, text_value, ts_value,
 };
 use super::send::send_message;
-use super::store::{parse_imap_uid, update_folder_counts};
+use super::store::{opt_str_value, parse_imap_uid, update_folder_counts};
 use super::types::{EnqueuedSync, SyncError, SyncStatus};
 use crate::auth::{AuthState, AuthUser};
 use crate::db_row::parse_ts;
@@ -1012,6 +1012,7 @@ pub(crate) async fn get_message(
     let db = state.db();
     let mut row = load_message_row(db, &session.user_id, &message_id).await?;
     maybe_fill_imap_body(db, &state.data_dir, &session.user_id, &mut row).await?;
+    maybe_verify_dkim(db, &session.user_id, &mut row).await;
 
     let allow_remote = query.remote_content.as_deref() == Some("allow");
     let mut response = finalize_message_response_with_opengpg(
@@ -1025,6 +1026,80 @@ pub(crate) async fn get_message(
     // Detail payload carries attachment metadata (lists use has_attachments).
     response.attachments = Some(load_attachment_meta(db, &message_id).await?);
     Ok(Json(response))
+}
+
+/// Lowercased domain of the message's primary From address ("" when absent).
+fn from_domain_of(row: &MessageRow) -> String {
+    crate::privacy::sender_email_from_json(row.from_address.as_deref())
+        .and_then(|addr| addr.rsplit('@').next().map(str::to_ascii_lowercase))
+        .unwrap_or_default()
+}
+
+/// Lazy DKIM for rows without a verdict: refetch raw bytes once, verify,
+/// store, and reflect into the row. Failure-safe: on any error the message
+/// serves without a verdict and the row stays NULL for a later retry.
+async fn maybe_verify_dkim(db: &DbPool, user_id: &str, row: &mut MessageRow) {
+    let needs = row.dkim_status.is_none() || row.dkim_status.as_deref() == Some("temperror");
+    // The fill hook already verified when it fetched the body this request.
+    if !needs || super::recovery::body_exceeds_limit(row.size_bytes) {
+        return;
+    }
+    let raw: Option<Vec<u8>> = match row.protocol.as_str() {
+        "imap" => {
+            let Ok(uid) = parse_imap_uid(row.external_id.as_deref()) else {
+                return;
+            };
+            let Ok((mut client, _)) = connect_imap_for_account(db, user_id, &row.account_id).await
+            else {
+                return;
+            };
+            if client.select(&row.folder_name).await.is_err() {
+                return;
+            }
+            client
+                .fetch_bodies(&[uid])
+                .await
+                .ok()
+                .and_then(|b| b.into_iter().next())
+                .and_then(|m| m.body)
+        }
+        "jmap" => {
+            let Some(email_id) = row.external_id.clone() else {
+                return;
+            };
+            let Ok(seam) = connect_jmap_for_account(db, user_id, &row.account_id).await else {
+                return;
+            };
+            let blob_id = seam
+                .get_emails(&[email_id])
+                .await
+                .ok()
+                .and_then(|(emails, _)| emails.into_iter().next())
+                .and_then(|e| e.blob_id);
+            match blob_id {
+                Some(id) => seam.download_blob(&id).await.ok(),
+                None => None,
+            }
+        }
+        _ => None,
+    };
+    let Some(raw) = raw else { return };
+    let verdict = crate::dkim::verify_raw(&raw, &from_domain_of(row)).await;
+    if crate::sync::store::update_dkim_verdict(db, &row.id, &verdict)
+        .await
+        .is_ok()
+    {
+        row.dkim_status = Some(verdict.status.as_str().to_string());
+        row.dkim_sdid.clone_from(&verdict.sdid);
+        row.dkim_auid.clone_from(&verdict.auid);
+        row.dkim_selector.clone_from(&verdict.selector);
+        row.dkim_algorithm.clone_from(&verdict.algorithm);
+        row.dkim_signed_headers =
+            Some(serde_json::to_string(&verdict.signed_headers).unwrap_or_default());
+        row.dkim_warnings = Some(serde_json::to_string(&verdict.warnings).unwrap_or_default());
+        row.dkim_signed_at = verdict.signed_at.map(|d| d.to_rfc3339());
+        row.dkim_expires_at = verdict.expires_at.map(|d| d.to_rfc3339());
+    }
 }
 
 /// RHS for `SET col = COALESCE(col, <bound>)`; UPDATE statements carry no
@@ -1130,6 +1205,13 @@ async fn maybe_fill_imap_body(
         return Ok(());
     }
 
+    // DKIM: the raw RFC 822 bytes are in hand exactly once — verify now.
+    let dkim_verdict = if let Some(raw) = &fetched.body {
+        Some(crate::dkim::verify_raw(raw, &from_domain_of(row)).await)
+    } else {
+        None
+    };
+
     let from_json = fetched
         .from
         .as_ref()
@@ -1234,6 +1316,29 @@ async fn maybe_fill_imap_body(
         )
         .value(message::Column::UpdatedAt, now_value(db))
         .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
+    if let Some(v) = &dkim_verdict {
+        let headers_json = serde_json::to_string(&v.signed_headers).unwrap_or_default();
+        let warnings_json = serde_json::to_string(&v.warnings).unwrap_or_default();
+        update
+            .value(
+                message::Column::DkimStatus,
+                opt_str_value(Some(v.status.as_str())),
+            )
+            .value(message::Column::DkimSdid, opt_str_value(v.sdid.as_deref()))
+            .value(message::Column::DkimAuid, opt_str_value(v.auid.as_deref()))
+            .value(
+                message::Column::DkimSelector,
+                opt_str_value(v.selector.as_deref()),
+            )
+            .value(
+                message::Column::DkimAlgorithm,
+                opt_str_value(v.algorithm.as_deref()),
+            )
+            .value(message::Column::DkimSignedHeaders, Expr::val(headers_json))
+            .value(message::Column::DkimWarnings, Expr::val(warnings_json))
+            .value(message::Column::DkimSignedAt, ts_value(db, v.signed_at))
+            .value(message::Column::DkimExpiresAt, ts_value(db, v.expires_at));
+    }
     db.orm().execute(&update).await.map_err(orm_err)?;
 
     row.body_text = fetched_body_text;
@@ -1253,6 +1358,18 @@ async fn maybe_fill_imap_body(
     }
     if header_needs_refresh(row.snippet.as_deref()) {
         row.snippet = snippet;
+    }
+    if let Some(v) = &dkim_verdict {
+        row.dkim_status = Some(v.status.as_str().to_string());
+        row.dkim_sdid.clone_from(&v.sdid);
+        row.dkim_auid.clone_from(&v.auid);
+        row.dkim_selector.clone_from(&v.selector);
+        row.dkim_algorithm.clone_from(&v.algorithm);
+        row.dkim_signed_headers =
+            Some(serde_json::to_string(&v.signed_headers).unwrap_or_default());
+        row.dkim_warnings = Some(serde_json::to_string(&v.warnings).unwrap_or_default());
+        row.dkim_signed_at = v.signed_at.map(|d| d.to_rfc3339());
+        row.dkim_expires_at = v.expires_at.map(|d| d.to_rfc3339());
     }
     persist_attachments(db, data_dir, &row.account_id, &row.id, &fetched.attachments).await?;
     Ok(())
@@ -2553,5 +2670,163 @@ mod learn_hook_tests {
                 .any(|s| s.list == crate::spam::SenderList::Allowed),
             "moving out of spam must learn the allowed sender, got {senders:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod dkim_lazy_tests {
+    use super::*;
+    use crate::auth::AuthSession;
+    use crate::imap::ImapMessage;
+    use crate::kernel::App;
+    use crate::storage::Storage;
+    use crate::sync::store::{get_folder_id, new_uuid_text, upsert_folder, upsert_message};
+
+    /// In-memory SQLite with a user, an IMAP account whose credential cannot
+    /// be decrypted (no reachable server, no network), and one message whose
+    /// body is already filled while `dkim_status` stays NULL.
+    /// Returns `(state, user_id, message_id)`.
+    async fn seed_filled_message() -> (AuthState, String, String) {
+        let storage = Storage::new("sqlite::memory:").await.unwrap();
+        storage.run_migrations().await.unwrap();
+        let db = storage.pool().clone();
+        let DbPool::Sqlite(pool) = &db else {
+            panic!("sqlite")
+        };
+
+        let user_id = new_uuid_text();
+        let account_id = new_uuid_text();
+        sqlx::query(
+            "INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) \
+             VALUES (?, ?, 'hash', '[]')",
+        )
+        .bind(&user_id)
+        .bind(format!("dkim-lazy-{user_id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mail_account (\
+                 id, user_id, display_name, email_address, protocol, auth_type, \
+                 credential, imap_host, imap_port, imap_security, is_active, sync_enabled\
+             ) VALUES (?, ?, 'DKIM', 'dkim@example.com', 'imap', 'password', \
+                       'cred', 'imap.example.com', 993, 'tls', 1, 1)",
+        )
+        .bind(&account_id)
+        .bind(&user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        upsert_folder(&db, &account_id, "INBOX", None, &[])
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&db, &account_id, "INBOX").await.unwrap();
+        let msg = ImapMessage {
+            uid: 1,
+            message_id: Some("<1@example.com>".into()),
+            subject: Some("Verify me".into()),
+            from: Some("ops@example.com".into()),
+            to: Some("me@example.org".into()),
+            cc: None,
+            date: None,
+            in_reply_to: None,
+            references: None,
+            flags: vec!["\\Seen".into()],
+            size: Some(1024),
+            body: None,
+            body_text: None,
+            body_html: None,
+            has_attachments: false,
+            attachments: vec![],
+        };
+        upsert_message(&db, &account_id, &folder_id, &msg)
+            .await
+            .unwrap();
+        let message_id: String = sqlx::query_scalar("SELECT id FROM message WHERE account_id = ?")
+            .bind(&account_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        // Body already filled → the fill hook is a no-op this request.
+        sqlx::query("UPDATE message SET body_text = 'cached body' WHERE id = ?")
+            .bind(&message_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        crate::auth::install_test_master_key();
+        let config = crate::config::Config {
+            listen_addr: "127.0.0.1:0".into(),
+            database_url: "sqlite::memory:".into(),
+            data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            min_password_length: 8,
+            sync_max_concurrent: 3,
+            sync_poll_secs: 300,
+            max_attachment_bytes: 25 * 1024 * 1024,
+            redis_url: None,
+            master_key: crate::auth::TEST_MASTER_KEY.to_vec(),
+            ms_oauth: None,
+            yandex_oauth: None,
+        };
+        let state = AuthState::new(
+            db,
+            &config,
+            std::sync::Arc::new(App::new()),
+            std::sync::Arc::new(crate::kv::MemoryKv::new()),
+        )
+        .unwrap();
+        (state, user_id, message_id)
+    }
+
+    async fn open_message(state: AuthState, user_id: &str, message_id: String) -> MessageResponse {
+        let Json(resp) = get_message(
+            State(state),
+            Path(message_id),
+            AuthSession {
+                user_id: user_id.to_string(),
+                token: "tok".into(),
+            },
+            Query(GetMessageQuery {
+                remote_content: None,
+            }),
+        )
+        .await
+        .unwrap();
+        resp
+    }
+
+    /// The lazy path attempts a refetch; with no reachable server in tests,
+    /// the failure-safe contract is: the response serves normally and carries
+    /// no dkim object (row stays NULL for a later retry).
+    #[tokio::test]
+    async fn get_message_without_verdict_serves_dkim_none() {
+        let (state, user_id, message_id) = seed_filled_message().await;
+        let resp = open_message(state, &user_id, message_id).await;
+        assert!(resp.dkim.is_none());
+    }
+
+    /// A stored verdict surfaces through the handler and is not refetched.
+    #[tokio::test]
+    async fn get_message_with_stored_verdict_serves_dkim() {
+        let (state, user_id, message_id) = seed_filled_message().await;
+        let verdict = crate::dkim::DkimVerdict {
+            status: crate::dkim::DkimStatus::Pass,
+            sdid: Some("example.com".into()),
+            auid: Some("ops@example.com".into()),
+            selector: Some("sel1".into()),
+            algorithm: Some("RsaSha256".into()),
+            signed_headers: vec!["from".into(), "to".into()],
+            warnings: Vec::new(),
+            signed_at: chrono::DateTime::from_timestamp(1_756_700_000, 0),
+            expires_at: None,
+        };
+        crate::sync::store::update_dkim_verdict(state.db(), &message_id, &verdict)
+            .await
+            .unwrap();
+
+        let resp = open_message(state, &user_id, message_id).await;
+        let dkim = resp.dkim.expect("stored verdict must surface");
+        assert_eq!(dkim.status, "pass");
+        assert_eq!(dkim.sdid.as_deref(), Some("example.com"));
     }
 }
