@@ -1760,42 +1760,50 @@ export function SettingsPage() {
                 ) : null}
               </FieldGroup>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={testing || !formData.emailAddress.trim()}
-                  onClick={() => void handleTestConnection()}
-                  className="mr-auto"
-                >
-                  {testing
-                    ? t(locale, 'settings.accounts.testing')
-                    : t(locale, 'settings.accounts.testConnection')}
-                </Button>
+              {/* Footer: actions on their own row, status always full-width
+                  below — a long probe result must never sit between the
+                  buttons and wrap them onto separate rows. */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={testing || !formData.emailAddress.trim()}
+                    onClick={() => void handleTestConnection()}
+                    className="mr-auto"
+                  >
+                    {testing
+                      ? t(locale, 'settings.accounts.testing')
+                      : t(locale, 'settings.accounts.testConnection')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      setShowAddForm(false);
+                      setEditingAccount(null);
+                    }}
+                  >
+                    {t(locale, 'common.cancel')}
+                  </Button>
+                  {!preferMailOAuth && (
+                    <Button type="submit">
+                      {editingAccount ? t(locale, 'common.save') : t(locale, 'common.add')}
+                    </Button>
+                  )}
+                </div>
                 {testResult && (
-                  <span
-                    className={cn('text-[12.5px]', testResult.ok ? 'text-ok' : 'text-destructive')}
+                  <p
+                    className={cn(
+                      'text-[12.5px] leading-snug',
+                      testResult.ok ? 'text-ok' : 'text-destructive',
+                    )}
                     role="status"
                   >
                     {testResult.ok
                       ? `${t(locale, 'settings.accounts.testOk')} — ${testResult.detail}`
                       : `${t(locale, 'settings.accounts.testFail')}: ${testResult.detail}`}
-                  </span>
-                )}
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => {
-                    setShowAddForm(false);
-                    setEditingAccount(null);
-                  }}
-                >
-                  {t(locale, 'common.cancel')}
-                </Button>
-                {!preferMailOAuth && (
-                  <Button type="submit">
-                    {editingAccount ? t(locale, 'common.save') : t(locale, 'common.add')}
-                  </Button>
+                  </p>
                 )}
               </div>
             </form>
