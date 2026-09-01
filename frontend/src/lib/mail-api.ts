@@ -2,7 +2,7 @@
  * Map backend mail JSON onto frontend types.
  */
 
-import type { MailAddress, MailAttachment, MailFolder, MailMessage } from '@/types';
+import type { DkimInfo, MailAddress, MailAttachment, MailFolder, MailMessage } from '@/types';
 
 export interface ApiFolder {
   id: string;
@@ -44,6 +44,7 @@ export interface ApiMessage {
   hasAttachments: boolean;
   attachments?: ApiAttachment[];
   remoteContentBlocked?: boolean;
+  dkim?: DkimInfo | null;
   opengpg?: {
     encrypted: boolean;
     decrypted: boolean;
@@ -155,6 +156,7 @@ export function mapApiMessage(msg: ApiMessage | Record<string, unknown>): MailMe
     hasAttachments: Boolean(row.hasAttachments),
     attachments: mapApiAttachments(row.attachments),
     remoteContentBlocked: Boolean(row.remoteContentBlocked),
+    dkim: row.dkim ?? null,
     opengpg: row.opengpg
       ? {
           encrypted: Boolean(row.opengpg.encrypted),

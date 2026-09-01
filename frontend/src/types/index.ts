@@ -46,9 +46,24 @@ export interface MailMessage {
   remoteContentBlocked?: boolean;
   /** OpenGPG decrypt/verify status from GET message (when present). */
   opengpg?: MailOpengpgStatus;
+  /** DKIM verification result from the detail payload (null when never verified). */
+  dkim?: DkimInfo | null;
   /** Thread was replied to (list status glyph). */
   isReplied?: boolean;
   labels?: string[];
+}
+
+/** DKIM verification verdict from the message detail payload. */
+export interface DkimInfo {
+  status: 'pass' | 'fail' | 'none' | 'temperror';
+  sdid: string | null;
+  auid: string | null;
+  selector: string | null;
+  algorithm: string | null;
+  signedHeaders: string[];
+  warnings: string[];
+  signedAt: string | null;
+  expiresAt: string | null;
 }
 
 export interface MailOpengpgSignature {

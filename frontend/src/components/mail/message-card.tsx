@@ -13,6 +13,7 @@ import { File, Forward, Paperclip, Reply, ReplyAll, Shield, Trash2 } from 'lucid
 import { useEffect, useRef, useState } from 'react';
 
 import { OpengpgMessageBanner } from '@/components/mail/opengpg-message-banner';
+import { DkimStatus } from '@/components/mail/dkim-status';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { t } from '@/i18n';
@@ -324,6 +325,11 @@ export function MessageCard({
             <Shield className="size-3.5 shrink-0 opacity-70" aria-hidden />
             <span className="min-w-0 flex-1">{t(locale, 'mail.trackingPixelHint')}</span>
           </div>
+        </div>
+      ) : null}
+      {mail.dkim ? (
+        <div className="px-4 pb-1">
+          <DkimStatus dkim={mail.dkim} locale={locale} />
         </div>
       ) : null}
       <div className="px-4 pt-1 pb-4 text-sm">
