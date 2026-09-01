@@ -19,6 +19,17 @@ pub struct Model {
     /// Anti-spam verdict once the post-sync filter judged this row:
     /// 'spam' | 'clean' | 'blocked' | 'allowed' (NULL = not yet judged).
     pub spam_verdict: Option<String>,
+    /// DKIM verdict once verified at view time (NULL = never verified):
+    /// 'pass' | 'fail' | 'none' | 'temperror'.
+    pub dkim_status: Option<String>,
+    pub dkim_sdid: Option<String>,
+    pub dkim_auid: Option<String>,
+    pub dkim_selector: Option<String>,
+    pub dkim_algorithm: Option<String>,
+    pub dkim_signed_headers: Option<String>,
+    pub dkim_warnings: Option<String>,
+    pub dkim_signed_at: Option<DateTimeUtc>,
+    pub dkim_expires_at: Option<DateTimeUtc>,
     pub message_id_header: Option<String>,
     pub subject: Option<String>,
     pub from_address: Option<Json>,

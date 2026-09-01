@@ -654,6 +654,36 @@ INSERT INTO message_fts (subject) VALUES ('x');
         assert_eq!(count, 1, "lyra_user table should exist");
     }
 
+    #[tokio::test]
+    async fn migration_0017_adds_dkim_columns() {
+        let storage = Storage::new("sqlite::memory:").await.unwrap();
+        storage.run_migrations().await.unwrap();
+
+        let pool = match storage.pool() {
+            DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "postgres")]
+            DbPool::Postgres(_) => panic!("Expected SQLite"),
+        };
+
+        for col in [
+            "dkim_status",
+            "dkim_sdid",
+            "dkim_auid",
+            "dkim_selector",
+            "dkim_algorithm",
+            "dkim_signed_headers",
+            "dkim_warnings",
+            "dkim_signed_at",
+            "dkim_expires_at",
+        ] {
+            let q = format!("SELECT {col} FROM message LIMIT 0");
+            sqlx::query(audited_sql(q.as_str()))
+                .execute(pool)
+                .await
+                .unwrap_or_else(|e| panic!("column {col} missing: {e}"));
+        }
+    }
+
     #[cfg(feature = "postgres")]
     mod postgres_live {
         use super::*;
