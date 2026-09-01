@@ -340,7 +340,10 @@ mod tests {
         assert_eq!(secret_fingerprint(secret_id), "len=36 uuid-shaped");
         // Synthetic 40-char Entra-style Value (tilde + alphanumerics) — never
         // a real credential.
-        assert_eq!(secret_shape("EXAMPLE~NOTAREALSECRETvALUE0000000000000000"), "opaque");
+        assert_eq!(
+            secret_shape("EXAMPLE~NOTAREALSECRETvALUE0000000000000000"),
+            "opaque"
+        );
     }
 
     #[test]
