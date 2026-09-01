@@ -343,7 +343,9 @@ function SortableAccountSection({
       <AccountSection
         account={account}
         selectedFolderId={selectedFolderId}
-        dragHandleProps={{ ...attributes, ...listeners }}
+        // touch-action: none keeps the browser from hijacking vertical scroll,
+        // which would pointercancel and abort the drag (dnd-kit guidance).
+        dragHandleProps={{ ...attributes, ...listeners, style: { touchAction: 'none' } }}
       />
     </div>
   );
