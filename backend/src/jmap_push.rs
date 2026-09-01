@@ -26,6 +26,16 @@ use crate::sync::jmap_client::{EventSourceOutcome, JmapError, JmapSeam};
 
 const SUPERVISOR_TICK: Duration = Duration::from_secs(30);
 const RECONNECT_DELAY: Duration = Duration::from_secs(15);
+/// Cap for the error backoff ladder (sync spec §11: double up to 1h).
+const MAX_RECONNECT_DELAY: Duration = Duration::from_hours(1);
+
+/// Double the delay on every consecutive failure, capped at 1 hour.
+fn backoff_after_failures(failures: u32) -> Duration {
+    let shift = failures.min(16) - 1;
+    RECONNECT_DELAY
+        .checked_mul(1u32 << shift)
+        .map_or(MAX_RECONNECT_DELAY, |d| d.min(MAX_RECONNECT_DELAY))
+}
 
 struct PushAccount {
     id: String,
@@ -175,6 +185,7 @@ async fn list_jmap_push_candidates(db: &DbPool) -> Result<Vec<PushAccount>, sqlx
 
 async fn run_account_push_loop(db: DbPool, account: PushAccount) {
     tracing::info!(account_id = %account.id, "JMAP EventSource watcher starting");
+    let mut failures: u32 = 0;
     loop {
         match watch_once(&db, &account).await {
             Ok(EventSourceOutcome::Unsupported) => {
@@ -185,6 +196,7 @@ async fn run_account_push_loop(db: DbPool, account: PushAccount) {
                 return;
             }
             Ok(EventSourceOutcome::StateChanged) => {
+                failures = 0;
                 if let Err(error) = enqueue_sync_if_idle(&db, &account).await {
                     tracing::warn!(
                         account_id = %account.id,
@@ -199,12 +211,15 @@ async fn run_account_push_loop(db: DbPool, account: PushAccount) {
                 tokio::time::sleep(RECONNECT_DELAY).await;
             }
             Err(error) => {
+                failures += 1;
+                let delay = backoff_after_failures(failures);
                 tracing::warn!(
                     account_id = %account.id,
                     error = %error,
+                    retry_in = ?delay,
                     "JMAP EventSource failed; reconnecting"
                 );
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                tokio::time::sleep(delay).await;
             }
         }
     }

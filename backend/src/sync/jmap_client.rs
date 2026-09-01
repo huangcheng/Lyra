@@ -583,6 +583,32 @@ impl JmapSeam {
         secret: &str,
         auth_type: &str,
     ) -> Result<Self, JmapError> {
+        let primary = credentials_for(auth_type, email, secret);
+        match Self::connect_with(base_url, primary).await {
+            Ok(seam) => Ok(seam),
+            // Providers disagree on how an API token travels: Fastmail wants
+            // Basic with the token as the username, standard providers want
+            // the account password over Basic. On a credentials rejection,
+            // try both alternate presentations before surfacing the 401.
+            Err(JmapError::Authentication(_)) if auth_type.eq_ignore_ascii_case("bearer") => {
+                tracing::info!(
+                    email,
+                    "bearer auth rejected; retrying token as Basic username"
+                );
+                match Self::connect_with(base_url, Credentials::basic(secret, "X")).await {
+                    Ok(seam) => Ok(seam),
+                    Err(JmapError::Authentication(_)) => {
+                        tracing::info!(email, "retrying token as Basic account password");
+                        Self::connect_with(base_url, Credentials::basic(email, secret)).await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn connect_with(base_url: &str, credentials: Credentials) -> Result<Self, JmapError> {
         crate::netsec::validate_server_url(base_url).map_err(JmapError::InvalidServerUrl)?;
         let trimmed = base_url.trim_end_matches('/');
         let base = trimmed.strip_suffix("/.well-known/jmap").unwrap_or(trimmed);
@@ -592,7 +618,6 @@ impl JmapSeam {
             .and_then(|u| u.host_str().map(str::to_owned))
             .ok_or_else(|| JmapError::InvalidServerUrl(format!("no host in '{base}'")))?;
 
-        let credentials = credentials_for(auth_type, email, secret);
         let auth_header = authorization_header(&credentials);
         let (redirected, discovery_url) = preflight_discovery(base, &auth_header, &origin).await?;
         // Hand the crate the chain's *final* URL: the preflight follower
