@@ -61,8 +61,9 @@ Confirmed scope decisions:
   multiple account headers render), the account header row becomes a
   sortable item. The single-account view (`bare=true`) has one section and
   no reordering.
-- A vertical insertion indicator appears between account sections while
-  dragging.
+- During a drag, sibling sections shift apart via sortable transforms and the
+  dragged section renders at 60% opacity (canonical dnd-kit feedback; no
+  separate insertion line).
 - dnd-kit activation constraint (~4px pointer movement) keeps a plain click
   on the header toggling expand/collapse as today; only a drag gesture
   reorders.
