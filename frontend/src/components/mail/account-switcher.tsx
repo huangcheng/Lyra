@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { t } from '@/i18n';
+import { orderAccounts } from '@/lib/account-order';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
 import { cn } from '@/lib/utils';
 import { useMailStore } from '@/stores/mail';
@@ -26,6 +27,7 @@ function AccountIcon({ kind, className }: { kind: 'all' | 'mail'; className?: st
 export function AccountSwitcher({ isCollapsed }: { isCollapsed: boolean }) {
   const locale = useUIStore((s) => s.locale);
   const accounts = useMailStore((s) => s.accounts);
+  const accountOrder = useUIStore((s) => s.accountOrder);
   const selectedAccountId = useUIStore((s) => s.selectedAccountId);
   const setSelectedAccount = useUIStore((s) => s.setSelectedAccount);
 
@@ -36,7 +38,7 @@ export function AccountSwitcher({ isCollapsed }: { isCollapsed: boolean }) {
       email: t(locale, 'nav.allInboxes'),
       icon: <AccountIcon kind="all" />,
     },
-    ...accounts.map((account) => ({
+    ...orderAccounts(accounts, accountOrder).map((account) => ({
       id: account.id,
       label: account.displayName || account.emailAddress,
       email: account.emailAddress,

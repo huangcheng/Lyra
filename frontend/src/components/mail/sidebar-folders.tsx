@@ -22,6 +22,7 @@ import { useMemo } from 'react';
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
+import { orderAccounts } from '@/lib/account-order';
 import { buildCustomFolderTree, buildRoleChildren, type FolderTreeNode } from '@/lib/folder-tree';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
 import { avatarTone, cn } from '@/lib/utils';
@@ -354,6 +355,8 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
   const selectedFolderId = useUIStore((s) => s.selectedFolderId);
   const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
   const accounts = useMailStore((s) => s.accounts);
+  const accountOrder = useUIStore((s) => s.accountOrder);
+  const orderedAccounts = orderAccounts(accounts, accountOrder);
   // Subscribe to `folders` so the unified counts re-render on folder updates.
   useMailStore((s) => s.folders);
   const getUnifiedFolders = useMailStore((s) => s.getUnifiedFolders);
@@ -393,7 +396,7 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
       </div>
       <SectionLabel>{t(locale, 'mail.section.accounts')}</SectionLabel>
       <div className="grid gap-0.5">
-        {accounts.map((account) => (
+        {orderedAccounts.map((account) => (
           <AccountSection key={account.id} account={account} selectedFolderId={selectedFolderId} />
         ))}
       </div>
