@@ -21,6 +21,12 @@ paths = [
     '''target/''',
     '''\.orch/''',               # local scratch (ignored)
 ]
+# Historical commit that introduced the DKIM test-fixture key inline in
+# dkim.rs (moved to backend/testdata/ afterwards, which the private-key
+# rule allowlists by path; this covers the old history).
+commits = [
+    "4e89b8bee253fc6f7e90b3340b6b5e1028d30252",
+]
 
 # ---------------------------------------------------------------------------
 # Custom rules
@@ -73,3 +79,7 @@ description = "Private key (PEM)"
 regex = '''-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'''
 keywords = ["PRIVATE KEY"]
 tags = ["private-key"]
+
+[rules.allowlist]
+description = "Test fixtures: committed test-only keys under testdata (never real credentials)"
+paths = ['''backend/testdata/''']

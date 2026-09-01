@@ -348,35 +348,9 @@ mod tests {
         use std::net::{IpAddr, Ipv4Addr};
         use std::sync::Arc;
 
-        const TEST_RSA_PRIVATE_PEM: &str = concat!(
-            "-----BEGIN RSA PRIVATE KEY-----\n",
-            "MIIEowIBAAKCAQEArnSRIyb6+zty/SR/vjDsqRCeqgwoA1Bsn5fNMaDMm+0zL5sl\n",
-            "W2QcXBTVu4F25nXvAPxOBEztsHYhMFvMGkd2wfKQCoIy2GskMZsoVEVGgkXAeuhS\n",
-            "g4y2s1CWbpjC/o9LuCAV0neWG3UnXDZFn7kgTIZ5GLENJ4sduPPem+yfFklts8jd\n",
-            "ohHxHv9sy8uxPzVDYUMKszRPiUaqtHNEuo5O8CQ5hQIphj4eneeuHgSZMPUABjEI\n",
-            "g1SuCu/F9Ts7KMYGLKRUor8Nx0qppaVHyE2shBIe/2lhrKBuOBCZ48FgkiJAf5AL\n",
-            "TT+jCcYPsJpXHPTAYKUoQaBSGbI82s8pa4a76QIDAQABAoIBAEspPpSqCSzvdoG4\n",
-            "1W6QLo5CclFqDl0rK7lwkf/FOxIc1lY23hfrYEqN0W3I//yXp+LBUS2KJUfHBVKL\n",
-            "4joaOwChbEySvqw+MOhMZEo2VIPw4FYzvMUffWFxIXbByxUYkLNh43T7f8kRpuUU\n",
-            "HtgLTu6Zaxfnw/aa+bHDI9AC2KGlSAA5feh4CPxGO1P/jCPQqfrDBP5mYnB0PUQJ\n",
-            "OsKOn+EQ8K7dFGhHmmTsdYPPSJWZRNnTCN93c0Mz6gXzvMUsk6+4iDfZF/GO49RZ\n",
-            "kzNB5GoJ0sVoRQnZKtUearO2aI8xTbSF25zpZ0p2B1LFb3wRSsbvxLlQwW6KR+Rk\n",
-            "PHEr/Y8CgYEA2DrXB2Z3Z5IZpXd8jGsdPPdaPUdapbb3+m7HbiA3H8Sj5GHAb0Bl\n",
-            "cby/bZyg0Ezm86KIu7GD1cFB+suOSnp98XBP3AtixgWc8jdaWk6ZPcZL+mWdLsIG\n",
-            "hXSeCtYlw8FH+DTUXkJe0Viq/bSLObM4xB1cvp7yXkPzxzHnWY2PauMCgYEAzorH\n",
-            "W86PZ2hEO8mox5DvTeU84j5T9IN9Y30468VTjJOsc/KjpiRIH/rSUuYtCqNroA+J\n",
-            "3cIdMnn3S2NulSUrM1r8A2k7N18wih5KNNXqdFFhcSS5jKSYm0Xuhy6i8MDljZgU\n",
-            "Z6440Ct727Dq0H8aDqzN2Cbrq86jbHJRomKiO8MCgYB9cd1wIKUjRCJ22ZQ7TqU+\n",
-            "ym3i4TOYska5Vm2C2VPBrW47v+5JXL29t3gDWnv9fK/8Jo5W/cxzRVRG8LMTSG8q\n",
-            "lDLwgPaD1ZvQ9gYIIFNNAG7xzOPczZnE8PwDY2uzXr2nJNcT/ENQBrXkzEp9ZhmH\n",
-            "xVUaDdKkl52lMbF7ReIvawKBgDla0meNIcdubdxIcKUSe1GfQdv1wOyagvxYrrDS\n",
-            "OBRGgdIk5Arj8l9nEHbS0lks7lshVYCOQftdYS2/K9sg2jFFp8vusfH7bgg8xxCL\n",
-            "ArNQUgXQU/JZVsNvlQBXFApVFqnOPIRaHg64tIlaRKqnUP4YQIUwsashE8KusDqu\n",
-            "tyxvAoGBAI5kc5ZtXBFA54o/ah58K+3JTsXQBz9hNgvRD9LuzUwKEVN+M0TTPYSq\n",
-            "i1SsCyT6g9BkOl1Fn6m+kzRETVmJS6k79dKV3VtUpYpTnEa7hWQ9FM6aKwMvCZze\n",
-            "JvTaZP7M7MwacpCehX51/FQDFU5IxgnNxwYe2GfZlKU3+5eLJBae\n",
-            "-----END RSA PRIVATE KEY-----\n",
-        );
+        /// Test-only fixture key (signs test messages only; never a real
+        /// credential — see .gitleaks.toml allowlist).
+        const TEST_RSA_PRIVATE_PEM: &str = include_str!("../testdata/dkim/test-rsa-key.pem");
 
         /// TXT record for `testsel._domainkey.example.com` (SPKI of the
         /// test-only key above).
