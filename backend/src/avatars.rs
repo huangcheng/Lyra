@@ -86,7 +86,11 @@ pub(crate) fn parse_bimi_record(txt: &[u8]) -> Option<BimiRecord> {
 /// BIMI requires DMARC enforcement on the From domain (client-side gate:
 /// policy record only — no alignment evaluation).
 pub(crate) fn dmarc_allows_bimi(txt: &str) -> bool {
-    txt.split(';')
+    let mut parts = txt.split(';');
+    if !parts.next().is_some_and(|v| v.trim().eq_ignore_ascii_case("v=DMARC1")) {
+        return false;
+    }
+    parts
         .map(str::trim)
         .find_map(|part| part.strip_prefix("p="))
         .is_some_and(|p| p == "quarantine" || p == "reject")
@@ -310,7 +314,7 @@ async fn get_avatar(
         return Ok(not_found_response());
     }
 
-    // 4. BIMI (Task 4 stub), 5. opt-in Gravatar.
+    // 4. BIMI (DMARC gate + VMC validation), 5. opt-in Gravatar.
     let domain = email.rsplit('@').next().unwrap_or_default();
     let mut fetched = resolve_bimi_logo(&state, domain).await;
     let mut upstream_error = false;
