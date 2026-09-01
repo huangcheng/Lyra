@@ -1036,12 +1036,17 @@ fn coalesce_existing(column: message::Column, val: Value) -> sea_orm::sea_query:
 /// Encoded-word sniffing RHS: refresh fields that are empty, still contain
 /// `=?…?=` markers (the legacy `%=?%?=%` LIKE pattern), or carry U+FFFD
 /// mojibake from before full legacy-charset decoding.
+///
+/// The stale checks run against `CAST(col AS text)`: on Postgres the address
+/// columns are JSONB, so a bare `col = ''` / `col LIKE …` raises
+/// `operator does not exist: jsonb = text`. The cast is a no-op on SQLite.
 fn refresh_if_stale(column: message::Column, replacement: Value) -> Expr {
+    let as_text = Expr::col(column).cast_as(Alias::new("text"));
     let stale = Condition::any()
         .add(Expr::col(column).is_null())
-        .add(Expr::col(column).eq(""))
-        .add(Expr::col(column).like("%=?%?=%"))
-        .add(Expr::col(column).like("%\u{FFFD}%"));
+        .add(as_text.clone().eq(""))
+        .add(as_text.clone().like("%=?%?=%"))
+        .add(as_text.like("%\u{FFFD}%"));
     Expr::case(stale, Expr::val(replacement))
         .finally(Expr::col(column))
         .into()
@@ -2411,6 +2416,43 @@ mod postgres_live {
             assert_eq!(subject, "[pg live] draft");
             let _ = store::upsert_message; // module touch (keeps imports honest)
         });
+    }
+}
+
+#[cfg(test)]
+mod lazy_fill_sql_tests {
+    use super::*;
+
+    /// Regression: the lazy body-fill UPDATE compared JSONB address columns
+    /// to bare text (`col = ''`, `col LIKE …`), which Postgres rejects with
+    /// `operator does not exist: jsonb = text` — killing every IMAP body
+    /// fetch in production while SQLite tests stayed green. The stale check
+    /// must run against `CAST(col AS text)` on both backends.
+    #[test]
+    fn stale_refresh_casts_jsonb_columns_to_text() {
+        let mut update = Sq::update();
+        update.table(message::Entity).value(
+            message::Column::FromAddress,
+            refresh_if_stale(
+                message::Column::FromAddress,
+                owned_text_value(Some("{\"raw\":\"a@b\"}".into())),
+            ),
+        );
+        let (pg_sql, _params) = update.build(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(
+            pg_sql.contains("CAST(\"from_address\" AS text)"),
+            "{pg_sql}"
+        );
+        // Every comparison against the column goes through CAST; the only
+        // bare `"from_address" =` left is the SET assignment, whose RHS is
+        // the CASE expression, not a text parameter.
+        assert!(
+            !pg_sql.contains("\"from_address\" = $"),
+            "jsonb column compared to bare text: {pg_sql}"
+        );
+        // SQLite accepts either form; the cast must not corrupt its SQL.
+        let (sqlite_sql, _params) = update.build(sea_orm::sea_query::SqliteQueryBuilder);
+        assert!(sqlite_sql.contains("CAST("), "{sqlite_sql}");
     }
 }
 
