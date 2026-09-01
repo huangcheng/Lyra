@@ -6,6 +6,7 @@
 //! `GET /api/v1/avatars/{email}` is bearer-gated (frontend uses `apiBlob`);
 //! it is intentionally not `<img>`-safe.
 
+use std::future::Future;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -41,9 +42,31 @@ const AVATAR_CACHE_CONTROL: &str = "private, max-age=86400";
 
 /// md5 hex of the trimmed, lowercased address (Gravatar's contract).
 pub(crate) fn gravatar_url(email: &str) -> String {
-    let digest = md5::Md5::digest(email.trim().to_ascii_lowercase().as_bytes());
-    format!("https://www.gravatar.com/avatar/{digest:x}?d=404&s=128")
+    gravatar_url_with_base(&gravatar_base(), email)
 }
+
+fn gravatar_url_with_base(base: &str, email: &str) -> String {
+    let digest = md5::Md5::digest(email.trim().to_ascii_lowercase().as_bytes());
+    format!("{base}/avatar/{digest:x}?d=404&s=128")
+}
+
+/// Gravatar base URL. Endpoint tests override it to point at a loopback
+/// mock upstream (`media::LoopbackGuard` serializes those tests, so the
+/// override can never leak between tests or into production builds).
+fn gravatar_base() -> String {
+    #[cfg(test)]
+    if let Some(base) = GRAVATAR_BASE_FOR_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return base;
+    }
+    "https://www.gravatar.com".to_string()
+}
+
+#[cfg(test)]
+static GRAVATAR_BASE_FOR_TESTS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Parsed `default._bimi` TXT record payload.
 #[derive(Debug, PartialEq, Eq)]
@@ -102,43 +125,200 @@ pub(crate) fn dmarc_allows_bimi(txt: &str) -> bool {
 /// Cap on the VMC evidence document (PEM bundle) fetched from `a=`.
 const MAX_VMC_BUNDLE_BYTES: u64 = 1024 * 1024;
 
-/// BIMI logo for a From domain, or None. DMARC gate → record parse →
-/// VMC validation → logo fetch. Every failure is a silent miss.
-async fn resolve_bimi_logo(state: &AuthState, domain: &str) -> Option<FetchedImage> {
-    let _ = state; // DNS goes through the process-wide DKIM authenticator.
-    let auth = crate::dkim::authenticator().ok()?;
-    let dmarc_txt = auth.txt_raw_lookup(format!("_dmarc.{domain}")).await.ok()?;
-    if !dmarc_allows_bimi(&String::from_utf8_lossy(&dmarc_txt)) {
-        return None;
+/// DMARC/BIMI lookup levels for a From domain, most specific first
+/// (RFC 7489 §6.6.3 tree walk). Without a public-suffix list (not in the
+/// dependency tree) the organizational domain is approximated: the last
+/// two labels, plus — for domains with ≥4 labels — the last three labels
+/// first (`example.co.uk`-style). Deeper guesses come first so a public
+/// suffix like `co.uk` can never shadow the registrable candidate; the
+/// suffix itself may be queried last, pointlessly but harmlessly.
+pub(crate) fn candidate_domains(domain: &str) -> Vec<String> {
+    let labels: Vec<&str> = domain.split('.').filter(|l| !l.is_empty()).collect();
+    let mut out = vec![labels.join(".")];
+    if labels.len() >= 4 {
+        out.push(labels[labels.len() - 3..].join("."));
     }
-    let bimi_txt = auth
-        .txt_raw_lookup(format!("default._bimi.{domain}"))
-        .await
-        .ok()?;
-    let record = parse_bimi_record(&bimi_txt)?;
-    let authority = record.authority_url?;
-    let pem = fetch_text(&authority).await?;
-    if let Err(e) = crate::bimi::validate_vmc(pem.as_bytes(), domain).await {
-        tracing::debug!(domain, error = %e, "bimi vmc validation failed");
-        return None;
+    if labels.len() >= 3 {
+        out.push(labels[labels.len() - 2..].join("."));
+    }
+    out.dedup();
+    out
+}
+
+/// DNS answer classification for the DMARC/BIMI tree walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DnsAnswer {
+    Record(Vec<u8>),
+    /// NXDOMAIN/NODATA: no record at this level — walk up.
+    NoRecord,
+    /// Timeout/SERVFAIL/resolver failure: transient — retry soon.
+    Error,
+}
+
+fn classify_dns(result: mail_auth::Result<Vec<u8>>) -> DnsAnswer {
+    match result {
+        Ok(txt) if txt.is_empty() => DnsAnswer::NoRecord,
+        Ok(txt) => DnsAnswer::Record(txt),
+        Err(mail_auth::Error::Dns(mail_auth::DnsError::RecordNotFound(_))) => DnsAnswer::NoRecord,
+        Err(_) => DnsAnswer::Error,
+    }
+}
+
+/// What the DNS tree walk decided for a From domain.
+#[derive(Debug, PartialEq, Eq)]
+enum BimiPlan {
+    /// No enforcing DMARC record, or no parseable BIMI record anywhere up
+    /// the tree.
+    CleanMiss,
+    /// Transient DNS failure — negative-cache briefly, not for a day.
+    Error,
+    /// BIMI record found at `level`; proceed to VMC validation there.
+    Fetch { level: String, record: BimiRecord },
+}
+
+type BoxedLookup<'a> = dyn Fn(String) -> std::pin::Pin<Box<dyn Future<Output = DnsAnswer> + Send + 'a>>
+    + Send
+    + Sync
+    + 'a;
+
+/// DMARC gate + BIMI record discovery, injectable DNS for tests.
+/// Both walks are independent: the gate passes at the level where a
+/// DMARC record exists; the BIMI record may live at a different level.
+async fn plan_bimi(domain: &str, lookup: &BoxedLookup<'_>) -> BimiPlan {
+    let candidates = candidate_domains(domain);
+    // DMARC gate: the first level (walking up) that publishes a DMARC
+    // record decides; NXDOMAIN falls through to the parent.
+    let mut gate_passed = false;
+    for level in &candidates {
+        match lookup(format!("_dmarc.{level}")).await {
+            DnsAnswer::NoRecord => {}
+            DnsAnswer::Error => return BimiPlan::Error,
+            DnsAnswer::Record(txt) => {
+                if !dmarc_allows_bimi(&String::from_utf8_lossy(&txt)) {
+                    return BimiPlan::CleanMiss;
+                }
+                gate_passed = true;
+                break;
+            }
+        }
+    }
+    if !gate_passed {
+        return BimiPlan::CleanMiss;
+    }
+    // BIMI record: the first level with a record wins; an unparseable
+    // record is the publisher's mistake — clean miss, not an error.
+    for level in candidates {
+        match lookup(format!("default._bimi.{level}")).await {
+            DnsAnswer::NoRecord => {}
+            DnsAnswer::Error => return BimiPlan::Error,
+            DnsAnswer::Record(txt) => {
+                return match parse_bimi_record(&txt) {
+                    Some(record) => BimiPlan::Fetch { level, record },
+                    None => BimiPlan::CleanMiss,
+                };
+            }
+        }
+    }
+    BimiPlan::CleanMiss
+}
+
+/// Outcome of the full BIMI pipeline (DNS → VMC → logo fetch). Drives the
+/// negative-cache TTL: clean misses cache for a day, transient errors
+/// heal in minutes.
+enum BimiOutcome {
+    Logo(FetchedImage),
+    CleanMiss,
+    Error,
+}
+
+/// BIMI logo for a From domain. DMARC gate → record parse → VMC
+/// validation → logo fetch, walking up to the organizational domain.
+async fn resolve_bimi_logo(state: &AuthState, domain: &str) -> BimiOutcome {
+    let _ = state; // DNS goes through the process-wide DKIM authenticator.
+
+    // Test-only DNS stub: endpoint tests can't rely on a working resolver
+    // in CI sandboxes, so they answer from a static map instead. (Bind
+    // first: an `if let` on the lock expression would hold the MutexGuard
+    // across the awaits below and make the handler future non-Send.)
+    #[cfg(test)]
+    let stubbed = BIMI_DNS_FOR_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    #[cfg(test)]
+    if let Some(stub) = stubbed {
+        let lookup = move |name: String| {
+            let answer = stub.get(&name).cloned().unwrap_or(DnsAnswer::NoRecord);
+            Box::pin(async move { answer })
+                as std::pin::Pin<Box<dyn Future<Output = DnsAnswer> + Send>>
+        };
+        let plan = plan_bimi(domain, &lookup).await;
+        return finish_bimi(plan).await;
+    }
+
+    let Ok(auth) = crate::dkim::authenticator() else {
+        // No system resolver at all: environment failure, not a miss.
+        return BimiOutcome::Error;
+    };
+    let lookup = move |name: String| {
+        Box::pin(async move { classify_dns(auth.txt_raw_lookup(name).await) })
+            as std::pin::Pin<Box<dyn Future<Output = DnsAnswer> + Send>>
+    };
+    let plan = plan_bimi(domain, &lookup).await;
+    finish_bimi(plan).await
+}
+
+#[cfg(test)]
+static BIMI_DNS_FOR_TESTS: std::sync::Mutex<
+    Option<std::sync::Arc<std::collections::HashMap<String, DnsAnswer>>>,
+> = std::sync::Mutex::new(None);
+
+/// VMC validation + logo fetch for a discovered BIMI record. Fetch
+/// failures (network, 5xx) are transient errors; invalid content (bad
+/// PEM, rejected VMC, non-image logo) is a clean miss.
+async fn finish_bimi(plan: BimiPlan) -> BimiOutcome {
+    let BimiPlan::Fetch { level, record } = plan else {
+        return match plan {
+            BimiPlan::CleanMiss => BimiOutcome::CleanMiss,
+            BimiPlan::Error => BimiOutcome::Error,
+            BimiPlan::Fetch { .. } => unreachable!(),
+        };
+    };
+    let Some(authority) = record.authority_url.as_deref() else {
+        // No VMC to validate against: BIMI without evidence is a clean miss.
+        return BimiOutcome::CleanMiss;
+    };
+    let pem = match media::fetch_bytes(authority, MAX_VMC_BUNDLE_BYTES).await {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(pem) => pem,
+            Err(_) => return BimiOutcome::CleanMiss, // PEM is ASCII
+        },
+        Err(e) => {
+            tracing::debug!(error = %e, "bimi vmc fetch failed");
+            return BimiOutcome::Error;
+        }
+    };
+    if let Err(e) = crate::bimi::validate_vmc(pem.as_bytes(), &level).await {
+        tracing::debug!(level, error = %e, "bimi vmc validation failed");
+        return BimiOutcome::CleanMiss;
     }
     fetch_logo(&record.logo_url).await
 }
 
-/// VMC evidence fetch: SSRF-guarded, 1 MiB cap, no content-type
-/// requirement. PEM is ASCII; non-UTF-8 bytes are a miss.
-async fn fetch_text(url: &str) -> Option<String> {
-    let bytes = media::fetch_bytes(url, MAX_VMC_BUNDLE_BYTES).await.ok()?;
-    String::from_utf8(bytes).ok()
-}
-
 /// Logo fetch through the media pipeline, accepting raster or SVG.
-async fn fetch_logo(url: &str) -> Option<FetchedImage> {
+async fn fetch_logo(url: &str) -> BimiOutcome {
     match media::fetch_bimi_logo(url).await {
-        Ok(img) => Some(img),
+        Ok(img) => BimiOutcome::Logo(img),
+        // Not an image / oversize: the publisher's content is broken — a
+        // clean miss, safe to negative-cache for a day.
+        Err(SyncError::InvalidInput(e)) => {
+            tracing::debug!(error = %e, "bimi logo rejected");
+            BimiOutcome::CleanMiss
+        }
+        // Network/5xx: transient — retry in minutes.
         Err(e) => {
             tracing::debug!(error = %e, "bimi logo fetch failed");
-            None
+            BimiOutcome::Error
         }
     }
 }
@@ -214,11 +394,11 @@ async fn read_fresh_cache(path: &Path) -> Option<(Vec<u8>, String)> {
 /// into media-cache). Blob read failures fall through to the rest of the
 /// chain instead of erroring the request.
 async fn contact_photo_response(
-    state: &AuthState,
+    db: &crate::storage::DbPool,
+    data_dir: &Path,
     user_id: &str,
     email: &str,
 ) -> Result<Option<Response>, SyncError> {
-    let db = state.db();
     let user = match id_param(db, user_id)? {
         IdParam::Text(s) => Value::String(Some(s)),
         IdParam::Uuid(u) => Value::Uuid(Some(u)),
@@ -262,7 +442,7 @@ async fn contact_photo_response(
         let Some(photo_path) = photo_path else {
             continue;
         };
-        let Ok(bytes) = crate::blobs::read(&state.data_dir, &photo_path).await else {
+        let Ok(bytes) = crate::blobs::read(data_dir, &photo_path).await else {
             tracing::debug!(
                 photo_path,
                 "avatar contact photo unreadable; falling through"
@@ -292,7 +472,9 @@ async fn get_avatar(
     }
 
     // 1. Contact photo (blob store, always preferred).
-    if let Some(resp) = contact_photo_response(&state, &user_id, &email).await? {
+    if let Some(resp) =
+        contact_photo_response(state.db(), &state.data_dir, &user_id, &email).await?
+    {
         return Ok(resp);
     }
 
@@ -319,12 +501,27 @@ async fn get_avatar(
 
     // 4. BIMI (DMARC gate + VMC validation), 5. opt-in Gravatar.
     let domain = email.rsplit('@').next().unwrap_or_default();
-    let mut fetched = resolve_bimi_logo(&state, domain).await;
     let mut upstream_error = false;
+    let mut fetched = match resolve_bimi_logo(&state, domain).await {
+        BimiOutcome::Logo(img) => Some(img),
+        BimiOutcome::CleanMiss => None,
+        // DNS timeout / VMC or logo fetch failure: transient, heal in minutes.
+        BimiOutcome::Error => {
+            upstream_error = true;
+            None
+        }
+    };
     if fetched.is_none() && settings.gravatar_avatars {
-        match media::fetch_upstream(&gravatar_url(&email)).await {
-            Ok(img) => fetched = Some(img),
-            // Any failure — Gravatar's own 404 included — is a miss.
+        match media::fetch_upstream_status(&gravatar_url(&email)).await {
+            Ok(media::UpstreamOutcome::Image(img)) => fetched = Some(img),
+            // Gravatar's `d=404` "no avatar" (any 4xx) is a clean miss;
+            // 5xx counts as an upstream error.
+            Ok(media::UpstreamOutcome::HttpStatus(status)) => {
+                tracing::debug!(status, "gravatar avatar fetch non-success");
+                if status >= 500 {
+                    upstream_error = true;
+                }
+            }
             Err(e) => {
                 tracing::debug!(error = %e, "gravatar avatar fetch failed");
                 upstream_error = true;
@@ -366,13 +563,176 @@ mod tests {
     use axum::http::header;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn gravatar_url_hashes_lowercased_trimmed_email() {
+        // Pure helper: no global base override involved (endpoint tests
+        // install one; this test must stay race-free against them).
         assert_eq!(
-            gravatar_url("  HuangCheng@Example.COM "),
+            gravatar_url_with_base("https://www.gravatar.com", "  HuangCheng@Example.COM "),
             "https://www.gravatar.com/avatar/64774d1724f12eae92bd80a2feb660b1?d=404&s=128"
         );
+    }
+
+    #[test]
+    fn candidate_domains_walks_up_to_org_guess() {
+        assert_eq!(candidate_domains("example.com"), vec!["example.com"]);
+        assert_eq!(
+            candidate_domains("mail.example.com"),
+            vec!["mail.example.com", "example.com"]
+        );
+        // co.uk-style: the three-label guess comes before the bare suffix.
+        assert_eq!(
+            candidate_domains("mail.example.co.uk"),
+            vec!["mail.example.co.uk", "example.co.uk", "co.uk"]
+        );
+        assert_eq!(
+            candidate_domains("a.b.example.com"),
+            vec!["a.b.example.com", "b.example.com", "example.com"]
+        );
+    }
+
+    /// DNS stub for `plan_bimi` tests: name → answer, unlisted names are
+    /// NXDOMAIN-class (`NoRecord`).
+    fn lookup_from(
+        records: &[(&str, DnsAnswer)],
+    ) -> impl Fn(String) -> std::pin::Pin<Box<dyn Future<Output = DnsAnswer> + Send>> + use<> {
+        let map: std::collections::HashMap<String, DnsAnswer> = records
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect();
+        move |name| {
+            let answer = map.get(&name).cloned().unwrap_or(DnsAnswer::NoRecord);
+            Box::pin(async move { answer })
+        }
+    }
+
+    fn txt(s: &str) -> DnsAnswer {
+        DnsAnswer::Record(s.as_bytes().to_vec())
+    }
+
+    #[tokio::test]
+    async fn plan_bimi_exact_domain_hit() {
+        let lookup = lookup_from(&[
+            ("_dmarc.example.com", txt("v=DMARC1; p=reject;")),
+            (
+                "default._bimi.example.com",
+                txt("v=BIMI1; l=https://example.com/logo.svg;"),
+            ),
+        ]);
+        let plan = plan_bimi("example.com", &lookup).await;
+        assert_eq!(
+            plan,
+            BimiPlan::Fetch {
+                level: "example.com".into(),
+                record: BimiRecord {
+                    logo_url: "https://example.com/logo.svg".into(),
+                    authority_url: None,
+                },
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_bimi_falls_back_to_organizational_domain() {
+        // Nothing at the subdomain; both records live at the org domain.
+        let lookup = lookup_from(&[
+            ("_dmarc.example.com", txt("v=DMARC1; p=reject;")),
+            (
+                "default._bimi.example.com",
+                txt("v=BIMI1; l=https://example.com/logo.svg;"),
+            ),
+        ]);
+        let plan = plan_bimi("mail.example.com", &lookup).await;
+        assert!(matches!(
+            plan,
+            BimiPlan::Fetch { ref level, .. } if level == "example.com"
+        ));
+    }
+
+    #[tokio::test]
+    async fn plan_bimi_dmarc_and_bimi_may_live_at_different_levels() {
+        // DMARC at the org domain, BIMI record on the exact subdomain.
+        let lookup = lookup_from(&[
+            ("_dmarc.example.com", txt("v=DMARC1; p=quarantine;")),
+            (
+                "default._bimi.mail.example.com",
+                txt("v=BIMI1; l=https://example.com/logo.svg;"),
+            ),
+        ]);
+        let plan = plan_bimi("mail.example.com", &lookup).await;
+        assert!(matches!(
+            plan,
+            BimiPlan::Fetch { ref level, .. } if level == "mail.example.com"
+        ));
+    }
+
+    #[tokio::test]
+    async fn plan_bimi_co_uk_style_org_domain() {
+        let lookup = lookup_from(&[
+            ("_dmarc.example.co.uk", txt("v=DMARC1; p=reject;")),
+            (
+                "default._bimi.example.co.uk",
+                txt("v=BIMI1; l=https://example.co.uk/logo.svg;"),
+            ),
+        ]);
+        let plan = plan_bimi("mail.example.co.uk", &lookup).await;
+        assert!(matches!(
+            plan,
+            BimiPlan::Fetch { ref level, .. } if level == "example.co.uk"
+        ));
+    }
+
+    #[tokio::test]
+    async fn plan_bimi_clean_misses() {
+        // DMARC exists but doesn't enforce: gate fails, walk stops (the
+        // first DMARC record decides, even with an enforcing org record).
+        let lookup = lookup_from(&[
+            ("_dmarc.mail.example.com", txt("v=DMARC1; p=none;")),
+            ("_dmarc.example.com", txt("v=DMARC1; p=reject;")),
+        ]);
+        assert_eq!(
+            plan_bimi("mail.example.com", &lookup).await,
+            BimiPlan::CleanMiss
+        );
+
+        // No DMARC anywhere up the tree.
+        let lookup = lookup_from(&[]);
+        assert_eq!(
+            plan_bimi("mail.example.com", &lookup).await,
+            BimiPlan::CleanMiss
+        );
+
+        // DMARC enforces but no BIMI record anywhere.
+        let lookup = lookup_from(&[("_dmarc.example.com", txt("v=DMARC1; p=reject;"))]);
+        assert_eq!(
+            plan_bimi("mail.example.com", &lookup).await,
+            BimiPlan::CleanMiss
+        );
+
+        // BIMI record present but unparseable.
+        let lookup = lookup_from(&[
+            ("_dmarc.example.com", txt("v=DMARC1; p=reject;")),
+            ("default._bimi.example.com", txt("v=DMARC1; p=reject;")),
+        ]);
+        assert_eq!(plan_bimi("example.com", &lookup).await, BimiPlan::CleanMiss);
+    }
+
+    #[tokio::test]
+    async fn plan_bimi_dns_error_is_an_error_not_a_miss() {
+        let lookup = lookup_from(&[("_dmarc.mail.example.com", DnsAnswer::Error)]);
+        assert_eq!(
+            plan_bimi("mail.example.com", &lookup).await,
+            BimiPlan::Error
+        );
+
+        // Gate passed; the BIMI lookup errors.
+        let lookup = lookup_from(&[
+            ("_dmarc.example.com", txt("v=DMARC1; p=reject;")),
+            ("default._bimi.example.com", DnsAnswer::Error),
+        ]);
+        assert_eq!(plan_bimi("example.com", &lookup).await, BimiPlan::Error);
     }
 
     #[test]
@@ -420,6 +780,11 @@ mod tests {
     }
 
     fn test_auth_state(pool: sqlx::SqlitePool, data_dir: &Path) -> AuthState {
+        test_auth_state_kv(pool, data_dir).0
+    }
+
+    /// AuthState plus its [`MemoryKv`] clone, for TTL inspection.
+    fn test_auth_state_kv(pool: sqlx::SqlitePool, data_dir: &Path) -> (AuthState, MemoryKv) {
         install_test_master_key();
         let config = crate::config::Config {
             listen_addr: "127.0.0.1:0".into(),
@@ -434,13 +799,15 @@ mod tests {
             ms_oauth: None,
             yandex_oauth: None,
         };
-        AuthState::new(
+        let kv = MemoryKv::new();
+        let state = AuthState::new(
             DbPool::Sqlite(pool),
             &config,
             Arc::new(App::new()),
-            Arc::new(MemoryKv::new()),
+            Arc::new(kv.clone()),
         )
-        .unwrap()
+        .unwrap();
+        (state, kv)
     }
 
     fn temp_data_dir() -> PathBuf {
@@ -450,7 +817,7 @@ mod tests {
     }
 
     /// A minimal but magic-correct PNG (header + IHDR chunk bytes).
-    const MOCK_PNG: &[u8] = &[
+    pub(super) const MOCK_PNG: &[u8] = &[
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
         0x52, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10,
     ];
@@ -606,5 +973,285 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    // ── Gravatar endpoint tests (loopback mock upstream) ─────────────
+
+    /// What the loopback mock "Gravatar" replies with.
+    #[derive(Clone, Copy)]
+    enum MockReply {
+        Png,
+        NotFound,
+        ServerError,
+    }
+
+    /// Loopback stand-in for Gravatar: counts hits so tests can prove
+    /// whether upstream was contacted at all.
+    async fn spawn_avatar_mock(
+        hits: Arc<AtomicUsize>,
+        reply: MockReply,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+        let app = axum::Router::new().route(
+            "/avatar/{hash}",
+            get(move |AxumPath(_hash): AxumPath<String>| {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    match reply {
+                        MockReply::Png => {
+                            ([(header::CONTENT_TYPE, "image/png")], MOCK_PNG.to_vec())
+                                .into_response()
+                        }
+                        MockReply::NotFound => StatusCode::NOT_FOUND.into_response(),
+                        MockReply::ServerError => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    }
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        tokio::task::yield_now().await;
+        (base, handle)
+    }
+
+    /// Endpoint-test network fixture: allows loopback upstreams, points
+    /// the Gravatar base at the mock, and stubs BIMI DNS with NXDOMAIN
+    /// answers (CI sandboxes may have no resolver). Serialized
+    /// process-wide via `media::LoopbackGuard`.
+    struct AvatarNet {
+        _guard: media::LoopbackGuard,
+    }
+
+    impl AvatarNet {
+        async fn enter(mock_base: &str) -> Self {
+            let guard = media::LoopbackGuard::enter().await;
+            *GRAVATAR_BASE_FOR_TESTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mock_base.to_string());
+            *BIMI_DNS_FOR_TESTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(Arc::new(std::collections::HashMap::new()));
+            Self { _guard: guard }
+        }
+    }
+
+    impl Drop for AvatarNet {
+        fn drop(&mut self) {
+            *GRAVATAR_BASE_FOR_TESTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            *BIMI_DNS_FOR_TESTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+
+    async fn enable_gravatar(state: &AuthState, user_id: &str) {
+        state
+            .kv()
+            .set(
+                &format!("user:{user_id}:privacy"),
+                r#"{"gravatarAvatars":true}"#,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn gravatar_opt_out_never_contacts_upstream() {
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        seed_user_account(&state, "u1").await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (base, handle) = spawn_avatar_mock(hits.clone(), MockReply::Png).await;
+        let _net = AvatarNet::enter(&base).await;
+
+        // gravatar_avatars defaults to false: 404 without any fetch.
+        let resp = call_avatar(&state, "u1", "ghost@example.com").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "opted-out Gravatar must never be contacted"
+        );
+        assert!(
+            state
+                .kv()
+                .get(&miss_key("u1", false, "ghost@example.com"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn gravatar_404_is_a_clean_miss_not_an_error() {
+        let data_dir = temp_data_dir();
+        let (state, kv) = test_auth_state_kv(test_pool().await, &data_dir);
+        seed_user_account(&state, "u1").await;
+        enable_gravatar(&state, "u1").await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (base, handle) = spawn_avatar_mock(hits.clone(), MockReply::NotFound).await;
+        let _net = AvatarNet::enter(&base).await;
+
+        let resp = call_avatar(&state, "u1", "ghost@example.com").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // `d=404` means "this address has no Gravatar" — a clean miss
+        // with the 24h TTL, not a 10-minute error retry.
+        let key = miss_key("u1", true, "ghost@example.com");
+        let ttl = kv.ttl_remaining(&key).await.expect("negative marker set");
+        assert!(
+            ttl > Duration::from_secs(MISS_TTL_CLEAN_SECS - 60),
+            "gravatar 404 must take the clean-miss TTL, got {ttl:?}"
+        );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn gravatar_5xx_uses_short_error_ttl() {
+        let data_dir = temp_data_dir();
+        let (state, kv) = test_auth_state_kv(test_pool().await, &data_dir);
+        seed_user_account(&state, "u1").await;
+        enable_gravatar(&state, "u1").await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (base, handle) = spawn_avatar_mock(hits, MockReply::ServerError).await;
+        let _net = AvatarNet::enter(&base).await;
+
+        let resp = call_avatar(&state, "u1", "ghost@example.com").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let key = miss_key("u1", true, "ghost@example.com");
+        let ttl = kv.ttl_remaining(&key).await.expect("negative marker set");
+        assert!(
+            ttl <= Duration::from_secs(MISS_TTL_ERROR_SECS)
+                && ttl > Duration::from_secs(MISS_TTL_ERROR_SECS - 60),
+            "gravatar 5xx must take the 10-minute error TTL, got {ttl:?}"
+        );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn contact_photo_beats_positive_cache_and_gravatar() {
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        let account_id = seed_user_account(&state, "u1").await;
+        let photo_path = crate::blobs::store(&data_dir, &account_id, MOCK_PNG)
+            .await
+            .unwrap();
+        seed_contact(
+            &state,
+            &account_id,
+            &["friend@example.com"],
+            Some(&photo_path),
+        )
+        .await;
+
+        // A fresh positive-cache entry that must lose to the contact photo.
+        let cache_root = data_dir.join("media-cache");
+        let stale_png = b"\x89\x50\x4e\x47-stale-cache-bytes";
+        media::write_cache(
+            &cache_root,
+            "avatar:friend@example.com",
+            stale_png,
+            "image/png",
+        )
+        .await
+        .unwrap();
+
+        enable_gravatar(&state, "u1").await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (base, handle) = spawn_avatar_mock(hits.clone(), MockReply::Png).await;
+        let _net = AvatarNet::enter(&base).await;
+
+        let resp = call_avatar(&state, "u1", "friend@example.com").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), MOCK_PNG, "contact photo wins over cache");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "contact photo short-circuits before Gravatar"
+        );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+}
+
+#[cfg(test)]
+mod postgres_live {
+    //! Contact-photo lookup roundtrip under PostgreSQL typing (uuid binds,
+    //! jsonb `email_addresses`). See `pgtest` for the harness contract.
+
+    use super::tests::MOCK_PNG;
+    use super::*;
+    use crate::pgtest::support;
+    use crate::storage::DbPool;
+
+    #[test]
+    #[ignore = "needs postgres"]
+    fn contact_photo_lookup_roundtrip() {
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_account(&db, &user_id, "pg-avatar@example.com").await;
+
+            let data_dir =
+                std::env::temp_dir().join(format!("lyra-avatars-pg-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let photo_path = crate::blobs::store(&data_dir, &account_id, MOCK_PNG)
+                .await
+                .unwrap();
+            let DbPool::Postgres(pool) = &db else {
+                panic!("expected postgres pool");
+            };
+            sqlx::query(
+                "INSERT INTO contact (id, account_id, display_name, email_addresses, photo_path) \
+                 VALUES ($1::uuid, $2::uuid, $3, $4, $5)",
+            )
+            .bind(crate::sync::store::new_uuid_text())
+            .bind(&account_id)
+            .bind("PG Friend")
+            .bind(serde_json::json!(["pg-friend@example.com"]))
+            .bind(&photo_path)
+            .execute(pool)
+            .await
+            .unwrap();
+
+            // Case-insensitive address match through the handler's lookup.
+            let resp = contact_photo_response(&db, &data_dir, &user_id, "PG-Friend@Example.COM")
+                .await
+                .unwrap()
+                .expect("contact photo resolves");
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(body.as_ref(), MOCK_PNG);
+
+            // Unknown sender misses cleanly.
+            assert!(
+                contact_photo_response(&db, &data_dir, &user_id, "stranger@example.com")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+
+            let _ = std::fs::remove_dir_all(&data_dir);
+        });
     }
 }

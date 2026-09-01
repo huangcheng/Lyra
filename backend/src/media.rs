@@ -13,6 +13,41 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 static ALLOW_LOOPBACK_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
+/// Serializes tests that flip [`ALLOW_LOOPBACK_FOR_TESTS`] (process-wide).
+/// Shared with sibling modules' endpoint tests (e.g. `avatars`).
+#[cfg(test)]
+static LOOPBACK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Test-only guard: while held, loopback mock upstreams pass the SSRF check.
+#[cfg(test)]
+pub(crate) struct LoopbackGuard {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl LoopbackGuard {
+    /// Allow loopback upstreams until the guard drops.
+    pub(crate) async fn enter() -> Self {
+        let lock = LOOPBACK_TEST_LOCK.lock().await;
+        ALLOW_LOOPBACK_FOR_TESTS.store(true, Ordering::SeqCst);
+        Self { _lock: lock }
+    }
+
+    /// Hold the lock with loopback explicitly *disallowed* (SSRF tests).
+    pub(crate) async fn hold_off() -> tokio::sync::MutexGuard<'static, ()> {
+        let lock = LOOPBACK_TEST_LOCK.lock().await;
+        ALLOW_LOOPBACK_FOR_TESTS.store(false, Ordering::SeqCst);
+        lock
+    }
+}
+
+#[cfg(test)]
+impl Drop for LoopbackGuard {
+    fn drop(&mut self) {
+        ALLOW_LOOPBACK_FOR_TESTS.store(false, Ordering::SeqCst);
+    }
+}
+
 use axum::{
     extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -268,6 +303,21 @@ pub(crate) async fn fetch_upstream(url: &str) -> Result<FetchedImage, SyncError>
     fetch_with_accept(url, looks_like_image).await
 }
 
+/// Fetch outcome for callers that treat a non-success HTTP status as a
+/// signal rather than an error (avatar resolution: Gravatar's `d=404`
+/// "no avatar" response is a clean miss, not a failure).
+pub(crate) enum UpstreamOutcome {
+    Image(FetchedImage),
+    /// Non-success HTTP status; the body was not consumed.
+    HttpStatus(u16),
+}
+
+/// Like [`fetch_upstream`], but surfaces the upstream HTTP status instead
+/// of collapsing every non-success into an error.
+pub(crate) async fn fetch_upstream_status(url: &str) -> Result<UpstreamOutcome, SyncError> {
+    fetch_with_accept_status(url, looks_like_image).await
+}
+
 /// BIMI logo fetch: same pipeline as [`fetch_upstream`], but accepts SVG
 /// (raster sniffing would reject every BIMI logo) in addition to raster.
 /// The logo URL is only fetched after the domain's VMC validated.
@@ -318,6 +368,18 @@ async fn fetch_with_accept(
     url: &str,
     accept: fn(&str, &[u8]) -> bool,
 ) -> Result<FetchedImage, SyncError> {
+    match fetch_with_accept_status(url, accept).await? {
+        UpstreamOutcome::Image(img) => Ok(img),
+        UpstreamOutcome::HttpStatus(code) => Err(SyncError::Internal(format!(
+            "upstream non-success status {code}"
+        ))),
+    }
+}
+
+async fn fetch_with_accept_status(
+    url: &str,
+    accept: fn(&str, &[u8]) -> bool,
+) -> Result<UpstreamOutcome, SyncError> {
     let client = reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
@@ -353,7 +415,7 @@ async fn fetch_with_accept(
         }
 
         if !resp.status().is_success() {
-            return Err(SyncError::Internal("upstream non-success status".into()));
+            return Ok(UpstreamOutcome::HttpStatus(resp.status().as_u16()));
         }
 
         let content_type = resp
@@ -388,10 +450,10 @@ async fn fetch_with_accept(
             return Err(SyncError::InvalidInput("upstream not an image".into()));
         }
 
-        return Ok(FetchedImage {
+        return Ok(UpstreamOutcome::Image(FetchedImage {
             bytes,
             content_type,
-        });
+        }));
     }
 
     Err(SyncError::InvalidInput("too many redirects".into()))
@@ -575,11 +637,9 @@ mod tests {
     use axum::http::{StatusCode, header};
     use axum::routing::get;
     use std::sync::Arc;
-    use tokio::sync::{Mutex, MutexGuard};
 
-    /// Serialize tests that touch [`ALLOW_LOOPBACK_FOR_TESTS`].
-    static LOOPBACK_TEST_LOCK: Mutex<()> = Mutex::const_new(());
-
+    /// Serialize tests that touch [`ALLOW_LOOPBACK_FOR_TESTS`] via the
+    /// module-level [`LoopbackGuard`].
     #[test]
     fn tiny_tracking_payload_heuristic() {
         assert!(is_tiny_tracking_payload(PLACEHOLDER_GIF));
@@ -643,30 +703,6 @@ mod tests {
         let c = cache_key_for_url("https://a.com/y");
         assert_eq!(a, b);
         assert_ne!(a, c);
-    }
-
-    struct LoopbackGuard {
-        _lock: MutexGuard<'static, ()>,
-    }
-
-    impl LoopbackGuard {
-        async fn enter() -> Self {
-            let lock = LOOPBACK_TEST_LOCK.lock().await;
-            ALLOW_LOOPBACK_FOR_TESTS.store(true, Ordering::SeqCst);
-            Self { _lock: lock }
-        }
-
-        async fn hold_off() -> MutexGuard<'static, ()> {
-            let lock = LOOPBACK_TEST_LOCK.lock().await;
-            ALLOW_LOOPBACK_FOR_TESTS.store(false, Ordering::SeqCst);
-            lock
-        }
-    }
-
-    impl Drop for LoopbackGuard {
-        fn drop(&mut self) {
-            ALLOW_LOOPBACK_FOR_TESTS.store(false, Ordering::SeqCst);
-        }
     }
 
     async fn test_pool() -> sqlx::SqlitePool {
