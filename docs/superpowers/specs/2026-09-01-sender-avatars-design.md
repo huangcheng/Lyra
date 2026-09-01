@@ -13,8 +13,9 @@ learns nothing unless the user explicitly opts in.
 Confirmed scope decisions:
 
 - Sources: **all three** — contacts, BIMI, Gravatar (opt-in, default off).
-- BIMI: **DNS record logo, no VMC validation** (Thunderbird-style; the logo
-  is fetched server-side and sniffed like any proxied image).
+- BIMI: **full VMC validation** — embedded Mark Verifying Authority roots,
+  chain + validity + domain binding + logotype OID, CRL revocation checks,
+  and a DMARC `p=quarantine|reject` gate.
 - Architecture: **one backend resolver endpoint** hides the source chain
   (rejected: frontend-side resolution — leaks; per-payload `avatar_url`
   fields — wasteful and still needs an image endpoint).
@@ -49,10 +50,29 @@ Resolution order:
 1. **Contact photo** — find any `contact` row whose `email_addresses` JSON
    contains the address; if it has a `photo_path`, stream that blob. Freshest
    source wins implicitly: contact sync rewrites `photo_path`.
-2. **BIMI** — TXT lookup for `default._bimi.{domain}`; parse `v=BIMI1` and
-   the `l=` logo URL. Fetch the logo through the media pipeline (SSRF guard,
-   caps, sniffing). BIMI logos are SVG — accept `image/svg+xml` in addition
-   to the raster types, and verify it against the sniffed bytes.
+2. **BIMI (full VMC validation)** — only honored when *all* checks pass:
+   - DMARC: the From domain's `_dmarc` record exists with
+     `p=quarantine` or `p=reject` (no alignment evaluation — see note below).
+   - TXT `default._bimi.{domain}` parses as `v=BIMI1` with `l=` (logo) and
+     `a=` (evidence document / VMC chain) attributes.
+   - The VMC chain (fetched via the media pipeline) validates against a small
+     embedded set of Mark Verifying Authority roots (DigiCert / Entrust /
+     Sectigo VMC roots — these are *not* in platform trust stores; embedding
+     them is our explicit trust decision), is within its validity window,
+     binds to the sender domain (SAN / organization), and carries the
+     logotype extension (OID 1.3.6.1.5.5.7.1.12) referencing the same logo.
+   - Revocation: check CRL distribution points from the chain (cached; CRL
+     fetch failure = soft-fail with a short retry, not silent pass).
+   - Then fetch the `l=` logo through the media pipeline (SSRF guard, caps,
+     sniffing). BIMI logos are SVG — accept `image/svg+xml` in addition to
+     the raster types, and verify it against the sniffed bytes.
+
+   Note: true DMARC alignment needs SPF, which a *client* cannot evaluate
+   (we never see the connecting IP). The DMARC-policy gate above plus the
+   DKIM alignment from the companion DKIM spec
+   (`2026-09-01-dkim-verification-design.md`, when it lands) is the
+   client-side approximation; until then the DMARC policy record alone gates
+   BIMI.
 3. **Gravatar** — only when the user's `gravatar_avatars` setting is on:
    server-side `GET https://www.gravatar.com/avatar/{md5(email)}?d=404&s=128`.
    A 404 from Gravatar is a miss, not an error.
@@ -66,8 +86,8 @@ Caching (in the media-cache, keyed `sha256("avatar:" + email)`):
 - Errors (DNS timeout, upstream 5xx): treated as miss, but negative-cached
   for only 10 minutes so transient failures heal quickly.
 
-Non-goal: VMC certificate validation, favicon heuristics, user-uploaded
-avatars, avatar editing UI.
+Non-goal: favicon heuristics, user-uploaded avatars, avatar editing UI,
+OCSP (CRL only for revocation).
 
 ### Backend: CardDAV PHOTO extraction
 
@@ -133,7 +153,10 @@ render card/row
   - Gravatar skipped when setting off;
   - 404 when no source has anything;
   - negative-cache behavior (second resolve does not re-hit upstream);
-  - BIMI record parsing: valid `v=BIMI1;l=…`, missing `l=`, wrong version.
+  - BIMI gating: DMARC policy missing/weak → no logo; VMC chain invalid,
+    expired, wrong domain, missing logotype OID, or revoked → no logo;
+    valid VMC + logo URL match → logo served;
+  - BIMI record parsing: valid `v=BIMI1;l=…;a=…`, missing `l=`, wrong version.
 - vCard PHOTO parsing tests: URI form, inline base64 form, garbage input.
 - Frontend `avatar.ts`: memoization (one fetch per email per session),
   404 → `null`, object-URL lifecycle (revoke on eviction).
@@ -142,7 +165,7 @@ render card/row
 
 ## Out of scope (YAGNI)
 
-- VMC / certificate validation for BIMI.
+- OCSP for VMC revocation (CRL only).
 - User-uploaded avatars; avatar editing UI.
 - Favicon or Clearbit-style heuristics.
 - Contact-photo sync for providers without CardDAV.
