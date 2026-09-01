@@ -19,10 +19,15 @@ Confirmed scope decisions:
 ## Current state
 
 - Lyra stores **no raw MIME**: `message` rows hold parsed headers and bodies
-  only (`backend/src/entities/message.rs`). Exact bytes exist in memory only
-  at ingest — IMAP fetches `BODY.PEEK[]` (`backend/src/imap.rs:493`), JMAP
-  downloads the blob. Verification must therefore happen at ingest; old mail
-  needs a refetch to verify.
+  only (`backend/src/entities/message.rs`). Exact RFC 822 bytes reach memory
+  only when a body is fetched — IMAP `BODY.PEEK[]` (`backend/src/imap.rs:495`,
+  kept in `ImapMessage.body`), JMAP via blob download.
+- **Sync never sees raw bytes**: the IMAP loop fetches metadata only
+  (`imap_loop.rs` passes `include_body=false`); JMAP `Email/get` carries
+  parsed body values, and `blob_id` is not persisted. Fetching raw bytes for
+  every message at ingest would be a bandwidth regression Lyra deliberately
+  avoids (bodies are lazy-loaded on open) — so this spec verifies at
+  **view time**, not ingest time.
 - No DKIM columns on `message`; no auth-results parsing anywhere.
 - Companion spec: `2026-09-01-sender-avatars-design.md` (BIMI gate upgrades
   to use DKIM alignment once this lands — follow-up, not blocking).
@@ -33,22 +38,34 @@ Confirmed scope decisions:
 
 `mail-auth` (Stalwart Labs) — the standard Rust DKIM/SPF/DMARC crate, same
 ecosystem as our `jmap-client`. Used for **verification only**: relaxed/
-simple canonicalization, DNS key lookup, RSA and Ed25519. Its DNS resolver
-runs on the backend; lookups are subject to the same operational posture as
-the media pipeline (timeouts, no user data in queries beyond the selector
-domain, which the sender published publicly anyway).
-
-### Ingest-time verification
-
-In the sync persist path (IMAP loop and JMAP loop), while the raw bytes are
-in memory, run `mail-auth` DKIM verification over the exact byte stream and
-store the outcome on the message row. Verification failure of the *process*
-(DNS down, timeout) stores `temperror` — eligible for lazy re-verify — and
-never fails or delays the sync itself.
+simple canonicalization, DNS key lookup, RSA and Ed25519 (default features:
+`aws-lc-rs` crypto, `dns-hickory` system resolver). DNS lookups query only
+the sender-published selector domain — no user data leaves the server.
 
 Multiple `DKIM-Signature` headers: evaluate all, store the best by this
 order — (1) passing signature whose d= aligns with the From domain,
 (2) any passing signature, (3) the first signature's result.
+
+### Verification points (both view-triggered)
+
+1. **Body-fill hook (IMAP)** — `maybe_fill_imap_body`
+   (`backend/src/sync/http.rs:1056`) already fetches the full raw message on
+   first open; the bytes sit in `ImapMessage.body`. Verify there and store
+   the verdict alongside the body fill. Zero extra fetches: newly opened
+   IMAP mail gets DKIM for free.
+2. **Lazy verify on open** — in the `GET /api/v1/messages/{id}` handler,
+   when `dkim_status` is NULL or `temperror` *and* the body-fill hook didn't
+   just run (body already cached, or JMAP protocol), refetch the raw message
+   — IMAP: reconnect + `UID FETCH … BODY.PEEK[]`; JMAP: re-resolve `blobId`
+   via `Email/get` (`JmapSeam::get_emails`, `jmap_client.rs:870`) then
+   `JmapSeam::download_blob` (`jmap_client.rs:891`) — verify inline (bounded:
+   skip when `size_bytes` > 10MB; one-shot attempt per open, no retry loop),
+   store the verdict, and include it in the response. On refetch/verify
+   failure the message serves normally without a verdict; the row stays
+   NULL/`temperror` so a later open retries.
+
+Verification failure of the *process* (DNS down, timeout, refetch error)
+stores `temperror` and never fails the request or sync.
 
 ### Stored columns (dual-DB migration, `message` table)
 
@@ -64,14 +81,11 @@ order — (1) passing signature whose d= aligns with the From domain,
 | `dkim_signed_at` | TIMESTAMP NULL | t= tag |
 | `dkim_expires_at` | TIMESTAMP NULL | x= tag |
 
-### Lazy verify on open
+### Lazy verify details
 
-`GET /api/v1/messages/{id}`: when `dkim_status` is NULL or `temperror`, the
-handler refetches the raw message — IMAP: `UID FETCH … BODY.PEEK[]`; JMAP:
-blob download by email id — verifies inline (bounded: skip when
-`size_bytes` > 10MB; 5s overall budget), stores the verdict, and includes it
-in the response. On refetch/verify failure the message serves normally
-without a verdict; the row stays NULL so a later open retries.
+The lazy path is bounded and idempotent: one refetch attempt per open, no
+background retry loop; `temperror` and NULL rows are retried on the next
+open. Nothing is verified in list views.
 
 ### API shape
 
@@ -119,8 +133,9 @@ costs a refetch for old mail; the status line lives in the reading pane).
   expired signature, key revoked in DNS (`p=` empty)):
   - signature selection policy (aligned pass beats unaligned pass beats
     fail);
-  - ingest path stores verdict for both IMAP and JMAP persist flows (table
-    roundtrip on SQLite + `postgres_live` per repo convention);
+  - verdict persistence: columns roundtrip through the message store on
+    SQLite + `postgres_live` per repo convention;
+  - body-fill hook: a filled IMAP body also stores the verdict;
   - lazy path: NULL row → refetch → verdict stored → included in response;
     refetch failure → response without verdict, row stays NULL.
 - Frontend: status-line label helper (all three states, both locales),
