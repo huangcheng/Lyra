@@ -1464,7 +1464,6 @@ pub(crate) async fn move_message_to_role(
     let external_id: Option<String> = dest.try_get("", "external_id").map_err(orm_err)?;
     let name: String = dest.try_get("", "name").map_err(orm_err)?;
     let dest_name = external_id.clone().unwrap_or(name);
-    let dest_role: Option<String> = dest.try_get("", "dest_role").ok().flatten();
 
     apply_message_move(
         db,
@@ -1473,7 +1472,7 @@ pub(crate) async fn move_message_to_role(
         &dest_id,
         external_id,
         dest_name,
-        dest_role.as_deref(),
+        Some(role),
     )
     .await?;
 
@@ -1503,6 +1502,7 @@ pub(crate) async fn move_message(
     let row = load_message_row(db, &user_id, &message_id).await?;
 
     let folder_value = id_value(db, &body.folder_id)?;
+    let dest_role_value = folder_value.clone();
     let dest = query_first(db, |q| {
         q.expr_as(Expr::col(folder::Column::Id), Alias::new("id"))
             .expr_as(
@@ -1514,10 +1514,6 @@ pub(crate) async fn move_message(
                 Alias::new("external_id"),
             )
             .expr_as(Expr::col(folder::Column::Name), Alias::new("name"))
-            .expr_as(
-                Expr::cust("COALESCE(role_override, role)"),
-                Alias::new("dest_role"),
-            )
             .from(folder::Entity)
             .and_where(Expr::col(folder::Column::Id).eq(Expr::val(folder_value)));
     })
@@ -1542,8 +1538,29 @@ pub(crate) async fn move_message(
     let external_id: Option<String> = dest.try_get("", "external_id").map_err(orm_err)?;
     let name: String = dest.try_get("", "name").map_err(orm_err)?;
     let dest_name = external_id.clone().unwrap_or(name);
+    // Dest role via the table-aliased shape load_message_row uses — an
+    // unqualified COALESCE alias decodes as None on the Postgres backend.
+    let dest_role: Option<String> = query_first(db, |q| {
+        q.expr_as(
+            Expr::cust("COALESCE(f.role_override, f.role)"),
+            Alias::new("role"),
+        )
+        .from_as(folder::Entity, Alias::new("f"))
+        .and_where(Expr::cust("f.id").eq(Expr::val(dest_role_value)));
+    })
+    .await?
+    .and_then(|row| row.try_get::<Option<String>>("", "role").ok().flatten());
 
-    apply_message_move(db, &user_id, &row, &dest_id, external_id, dest_name, None).await?;
+    apply_message_move(
+        db,
+        &user_id,
+        &row,
+        &dest_id,
+        external_id,
+        dest_name,
+        dest_role.as_deref(),
+    )
+    .await?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -1973,13 +1990,6 @@ pub(crate) async fn apply_message_move(
     dest_role: Option<&str>,
 ) -> Result<(), SyncError> {
     // Learn: moving out of the spam folder is the "not spam" signal.
-    tracing::info!(
-        folder_role = ?row.folder_role,
-        dest_role = ?dest_role,
-        is_draft = row.is_draft,
-        from = ?row.from_address,
-        "spam learn hook reached"
-    );
     if row.folder_role.as_deref() == Some("spam")
         && dest_role.is_some_and(|r| r != "spam")
         && !row.is_draft
@@ -2439,7 +2449,9 @@ mod learn_hook_tests {
     /// so the allowed sender must be recorded even though the move errors.
     #[tokio::test]
     async fn moving_out_of_spam_learns_allowed_sender() {
-        let storage = crate::storage::Storage::new("sqlite::memory:").await.unwrap();
+        let storage = crate::storage::Storage::new("sqlite::memory:")
+            .await
+            .unwrap();
         storage.run_migrations().await.unwrap();
         let db = storage.pool().clone();
         let DbPool::Sqlite(pool) = &db else { panic!() };
