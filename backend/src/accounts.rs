@@ -769,21 +769,25 @@ async fn test_connection(
             }
         }
         "imap" => {
-            let host = body
+            let raw_host = body
                 .imap_host
                 .as_deref()
                 .map(str::trim)
                 .filter(|h| !h.is_empty())
                 .ok_or_else(|| AccountError::InvalidInput("IMAP host is required".into()))?;
-            crate::netsec::validate_domain(extract_domain(host).as_str())
-                .map_err(|_| AccountError::InvalidInput(format!("invalid IMAP host '{host}'")))?;
+            // The host is a DNS name itself — validate it directly.
+            // extract_domain is for email addresses and returns "" for any
+            // bare host, which rejected every valid IMAP server.
+            let host = validate_imap_host(raw_host).map_err(|_| {
+                AccountError::InvalidInput(format!("invalid IMAP host '{raw_host}'"))
+            })?;
             let port = body.imap_port.unwrap_or(993);
             let security = crate::netsec::normalize_security_mode(
                 body.imap_security.as_deref().unwrap_or("tls"),
             )
             .map_err(AccountError::InvalidInput)?;
             let config = crate::imap::ImapConfig {
-                host: host.to_owned(),
+                host,
                 port: u16::try_from(port).map_err(|_| AccountError::InvalidInput("port".into()))?,
                 security: match security {
                     "starttls" => crate::imap::ImapSecurity::Starttls,
@@ -1015,6 +1019,12 @@ async fn probe_one_jmap_host(client: &reqwest::Client, host: &str) -> bool {
 /// Extract domain from email address.
 fn extract_domain(email: &str) -> String {
     email.split('@').nth(1).unwrap_or("").trim().to_lowercase()
+}
+
+/// Validate a user-supplied IMAP/SMTP host: strict DNS-name rules via
+/// netsec (ASCII labels, no IP literals), normalized.
+fn validate_imap_host(host: &str) -> Result<String, String> {
+    crate::netsec::validate_domain(host)
 }
 
 /// Probe Mozilla ISPDB for autoconfig.
@@ -1300,6 +1310,29 @@ async fn try_tcp_connect(host: &str, port: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn imap_host_validation_accepts_real_mail_hosts() {
+        // Regression: validation used to run extract_domain (email → domain,
+        // returns "" for bare hosts) on the host, rejecting every IMAP server
+        // including imap.qq.com.
+        assert_eq!(
+            validate_imap_host("imap.qq.com").as_deref(),
+            Ok("imap.qq.com")
+        );
+        assert_eq!(
+            validate_imap_host("imap.gmail.com").as_deref(),
+            Ok("imap.gmail.com")
+        );
+        assert_eq!(
+            validate_imap_host("IMAP.Outlook.Com.").as_deref(),
+            Ok("imap.outlook.com")
+        );
+        assert!(validate_imap_host("imap.qq.com.").is_ok());
+        assert!(validate_imap_host("").is_err());
+        assert!(validate_imap_host("127.0.0.1").is_err());
+        assert!(validate_imap_host("not a host").is_err());
+    }
+
     #[test]
     fn jmap_base_url_uses_provider_hints_and_explicit_urls() {
         assert_eq!(
