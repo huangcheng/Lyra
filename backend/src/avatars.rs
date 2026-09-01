@@ -53,8 +53,6 @@ pub(crate) struct BimiRecord {
 }
 
 /// Parse a `default._bimi` TXT payload: `v=BIMI1; l=<logo>; a=<authority>`.
-// Task 4 wires this into `resolve_bimi_logo`; only tests exercise it today.
-#[allow(dead_code)]
 pub(crate) fn parse_bimi_record(txt: &[u8]) -> Option<BimiRecord> {
     let txt = std::str::from_utf8(txt).ok()?;
     let mut version_ok = false;
@@ -87,8 +85,6 @@ pub(crate) fn parse_bimi_record(txt: &[u8]) -> Option<BimiRecord> {
 
 /// BIMI requires DMARC enforcement on the From domain (client-side gate:
 /// policy record only — no alignment evaluation).
-// Task 4 wires this into `resolve_bimi_logo`; only tests exercise it today.
-#[allow(dead_code)]
 pub(crate) fn dmarc_allows_bimi(txt: &str) -> bool {
     txt.split(';')
         .map(str::trim)
@@ -96,14 +92,48 @@ pub(crate) fn dmarc_allows_bimi(txt: &str) -> bool {
         .is_some_and(|p| p == "quarantine" || p == "reject")
 }
 
-/// Task 4 stub: real BIMI resolution (DNS `default._bimi.<domain>` TXT gated
-/// by `dmarc_allows_bimi`, then a media-pipeline fetch of `l=`) lands next.
-// Stays async (though the stub has no await) so Task 4 drops in without a
-// signature change.
-#[allow(clippy::unused_async)]
+/// Cap on the VMC evidence document (PEM bundle) fetched from `a=`.
+const MAX_VMC_BUNDLE_BYTES: u64 = 1024 * 1024;
+
+/// BIMI logo for a From domain, or None. DMARC gate → record parse →
+/// VMC validation → logo fetch. Every failure is a silent miss.
 async fn resolve_bimi_logo(state: &AuthState, domain: &str) -> Option<FetchedImage> {
-    let _ = (state, domain);
-    None
+    let _ = state; // DNS goes through the process-wide DKIM authenticator.
+    let auth = crate::dkim::authenticator().ok()?;
+    let dmarc_txt = auth.txt_raw_lookup(format!("_dmarc.{domain}")).await.ok()?;
+    if !dmarc_allows_bimi(&String::from_utf8_lossy(&dmarc_txt)) {
+        return None;
+    }
+    let bimi_txt = auth
+        .txt_raw_lookup(format!("default._bimi.{domain}"))
+        .await
+        .ok()?;
+    let record = parse_bimi_record(&bimi_txt)?;
+    let authority = record.authority_url?;
+    let pem = fetch_text(&authority).await?;
+    if let Err(e) = crate::bimi::validate_vmc(pem.as_bytes(), domain).await {
+        tracing::debug!(domain, error = %e, "bimi vmc validation failed");
+        return None;
+    }
+    fetch_logo(&record.logo_url).await
+}
+
+/// VMC evidence fetch: SSRF-guarded, 1 MiB cap, no content-type
+/// requirement. PEM is ASCII; non-UTF-8 bytes are a miss.
+async fn fetch_text(url: &str) -> Option<String> {
+    let bytes = media::fetch_bytes(url, MAX_VMC_BUNDLE_BYTES).await.ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Logo fetch through the media pipeline, accepting raster or SVG.
+async fn fetch_logo(url: &str) -> Option<FetchedImage> {
+    match media::fetch_bimi_logo(url).await {
+        Ok(img) => Some(img),
+        Err(e) => {
+            tracing::debug!(error = %e, "bimi logo fetch failed");
+            None
+        }
+    }
 }
 
 /// Content type from image magic bytes (contact photos carry no header).
@@ -132,6 +162,14 @@ fn avatar_response(bytes: Vec<u8>, content_type: &str) -> Response {
     let mut headers = HeaderMap::new();
     if let Ok(ct) = HeaderValue::from_str(content_type) {
         headers.insert(header::CONTENT_TYPE, ct);
+    }
+    // BIMI logos are SVG; served as a top-level document an SVG can run
+    // scripts in our origin. Forbid that — raster types need nothing.
+    if content_type.eq_ignore_ascii_case("image/svg+xml") {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("script-src 'none'"),
+        );
     }
     headers.insert(
         header::CACHE_CONTROL,

@@ -13,6 +13,7 @@ mod accounts;
 mod api_error;
 mod auth;
 mod avatars;
+mod bimi;
 mod blobs;
 mod config;
 mod crypto;

@@ -206,6 +206,28 @@ fn sniff_raster_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
+/// BIMI logo check: `image/svg+xml` content type, `<`-led body (BOM and
+/// leading whitespace tolerated; an `<?xml …?>` prolog qualifies since it
+/// starts with `<`), and an `<svg` tag somewhere in the payload.
+pub(crate) fn looks_like_svg(content_type: &str, bytes: &[u8]) -> bool {
+    if !content_type.eq_ignore_ascii_case("image/svg+xml") {
+        return false;
+    }
+    let body = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    let body = {
+        let mut b = body;
+        while let Some((&c, rest)) = b.split_first() {
+            if c.is_ascii_whitespace() {
+                b = rest;
+            } else {
+                break;
+            }
+        }
+        b
+    };
+    body.starts_with(b"<") && body.windows(4).any(|w| w == b"<svg")
+}
+
 pub(crate) async fn validate_outbound_url(url: &str) -> Result<(), SyncError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|_| SyncError::InvalidInput("invalid proxy target URL".into()))?;
@@ -243,6 +265,59 @@ pub(crate) struct FetchedImage {
 }
 
 pub(crate) async fn fetch_upstream(url: &str) -> Result<FetchedImage, SyncError> {
+    fetch_with_accept(url, looks_like_image).await
+}
+
+/// BIMI logo fetch: same pipeline as [`fetch_upstream`], but accepts SVG
+/// (raster sniffing would reject every BIMI logo) in addition to raster.
+/// The logo URL is only fetched after the domain's VMC validated.
+pub(crate) async fn fetch_bimi_logo(url: &str) -> Result<FetchedImage, SyncError> {
+    fetch_with_accept(url, |ct, b| {
+        looks_like_image(ct, b) || looks_like_svg(ct, b)
+    })
+    .await
+}
+
+/// Fetch raw bytes (VMC evidence documents, CRLs): the same SSRF guard,
+/// timeout and UA as the image pipeline, but no content-type sniffing and a
+/// caller-set size cap. Redirects are not followed — callers treat any
+/// failure as a silent miss.
+pub(crate) async fn fetch_bytes(url: &str, max_bytes: u64) -> Result<Vec<u8>, SyncError> {
+    validate_outbound_url(url).await?;
+    let client = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
+        .user_agent(PROXY_USER_AGENT)
+        .build()
+        .map_err(|e| SyncError::Internal(format!("proxy client: {e}")))?;
+    let mut resp = client
+        .get(url)
+        .header(header::REFERER, "")
+        .send()
+        .await
+        .map_err(|e| SyncError::Internal(format!("upstream fetch failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(SyncError::Internal("upstream non-success status".into()));
+    }
+    let cap = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| SyncError::Internal(format!("upstream read: {e}")))?
+    {
+        if bytes.len() + chunk.len() > cap {
+            return Err(SyncError::InvalidInput("upstream body too large".into()));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+async fn fetch_with_accept(
+    url: &str,
+    accept: fn(&str, &[u8]) -> bool,
+) -> Result<FetchedImage, SyncError> {
     let client = reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
@@ -309,7 +384,7 @@ pub(crate) async fn fetch_upstream(url: &str) -> Result<FetchedImage, SyncError>
             bytes.extend_from_slice(&chunk);
         }
 
-        if !looks_like_image(&content_type, &bytes) {
+        if !accept(&content_type, &bytes) {
             return Err(SyncError::InvalidInput("upstream not an image".into()));
         }
 
@@ -518,6 +593,25 @@ mod tests {
         gif[8] = 1;
         gif[9] = 0;
         assert!(is_tiny_tracking_payload(&gif));
+    }
+
+    #[test]
+    fn svg_sniffing_gate() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#;
+        assert!(looks_like_svg("image/svg+xml", svg));
+        // BOM + whitespace + XML prolog tolerated.
+        assert!(looks_like_svg(
+            "image/svg+xml",
+            b"\xef\xbb\xbf \n<?xml version=\"1.0\"?><svg/>"
+        ));
+        // Content type must be exactly image/svg+xml (case-insensitive)…
+        assert!(looks_like_svg("IMAGE/SVG+XML", svg));
+        assert!(!looks_like_svg("image/png", svg));
+        assert!(!looks_like_svg("text/xml", svg));
+        // …and the body must be `<`-led and actually contain an svg tag.
+        assert!(!looks_like_svg("image/svg+xml", b"not svg at all"));
+        assert!(!looks_like_svg("image/svg+xml", b"<html><body/></html>"));
+        assert!(!looks_like_svg("image/svg+xml", b"<?xml version=\"1.0\"?>"));
     }
 
     #[test]

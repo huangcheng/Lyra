@@ -80,13 +80,17 @@ regex = "1"
 hmac = "0.12"
 utf7-imap = "0.3.2"
 pgp = "0.19"
+# BIMI VMC validation: webpki verifies the chain to the embedded MVA roots
+# (0.103.14 already transitive via rustls); x509-parser reads SAN / logotype
+# OID / cDP extensions and verifies CRL signatures (aws-lc-rs backend, also
+# already transitive). rustls-pki-types supplies TrustAnchor/CertificateDer.
+rustls-webpki = "0.103"
+x509-parser = { version = "0.18", features = ["verify-aws"] }
+rustls-pki-types = "1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
-# Test-only: load the hardcoded DKIM test key PEM (same version mail-auth
-# already pulls transitively — no lockfile churn).
-rustls-pki-types = "1"
 
 [lints.clippy]
 # Clippy warnings as errors (matches Makefile: -D warnings)
