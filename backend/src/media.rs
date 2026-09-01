@@ -99,12 +99,12 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn cache_key_for_url(url: &str) -> String {
+pub(crate) fn cache_key_for_url(url: &str) -> String {
     let hash = Sha256::digest(url.as_bytes());
     hex_encode(&hash)
 }
 
-fn cache_file_path(cache_root: &Path, url: &str) -> PathBuf {
+pub(crate) fn cache_file_path(cache_root: &Path, url: &str) -> PathBuf {
     let hash = cache_key_for_url(url);
     let prefix = hash.get(..2).unwrap_or("00");
     cache_root.join(prefix).join(&hash)
@@ -164,7 +164,7 @@ fn verify_sig(secret: &[u8], user_id: &str, url: &str, exp: i64, sig: &str) -> b
     expected == sig
 }
 
-fn looks_like_image(content_type: &str, bytes: &[u8]) -> bool {
+pub(crate) fn looks_like_image(content_type: &str, bytes: &[u8]) -> bool {
     let ct = content_type.to_ascii_lowercase();
     if !ct.starts_with("image/") {
         return false;
@@ -206,7 +206,7 @@ fn sniff_raster_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-async fn validate_outbound_url(url: &str) -> Result<(), SyncError> {
+pub(crate) async fn validate_outbound_url(url: &str) -> Result<(), SyncError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|_| SyncError::InvalidInput("invalid proxy target URL".into()))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
@@ -237,12 +237,12 @@ async fn validate_outbound_url(url: &str) -> Result<(), SyncError> {
     Ok(())
 }
 
-struct FetchedImage {
-    bytes: Vec<u8>,
-    content_type: String,
+pub(crate) struct FetchedImage {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) content_type: String,
 }
 
-async fn fetch_upstream(url: &str) -> Result<FetchedImage, SyncError> {
+pub(crate) async fn fetch_upstream(url: &str) -> Result<FetchedImage, SyncError> {
     let client = reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(UPSTREAM_TIMEOUT_SECS))
@@ -322,7 +322,7 @@ async fn fetch_upstream(url: &str) -> Result<FetchedImage, SyncError> {
     Err(SyncError::InvalidInput("too many redirects".into()))
 }
 
-async fn read_cache(path: &Path) -> Option<(Vec<u8>, String)> {
+pub(crate) async fn read_cache(path: &Path) -> Option<(Vec<u8>, String)> {
     let meta_path = cache_meta_path(path);
     let meta_raw = tokio::fs::read_to_string(&meta_path).await.ok()?;
     let meta: serde_json::Value = serde_json::from_str(&meta_raw).ok()?;
@@ -335,7 +335,7 @@ async fn read_cache(path: &Path) -> Option<(Vec<u8>, String)> {
     Some((bytes, content_type))
 }
 
-async fn write_cache(
+pub(crate) async fn write_cache(
     cache_root: &Path,
     url: &str,
     bytes: &[u8],
@@ -409,7 +409,7 @@ fn placeholder_response() -> Response {
     (StatusCode::NOT_FOUND, headers, PLACEHOLDER_GIF).into_response()
 }
 
-fn image_response(bytes: Vec<u8>, content_type: &str, _cached: bool) -> Response {
+pub(crate) fn image_response(bytes: Vec<u8>, content_type: &str, _cached: bool) -> Response {
     let mut headers = HeaderMap::new();
     if let Ok(ct) = HeaderValue::from_str(content_type) {
         headers.insert(header::CONTENT_TYPE, ct);

@@ -34,6 +34,10 @@ pub struct PrivacySettings {
     pub remote_images: String,
     #[serde(default)]
     pub remote_content_allowlist: Vec<String>,
+    /// Opt-in: allow Gravatar lookups for sender avatars (default off —
+    /// Gravatar learns hashed correspondent addresses per lookup).
+    #[serde(default)]
+    pub gravatar_avatars: bool,
 }
 
 fn default_remote_images() -> String {
@@ -45,6 +49,7 @@ impl Default for PrivacySettings {
         Self {
             remote_images: DEFAULT_REMOTE_IMAGES.to_string(),
             remote_content_allowlist: Vec::new(),
+            gravatar_avatars: false,
         }
     }
 }
@@ -54,12 +59,14 @@ impl Default for PrivacySettings {
 pub struct PrivacySettingsResponse {
     pub remote_images: String,
     pub remote_content_allowlist: Vec<String>,
+    pub gravatar_avatars: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchPrivacyRequest {
     pub remote_images: Option<String>,
+    pub gravatar_avatars: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -369,6 +376,7 @@ async fn get_privacy(
     Ok(Json(PrivacySettingsResponse {
         remote_images: settings.remote_images,
         remote_content_allowlist: settings.remote_content_allowlist,
+        gravatar_avatars: settings.gravatar_avatars,
     }))
 }
 
@@ -386,10 +394,14 @@ async fn patch_privacy(
         }
         settings.remote_images = mode;
     }
+    if let Some(gravatar) = body.gravatar_avatars {
+        settings.gravatar_avatars = gravatar;
+    }
     save_settings(state.kv(), &user_id, &settings).await?;
     Ok(Json(PrivacySettingsResponse {
         remote_images: settings.remote_images,
         remote_content_allowlist: settings.remote_content_allowlist,
+        gravatar_avatars: settings.gravatar_avatars,
     }))
 }
 
@@ -412,6 +424,7 @@ async fn allow_sender(
     Ok(Json(PrivacySettingsResponse {
         remote_images: settings.remote_images,
         remote_content_allowlist: settings.remote_content_allowlist,
+        gravatar_avatars: settings.gravatar_avatars,
     }))
 }
 
@@ -427,6 +440,7 @@ async fn remove_allow_sender(
     Ok(Json(PrivacySettingsResponse {
         remote_images: settings.remote_images,
         remote_content_allowlist: settings.remote_content_allowlist,
+        gravatar_avatars: settings.gravatar_avatars,
     }))
 }
 
@@ -494,6 +508,17 @@ mod tests {
         assert!(attrs_suggest_tracking_pixel(
             r#" style="width:1px;height:1px""#
         ));
+    }
+
+    #[test]
+    fn gravatar_avatars_defaults_off_and_roundtrips() {
+        let parsed: PrivacySettings = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.gravatar_avatars);
+        let on: PrivacySettings =
+            serde_json::from_str(r#"{"gravatarAvatars":true}"#).unwrap();
+        assert!(on.gravatar_avatars);
+        let back = serde_json::to_value(&on).unwrap();
+        assert_eq!(back["gravatarAvatars"], serde_json::json!(true));
     }
 
     #[test]

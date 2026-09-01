@@ -161,7 +161,7 @@ fn flatten(o: &mail_auth::DkimOutput<'_>) -> SigOutcome {
 /// time-bounded; expiry maps to a retriable temperror verdict).
 const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-fn authenticator() -> Result<&'static MessageAuthenticator, DkimStatus> {
+pub(crate) fn authenticator() -> Result<&'static MessageAuthenticator, DkimStatus> {
     static AUTH: std::sync::OnceLock<MessageAuthenticator> = std::sync::OnceLock::new();
     if let Some(a) = AUTH.get() {
         return Ok(a);

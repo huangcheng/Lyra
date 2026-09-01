@@ -1450,6 +1450,8 @@ paths:
                 remoteImages:
                   type: string
                   enum: [block, allow]
+                gravatarAvatars:
+                  type: boolean
       responses:
         "200":
           content:
@@ -1834,6 +1836,10 @@ components:
           type: array
           items:
             type: string
+        gravatarAvatars:
+          type: boolean
+          default: false
+          description: Opt-in — allow Gravatar lookups for sender avatars.
 
     OpengpgKey:
       type: object
