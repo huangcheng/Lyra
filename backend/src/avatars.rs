@@ -534,6 +534,14 @@ async fn get_avatar(
         return Ok(avatar_response(img.bytes, &img.content_type));
     }
 
+    // Upstream trouble after the freshness window: serve the stale cached
+    // avatar rather than blanking it — a Gravatar/BIMI outage is not
+    // evidence the sender lost their photo. The file stays on disk until a
+    // later successful refetch replaces it, so no negative marker either.
+    if upstream_error && let Some((bytes, content_type)) = media::read_cache(&cache_path).await {
+        return Ok(avatar_response(bytes, &content_type));
+    }
+
     let ttl = if upstream_error {
         MISS_TTL_ERROR_SECS
     } else {
@@ -1139,6 +1147,56 @@ mod tests {
             ttl <= Duration::from_secs(MISS_TTL_ERROR_SECS)
                 && ttl > Duration::from_secs(MISS_TTL_ERROR_SECS - 60),
             "gravatar 5xx must take the 10-minute error TTL, got {ttl:?}"
+        );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn stale_avatar_served_when_upstream_errors_after_freshness_window() {
+        let data_dir = temp_data_dir();
+        let state = test_auth_state(test_pool().await, &data_dir);
+        seed_user_account(&state, "u1").await;
+        enable_gravatar(&state, "u1").await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (base, handle) = spawn_avatar_mock(hits.clone(), MockReply::ServerError).await;
+        let _net = AvatarNet::enter(&base).await;
+
+        // A cached avatar whose freshness window (7d) has expired.
+        let cache_root = data_dir.join("media-cache");
+        media::write_cache(
+            &cache_root,
+            "avatar:friend@example.com",
+            MOCK_PNG,
+            "image/png",
+        )
+        .await
+        .unwrap();
+        let cache_path = media::cache_file_path(&cache_root, "avatar:friend@example.com");
+        let aged_mtime = SystemTime::now() - AVATAR_CACHE_FRESH - Duration::from_hours(1);
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&cache_path)
+            .unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(aged_mtime))
+            .unwrap();
+        drop(file);
+
+        // Gravatar 5xx → upstream error → the stale file must win over a 404,
+        // and no negative marker may be written (the avatar resolved).
+        let resp = call_avatar(&state, "u1", "friend@example.com").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), MOCK_PNG);
+        assert!(
+            state
+                .kv()
+                .get(&miss_key("u1", true, "friend@example.com"))
+                .await
+                .unwrap()
+                .is_none(),
+            "served-stale must not take the negative marker"
         );
 
         handle.abort();

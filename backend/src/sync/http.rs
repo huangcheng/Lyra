@@ -1013,7 +1013,7 @@ pub(crate) async fn get_message(
     let mut row = load_message_row(db, &session.user_id, &message_id).await?;
     let fill_verified =
         maybe_fill_imap_body(db, &state.data_dir, &session.user_id, &mut row).await?;
-    maybe_verify_dkim(db, &session.user_id, &mut row, fill_verified).await;
+    maybe_verify_dkim(db, state.kv(), &session.user_id, &mut row, fill_verified).await;
 
     let allow_remote = query.remote_content.as_deref() == Some("allow");
     let mut response = finalize_message_response_with_opengpg(
@@ -1036,15 +1036,36 @@ fn from_domain_of(row: &MessageRow) -> String {
         .unwrap_or_default()
 }
 
+/// How long a `temperror` DKIM verdict waits before its next lazy retry
+/// (full-body refetch + DNS). Short enough to heal after a resolver blip,
+/// long enough that a hard outage doesn't refetch on every open.
+const DKIM_TEMPERROR_RETRY_BACKOFF_SECS: u64 = 60 * 60;
+
 /// Lazy DKIM for rows without a verdict: refetch raw bytes once, verify,
 /// store, and reflect into the row. Failure-safe: on any error the message
 /// serves without a verdict and the row stays NULL for a later retry.
 /// `fill_verified` is true when the body-fill hook already ran verification
 /// this same request — its verdict (even `temperror`) is fresh, so skip the
 /// lazy refetch instead of verifying twice per open.
-async fn maybe_verify_dkim(db: &DbPool, user_id: &str, row: &mut MessageRow, fill_verified: bool) {
+///
+/// `temperror` retries carry a kv backoff: re-verifying requires the full
+/// raw body again (IMAP/JMAP fetch + the 5s DNS budget), so a resolver
+/// outage must not turn every open into a refetch. Backoff is keyed per
+/// message and only set when the retry again lands on `temperror`.
+async fn maybe_verify_dkim(
+    db: &DbPool,
+    kv: &std::sync::Arc<dyn crate::kv::KvStore>,
+    user_id: &str,
+    row: &mut MessageRow,
+    fill_verified: bool,
+) {
     let needs = row.dkim_status.is_none() || row.dkim_status.as_deref() == Some("temperror");
     if fill_verified || !needs || super::recovery::body_exceeds_limit(row.size_bytes) {
+        return;
+    }
+    let backoff_key = format!("dkim:retry-backoff:{}", row.id);
+    let is_retry = row.dkim_status.is_some();
+    if is_retry && matches!(kv.get(&backoff_key).await, Ok(Some(_))) {
         return;
     }
     let raw: Option<Vec<u8>> = match row.protocol.as_str() {
@@ -1088,6 +1109,13 @@ async fn maybe_verify_dkim(db: &DbPool, user_id: &str, row: &mut MessageRow, fil
     };
     let Some(raw) = raw else { return };
     let verdict = crate::dkim::verify_raw(&raw, &from_domain_of(row)).await;
+    if verdict.status == crate::dkim::DkimStatus::TempError {
+        // Only retriable verdicts back off; pass/fail persist and never
+        // re-enter the lazy path.
+        let _ = kv
+            .set(&backoff_key, "1", Some(DKIM_TEMPERROR_RETRY_BACKOFF_SECS))
+            .await;
+    }
     if crate::sync::store::update_dkim_verdict(db, &row.id, &verdict)
         .await
         .is_ok()
