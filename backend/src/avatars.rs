@@ -87,7 +87,10 @@ pub(crate) fn parse_bimi_record(txt: &[u8]) -> Option<BimiRecord> {
 /// policy record only — no alignment evaluation).
 pub(crate) fn dmarc_allows_bimi(txt: &str) -> bool {
     let mut parts = txt.split(';');
-    if !parts.next().is_some_and(|v| v.trim().eq_ignore_ascii_case("v=DMARC1")) {
+    if !parts
+        .next()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("v=DMARC1"))
+    {
         return false;
     }
     parts

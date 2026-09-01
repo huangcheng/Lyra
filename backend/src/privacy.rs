@@ -514,8 +514,7 @@ mod tests {
     fn gravatar_avatars_defaults_off_and_roundtrips() {
         let parsed: PrivacySettings = serde_json::from_str("{}").unwrap();
         assert!(!parsed.gravatar_avatars);
-        let on: PrivacySettings =
-            serde_json::from_str(r#"{"gravatarAvatars":true}"#).unwrap();
+        let on: PrivacySettings = serde_json::from_str(r#"{"gravatarAvatars":true}"#).unwrap();
         assert!(on.gravatar_avatars);
         let back = serde_json::to_value(&on).unwrap();
         assert_eq!(back["gravatarAvatars"], serde_json::json!(true));
