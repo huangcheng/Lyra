@@ -304,6 +304,7 @@
       "oauthDenied": "已取消或拒绝登录。",
       "oauthError": "无法完成邮箱登录。",
       "oauthTokenExchange": "服务商已接受登录，但拒绝了令牌交换。请检查服务器上的 OAuth 客户端密钥——应填密钥的“值”，而非其 ID。",
+      "oauthTokenExchangeGeneric": "邮箱服务商拒绝了令牌交换。请查看服务器日志中的服务商错误码。",
       "oauthEmailRequired": "请先填写邮箱地址，再使用 OAuth 登录。",
       "protocol": "协议",
       "protocolJmap": "JMAP（推荐）",

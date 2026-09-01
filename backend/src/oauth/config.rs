@@ -3,9 +3,11 @@
 //! Provider endpoints, scopes, and domain rules live in code (`providers.rs`).
 //! Deployers only supply per-provider client credentials here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 
@@ -70,15 +72,26 @@ impl OAuthRegistry {
         };
 
         // File entries win; legacy env vars only fill providers the file omits.
-        if let Some(legacy) = legacy_microsoft_from_env() {
-            credentials
-                .entry(providers::MICROSOFT.to_string())
-                .or_insert(legacy);
-        }
-        if let Some(legacy) = legacy_yandex_from_env() {
-            credentials
-                .entry(providers::YANDEX.to_string())
-                .or_insert(legacy);
+        // When both define the same provider, warn once if the secrets differ:
+        // a stale value silently ignored by file precedence is exactly how a
+        // secret rotation gets lost. Fingerprints only — never log values.
+        let mut credentials_source: HashMap<&str, &str> = HashMap::new();
+        for (id, legacy) in [
+            (providers::MICROSOFT, legacy_microsoft_from_env()),
+            (providers::YANDEX, legacy_yandex_from_env()),
+        ] {
+            let Some(legacy) = legacy else { continue };
+            if let Some(file_entry) = credentials.get(id) {
+                credentials_source.insert(id, "file");
+                warn_once_on_secret_divergence(
+                    id,
+                    file_entry.client_secret.as_deref(),
+                    legacy.client_secret.as_deref(),
+                );
+            } else {
+                credentials_source.insert(id, "env");
+                credentials.insert(id.to_string(), legacy);
+            }
         }
 
         let redirect_uri = oauth_callback_url(public_url);
@@ -92,12 +105,20 @@ impl OAuthRegistry {
         if microsoft.is_some() {
             tracing::info!(
                 redirect_uri = %redirect_uri,
+                credentials = credentials_source
+                    .get(providers::MICROSOFT)
+                    .copied()
+                    .unwrap_or("file"),
                 "Microsoft mail OAuth configured"
             );
         }
         if yandex.is_some() {
             tracing::info!(
                 redirect_uri = %redirect_uri,
+                credentials = credentials_source
+                    .get(providers::YANDEX)
+                    .copied()
+                    .unwrap_or("file"),
                 "Yandex mail OAuth configured"
             );
         }
@@ -166,6 +187,56 @@ fn credentials_configured(credentials: &HashMap<String, ProviderCredentials>, id
     credentials
         .get(id)
         .is_some_and(|c| !c.client_id.trim().is_empty())
+}
+
+/// Divergence situations already warned about. `load` also runs on every
+/// sync tick via [`OAuthRegistry::refresh_configs`], so without dedup the
+/// warning would spam once per reload.
+static WARNED_SECRET_DIVERGENCES: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+
+fn warn_once_on_secret_divergence(
+    provider: &str,
+    file_secret: Option<&str>,
+    env_secret: Option<&str>,
+) {
+    let (Some(file), Some(env)) = (file_secret, env_secret) else {
+        return;
+    };
+    let (file, env) = (file.trim(), env.trim());
+    if file.is_empty() || env.is_empty() || file == env {
+        return;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (
+        provider,
+        file.len(),
+        secret_shape(file),
+        env.len(),
+        secret_shape(env),
+    )
+        .hash(&mut hasher);
+    let warned = WARNED_SECRET_DIVERGENCES.get_or_init(|| Mutex::new(HashSet::new()));
+    if !warned.lock().unwrap().insert(hasher.finish()) {
+        return;
+    }
+    tracing::warn!(
+        provider = provider,
+        file_secret = %secret_fingerprint(file),
+        env_secret = %secret_fingerprint(env),
+        "mail OAuth provider configured in both oauth-providers.toml and env with different secrets; the FILE value wins and env is ignored — update the TOML file to rotate"
+    );
+}
+
+/// Non-reversible fingerprint for diagnostics; never log the value itself.
+fn secret_fingerprint(secret: &str) -> String {
+    format!("len={} {}", secret.len(), secret_shape(secret))
+}
+
+/// Coarse shape class. A 36-char UUID is almost always the Entra secret *ID*
+/// pasted instead of the secret *Value* (AADSTS7000215).
+fn secret_shape(secret: &str) -> &'static str {
+    let uuidish = secret.len() == 36 && secret.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    if uuidish { "uuid-shaped" } else { "opaque" }
 }
 
 fn parse_oauth_file(path: &Path) -> Result<HashMap<String, ProviderCredentials>, OAuthConfigError> {
@@ -259,6 +330,31 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn secret_fingerprint_shapes_uuid_vs_value() {
+        // The exact failure this shape check exists for: an Entra secret ID
+        // (UUID) pasted where the Value belongs.
+        let secret_id = "410a0d91-2466-48e7-94dc-7ae3ad58262c";
+        assert_eq!(secret_shape(secret_id), "uuid-shaped");
+        assert_eq!(secret_fingerprint(secret_id), "len=36 uuid-shaped");
+        // Synthetic 40-char Entra-style Value (tilde + alphanumerics) — never
+        // a real credential.
+        assert_eq!(secret_shape("EXAMPLE~NOTAREALSECRETvALUE0000000000000000"), "opaque");
+    }
+
+    #[test]
+    fn divergence_warn_tolerates_repeats_and_noops() {
+        // Repeats dedup (no panic, no unbounded set growth); absent, blank,
+        // and equal secrets are no-ops. The dedup set is keyed by provider +
+        // secret shapes, so each test run uses distinct providers.
+        let (file, env) = (Some("file-secret"), Some("env-secret"));
+        warn_once_on_secret_divergence("microsoft-divergence-a", file, env);
+        warn_once_on_secret_divergence("microsoft-divergence-a", file, env);
+        warn_once_on_secret_divergence("microsoft-divergence-b", None, env);
+        warn_once_on_secret_divergence("microsoft-divergence-c", file, Some("   "));
+        warn_once_on_secret_divergence("microsoft-divergence-d", file, file);
+    }
 
     #[test]
     fn parses_provider_matrix() {

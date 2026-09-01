@@ -102,10 +102,9 @@ pub async fn exchange_code(
         .await
         .map_err(|e| MsOAuthError::TokenExchange(e.to_string()))?;
     if let Some(err) = body.error {
-        return Err(MsOAuthError::TokenExchange(format!(
-            "{err}: {}",
-            body.error_description.unwrap_or_default()
-        )));
+        let description = body.error_description.unwrap_or_default();
+        let message = format!("{err}: {description}");
+        return Err(MsOAuthError::TokenExchangeRejected { code: err, message });
     }
     let refresh = body
         .refresh_token
@@ -147,10 +146,9 @@ pub async fn refresh_access_token(
         .await
         .map_err(|e| MsOAuthError::TokenExchange(e.to_string()))?;
     if let Some(err) = body.error {
-        return Err(MsOAuthError::TokenExchange(format!(
-            "{err}: {}",
-            body.error_description.unwrap_or_default()
-        )));
+        let description = body.error_description.unwrap_or_default();
+        let message = format!("{err}: {description}");
+        return Err(MsOAuthError::TokenExchangeRejected { code: err, message });
     }
     Ok(ExchangedTokens {
         access_token: body.access_token,

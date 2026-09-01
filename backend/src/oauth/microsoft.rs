@@ -30,6 +30,11 @@ pub enum MsOAuthError {
     InvalidState,
     #[error("token exchange failed: {0}")]
     TokenExchange(String),
+    /// The provider answered the token endpoint with an OAuth error body.
+    /// `code` is the spec error (`invalid_client`, `invalid_grant`, …) — safe
+    /// to surface to clients; `message` is for server logs only.
+    #[error("token exchange rejected ({code}): {message}")]
+    TokenExchangeRejected { code: String, message: String },
     #[error("mailbox email is required to start OAuth")]
     MissingEmailParam,
     #[error("missing email in OAuth profile")]
@@ -209,10 +214,9 @@ pub async fn exchange_code(
 
     let body = post_token_form(&client, cfg.token_url(), &form).await?;
     if let Some(err) = body.error {
-        return Err(MsOAuthError::TokenExchange(format!(
-            "{err}: {}",
-            body.error_description.unwrap_or_default()
-        )));
+        let description = body.error_description.unwrap_or_default();
+        let message = format!("{err}: {description}");
+        return Err(MsOAuthError::TokenExchangeRejected { code: err, message });
     }
     let refresh = body
         .refresh_token
@@ -256,10 +260,9 @@ pub async fn refresh_access_token(
 
     let body = post_token_form(&client, cfg.token_url(), &form).await?;
     if let Some(err) = body.error {
-        return Err(MsOAuthError::TokenExchange(format!(
-            "{err}: {}",
-            body.error_description.unwrap_or_default()
-        )));
+        let description = body.error_description.unwrap_or_default();
+        let message = format!("{err}: {description}");
+        return Err(MsOAuthError::TokenExchangeRejected { code: err, message });
     }
     Ok(ExchangedTokens {
         access_token: body.access_token,

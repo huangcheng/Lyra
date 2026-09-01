@@ -81,7 +81,9 @@ impl IntoResponse for MsOAuthError {
             | MsOAuthError::MissingEmail
             | MsOAuthError::MissingEmailParam
             | MsOAuthError::UnknownProvider(_) => StatusCode::BAD_REQUEST,
-            MsOAuthError::TokenExchange(_) => StatusCode::BAD_GATEWAY,
+            MsOAuthError::TokenExchange(_) | MsOAuthError::TokenExchangeRejected { .. } => {
+                StatusCode::BAD_GATEWAY
+            }
             MsOAuthError::CredentialDecrypt | MsOAuthError::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -95,6 +97,14 @@ impl IntoResponse for MsOAuthError {
                 tracing::warn!(error = %e, "oauth token exchange failed");
                 "token exchange failed".to_string()
             }
+            MsOAuthError::TokenExchangeRejected { code, message } => {
+                tracing::warn!(
+                    provider_code = %code,
+                    error = %message,
+                    "oauth token exchange rejected by provider"
+                );
+                "token exchange failed".to_string()
+            }
             other => other.to_string(),
         };
         let code = match &self {
@@ -105,7 +115,9 @@ impl IntoResponse for MsOAuthError {
             | MsOAuthError::MissingEmail
             | MsOAuthError::MissingEmailParam => Some("bad_request"),
             MsOAuthError::UnknownProvider(_) => Some("bad_request"),
-            MsOAuthError::TokenExchange(_) => Some("bad_gateway"),
+            MsOAuthError::TokenExchange(_) | MsOAuthError::TokenExchangeRejected { .. } => {
+                Some("bad_gateway")
+            }
             MsOAuthError::CredentialDecrypt | MsOAuthError::Internal(_) => Some("internal_error"),
         };
         (status, Json(ApiErrorBody::new(msg, code))).into_response()
@@ -223,6 +235,18 @@ async fn oauth_callback(
                     tracing::warn!(error = %e, "oauth token exchange failed");
                     return Ok(oauth_complete_response(&headers, "error", "token_exchange"));
                 }
+                // The provider named a spec error code (`invalid_client`, …).
+                // Forward it in the detail so the UI can show a targeted hint;
+                // the description stays server-side (may echo request data).
+                Err(MsOAuthError::TokenExchangeRejected { code, message }) => {
+                    tracing::warn!(
+                        provider_code = %code,
+                        error = %message,
+                        "oauth token exchange rejected by provider"
+                    );
+                    let detail = format!("token_exchange:{code}");
+                    return Ok(oauth_complete_response(&headers, "error", &detail));
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -236,6 +260,15 @@ async fn oauth_callback(
                 Err(MsOAuthError::TokenExchange(e)) => {
                     tracing::warn!(error = %e, "oauth token exchange failed");
                     return Ok(oauth_complete_response(&headers, "error", "token_exchange"));
+                }
+                Err(MsOAuthError::TokenExchangeRejected { code, message }) => {
+                    tracing::warn!(
+                        provider_code = %code,
+                        error = %message,
+                        "oauth token exchange rejected by provider"
+                    );
+                    let detail = format!("token_exchange:{code}");
+                    return Ok(oauth_complete_response(&headers, "error", &detail));
                 }
                 Err(e) => return Err(e),
             }

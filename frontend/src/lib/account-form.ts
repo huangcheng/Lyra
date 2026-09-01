@@ -65,9 +65,21 @@ export function probeSourceLabel(locale: 'en' | 'zh', source?: string | null): s
   return labels[source] ? labels[source][locale] : source;
 }
 
-/** i18n key for the mail-OAuth callback banner, by backend detail code. */
+/** i18n key for the mail-OAuth callback banner, by backend detail code.
+ *
+ *  Token-exchange failures carry the provider's OAuth error code as a suffix
+ *  (`token_exchange:invalid_client`); plain `token_exchange` is the legacy
+ *  detail from servers that predate the suffix. Only `invalid_client` gets a
+ *  targeted hint (wrong secret) — every other code falls back to a generic
+ *  message pointing at the server logs, where the full description lives.
+ */
 export function oauthErrorKey(detail: string | null): string {
   if (detail === 'oauth_denied') return 'settings.accounts.oauthDenied';
-  if (detail === 'token_exchange') return 'settings.accounts.oauthTokenExchange';
+  if (detail?.startsWith('token_exchange')) {
+    if (detail.split(':')[1] === 'invalid_client') {
+      return 'settings.accounts.oauthTokenExchange';
+    }
+    return 'settings.accounts.oauthTokenExchangeGeneric';
+  }
   return 'settings.accounts.oauthError';
 }

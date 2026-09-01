@@ -108,8 +108,18 @@ describe('probeSourceLabel', () => {
 describe('oauthErrorKey', () => {
   it('maps callback detail codes to specific messages', () => {
     expect(oauthErrorKey('oauth_denied')).toBe('settings.accounts.oauthDenied');
-    expect(oauthErrorKey('token_exchange')).toBe('settings.accounts.oauthTokenExchange');
     expect(oauthErrorKey('anything_else')).toBe('settings.accounts.oauthError');
     expect(oauthErrorKey(null)).toBe('settings.accounts.oauthError');
+  });
+
+  it('targets invalid_client at the secret hint; other codes stay generic', () => {
+    expect(oauthErrorKey('token_exchange:invalid_client')).toBe(
+      'settings.accounts.oauthTokenExchange',
+    );
+    expect(oauthErrorKey('token_exchange:invalid_grant')).toBe(
+      'settings.accounts.oauthTokenExchangeGeneric',
+    );
+    // Legacy servers send the bare detail without a provider code.
+    expect(oauthErrorKey('token_exchange')).toBe('settings.accounts.oauthTokenExchangeGeneric');
   });
 });
