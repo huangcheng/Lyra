@@ -12,6 +12,7 @@
 
 use uuid::Uuid;
 
+use super::queries::{now_value, ts_value};
 use super::types::{SyncError, SyncResponse};
 use crate::db_row::{IdParam, id_param, parse_ts};
 use crate::entities::{folder, mail_account, message, sync_cursor};
@@ -1324,6 +1325,60 @@ fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStatement {
     ins
 }
 
+/// Persist one message's DKIM verdict (view-time verification writes).
+// Callers land with the body-fill/open-verify hook task.
+#[allow(dead_code)]
+pub(crate) async fn update_dkim_verdict(
+    db: &DbPool,
+    message_id: &str,
+    verdict: &crate::dkim::DkimVerdict,
+) -> Result<(), SyncError> {
+    let signed_headers = serde_json::to_string(&verdict.signed_headers)
+        .map_err(|e| SyncError::Protocol(format!("dkim headers encode: {e}")))?;
+    let warnings = serde_json::to_string(&verdict.warnings)
+        .map_err(|e| SyncError::Protocol(format!("dkim warnings encode: {e}")))?;
+    let mut update = Sq::update();
+    update
+        .table(message::Entity)
+        .value(
+            message::Column::DkimStatus,
+            opt_str_value(Some(verdict.status.as_str())),
+        )
+        .value(
+            message::Column::DkimSdid,
+            opt_str_value(verdict.sdid.as_deref()),
+        )
+        .value(
+            message::Column::DkimAuid,
+            opt_str_value(verdict.auid.as_deref()),
+        )
+        .value(
+            message::Column::DkimSelector,
+            opt_str_value(verdict.selector.as_deref()),
+        )
+        .value(
+            message::Column::DkimAlgorithm,
+            opt_str_value(verdict.algorithm.as_deref()),
+        )
+        .value(
+            message::Column::DkimSignedHeaders,
+            Expr::val(signed_headers),
+        )
+        .value(message::Column::DkimWarnings, Expr::val(warnings))
+        .value(
+            message::Column::DkimSignedAt,
+            ts_value(db, verdict.signed_at),
+        )
+        .value(
+            message::Column::DkimExpiresAt,
+            ts_value(db, verdict.expires_at),
+        )
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, message_id)?));
+    db.orm().execute(&update).await.map_err(orm_err)?;
+    Ok(())
+}
+
 /// Refresh read/star/flags state plus fill-in semantics for a matched message.
 ///
 /// `flags = excluded.flags`, while subject/snippet/address columns only move
@@ -1850,6 +1905,123 @@ mod stale_imap_row_tests {
     }
 }
 
+#[cfg(test)]
+mod dkim_verdict_tests {
+    use super::{get_folder_id, new_uuid_text, update_dkim_verdict, upsert_folder, upsert_message};
+    use crate::imap::ImapMessage;
+    use crate::storage::{DbPool, Storage};
+
+    /// In-memory SQLite with one user/account/folder/message seeded.
+    /// Returns `(db, user_id, message_id)`.
+    async fn seed() -> (DbPool, String, String) {
+        let storage = Storage::new("sqlite::memory:").await.unwrap();
+        storage.run_migrations().await.unwrap();
+        let db = storage.pool().clone();
+        let DbPool::Sqlite(pool) = &db else {
+            panic!("sqlite");
+        };
+        let user_id = new_uuid_text();
+        let account_id = new_uuid_text();
+        sqlx::query(
+            "INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) \
+             VALUES (?, ?, 'hash', '[]')",
+        )
+        .bind(&user_id)
+        .bind(format!("dkim-{user_id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mail_account (\
+                 id, user_id, display_name, email_address, protocol, auth_type, \
+                 credential, imap_host, imap_port, imap_security, is_active, sync_enabled\
+             ) VALUES (?, ?, 'DKIM', 'dkim@example.com', 'imap', 'password', \
+                       'cred', 'imap.example.com', 993, 'tls', 1, 1)",
+        )
+        .bind(&account_id)
+        .bind(&user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        upsert_folder(&db, &account_id, "INBOX", None, &[])
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&db, &account_id, "INBOX").await.unwrap();
+        let msg = ImapMessage {
+            uid: 1,
+            message_id: Some("<1@example.com>".into()),
+            subject: Some("Verify me".into()),
+            from: Some("ops@example.com".into()),
+            to: Some("me@example.org".into()),
+            cc: None,
+            date: None,
+            in_reply_to: None,
+            references: None,
+            flags: vec!["\\Seen".into()],
+            size: Some(1024),
+            body: None,
+            body_text: None,
+            body_html: None,
+            has_attachments: false,
+            attachments: vec![],
+        };
+        upsert_message(&db, &account_id, &folder_id, &msg)
+            .await
+            .unwrap();
+        let message_id: String = sqlx::query_scalar("SELECT id FROM message WHERE account_id = ?")
+            .bind(&account_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        (db, user_id, message_id)
+    }
+
+    #[tokio::test]
+    async fn update_dkim_verdict_roundtrips_all_columns() {
+        let (db, user_id, message_id) = seed().await;
+        let verdict = crate::dkim::DkimVerdict {
+            status: crate::dkim::DkimStatus::Pass,
+            sdid: Some("example.com".into()),
+            auid: Some("ops@example.com".into()),
+            selector: Some("sel1".into()),
+            algorithm: Some("RsaSha256".into()),
+            signed_headers: vec!["from".into(), "to".into()],
+            warnings: vec!["Header 'Subject' is not signed".into()],
+            signed_at: chrono::DateTime::from_timestamp(1_756_700_000, 0),
+            expires_at: None,
+        };
+        update_dkim_verdict(&db, &message_id, &verdict)
+            .await
+            .unwrap();
+
+        let row = crate::sync::queries::load_message_row(&db, &user_id, &message_id)
+            .await
+            .unwrap();
+        assert_eq!(row.dkim_status.as_deref(), Some("pass"));
+        assert_eq!(row.dkim_sdid.as_deref(), Some("example.com"));
+        assert_eq!(row.dkim_auid.as_deref(), Some("ops@example.com"));
+        assert_eq!(row.dkim_selector.as_deref(), Some("sel1"));
+        assert_eq!(row.dkim_algorithm.as_deref(), Some("RsaSha256"));
+        assert_eq!(row.dkim_signed_headers.as_deref(), Some(r#"["from","to"]"#));
+        assert_eq!(
+            row.dkim_warnings.as_deref(),
+            Some(r#"["Header 'Subject' is not signed"]"#)
+        );
+        assert!(row.dkim_signed_at.is_some());
+        assert!(row.dkim_expires_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn unverified_message_has_no_dkim_verdict() {
+        let (db, user_id, message_id) = seed().await;
+        let row = crate::sync::queries::load_message_row(&db, &user_id, &message_id)
+            .await
+            .unwrap();
+        assert!(row.dkim_status.is_none());
+        assert!(crate::sync::queries::dkim_response_from_row(&row).is_none());
+    }
+}
+
 /// Live-PostgreSQL roundtrips for the IMAP sync store seam.
 ///
 /// Every dialect bug that ever reached production (`jsonb ~~ text`,
@@ -1860,7 +2032,8 @@ mod stale_imap_row_tests {
 #[cfg(feature = "postgres")]
 mod postgres_live {
     use super::{
-        imap_message_external_id, mojibake_message_uids, reconcile_folder_deletions, upsert_message,
+        imap_message_external_id, mojibake_message_uids, reconcile_folder_deletions,
+        update_dkim_verdict, upsert_message,
     };
     use crate::pgtest::support;
     use crate::storage::DbPool;
@@ -1985,6 +2158,74 @@ mod postgres_live {
             .await
             .unwrap();
             assert_eq!(soft_deleted, vec![false, true], "vanished UID soft-deleted");
+        });
+    }
+
+    /// DKIM verdict persistence: TEXT columns, TIMESTAMPTZ binds, and the
+    /// dialect-tolerant timestamp reads must all survive PostgreSQL typing.
+    #[test]
+    #[ignore = "needs postgres"]
+    fn dkim_verdict_roundtrip() {
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_account(&db, &user_id, "dkim@example.com").await;
+            let folder_id = support::seed_inbox(&db, &account_id).await;
+            upsert_message(
+                &db,
+                &account_id,
+                &folder_id,
+                &support::message(31, "DKIM me", "ops@example.com"),
+            )
+            .await
+            .unwrap();
+            let DbPool::Postgres(pool) = &db else {
+                panic!()
+            };
+            let message_id: String = sqlx::query_scalar(
+                "SELECT id::text FROM message \
+                 WHERE account_id = $1::uuid AND external_id = $2",
+            )
+            .bind(&account_id)
+            .bind(imap_message_external_id(&folder_id, 31))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+
+            let verdict = crate::dkim::DkimVerdict {
+                status: crate::dkim::DkimStatus::Pass,
+                sdid: Some("example.com".into()),
+                auid: Some("ops@example.com".into()),
+                selector: Some("sel1".into()),
+                algorithm: Some("RsaSha256".into()),
+                signed_headers: vec!["from".into(), "to".into()],
+                warnings: vec!["Header 'Subject' is not signed".into()],
+                signed_at: chrono::DateTime::from_timestamp(1_756_700_000, 0),
+                expires_at: None,
+            };
+            update_dkim_verdict(&db, &message_id, &verdict)
+                .await
+                .unwrap();
+
+            let row = crate::sync::queries::load_message_row(&db, &user_id, &message_id)
+                .await
+                .unwrap();
+            assert_eq!(row.dkim_status.as_deref(), Some("pass"));
+            assert_eq!(row.dkim_sdid.as_deref(), Some("example.com"));
+            assert_eq!(row.dkim_auid.as_deref(), Some("ops@example.com"));
+            assert_eq!(row.dkim_selector.as_deref(), Some("sel1"));
+            assert_eq!(row.dkim_algorithm.as_deref(), Some("RsaSha256"));
+            assert_eq!(row.dkim_signed_headers.as_deref(), Some(r#"["from","to"]"#));
+            assert_eq!(
+                row.dkim_warnings.as_deref(),
+                Some(r#"["Header 'Subject' is not signed"]"#)
+            );
+            assert!(row.dkim_signed_at.is_some());
+            assert!(row.dkim_expires_at.is_none());
+
+            let response = crate::sync::queries::dkim_response_from_row(&row)
+                .expect("verified row maps to a response");
+            assert_eq!(response.status, "pass");
+            assert_eq!(response.signed_headers, vec!["from", "to"]);
         });
     }
 }

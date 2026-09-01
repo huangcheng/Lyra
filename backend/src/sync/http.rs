@@ -2484,6 +2484,15 @@ mod learn_hook_tests {
             date: None,
             snippet: None,
             size_bytes: None,
+            dkim_status: None,
+            dkim_sdid: None,
+            dkim_auid: None,
+            dkim_selector: None,
+            dkim_algorithm: None,
+            dkim_signed_headers: None,
+            dkim_warnings: None,
+            dkim_signed_at: None,
+            dkim_expires_at: None,
         }
     }
 

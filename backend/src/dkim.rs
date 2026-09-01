@@ -172,7 +172,8 @@ fn authenticator() -> Result<&'static MessageAuthenticator, DkimStatus> {
 /// Verify all DKIM signatures on a raw RFC 822 message. `from_domain` is the
 /// lowercased domain of the message's primary From address.
 ///
-/// Never fails the caller: parse/resolver problems yield `temperror`.
+/// Never fails the caller: unparseable messages yield `none`; DNS resolver
+/// init failure yields `temperror`.
 pub(crate) async fn verify_raw(raw: &[u8], from_domain: &str) -> DkimVerdict {
     let Ok(auth) = authenticator() else {
         return select_best(

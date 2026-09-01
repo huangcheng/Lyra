@@ -284,6 +284,7 @@ pub(super) fn message_response_from_query_row(
         remote_content_blocked: false,
         opengpg: None,
         attachments: None,
+        dkim: None,
     })
 }
 
@@ -330,6 +331,21 @@ pub struct FolderResponse {
     pub unread_messages: i32,
 }
 
+/// DKIM verdict in the detail payload (`null` = never verified).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DkimResponse {
+    pub status: String,
+    pub sdid: Option<String>,
+    pub auid: Option<String>,
+    pub selector: Option<String>,
+    pub algorithm: Option<String>,
+    pub signed_headers: Vec<String>,
+    pub warnings: Vec<String>,
+    pub signed_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
 /// Message response for the API.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -362,6 +378,9 @@ pub struct MessageResponse {
     /// `has_attachments` instead).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<AttachmentResponse>>,
+    /// DKIM verdict; detail endpoint only, absent when never verified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dkim: Option<DkimResponse>,
 }
 
 /// Folder columns needed by [`FolderResponse`], projected from alias `f`.
@@ -547,6 +566,32 @@ pub(crate) struct MessageRow {
     pub(super) snippet: Option<String>,
     pub(super) has_attachments: bool,
     pub(super) size_bytes: Option<i64>,
+    pub(super) dkim_status: Option<String>,
+    pub(super) dkim_sdid: Option<String>,
+    pub(super) dkim_auid: Option<String>,
+    pub(super) dkim_selector: Option<String>,
+    pub(super) dkim_algorithm: Option<String>,
+    pub(super) dkim_signed_headers: Option<String>,
+    pub(super) dkim_warnings: Option<String>,
+    pub(super) dkim_signed_at: Option<String>,
+    pub(super) dkim_expires_at: Option<String>,
+}
+
+pub(super) fn dkim_response_from_row(row: &MessageRow) -> Option<DkimResponse> {
+    let status = row.dkim_status.clone()?;
+    Some(DkimResponse {
+        status,
+        sdid: row.dkim_sdid.clone(),
+        auid: row.dkim_auid.clone(),
+        selector: row.dkim_selector.clone(),
+        algorithm: row.dkim_algorithm.clone(),
+        signed_headers: serde_json::from_str(row.dkim_signed_headers.as_deref().unwrap_or("[]"))
+            .unwrap_or_default(),
+        warnings: serde_json::from_str(row.dkim_warnings.as_deref().unwrap_or("[]"))
+            .unwrap_or_default(),
+        signed_at: row.dkim_signed_at.clone(),
+        expires_at: row.dkim_expires_at.clone(),
+    })
 }
 
 pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
@@ -579,6 +624,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         remote_content_blocked: false,
         opengpg: None,
         attachments: None,
+        dkim: dkim_response_from_row(row),
     }
 }
 
@@ -608,6 +654,15 @@ const MESSAGE_LOAD_COLS: &[message::Column] = &[
     message::Column::IsDraft,
     message::Column::HasAttachments,
     message::Column::SizeBytes,
+    message::Column::DkimStatus,
+    message::Column::DkimSdid,
+    message::Column::DkimAuid,
+    message::Column::DkimSelector,
+    message::Column::DkimAlgorithm,
+    message::Column::DkimSignedHeaders,
+    message::Column::DkimWarnings,
+    message::Column::DkimSignedAt,
+    message::Column::DkimExpiresAt,
 ];
 
 pub(crate) async fn load_message_row(
@@ -665,6 +720,15 @@ pub(crate) async fn load_message_row(
         snippet: row.try_get("", "snippet").map_err(orm_err)?,
         has_attachments: row.try_get("", "has_attachments").map_err(orm_err)?,
         size_bytes: row.try_get("", "size_bytes").map_err(orm_err)?,
+        dkim_status: row.try_get("", "dkim_status").map_err(orm_err)?,
+        dkim_sdid: row.try_get("", "dkim_sdid").map_err(orm_err)?,
+        dkim_auid: row.try_get("", "dkim_auid").map_err(orm_err)?,
+        dkim_selector: row.try_get("", "dkim_selector").map_err(orm_err)?,
+        dkim_algorithm: row.try_get("", "dkim_algorithm").map_err(orm_err)?,
+        dkim_signed_headers: row.try_get("", "dkim_signed_headers").map_err(orm_err)?,
+        dkim_warnings: row.try_get("", "dkim_warnings").map_err(orm_err)?,
+        dkim_signed_at: row_opt_ts(&row, "dkim_signed_at").map_err(orm_err)?,
+        dkim_expires_at: row_opt_ts(&row, "dkim_expires_at").map_err(orm_err)?,
     })
 }
 
