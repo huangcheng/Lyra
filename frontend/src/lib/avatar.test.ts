@@ -2,10 +2,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/lib/api-client', () => ({ apiBlob: vi.fn() }));
 
+import { act, createElement } from 'react';
+import { createRoot } from 'react-dom/client';
+
 import { apiBlob } from '@/lib/api-client';
-import { avatarState, loadAvatar, resetAvatarCacheForTests } from '@/lib/avatar';
+import { avatarState, loadAvatar, resetAvatarCacheForTests, useAvatar } from '@/lib/avatar';
 
 const mockedApiBlob = vi.mocked(apiBlob);
+
+(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
 beforeEach(() => {
   resetAvatarCacheForTests();
@@ -35,5 +40,44 @@ describe('loadAvatar', () => {
     await loadAvatar('c@example.com');
     expect(avatarState('c@example.com')).not.toBeNull();
     expect(avatarState('d@example.com')).toBeUndefined();
+  });
+});
+
+describe('useAvatar', () => {
+  it('clears the previous sender photo when the new sender has none', async () => {
+    mockedApiBlob.mockImplementation((path: string) =>
+      path.includes('a%40example.com')
+        ? Promise.resolve(new Blob(['x'], { type: 'image/png' }))
+        : Promise.reject(new Error('404')),
+    );
+
+    const seen: (string | null)[] = [];
+    function Probe({ email }: { email: string }) {
+      seen.push(useAvatar(email));
+      return null;
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    // Sender A resolves to a photo.
+    await act(async () => {
+      root.render(createElement(Probe, { email: 'a@example.com' }));
+    });
+    const urlA = seen.at(-1);
+    expect(urlA).not.toBeNull();
+
+    // Sender B has no avatar: the hook must clear, never keep A's photo.
+    await act(async () => {
+      root.render(createElement(Probe, { email: 'b@example.com' }));
+    });
+    expect(seen.at(-1)).toBeNull();
+    expect(seen.at(-1)).not.toBe(urlA);
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
   });
 });

@@ -37,10 +37,17 @@ export function useAvatar(email: string | undefined): string | null {
     email ? (avatarState(email) ?? null) : null,
   );
   useEffect(() => {
-    if (!email) return;
+    if (!email) {
+      setUrl(null);
+      return;
+    }
+    // Reset before loading: a sender without an avatar must never inherit
+    // the previous sender's photo, and a cached miss applies immediately.
+    setUrl(avatarState(email) ?? null);
     let live = true;
     void loadAvatar(email).then((u) => {
-      if (live && u) setUrl(u);
+      // Apply unconditionally — u is null on a miss, which must clear.
+      if (live) setUrl(u);
     });
     return () => {
       live = false;
