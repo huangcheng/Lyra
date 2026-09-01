@@ -18,11 +18,21 @@ import {
   Trash2,
   type LucideIcon,
 } from 'lucide-react';
-import { useMemo } from 'react';
+import { useMemo, type HTMLAttributes } from 'react';
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
-import { orderAccounts } from '@/lib/account-order';
+import { moveId, orderAccounts } from '@/lib/account-order';
 import { buildCustomFolderTree, buildRoleChildren, type FolderTreeNode } from '@/lib/folder-tree';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
 import { avatarTone, cn } from '@/lib/utils';
@@ -172,11 +182,14 @@ function AccountSection({
   account,
   selectedFolderId,
   bare = false,
+  dragHandleProps,
 }: {
   account: MailAccount;
   selectedFolderId: string | null;
   /** Single-account view: header omitted (the switcher already names the account). */
   bare?: boolean;
+  /** dnd-kit listeners/attributes for the account header (unified view only). */
+  dragHandleProps?: HTMLAttributes<HTMLButtonElement>;
 }) {
   const locale = useUIStore((s) => s.locale);
   // Subscribe to `folders` so this section re-renders on folder updates.
@@ -203,6 +216,7 @@ function AccountSection({
           type="button"
           onClick={() => setAccountExpanded(account.id, !expanded)}
           aria-expanded={expanded}
+          {...dragHandleProps}
           className="flex h-8 w-full items-center gap-1.5 rounded-[7px] px-2.5 hover:bg-accent/60"
         >
           {expanded ? (
@@ -307,6 +321,72 @@ function AccountSection({
   );
 }
 
+function SortableAccountSection({
+  account,
+  selectedFolderId,
+}: {
+  account: MailAccount;
+  selectedFolderId: string | null;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: account.id,
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.6 : undefined,
+      }}
+    >
+      <AccountSection
+        account={account}
+        selectedFolderId={selectedFolderId}
+        dragHandleProps={{ ...attributes, ...listeners }}
+      />
+    </div>
+  );
+}
+
+/** ACCOUNTS section with drag-to-reorder; drop persists via the UI store. */
+function SortableAccountSections({
+  accounts,
+  selectedFolderId,
+}: {
+  accounts: MailAccount[];
+  selectedFolderId: string | null;
+}) {
+  const accountOrder = useUIStore((s) => s.accountOrder);
+  const setAccountOrder = useUIStore((s) => s.setAccountOrder);
+  const ordered = orderAccounts(accounts, accountOrder);
+  const ids = ordered.map((a) => a.id);
+  // 4px movement threshold: plain clicks still toggle expand/collapse.
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+
+  const onDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setAccountOrder(moveId(ids, String(active.id), String(over.id)));
+  };
+
+  return (
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+      <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+        <div className="grid gap-0.5">
+          {ordered.map((account) => (
+            <SortableAccountSection
+              key={account.id}
+              account={account}
+              selectedFolderId={selectedFolderId}
+            />
+          ))}
+        </div>
+      </SortableContext>
+    </DndContext>
+  );
+}
+
 /** Collapsed-pane fallback: icon-only rows with tooltips (Nav parity). */
 function CollapsedFolders({ unifiedFolders }: { unifiedFolders: UnifiedFolder[] }) {
   const locale = useUIStore((s) => s.locale);
@@ -355,8 +435,6 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
   const selectedFolderId = useUIStore((s) => s.selectedFolderId);
   const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
   const accounts = useMailStore((s) => s.accounts);
-  const accountOrder = useUIStore((s) => s.accountOrder);
-  const orderedAccounts = orderAccounts(accounts, accountOrder);
   // Subscribe to `folders` so the unified counts re-render on folder updates.
   useMailStore((s) => s.folders);
   const getUnifiedFolders = useMailStore((s) => s.getUnifiedFolders);
@@ -395,11 +473,7 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
         ))}
       </div>
       <SectionLabel>{t(locale, 'mail.section.accounts')}</SectionLabel>
-      <div className="grid gap-0.5">
-        {orderedAccounts.map((account) => (
-          <AccountSection key={account.id} account={account} selectedFolderId={selectedFolderId} />
-        ))}
-      </div>
+      <SortableAccountSections accounts={accounts} selectedFolderId={selectedFolderId} />
     </div>
   );
 }
