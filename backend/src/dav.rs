@@ -201,6 +201,57 @@ pub fn parse_vcard_fields(
     (display_name, emails, phones, org)
 }
 
+/// Extracted vCard PHOTO property (RFC 6350 §6.2.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VcardPhoto {
+    Uri(String),
+    Inline(Vec<u8>),
+}
+
+/// Parse the first PHOTO property. Handles RFC 6350 line folding, the
+/// `VALUE=URI` parameter form, and the inline `ENCODING=b` base64 form.
+/// Garbage yields `None` — a bad photo must never fail contact sync.
+pub(crate) fn parse_vcard_photo(vcard: &str) -> Option<VcardPhoto> {
+    // Unfold: a line starting with SP/HTAB continues the previous line.
+    let mut lines: Vec<String> = Vec::new();
+    for raw in vcard.split("\r\n").flat_map(|l| l.split('\n')) {
+        if raw.starts_with([' ', '\t'])
+            && let Some(prev) = lines.last_mut()
+        {
+            // Strip all leading WSP: RFC 6350 removes exactly one char, but
+            // servers commonly indent with more; a stray space corrupts URLs.
+            prev.push_str(raw.trim_start());
+            continue;
+        }
+        lines.push(raw.to_string());
+    }
+    for line in lines {
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        let (name_part, value) = (&line[..colon], line[colon + 1..].trim());
+        let mut segs = name_part.split(';');
+        if !segs.next().is_some_and(|n| n.eq_ignore_ascii_case("photo")) {
+            continue;
+        }
+        let params: Vec<String> = segs.map(str::to_ascii_uppercase).collect();
+        if params.iter().any(|p| p == "VALUE=URI") {
+            return Some(VcardPhoto::Uri(value.to_string()));
+        }
+        if params
+            .iter()
+            .any(|p| p == "ENCODING=B" || p == "ENCODING=BASE64")
+        {
+            use base64::Engine;
+            let clean: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(clean) {
+                return Some(VcardPhoto::Inline(bytes));
+            }
+        }
+    }
+    None
+}
+
 type VEventFields = (
     Option<String>,
     Option<String>,
@@ -329,6 +380,47 @@ mod tests {
         assert_eq!(emails, vec!["ada@example.com"]);
         assert_eq!(phones, vec!["+1-555"]);
         assert_eq!(org.as_deref(), Some("Analytical"));
+    }
+
+    #[test]
+    fn photo_uri_form_extracts_url() {
+        let vcard =
+            "BEGIN:VCARD\r\nFN:Ada\r\nPHOTO;VALUE=URI:https://example.com/a.jpg\r\nEND:VCARD\r\n";
+        assert_eq!(
+            parse_vcard_photo(vcard),
+            Some(VcardPhoto::Uri("https://example.com/a.jpg".into()))
+        );
+    }
+
+    #[test]
+    fn photo_inline_base64_extracts_bytes() {
+        // 1x1 PNG, base64
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let vcard = format!("BEGIN:VCARD\r\nPHOTO;ENCODING=b;TYPE=PNG:{png_b64}\r\nEND:VCARD\r\n");
+        match parse_vcard_photo(&vcard) {
+            Some(VcardPhoto::Inline(bytes)) => assert_eq!(bytes[..4], [0x89, 0x50, 0x4E, 0x47]),
+            other => panic!("expected inline photo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn photo_folded_line_unfolds() {
+        // RFC 6350: continuation lines start with a space.
+        let vcard = "BEGIN:VCARD\r\nPHOTO;VALUE=URI:https://example.com/very/\r\n  long/photo.png\r\nEND:VCARD\r\n";
+        assert_eq!(
+            parse_vcard_photo(vcard),
+            Some(VcardPhoto::Uri(
+                "https://example.com/very/long/photo.png".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn no_photo_returns_none() {
+        assert_eq!(
+            parse_vcard_photo("BEGIN:VCARD\r\nFN:Ada\r\nEND:VCARD\r\n"),
+            None
+        );
     }
 
     #[test]

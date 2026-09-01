@@ -621,6 +621,25 @@ async fn sync_contacts(
             continue;
         };
         let (display_name, emails, phones, org) = crate::dav::parse_vcard_fields(&vcard);
+        // Extract the contact photo into the blob store. A bad photo (or a
+        // failed fetch) must never fail contact sync, so errors degrade to
+        // `None` and the existing photo is left untouched.
+        let photo_path = match crate::dav::parse_vcard_photo(&vcard) {
+            Some(crate::dav::VcardPhoto::Inline(bytes)) => {
+                crate::blobs::store(&state.data_dir, &account_id, &bytes)
+                    .await
+                    .ok()
+            }
+            Some(crate::dav::VcardPhoto::Uri(url)) => {
+                match crate::media::fetch_upstream(&url).await {
+                    Ok(img) => crate::blobs::store(&state.data_dir, &account_id, &img.bytes)
+                        .await
+                        .ok(),
+                    Err(_) => None,
+                }
+            }
+            None => None,
+        };
         let emails_json = serde_json::json!(emails);
         let phones_json = serde_json::json!(phones);
         let external_id = href.clone();
@@ -652,6 +671,11 @@ async fn sync_contacts(
                 .value(contact::Column::AddressbookUrl, base_url.clone())
                 .value(contact::Column::UpdatedAt, now_value(db))
                 .and_where(contact::Column::Id.eq(id_value(db, &id)?));
+            // Only overwrite the photo when this sync produced a new one —
+            // never wipe an existing photo with NULL.
+            if let Some(photo_path) = &photo_path {
+                update.value(contact::Column::PhotoPath, photo_path.clone());
+            }
             conn.execute(&update).await.map_err(orm_err)?;
         } else {
             let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
@@ -667,6 +691,7 @@ async fn sync_contacts(
                     contact::Column::EmailAddresses,
                     contact::Column::PhoneNumbers,
                     contact::Column::Organisation,
+                    contact::Column::PhotoPath,
                     contact::Column::AddressbookUrl,
                 ])
                 .values_panic([
@@ -678,6 +703,7 @@ async fn sync_contacts(
                     Expr::val(Value::Json(Some(Box::new(emails_json)))),
                     Expr::val(Value::Json(Some(Box::new(phones_json)))),
                     org.into(),
+                    photo_path.into(),
                     base_url.clone().into(),
                 ]);
             conn.execute(&insert).await.map_err(orm_err)?;
