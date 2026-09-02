@@ -146,7 +146,11 @@
       "accounts": "Accounts"
     },
     "expandFolder": "Expand folder",
-    "collapseFolder": "Collapse folder"
+    "collapseFolder": "Collapse folder",
+    "dndGrabbed": "Picked up {name}. Move with arrow keys, drop with space.",
+    "dndDropped": "Dropped {name} at position {position} of {total}.",
+    "dndCanceled": "Reordering cancelled.",
+    "dndInstructions": "To pick up a reorderable account, press Tab to its header and press space or Enter. Move with the arrow keys, then press space to drop, or Escape to cancel."
   },
   "auth": {
     "tagline": "Mail you host yourself.",

@@ -146,7 +146,11 @@
       "accounts": "账户"
     },
     "expandFolder": "展开文件夹",
-    "collapseFolder": "收起文件夹"
+    "collapseFolder": "收起文件夹",
+    "dndGrabbed": "已拿起 {name}。用方向键移动，空格键放下。",
+    "dndDropped": "已将 {name} 移动到第 {position} 位，共 {total} 个。",
+    "dndCanceled": "已取消排序。",
+    "dndInstructions": "要移动账户顺序，请用 Tab 聚焦到账户标题后按空格或回车拿起，用方向键移动，再按空格放下，或按 Esc 取消。"
   },
   "auth": {
     "tagline": "自己托管的邮件。",

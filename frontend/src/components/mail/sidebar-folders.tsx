@@ -18,7 +18,7 @@ import {
   Trash2,
   type LucideIcon,
 } from 'lucide-react';
-import { useMemo, type HTMLAttributes } from 'react';
+import { useMemo, type CSSProperties, type HTMLAttributes, type Ref } from 'react';
 import { useDndContext, useDroppable } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -309,6 +309,10 @@ function AccountSection({
   selectedFolderId,
   bare = false,
   dragHandleProps,
+  headerRef,
+  headerStyle,
+  headerClassName,
+  activatorRef,
 }: {
   account: MailAccount;
   selectedFolderId: string | null;
@@ -316,6 +320,14 @@ function AccountSection({
   bare?: boolean;
   /** dnd-kit listeners/attributes for the account header (unified view only). */
   dragHandleProps?: HTMLAttributes<HTMLButtonElement>;
+  /** Sortable node lands on a wrapper of the header row only — an expanded
+   *  section's folder droppables must never eclipse sibling headers in
+   *  collision detection, or expanded accounts cannot be reordered. */
+  headerRef?: Ref<HTMLDivElement>;
+  headerStyle?: CSSProperties;
+  headerClassName?: string;
+  /** dnd-kit activator (the button itself) for correct drag measurement. */
+  activatorRef?: Ref<HTMLButtonElement>;
 }) {
   // Subscribe to `folders` so this section re-renders on folder updates.
   const folders = useMailStore((s) => s.folders);
@@ -337,26 +349,29 @@ function AccountSection({
   return (
     <div>
       {bare ? null : (
-        <button
-          type="button"
-          onClick={() => setAccountExpanded(account.id, !expanded)}
-          aria-expanded={expanded}
-          {...dragHandleProps}
-          className="flex h-8 w-full items-center gap-1.5 rounded-[7px] px-2.5 hover:bg-accent/60"
-        >
-          {expanded ? (
-            <ChevronDown className="size-3.5 shrink-0 text-ter-foreground" />
-          ) : (
-            <ChevronRight className="size-3.5 shrink-0 text-ter-foreground" />
-          )}
-          <span
-            className="truncate text-[12.5px] font-semibold"
-            title={account.displayName || account.emailAddress}
+        <div ref={headerRef} style={headerStyle} className={headerClassName}>
+          <button
+            ref={activatorRef}
+            type="button"
+            onClick={() => setAccountExpanded(account.id, !expanded)}
+            aria-expanded={expanded}
+            {...dragHandleProps}
+            className="flex h-8 w-full items-center gap-1.5 rounded-[7px] px-2.5 hover:bg-accent/60"
           >
-            {account.displayName || account.emailAddress}
-          </span>
-          <UnreadCount count={totalUnread} />
-        </button>
+            {expanded ? (
+              <ChevronDown className="size-3.5 shrink-0 text-ter-foreground" />
+            ) : (
+              <ChevronRight className="size-3.5 shrink-0 text-ter-foreground" />
+            )}
+            <span
+              className="truncate text-[12.5px] font-semibold"
+              title={account.displayName || account.emailAddress}
+            >
+              {account.displayName || account.emailAddress}
+            </span>
+            <UnreadCount count={totalUnread} />
+          </button>
+        </div>
       )}
       {bare || expanded ? (
         <div className={bare ? undefined : 'pl-4'}>
@@ -395,26 +410,28 @@ function SortableAccountSection({
   account: MailAccount;
   selectedFolderId: string | null;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: account.id,
-  });
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: account.id });
   return (
-    <div
-      ref={setNodeRef}
-      style={{
-        transform: CSS.Transform.toString(transform),
-        transition,
-        opacity: isDragging ? 0.6 : undefined,
-      }}
-    >
-      <AccountSection
-        account={account}
-        selectedFolderId={selectedFolderId}
-        // touch-action: none keeps the browser from hijacking vertical scroll,
-        // which would pointercancel and abort the drag (dnd-kit guidance).
-        dragHandleProps={{ ...attributes, ...listeners, style: { touchAction: 'none' } }}
-      />
-    </div>
+    <AccountSection
+      account={account}
+      selectedFolderId={selectedFolderId}
+      // touch-action: none keeps the browser from hijacking vertical scroll,
+      // which would pointercancel and abort the drag (dnd-kit guidance).
+      dragHandleProps={{ ...attributes, ...listeners, style: { touchAction: 'none' } }}
+      headerRef={setNodeRef}
+      headerStyle={{ transform: CSS.Transform.toString(transform), transition }}
+      // The overlay chip carries the affordance; the ghost stays faint.
+      headerClassName={isDragging ? 'opacity-40' : undefined}
+      activatorRef={setActivatorNodeRef}
+    />
   );
 }
 
