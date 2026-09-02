@@ -226,6 +226,11 @@ pub struct ImapSelectResult {
 pub struct ImapClient {
     session: Session<TlsStream<TcpStream>>,
     capabilities: Capabilities,
+    /// Config retained for [`ImapClient::reconnect`]: servers that drop
+    /// busy connections mid-response (QQ) leave the session unusable.
+    config: ImapConfig,
+    /// Last successfully SELECTed mailbox, re-selected after a reconnect.
+    selected: Option<String>,
 }
 
 impl ImapClient {
@@ -273,6 +278,8 @@ impl ImapClient {
                 Ok(Self {
                     session,
                     capabilities,
+                    config: config.clone(),
+                    selected: None,
                 })
             }
             ImapSecurity::Starttls => {
@@ -309,6 +316,8 @@ impl ImapClient {
                 Ok(Self {
                     session,
                     capabilities,
+                    config: config.clone(),
+                    selected: None,
                 })
             }
         }
@@ -391,7 +400,7 @@ impl ImapClient {
 
     /// Select a folder (mailbox) for subsequent operations.
     pub async fn select(&mut self, folder_name: &str) -> Result<ImapSelectResult, ImapError> {
-        timed(COMMAND_TIMEOUT, async {
+        let result = timed(COMMAND_TIMEOUT, async {
             let mailbox = self
                 .session
                 .select(folder_name)
@@ -403,7 +412,25 @@ impl ImapClient {
                 highest_modseq: mailbox.highest_modseq,
             })
         })
-        .await
+        .await;
+        if result.is_ok() {
+            self.selected = Some(folder_name.to_string());
+        }
+        result
+    }
+
+    /// Tear down and re-establish the connection, re-authenticating and
+    /// re-selecting the mailbox that was active. QQ-style servers reset
+    /// connections mid-FETCH; without this the whole sync pass is lost.
+    pub async fn reconnect(&mut self) -> Result<(), ImapError> {
+        let fresh = Self::connect_within(&self.config, CONNECT_TIMEOUT).await?;
+        self.session = fresh.session;
+        self.capabilities = fresh.capabilities;
+        if let Some(folder) = self.selected.clone() {
+            self.selected = None;
+            self.select(&folder).await?;
+        }
+        Ok(())
     }
 
     /// Fetch message UIDs optionally after a given UID.
@@ -439,12 +466,35 @@ impl ImapClient {
     /// and fully drained.
     pub async fn fetch_metadata(&mut self, uids: &[u32]) -> Result<Vec<ImapMessage>, ImapError> {
         const METADATA_CHUNK: usize = 8;
+        const MAX_RETRIES_PER_CHUNK: u8 = 3;
         if uids.len() <= METADATA_CHUNK {
             return self.fetch_metadata_once(uids).await;
         }
+        let chunks: Vec<&[u32]> = uids.chunks(METADATA_CHUNK).collect();
         let mut out = Vec::with_capacity(uids.len());
-        for chunk in uids.chunks(METADATA_CHUNK) {
-            out.extend(self.fetch_metadata_once(chunk).await?);
+        let mut idx = 0;
+        let mut retries = 0u8;
+        while idx < chunks.len() {
+            match self.fetch_metadata_once(chunks[idx]).await {
+                Ok(msgs) => {
+                    out.extend(msgs);
+                    idx += 1;
+                    retries = 0;
+                }
+                Err(err) => {
+                    retries += 1;
+                    if retries > MAX_RETRIES_PER_CHUNK {
+                        return Err(err);
+                    }
+                    tracing::warn!(
+                        error = %err,
+                        failed_chunk = idx,
+                        remaining_chunks = chunks.len() - idx,
+                        "metadata chunk failed; reconnecting to resume"
+                    );
+                    self.reconnect().await?;
+                }
+            }
         }
         Ok(out)
     }
