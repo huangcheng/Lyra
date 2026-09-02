@@ -13,6 +13,7 @@ import { MailDisplay } from '@/components/mail/mail-display';
 import { MailDndProvider } from '@/components/mail/mail-dnd';
 import { MailList } from '@/components/mail/mail-list';
 import { SidebarFolders } from '@/components/mail/sidebar-folders';
+import { SyncAllButton } from '@/components/mail/sync-all-button';
 import { LyraWordmark } from '@/components/lyra-wordmark';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -24,23 +25,15 @@ import { t } from '@/i18n';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
 import { useMailData } from '@/lib/use-mail-data';
 import { useMediaQuery } from '@/lib/use-media-query';
+import { useSyncingAccounts } from '@/lib/use-syncing-accounts';
 import { cn } from '@/lib/utils';
-import { syncEvents$ } from '@/rxjs/sync-events';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 
 /** Green sync dot; amber pulse while any account is syncing. */
 function SyncStatusDot() {
   const locale = useUIStore((s) => s.locale);
-  const [syncing, setSyncing] = useState(false);
-
-  useEffect(() => {
-    const sub = syncEvents$.subscribe((ev) => {
-      if (ev.type === 'sync_started') setSyncing(true);
-      if (ev.type === 'sync_complete' || ev.type === 'sync_error') setSyncing(false);
-    });
-    return () => sub.unsubscribe();
-  }, []);
+  const syncing = useSyncingAccounts().size > 0;
 
   return (
     <span
@@ -103,6 +96,7 @@ function NavContent({ isCollapsed }: { isCollapsed: boolean }) {
           <LyraWordmark className="[&>span:last-child]:text-sm" />
           <SyncStatusDot />
           <div className="flex-1" />
+          <SyncAllButton />
         </div>
       )}
     </div>
