@@ -19,26 +19,21 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { useMemo, type HTMLAttributes } from 'react';
-import {
-  DndContext,
-  PointerSensor,
-  closestCenter,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from '@dnd-kit/core';
+import { useDndContext, useDroppable } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
+import type { FolderDropData, UnifiedRoleDropData } from '@/components/mail/mail-dnd';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
-import { moveId, orderAccounts } from '@/lib/account-order';
+import { orderAccounts } from '@/lib/account-order';
+import { canDropConversation, type ConversationDragData } from '@/lib/conversation-actions';
 import { buildCustomFolderTree, buildRoleChildren, type FolderTreeNode } from '@/lib/folder-tree';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
 import { avatarTone, cn } from '@/lib/utils';
 import { useMailStore, type UnifiedFolder } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
-import type { MailAccount } from '@/types';
+import type { MailAccount, MailFolder } from '@/types';
 
 const ROLE_ICONS: Record<StandardFolderRole, LucideIcon> = {
   inbox: Inbox,
@@ -77,22 +72,60 @@ function selectAccountFolder(_accountId: string, folderId: string) {
   useUIStore.getState().setSelectedFolder(folderId);
 }
 
+/** Drop-target state for a folder row during a conversation drag. */
+function useFolderDropTarget(drop: FolderDropData | UnifiedRoleDropData, dropId: string) {
+  const { active } = useDndContext();
+  const drag = active?.data.current as ConversationDragData | undefined;
+  const isConvoDrag = drag?.type === 'conversation';
+
+  let enabled = false;
+  if (isConvoDrag && drag) {
+    if ('unified' in drop && drop.unified) {
+      const folders = useMailStore.getState().folders;
+      const target = Object.values(folders).find(
+        (f) => f.accountId === drag.accountId && f.role === drop.role,
+      );
+      enabled = Boolean(target) && !drag.folderIds.includes(target!.id);
+    } else {
+      enabled = canDropConversation(drag, drop as FolderDropData);
+    }
+  }
+
+  const { isOver, setNodeRef } = useDroppable({ id: dropId, data: drop, disabled: !enabled });
+  const rowClass = isConvoDrag
+    ? enabled
+      ? isOver
+        ? 'bg-accent ring-1 ring-ring/40'
+        : undefined
+      : 'opacity-40'
+    : undefined;
+  return { setNodeRef, rowClass };
+}
+
 function UnifiedRow({ folder, active }: { folder: UnifiedFolder; active: boolean }) {
   const locale = useUIStore((s) => s.locale);
   const Icon = ROLE_ICONS[folder.role];
+  const { setNodeRef, rowClass } = useFolderDropTarget(
+    { type: 'folder', unified: true, role: folder.role },
+    `drop:unified:${folder.role}`,
+  );
   return (
-    <button
-      type="button"
-      onClick={() => selectUnifiedRole(folder.role)}
-      className={cn(
-        'flex h-8 w-full items-center gap-2 rounded-[7px] border px-2.5 text-left text-[13px]',
-        active ? 'border-input bg-card shadow-whisper' : 'border-transparent hover:bg-accent/60',
-      )}
-    >
-      <Icon className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')} />
-      <span className="truncate">{t(locale, `mail.folder.${folder.role}`)}</span>
-      <UnreadCount count={folder.unreadCount} />
-    </button>
+    <div ref={setNodeRef} className={cn('rounded-[7px]', rowClass)}>
+      <button
+        type="button"
+        onClick={() => selectUnifiedRole(folder.role)}
+        className={cn(
+          'flex h-8 w-full items-center gap-2 rounded-[7px] border px-2.5 text-left text-[13px]',
+          active ? 'border-input bg-card shadow-whisper' : 'border-transparent hover:bg-accent/60',
+        )}
+      >
+        <Icon
+          className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')}
+        />
+        <span className="truncate">{t(locale, `mail.folder.${folder.role}`)}</span>
+        <UnreadCount count={folder.unreadCount} />
+      </button>
+    </div>
   );
 }
 
@@ -115,13 +148,19 @@ function CustomFolderBranch({
   const hasChildren = node.children.length > 0;
   const expanded = expandedIds.has(node.id);
   const active = selectedFolderId === node.id;
+  const { setNodeRef, rowClass } = useFolderDropTarget(
+    { type: 'folder', accountId, folderId: node.id },
+    `drop:folder:${node.id}`,
+  );
 
   return (
     <div>
       <div
+        ref={setNodeRef}
         className={cn(
           'flex items-center rounded-[7px] border',
           active ? 'border-input bg-card shadow-whisper' : 'border-transparent hover:bg-accent/60',
+          rowClass,
         )}
         style={{ marginLeft: depth * 16 }}
       >
@@ -178,6 +217,92 @@ function CustomFolderBranch({
   );
 }
 
+/** One role-folder row (plus its child folders) — a component so the drop hook is legal. */
+function RoleFolderRow({
+  account,
+  folder,
+  accountFolders,
+  selectedFolderId,
+  expandedIds,
+  onToggleExpanded,
+}: {
+  account: MailAccount;
+  folder: MailFolder;
+  accountFolders: MailFolder[];
+  selectedFolderId: string | null;
+  expandedIds: Set<string>;
+  onToggleExpanded: (id: string) => void;
+}) {
+  const locale = useUIStore((s) => s.locale);
+  const role = folder.role as StandardFolderRole;
+  const Icon = ROLE_ICONS[role] ?? Folder;
+  const children = buildRoleChildren(folder.id, accountFolders);
+  const hasChildren = children.length > 0;
+  const childrenExpanded = expandedIds.has(folder.id);
+  const active = selectedFolderId === folder.id;
+  const { setNodeRef, rowClass } = useFolderDropTarget(
+    { type: 'folder', accountId: account.id, folderId: folder.id },
+    `drop:folder:${folder.id}`,
+  );
+
+  return (
+    <div>
+      <div
+        ref={setNodeRef}
+        className={cn(
+          'flex items-center rounded-[7px] border',
+          active ? 'border-input bg-card shadow-whisper' : 'border-transparent hover:bg-accent/60',
+          rowClass,
+        )}
+      >
+        {hasChildren ? (
+          <button
+            type="button"
+            className="flex size-5 shrink-0 items-center justify-center text-ter-foreground"
+            onClick={() => onToggleExpanded(folder.id)}
+            aria-expanded={childrenExpanded}
+            aria-label={
+              childrenExpanded ? t(locale, 'mail.collapseFolder') : t(locale, 'mail.expandFolder')
+            }
+          >
+            {childrenExpanded ? (
+              <ChevronDown className="size-3.5" />
+            ) : (
+              <ChevronRight className="size-3.5" />
+            )}
+          </button>
+        ) : (
+          <span className="inline-block size-5 shrink-0" />
+        )}
+        <button
+          type="button"
+          onClick={() => selectAccountFolder(account.id, folder.id)}
+          className="flex h-8 min-w-0 flex-1 items-center gap-2 pr-2.5 text-left text-[13px]"
+        >
+          <Icon
+            className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')}
+          />
+          <span className="truncate">{t(locale, `mail.folder.${role}`)}</span>
+          <UnreadCount count={folder.unreadCount} />
+        </button>
+      </div>
+      {hasChildren && childrenExpanded
+        ? children.map((child) => (
+            <CustomFolderBranch
+              key={child.id}
+              node={child}
+              depth={1}
+              accountId={account.id}
+              selectedFolderId={selectedFolderId}
+              expandedIds={expandedIds}
+              toggleExpanded={onToggleExpanded}
+            />
+          ))
+        : null}
+    </div>
+  );
+}
+
 function AccountSection({
   account,
   selectedFolderId,
@@ -191,7 +316,6 @@ function AccountSection({
   /** dnd-kit listeners/attributes for the account header (unified view only). */
   dragHandleProps?: HTMLAttributes<HTMLButtonElement>;
 }) {
-  const locale = useUIStore((s) => s.locale);
   // Subscribe to `folders` so this section re-renders on folder updates.
   const folders = useMailStore((s) => s.folders);
   const getFoldersForAccount = useMailStore((s) => s.getFoldersForAccount);
@@ -235,75 +359,17 @@ function AccountSection({
       )}
       {bare || expanded ? (
         <div className={bare ? undefined : 'pl-4'}>
-          {roleFolders.map((folder) => {
-            const role = folder.role as StandardFolderRole;
-            const Icon = ROLE_ICONS[role] ?? Folder;
-            const children = buildRoleChildren(folder.id, accountFolders);
-            const hasChildren = children.length > 0;
-            const childrenExpanded = expandedIds.has(folder.id);
-            const active = selectedFolderId === folder.id;
-            return (
-              <div key={folder.id}>
-                <div
-                  className={cn(
-                    'flex items-center rounded-[7px] border',
-                    active
-                      ? 'border-input bg-card shadow-whisper'
-                      : 'border-transparent hover:bg-accent/60',
-                  )}
-                >
-                  {hasChildren ? (
-                    <button
-                      type="button"
-                      className="flex size-5 shrink-0 items-center justify-center text-ter-foreground"
-                      onClick={() => onToggleExpanded(folder.id)}
-                      aria-expanded={childrenExpanded}
-                      aria-label={
-                        childrenExpanded
-                          ? t(locale, 'mail.collapseFolder')
-                          : t(locale, 'mail.expandFolder')
-                      }
-                    >
-                      {childrenExpanded ? (
-                        <ChevronDown className="size-3.5" />
-                      ) : (
-                        <ChevronRight className="size-3.5" />
-                      )}
-                    </button>
-                  ) : (
-                    <span className="inline-block size-5 shrink-0" />
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => selectAccountFolder(account.id, folder.id)}
-                    className="flex h-8 min-w-0 flex-1 items-center gap-2 pr-2.5 text-left text-[13px]"
-                  >
-                    <Icon
-                      className={cn(
-                        'size-4 shrink-0',
-                        active ? 'text-foreground' : 'text-ter-foreground',
-                      )}
-                    />
-                    <span className="truncate">{t(locale, `mail.folder.${role}`)}</span>
-                    <UnreadCount count={folder.unreadCount} />
-                  </button>
-                </div>
-                {hasChildren && childrenExpanded
-                  ? children.map((child) => (
-                      <CustomFolderBranch
-                        key={child.id}
-                        node={child}
-                        depth={1}
-                        accountId={account.id}
-                        selectedFolderId={selectedFolderId}
-                        expandedIds={expandedIds}
-                        toggleExpanded={onToggleExpanded}
-                      />
-                    ))
-                  : null}
-              </div>
-            );
-          })}
+          {roleFolders.map((folder) => (
+            <RoleFolderRow
+              key={folder.id}
+              account={account}
+              folder={folder}
+              accountFolders={accountFolders}
+              selectedFolderId={selectedFolderId}
+              expandedIds={expandedIds}
+              onToggleExpanded={onToggleExpanded}
+            />
+          ))}
           {customTree.map((node) => (
             <CustomFolderBranch
               key={node.id}
@@ -351,7 +417,7 @@ function SortableAccountSection({
   );
 }
 
-/** ACCOUNTS section with drag-to-reorder; drop persists via the UI store. */
+/** ACCOUNTS section with drag-to-reorder; the DndContext lives in mail.tsx. */
 function SortableAccountSections({
   accounts,
   selectedFolderId,
@@ -360,32 +426,21 @@ function SortableAccountSections({
   selectedFolderId: string | null;
 }) {
   const accountOrder = useUIStore((s) => s.accountOrder);
-  const setAccountOrder = useUIStore((s) => s.setAccountOrder);
   const ordered = orderAccounts(accounts, accountOrder);
   const ids = ordered.map((a) => a.id);
-  // 4px movement threshold: plain clicks still toggle expand/collapse.
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
-
-  const onDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    setAccountOrder(moveId(ids, String(active.id), String(over.id)));
-  };
 
   return (
-    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-      <SortableContext items={ids} strategy={verticalListSortingStrategy}>
-        <div className="grid gap-0.5">
-          {ordered.map((account) => (
-            <SortableAccountSection
-              key={account.id}
-              account={account}
-              selectedFolderId={selectedFolderId}
-            />
-          ))}
-        </div>
-      </SortableContext>
-    </DndContext>
+    <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+      <div className="grid gap-0.5">
+        {ordered.map((account) => (
+          <SortableAccountSection
+            key={account.id}
+            account={account}
+            selectedFolderId={selectedFolderId}
+          />
+        ))}
+      </div>
+    </SortableContext>
   );
 }
 

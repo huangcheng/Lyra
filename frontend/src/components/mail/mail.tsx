@@ -10,6 +10,7 @@ import { useDefaultLayout } from 'react-resizable-panels';
 import { AccountSwitcher } from '@/components/mail/account-switcher';
 import { AppRail } from '@/components/mail/app-rail';
 import { MailDisplay } from '@/components/mail/mail-display';
+import { MailDndProvider } from '@/components/mail/mail-dnd';
 import { MailList } from '@/components/mail/mail-list';
 import { SidebarFolders } from '@/components/mail/sidebar-folders';
 import { LyraWordmark } from '@/components/lyra-wordmark';
@@ -232,59 +233,63 @@ export function Mail() {
   if (isMobile) {
     return (
       <TooltipProvider delayDuration={0}>
-        <div className="flex h-full flex-col bg-background">
-          {selectedMessageId ? (
-            <MailDisplay />
-          ) : (
-            <ListPane onOpenDrawer={() => setDrawerOpen(true)} />
-          )}
-        </div>
-        {drawerOpen ? (
-          <div className="fixed inset-0 z-50">
-            <div className="absolute inset-0 bg-black/50" onClick={() => setDrawerOpen(false)} />
-            <div className="absolute inset-y-0 left-0 w-72 border-r bg-background shadow-lg">
-              <NavContent isCollapsed={false} />
-            </div>
+        <MailDndProvider>
+          <div className="flex h-full flex-col bg-background">
+            {selectedMessageId ? (
+              <MailDisplay />
+            ) : (
+              <ListPane onOpenDrawer={() => setDrawerOpen(true)} />
+            )}
           </div>
-        ) : null}
+          {drawerOpen ? (
+            <div className="fixed inset-0 z-50">
+              <div className="absolute inset-0 bg-black/50" onClick={() => setDrawerOpen(false)} />
+              <div className="absolute inset-y-0 left-0 w-72 border-r bg-background shadow-lg">
+                <NavContent isCollapsed={false} />
+              </div>
+            </div>
+          ) : null}
+        </MailDndProvider>
       </TooltipProvider>
     );
   }
 
   return (
     <TooltipProvider delayDuration={0}>
-      <div className="flex h-full">
-        <AppRail />
-        <ResizablePanelGroup
-          orientation="horizontal"
-          defaultLayout={defaultLayout ?? { nav: 20, list: 32, view: 48 }}
-          onLayoutChanged={onLayoutChanged}
-          className="h-full flex-1 items-stretch"
-        >
-          <ResizablePanel
-            id="nav"
-            defaultSize="20%"
-            collapsedSize={48}
-            collapsible
-            minSize="15%"
-            maxSize="20%"
-            onResize={(size) => {
-              setIsCollapsed(size.asPercentage < 10 || size.inPixels <= 56);
-            }}
-            className={cn(isCollapsed && 'min-w-[50px] transition-all duration-300 ease-in-out')}
+      <MailDndProvider>
+        <div className="flex h-full">
+          <AppRail />
+          <ResizablePanelGroup
+            orientation="horizontal"
+            defaultLayout={defaultLayout ?? { nav: 20, list: 32, view: 48 }}
+            onLayoutChanged={onLayoutChanged}
+            className="h-full flex-1 items-stretch"
           >
-            <NavContent isCollapsed={isCollapsed} />
-          </ResizablePanel>
-          <ResizableHandle withHandle />
-          <ResizablePanel id="list" defaultSize="32%" minSize="30%" className="bg-background">
-            <ListPane />
-          </ResizablePanel>
-          <ResizableHandle withHandle />
-          <ResizablePanel id="view" defaultSize="48%" minSize="30%">
-            <MailDisplay />
-          </ResizablePanel>
-        </ResizablePanelGroup>
-      </div>
+            <ResizablePanel
+              id="nav"
+              defaultSize="20%"
+              collapsedSize={48}
+              collapsible
+              minSize="15%"
+              maxSize="20%"
+              onResize={(size) => {
+                setIsCollapsed(size.asPercentage < 10 || size.inPixels <= 56);
+              }}
+              className={cn(isCollapsed && 'min-w-[50px] transition-all duration-300 ease-in-out')}
+            >
+              <NavContent isCollapsed={isCollapsed} />
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+            <ResizablePanel id="list" defaultSize="32%" minSize="30%" className="bg-background">
+              <ListPane />
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+            <ResizablePanel id="view" defaultSize="48%" minSize="30%">
+              <MailDisplay />
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        </div>
+      </MailDndProvider>
     </TooltipProvider>
   );
 }
