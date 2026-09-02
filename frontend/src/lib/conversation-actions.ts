@@ -7,12 +7,12 @@
  */
 
 import { api } from '@/lib/api-client';
-import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
+import { mapApiMessage, type ApiMessage, type StandardFolderRole } from '@/lib/mail-api';
 import { textToHtml } from '@/lib/compose-html';
 import { buildForwardDraft, buildReplyDraft } from '@/lib/compose-draft';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
-import type { MailMessage } from '@/types';
+import type { MailFolder, MailMessage } from '@/types';
 
 export interface BatchResult {
   /** Message ids successfully processed, in order. */
@@ -177,4 +177,13 @@ export function canDropConversation(
   target: { accountId: string; folderId: string },
 ): boolean {
   return drag.accountId === target.accountId && !drag.folderIds.includes(target.folderId);
+}
+
+/** Resolve the concrete folder holding `role` for an account (unified row drop targets). */
+export function resolveRoleFolder(
+  folders: Record<string, MailFolder>,
+  accountId: string,
+  role: StandardFolderRole,
+): MailFolder | null {
+  return Object.values(folders).find((f) => f.accountId === accountId && f.role === role) ?? null;
 }

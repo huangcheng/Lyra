@@ -1139,6 +1139,7 @@ import {
   DndContext,
   DragOverlay,
   PointerSensor,
+  TouchSensor,
   useSensor,
   useSensors,
   type DragEndEvent,
@@ -1149,7 +1150,11 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { t } from '@/i18n';
 import { moveId, orderAccounts } from '@/lib/account-order';
-import { moveMessages, type ConversationDragData } from '@/lib/conversation-actions';
+import {
+  moveMessages,
+  resolveRoleFolder,
+  type ConversationDragData,
+} from '@/lib/conversation-actions';
 import type { StandardFolderRole } from '@/lib/mail-api';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -1173,8 +1178,12 @@ export function MailDndProvider({ children }: { children: ReactNode }) {
   const accounts = useMailStore((s) => s.accounts);
   const accountOrder = useUIStore((s) => s.accountOrder);
   const setAccountOrder = useUIStore((s) => s.setAccountOrder);
-  // 6px movement threshold: plain clicks on rows/folders still select.
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  // Pointer for mouse/pen; TouchSensor with a long-press delay so list
+  // scrolling still wins over drag on touch devices.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 6 } }),
+  );
 
   const [drag, setDrag] = useState<ConversationDragData | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -1198,9 +1207,10 @@ export function MailDndProvider({ children }: { children: ReactNode }) {
     if (!overData || overData.type !== 'folder') return null;
     if ('unified' in overData && overData.unified) {
       // Unified role row: target is the drag account's folder with that role.
-      const folders = useMailStore.getState().folders;
-      const target = Object.values(folders).find(
-        (f) => f.accountId === data.accountId && f.role === overData.role,
+      const target = resolveRoleFolder(
+        useMailStore.getState().folders,
+        data.accountId,
+        overData.role,
       );
       return target?.id ?? null;
     }
@@ -1280,6 +1290,19 @@ export function MailDndProvider({ children }: { children: ReactNode }) {
 }
 ```
 
+The shared role→folder lookup lives in `conversation-actions.ts` (used by both this provider and the sidebar hook):
+
+```ts
+/** Resolve the concrete folder holding `role` for an account (unified row drop targets). */
+export function resolveRoleFolder(
+  folders: Record<string, MailFolder>,
+  accountId: string,
+  role: StandardFolderRole,
+): MailFolder | null {
+  return Object.values(folders).find((f) => f.accountId === accountId && f.role === role) ?? null;
+}
+```
+
 - [ ] **Step 2: Make conversation rows draggable in `mail-list.tsx`**
 
 Wrap the row rendering in a small component (hook rules require a component per row):
@@ -1300,7 +1323,9 @@ function DraggableConversationRow({
 }) {
   const messageIds = convo.messages.map((m) => m.id);
   const folderIds = [...new Set(convo.messages.map((m) => m.folderId))];
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+  // No `attributes` spread: without a KeyboardSensor they would only add a
+  // duplicate role="button" tab stop around the row's own interactive div.
+  const { listeners, setNodeRef, isDragging } = useDraggable({
     id: `convo:${convo.key}`,
     data: {
       type: 'conversation',
@@ -1312,12 +1337,7 @@ function DraggableConversationRow({
     } satisfies ConversationDragData,
   });
   return (
-    <div
-      ref={setNodeRef}
-      {...attributes}
-      {...listeners}
-      className={isDragging ? 'opacity-50' : undefined}
-    >
+    <div ref={setNodeRef} {...listeners} className={isDragging ? 'opacity-50' : undefined}>
       {children}
     </div>
   );
@@ -1350,6 +1370,7 @@ Add imports:
 import { useDndContext, useDroppable } from '@dnd-kit/core';
 import {
   canDropConversation,
+  resolveRoleFolder,
   type ConversationDragData,
 } from '@/lib/conversation-actions';
 import type { FolderDropData, UnifiedRoleDropData } from '@/components/mail/mail-dnd';
@@ -1367,11 +1388,8 @@ function useFolderDropTarget(drop: FolderDropData | UnifiedRoleDropData, dropId:
   let enabled = false;
   if (isConvoDrag && drag) {
     if ('unified' in drop && drop.unified) {
-      const folders = useMailStore.getState().folders;
-      const target = Object.values(folders).find(
-        (f) => f.accountId === drag.accountId && f.role === drop.role,
-      );
-      enabled = Boolean(target) && !drag.folderIds.includes(target!.id);
+      const target = resolveRoleFolder(useMailStore.getState().folders, drag.accountId, drop.role);
+      enabled = target !== null && !drag.folderIds.includes(target.id);
     } else {
       enabled = canDropConversation(drag, drop as FolderDropData);
     }

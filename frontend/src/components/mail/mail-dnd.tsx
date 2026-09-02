@@ -11,6 +11,7 @@ import {
   DndContext,
   DragOverlay,
   PointerSensor,
+  TouchSensor,
   useSensor,
   useSensors,
   type DragEndEvent,
@@ -21,7 +22,11 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { t } from '@/i18n';
 import { moveId, orderAccounts } from '@/lib/account-order';
-import { moveMessages, type ConversationDragData } from '@/lib/conversation-actions';
+import {
+  moveMessages,
+  resolveRoleFolder,
+  type ConversationDragData,
+} from '@/lib/conversation-actions';
 import type { StandardFolderRole } from '@/lib/mail-api';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -45,8 +50,12 @@ export function MailDndProvider({ children }: { children: ReactNode }) {
   const accounts = useMailStore((s) => s.accounts);
   const accountOrder = useUIStore((s) => s.accountOrder);
   const setAccountOrder = useUIStore((s) => s.setAccountOrder);
-  // 6px movement threshold: plain clicks on rows/folders still select.
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  // Pointer for mouse/pen; TouchSensor with a long-press delay so list
+  // scrolling still wins over drag on touch devices.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 6 } }),
+  );
 
   const [drag, setDrag] = useState<ConversationDragData | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -70,9 +79,10 @@ export function MailDndProvider({ children }: { children: ReactNode }) {
     if (!overData || overData.type !== 'folder') return null;
     if ('unified' in overData && overData.unified) {
       // Unified role row: target is the drag account's folder with that role.
-      const folders = useMailStore.getState().folders;
-      const target = Object.values(folders).find(
-        (f) => f.accountId === data.accountId && f.role === overData.role,
+      const target = resolveRoleFolder(
+        useMailStore.getState().folders,
+        data.accountId,
+        overData.role,
       );
       return target?.id ?? null;
     }

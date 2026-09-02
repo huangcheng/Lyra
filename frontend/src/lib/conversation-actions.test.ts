@@ -10,10 +10,11 @@ import {
   moveMessages,
   patchMessages,
   replyFromList,
+  resolveRoleFolder,
 } from '@/lib/conversation-actions';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
-import type { MailMessage } from '@/types';
+import type { MailFolder, MailMessage } from '@/types';
 
 const mockedApi = vi.mocked(api);
 
@@ -144,5 +145,58 @@ describe('canDropConversation', () => {
   });
   it('accepts a same-account different folder', () => {
     expect(canDropConversation(drag, { accountId: 'acc1', folderId: 'f2' })).toBe(true);
+  });
+});
+
+describe('resolveRoleFolder', () => {
+  const folders: Record<string, MailFolder> = {
+    f1: {
+      id: 'f1',
+      accountId: 'acc1',
+      name: 'Inbox',
+      role: 'inbox',
+      unreadCount: 0,
+      totalCount: 0,
+      sortOrder: 0,
+    },
+    f2: {
+      id: 'f2',
+      accountId: 'acc1',
+      name: 'Archive',
+      role: 'archive',
+      unreadCount: 0,
+      totalCount: 0,
+      sortOrder: 1,
+    },
+    f3: {
+      id: 'f3',
+      accountId: 'acc2',
+      name: 'Inbox',
+      role: 'inbox',
+      unreadCount: 0,
+      totalCount: 0,
+      sortOrder: 0,
+    },
+    f4: {
+      id: 'f4',
+      accountId: 'acc1',
+      name: 'Receipts',
+      unreadCount: 0,
+      totalCount: 0,
+      sortOrder: 2,
+    },
+  };
+
+  it('finds the folder by account and role', () => {
+    expect(resolveRoleFolder(folders, 'acc1', 'archive')?.id).toBe('f2');
+  });
+
+  it('returns null when the account lacks that role', () => {
+    expect(resolveRoleFolder(folders, 'acc2', 'archive')).toBeNull();
+  });
+
+  it("does not match another account's folder with the same role", () => {
+    expect(resolveRoleFolder(folders, 'acc1', 'inbox')?.id).toBe('f1');
+    expect(resolveRoleFolder(folders, 'acc2', 'inbox')?.id).toBe('f3');
   });
 });

@@ -27,7 +27,11 @@ import type { FolderDropData, UnifiedRoleDropData } from '@/components/mail/mail
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
 import { orderAccounts } from '@/lib/account-order';
-import { canDropConversation, type ConversationDragData } from '@/lib/conversation-actions';
+import {
+  canDropConversation,
+  resolveRoleFolder,
+  type ConversationDragData,
+} from '@/lib/conversation-actions';
 import { buildCustomFolderTree, buildRoleChildren, type FolderTreeNode } from '@/lib/folder-tree';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
 import { avatarTone, cn } from '@/lib/utils';
@@ -81,11 +85,8 @@ function useFolderDropTarget(drop: FolderDropData | UnifiedRoleDropData, dropId:
   let enabled = false;
   if (isConvoDrag && drag) {
     if ('unified' in drop && drop.unified) {
-      const folders = useMailStore.getState().folders;
-      const target = Object.values(folders).find(
-        (f) => f.accountId === drag.accountId && f.role === drop.role,
-      );
-      enabled = Boolean(target) && !drag.folderIds.includes(target!.id);
+      const target = resolveRoleFolder(useMailStore.getState().folders, drag.accountId, drop.role);
+      enabled = target !== null && !drag.folderIds.includes(target.id);
     } else {
       enabled = canDropConversation(drag, drop as FolderDropData);
     }

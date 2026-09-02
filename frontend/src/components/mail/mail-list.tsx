@@ -86,7 +86,9 @@ function DraggableConversationRow({
 }) {
   const messageIds = convo.messages.map((m) => m.id);
   const folderIds = [...new Set(convo.messages.map((m) => m.folderId))];
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+  // No `attributes` spread: without a KeyboardSensor they would only add a
+  // duplicate role="button" tab stop around the row's own interactive div.
+  const { listeners, setNodeRef, isDragging } = useDraggable({
     id: `convo:${convo.key}`,
     data: {
       type: 'conversation',
@@ -98,12 +100,7 @@ function DraggableConversationRow({
     } satisfies ConversationDragData,
   });
   return (
-    <div
-      ref={setNodeRef}
-      {...attributes}
-      {...listeners}
-      className={isDragging ? 'opacity-50' : undefined}
-    >
+    <div ref={setNodeRef} {...listeners} className={isDragging ? 'opacity-50' : undefined}>
       {children}
     </div>
   );
