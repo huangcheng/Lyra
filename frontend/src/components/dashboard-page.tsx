@@ -216,7 +216,10 @@ function DashboardBody({
   return (
     <>
       <div
-        className={cn('grid gap-3 pt-6', mobile ? 'grid-cols-2 px-4' : 'grid-cols-4 gap-4 px-8')}
+        className={cn(
+          'stagger-in grid gap-3 pt-6',
+          mobile ? 'grid-cols-2 px-4' : 'grid-cols-4 gap-4 px-8',
+        )}
       >
         <KpiCard
           label={t(locale, 'dash.unread')}
@@ -278,7 +281,7 @@ function DashboardBody({
 
       <div
         className={cn(
-          'grid gap-3 py-4',
+          'stagger-in grid gap-3 py-4',
           mobile ? 'grid-cols-1 px-4' : 'grid-cols-2 gap-4 px-8 py-4',
         )}
       >

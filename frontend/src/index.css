@@ -11,6 +11,35 @@
   --ease-in-out-soft: cubic-bezier(0.77, 0, 0.175, 1);
 }
 
+/* One-shot group entrance for occasional surfaces (settings, dashboard).
+   40ms stagger, capped at 200ms; children animate opacity + an 8px rise.
+   Decorative by design — never applied to high-frequency lists. */
+@keyframes lyra-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+.stagger-in > * {
+  animation: lyra-rise-in 300ms cubic-bezier(0.23, 1, 0.32, 1) backwards;
+  animation-delay: 200ms; /* children beyond the explicit ladder */
+}
+.stagger-in > :nth-child(2) {
+  animation-delay: 40ms;
+}
+.stagger-in > :nth-child(3) {
+  animation-delay: 80ms;
+}
+.stagger-in > :nth-child(4) {
+  animation-delay: 120ms;
+}
+.stagger-in > :nth-child(5) {
+  animation-delay: 160ms;
+}
+.stagger-in > :nth-child(6) {
+  animation-delay: 200ms;
+}
+
 /* Reduced motion: keep opacity/color feedback, drop movement.
    tw-animate-css defers this guard to the app. */
 @media (prefers-reduced-motion: reduce) {

@@ -794,7 +794,7 @@ export function SettingsPage() {
           </div>
         </header>
 
-        <div className="mx-auto w-full max-w-2xl space-y-4 px-8 py-6">
+        <div className="stagger-in mx-auto w-full max-w-2xl space-y-4 px-8 py-6">
           {section === 'general' && (
             <>
               <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
