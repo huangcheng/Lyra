@@ -22,6 +22,11 @@ Investigated live via the user's logged-in sessions, 2026-09-02:
   Create filter. **To folder ▸ also has a folder-name filter input** + "New
   folder". A circular-refresh icon button sits next to Compose as the manual
   refresh affordance.
+- **Apple Mail** (desktop, user-supplied): Open, Reply, Reply All, Forward,
+  Forward as Attachment, Remind Me ▸, Mark as Unread, Move to Junk, Mute,
+  Delete, a colored Flag row, Archive, Move to ▸, Copy to ▸, Apply Rules.
+  "Remind Me" matches our Snooze; "Mute" maps to the existing session-local
+  `toggleMuteMessage` in the reader's overflow menu.
 
 Consequences for this design:
 
@@ -32,8 +37,12 @@ Consequences for this design:
    Fastmail account.
 4. A header-level sync/refresh icon next to the sidebar header matches Yandex's
    Compose-adjacent refresh button.
-5. Deferred ideas (not in scope): Open in new window, Copy link, Pin, Mute,
-   Unsubscribe, Forward as attachment, Copy to folder, Download .eml.
+5. **Mute joins the menu** (Apple Mail + Fastmail both have it) via the existing
+   session-local `toggleMuteMessage` — it mutes every message of the
+   conversation that is not already muted.
+6. Deferred ideas (not in scope): Open in new window, Copy link, Pin, Flag
+   colors, Unsubscribe, Forward as attachment, Copy to folder, Apply Rules,
+   Download .eml.
 
 Three frontend-only additions to the mail list. No backend or API changes; every
 action reuses existing `/api/v1` endpoints.
@@ -88,7 +97,9 @@ Right-clicking a conversation row opens a context menu.
     (Fastmail/Yandex pattern), followed by the account's role folders + custom
     tree flattened/indented; picking one runs the same move loop as
     drag-and-drop. Filtering matches folder display names case-insensitively.
-  - *(divider)* Mark Read/Unread (`PATCH /messages/{id}`), Star/Unstar, Snooze
+  - *(divider)* Mark Read/Unread (`PATCH /messages/{id}`), Star/Unstar, Mute
+    (session-local `toggleMuteMessage` for every not-yet-muted message of the
+    conversation, matching the reader's overflow menu), Snooze
     (existing `POST /messages/{id}/snooze`).
 - **Errors**: same inline-error pattern as drag-and-drop.
 - **i18n**: all labels added to en + zh translation tables.
