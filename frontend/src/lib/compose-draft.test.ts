@@ -84,4 +84,8 @@ describe('buildForwardDraft', () => {
     expect(d.subject).toBe('Fwd: Hello');
     expect(d.forwardAttachments).toEqual([{ id: 'a1', filename: 'x.pdf', contentType: undefined }]);
   });
+
+  it('omits forwardAttachments when there are none to carry', () => {
+    expect(buildForwardDraft(msg(), accounts).forwardAttachments).toBeUndefined();
+  });
 });
