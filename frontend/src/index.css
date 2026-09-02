@@ -93,39 +93,40 @@
 :root {
   --radius: 0.5rem;
   --background: #ffffff;
-  --foreground: #26251e;
+  --foreground: #18181b; /* cool ink */
   --card: #ffffff;
-  --card-foreground: #26251e;
+  --card-foreground: #18181b;
   --popover: #ffffff;
-  --popover-foreground: #26251e;
-  --primary: #f54e00; /* brand voltage — primary CTAs only */
+  --popover-foreground: #18181b;
+  /* Ink stamp / sparse solid actions — color is for status (unread/ok/danger), not brand paint. */
+  --primary: #18181b;
   --primary-foreground: #ffffff;
-  --secondary: #fafaf7; /* canvas-soft */
-  --secondary-foreground: #26251e;
-  --muted: #f7f7f4; /* cream canvas */
-  --muted-foreground: #666b70; /* cool graphite — AA on all light surfaces (4.6-5.4:1) */
-  --accent: #efeee8; /* hairline-soft hover wash */
-  --accent-foreground: #26251e;
+  --secondary: #f4f4f5; /* cool zinc wash */
+  --secondary-foreground: #18181b;
+  --muted: #f4f4f5;
+  --muted-foreground: #71717a;
+  --accent: #e4e4e7; /* cool hover / selected wash — not warm cream */
+  --accent-foreground: #18181b;
   --destructive: #cf2d56;
   --destructive-foreground: #ffffff;
-  --border: #e6e5e0; /* hairline */
-  --input: #cfcdc4; /* hairline-strong */
-  --ring: #a09c92; /* muted-soft */
-  --sidebar: #f7f7f4;
-  --sidebar-foreground: #26251e;
-  --sidebar-primary: #f54e00;
+  --border: #e4e4e7;
+  --input: #d4d4d8;
+  --ring: #a1a1aa;
+  --sidebar: #f4f4f5;
+  --sidebar-foreground: #18181b;
+  --sidebar-primary: #18181b;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #efeee8;
-  --sidebar-accent-foreground: #26251e;
-  --sidebar-border: #e6e5e0;
-  --sidebar-ring: #a09c92;
+  --sidebar-accent: #e4e4e7;
+  --sidebar-accent-foreground: #18181b;
+  --sidebar-border: #e4e4e7;
+  --sidebar-ring: #a1a1aa;
   /* Lyra extras */
   --unread: #c08532; /* warm gold — unread dots */
   --ok: #1f8a65; /* sync dot, toggles on */
   --ter-foreground: #86898d; /* icons/graphics only (3:1+); readable text uses muted-foreground */
-  --canvas: #f7f7f4; /* login backdrop */
-  /* hairline-only depth: no drop shadows */
-  --shadow-whisper: 0 0 0 1px rgba(230, 229, 224, 0.8);
+  --canvas: #f4f4f5; /* login backdrop */
+  /* Soft edge for controls that still need a hairline (not nav selection). */
+  --shadow-whisper: 0 0 0 1px rgba(228, 228, 231, 0.9);
 }
 
 .dark {
@@ -135,8 +136,8 @@
   --card-foreground: #f4f4f5;
   --popover: #1d1d21;
   --popover-foreground: #f4f4f5;
-  --primary: #f54e00;
-  --primary-foreground: #ffffff;
+  --primary: #edebe5; /* inverted stamp / ink-on-dark surfaces */
+  --primary-foreground: #18181b;
   --secondary: #1a1a1e; /* PANEL dark */
   --secondary-foreground: #f4f4f5;
   --muted: #1a1a1e;
@@ -150,8 +151,8 @@
   --ring: #71717a;
   --sidebar: #1a1a1e;
   --sidebar-foreground: #f4f4f5;
-  --sidebar-primary: #f54e00;
-  --sidebar-primary-foreground: #ffffff;
+  --sidebar-primary: #edebe5;
+  --sidebar-primary-foreground: #18181b;
   --sidebar-accent: #27272c;
   --sidebar-accent-foreground: #f4f4f5;
   --sidebar-border: #2c2c31;
@@ -183,6 +184,31 @@
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
+  background: var(--ring);
+}
+
+/* Folder nav: keep scroll, hide the thumb until the pane is hovered so a
+   dormant scrollbar doesn't read as a hard vertical rule beside the divider. */
+.scrollbar-hover {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.scrollbar-hover:hover,
+.scrollbar-hover:focus-within {
+  scrollbar-color: var(--border) transparent;
+}
+.scrollbar-hover::-webkit-scrollbar {
+  width: 6px;
+}
+.scrollbar-hover::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+.scrollbar-hover:hover::-webkit-scrollbar-thumb,
+.scrollbar-hover:focus-within::-webkit-scrollbar-thumb {
+  background: var(--border);
+}
+.scrollbar-hover::-webkit-scrollbar-thumb:hover {
   background: var(--ring);
 }
 

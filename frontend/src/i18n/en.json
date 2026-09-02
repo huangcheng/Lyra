@@ -42,6 +42,8 @@
     "bodyUnavailable": "This message's content has not been downloaded yet. It will appear after the next successful sync.",
     "moveToJunk": "Move to junk",
     "moveToTrash": "Move to trash",
+    "confirmTrash": "Move this message to trash?",
+    "confirmTrashMany": "Move {{count}} messages to trash?",
     "messageActions": "Message actions",
     "snooze": "Snooze",
     "snoozeUntil": "Snooze until",

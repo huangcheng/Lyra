@@ -48,8 +48,8 @@ export function AppRail() {
             className={cn(
               'relative flex size-9 items-center justify-center rounded-[9px] transition-colors',
               active
-                ? 'bg-card text-foreground shadow-whisper'
-                : 'text-ter-foreground hover:bg-accent/60 hover:text-foreground',
+                ? 'bg-accent text-foreground'
+                : 'text-ter-foreground hover:bg-accent/50 hover:text-foreground',
             )}
           >
             <Icon className="size-[17px]" />

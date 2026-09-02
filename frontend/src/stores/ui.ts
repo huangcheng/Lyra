@@ -149,7 +149,7 @@ export const useUIStore = create<UIState>((set) => ({
 
   toggleFolderExpanded: (accountId, folderId) =>
     set((s) => {
-      const current = s.folderExpansion[accountId] ?? { expanded: true, folderIds: [] };
+      const current = s.folderExpansion[accountId] ?? { expanded: false, folderIds: [] };
       const folderIds = current.folderIds.includes(folderId)
         ? current.folderIds.filter((id) => id !== folderId)
         : [...current.folderIds, folderId];

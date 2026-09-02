@@ -61,7 +61,11 @@ function SectionLabel({ children }: { children: string }) {
 
 function UnreadCount({ count }: { count: number }) {
   if (count <= 0) return null;
-  return <span className="ml-auto text-[11.5px] tabular-nums text-muted-foreground">{count}</span>;
+  return (
+    <span className="ml-auto shrink-0 text-[11.5px] tabular-nums text-muted-foreground">
+      {count}
+    </span>
+  );
 }
 
 function selectUnifiedRole(role: StandardFolderRole) {
@@ -96,11 +100,19 @@ function useFolderDropTarget(drop: FolderDropData | UnifiedRoleDropData, dropId:
   const rowClass = isConvoDrag
     ? enabled
       ? isOver
-        ? 'bg-accent ring-1 ring-ring/40'
+        ? 'bg-accent/80'
         : undefined
       : 'opacity-40'
     : undefined;
   return { setNodeRef, rowClass };
+}
+
+/** Selected folder: cool wash only — no card border / whisper ring (those read as mud + hard edges). */
+function navRowClass(active: boolean): string {
+  return cn(
+    'flex w-full min-w-0 max-w-full items-center rounded-[7px] text-left text-[13px] transition-colors',
+    active ? 'bg-accent font-medium text-foreground' : 'text-foreground hover:bg-accent/50',
+  );
 }
 
 function UnifiedRow({ folder, active }: { folder: UnifiedFolder; active: boolean }) {
@@ -115,10 +127,7 @@ function UnifiedRow({ folder, active }: { folder: UnifiedFolder; active: boolean
       <button
         type="button"
         onClick={() => selectUnifiedRole(folder.role)}
-        className={cn(
-          'flex h-8 w-full items-center gap-2 rounded-[7px] border px-2.5 text-left text-[13px]',
-          active ? 'border-input bg-card shadow-whisper' : 'border-transparent hover:bg-accent/60',
-        )}
+        className={cn(navRowClass(active), 'h-8 gap-2 px-2.5')}
       >
         <Icon
           className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')}
@@ -155,15 +164,11 @@ function CustomFolderBranch({
   );
 
   return (
-    <div>
+    <div className="min-w-0">
       <div
         ref={setNodeRef}
-        className={cn(
-          'flex items-center rounded-[7px] border',
-          active ? 'border-input bg-card shadow-whisper' : 'border-transparent hover:bg-accent/60',
-          rowClass,
-        )}
-        style={{ marginLeft: depth * 16 }}
+        className={cn(navRowClass(active), rowClass)}
+        style={{ paddingLeft: depth * 16 }}
       >
         {hasChildren ? (
           <button
@@ -247,15 +252,8 @@ function RoleFolderRow({
   );
 
   return (
-    <div>
-      <div
-        ref={setNodeRef}
-        className={cn(
-          'flex items-center rounded-[7px] border',
-          active ? 'border-input bg-card shadow-whisper' : 'border-transparent hover:bg-accent/60',
-          rowClass,
-        )}
-      >
+    <div className="min-w-0">
+      <div ref={setNodeRef} className={cn(navRowClass(active), rowClass)}>
         {hasChildren ? (
           <button
             type="button"
@@ -336,7 +334,8 @@ function AccountSection({
   const expansion = useUIStore((s) => s.folderExpansion[account.id]);
   const setAccountExpanded = useUIStore((s) => s.setAccountExpanded);
   const toggleExpanded = useUIStore((s) => s.toggleFolderExpanded);
-  const expanded = expansion?.expanded ?? true;
+  // Default collapsed: unified folders first; accounts open on demand (or from persisted ui_state).
+  const expanded = expansion?.expanded ?? false;
   const expandedIds = useMemo(() => new Set(expansion?.folderIds ?? []), [expansion]);
 
   const accountFolders = getFoldersForAccount(account.id);
@@ -347,16 +346,16 @@ function AccountSection({
   const onToggleExpanded = (id: string) => toggleExpanded(account.id, id);
 
   return (
-    <div>
+    <div className="min-w-0">
       {bare ? null : (
-        <div ref={headerRef} style={headerStyle} className={headerClassName}>
+        <div ref={headerRef} style={headerStyle} className={cn('min-w-0', headerClassName)}>
           <button
             ref={activatorRef}
             type="button"
             onClick={() => setAccountExpanded(account.id, !expanded)}
             aria-expanded={expanded}
             {...dragHandleProps}
-            className="flex h-8 w-full items-center gap-1.5 rounded-[7px] px-2.5 hover:bg-accent/60"
+            className="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-[7px] px-2.5 hover:bg-accent/60"
           >
             {expanded ? (
               <ChevronDown className="size-3.5 shrink-0 text-ter-foreground" />
@@ -364,7 +363,7 @@ function AccountSection({
               <ChevronRight className="size-3.5 shrink-0 text-ter-foreground" />
             )}
             <span
-              className="truncate text-[12.5px] font-semibold"
+              className="min-w-0 truncate text-[12.5px] font-semibold"
               title={account.displayName || account.emailAddress}
             >
               {account.displayName || account.emailAddress}
@@ -374,7 +373,7 @@ function AccountSection({
         </div>
       )}
       {bare || expanded ? (
-        <div className={bare ? undefined : 'pl-4'}>
+        <div className={cn('min-w-0', bare ? undefined : 'pl-4')}>
           {roleFolders.map((folder) => (
             <RoleFolderRow
               key={folder.id}
@@ -449,7 +448,7 @@ function SortableAccountSections({
 
   return (
     <SortableContext items={ids} strategy={verticalListSortingStrategy}>
-      <div className="grid gap-0.5">
+      <div className="grid min-w-0 gap-0.5">
         {ordered.map((account) => (
           <SortableAccountSection
             key={account.id}
@@ -481,10 +480,10 @@ function CollapsedFolders({ unifiedFolders }: { unifiedFolders: UnifiedFolder[] 
                 type="button"
                 onClick={() => selectUnifiedRole(folder.role)}
                 className={cn(
-                  'flex h-9 w-9 items-center justify-center rounded-[7px] border',
+                  'flex h-9 w-9 items-center justify-center rounded-[7px]',
                   active
-                    ? 'border-input bg-card text-foreground shadow-whisper'
-                    : 'border-transparent text-ter-foreground hover:bg-accent/60 hover:text-foreground',
+                    ? 'bg-accent text-foreground'
+                    : 'text-ter-foreground hover:bg-accent/50 hover:text-foreground',
                 )}
               >
                 <Icon className="h-4 w-4" />
@@ -527,8 +526,8 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
   const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
   if (selectedAccount) {
     return (
-      <div className="flex flex-col px-2 pb-2">
-        <div className="grid gap-0.5 pt-2">
+      <div className="flex min-w-0 flex-col px-2 pb-2">
+        <div className="grid min-w-0 gap-0.5 pt-2">
           <AccountSection account={selectedAccount} selectedFolderId={selectedFolderId} bare />
         </div>
       </div>
@@ -536,9 +535,9 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
   }
 
   return (
-    <div className="flex flex-col px-2 pb-2">
+    <div className="flex min-w-0 flex-col px-2 pb-2">
       <SectionLabel>{t(locale, 'mail.section.unified')}</SectionLabel>
-      <div className="grid gap-0.5">
+      <div className="grid min-w-0 gap-0.5">
         {unifiedFolders.map((folder) => (
           <UnifiedRow
             key={folder.role}

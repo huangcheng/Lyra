@@ -37,6 +37,7 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { t } from '@/i18n';
+import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import {
   actOnMessages,
   editDraftFromList,
@@ -185,7 +186,13 @@ export function ConversationContextMenu({
           <ArchiveX />
           {t(locale, 'mail.moveToJunk')}
         </ContextMenuItem>
-        <ContextMenuItem variant="destructive" onSelect={() => run(actOnMessages(ids, 'trash'))}>
+        <ContextMenuItem
+          variant="destructive"
+          onSelect={() => {
+            if (!confirmMoveToTrash(locale, ids.length)) return;
+            run(actOnMessages(ids, 'trash'));
+          }}
+        >
           <Trash2 />
           {t(locale, 'mail.moveToTrash')}
         </ContextMenuItem>

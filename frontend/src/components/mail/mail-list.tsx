@@ -18,6 +18,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { t } from '@/i18n';
 import { ApiError, api } from '@/lib/api-client';
 import { useAvatar } from '@/lib/avatar';
+import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import { groupIntoConversations, type Conversation } from '@/lib/conversation';
 import type { ConversationDragData } from '@/lib/conversation-actions';
 import { fetchMessagesForView } from '@/lib/load-mail-messages';
@@ -343,6 +344,7 @@ export function MailList() {
             const hasAttachments = (item.attachments ?? []).some((a) => !a.isInline);
             const quickAction = (e: React.MouseEvent, action: 'archive' | 'trash') => {
               e.stopPropagation();
+              if (action === 'trash' && !confirmMoveToTrash(locale)) return;
               void api(`/messages/${item.id}/${action}`, { method: 'POST' })
                 .then(() => {
                   removeMessage(item.id);
@@ -377,24 +379,29 @@ export function MailList() {
                       }
                     }}
                   >
-                    <div className="absolute right-3 top-2 hidden items-center gap-0.5 rounded-[7px] border border-input bg-card p-0.5 shadow-whisper group-hover:flex">
+                    <div
+                      role="toolbar"
+                      aria-label={t(locale, 'mail.messageActions')}
+                      className="absolute right-2 top-1/2 z-10 flex -translate-y-1/2 items-center gap-1 rounded-lg bg-background/95 p-1 opacity-0 shadow-none ring-1 ring-border/60 transition-opacity duration-100 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       <button
                         type="button"
-                        className="flex size-6 items-center justify-center rounded-[5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                        className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                         title={t(locale, 'mail.archive')}
                         aria-label={t(locale, 'mail.archive')}
                         onClick={(e) => quickAction(e, 'archive')}
                       >
-                        <Archive className="size-3.5" aria-hidden />
+                        <Archive className="size-4" aria-hidden />
                       </button>
                       <button
                         type="button"
-                        className="flex size-6 items-center justify-center rounded-[5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                        className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                         title={t(locale, 'mail.moveToTrash')}
                         aria-label={t(locale, 'mail.moveToTrash')}
                         onClick={(e) => quickAction(e, 'trash')}
                       >
-                        <Trash2 className="size-3.5" aria-hidden />
+                        <Trash2 className="size-4" aria-hidden />
                       </button>
                     </div>
                     <div className="flex w-3 shrink-0 items-start justify-center pt-1.5">

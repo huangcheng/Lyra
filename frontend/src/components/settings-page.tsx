@@ -7,7 +7,19 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
-import { Flag, KeyRound, Plus, Shield, SlidersHorizontal, Star, Users, X } from 'lucide-react';
+import {
+  Flag,
+  KeyRound,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Shield,
+  SlidersHorizontal,
+  Star,
+  Trash2,
+  Users,
+  X,
+} from 'lucide-react';
 import { t } from '../i18n';
 import { SlimPageNav, type SlimNavItem } from '@/components/slim-page-nav';
 import { FolderRoleMapping } from './folder-role-mapping';
@@ -57,6 +69,7 @@ import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import {
   Select,
@@ -1024,109 +1037,161 @@ export function SettingsPage() {
               {loading ? (
                 <div className="text-sm text-muted-foreground">{t(locale, 'common.loading')}</div>
               ) : (
-                <>
-                  {accounts.map((account) => (
-                    <div
-                      key={account.id}
-                      className="flex items-center gap-3.5 rounded-[10px] border border-border bg-card px-5 py-4"
-                    >
-                      <div className="flex size-9 shrink-0 items-center justify-center rounded-[9px] bg-muted">
-                        <span className="font-brand text-[15px] text-foreground">
-                          {(account.displayName || account.emailAddress).charAt(0).toUpperCase()}
-                        </span>
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13.5px] font-medium">
-                          {account.emailAddress}
-                        </div>
-                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px] text-muted-foreground">
-                          <span
-                            className={`size-1.5 rounded-full ${
-                              syncErrors[account.id] ? 'bg-destructive' : 'bg-ok'
-                            }`}
-                          />
-                          {account.lastSyncAt && (
-                            <span>
-                              {t(locale, 'sync.lastSync')}: {formatLastSync(account.lastSyncAt)}
-                            </span>
-                          )}
-                          <span>{account.protocol.toUpperCase()}</span>
-                          {defaultAccountId === account.id && (
-                            <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
-                              <Star size={11} className="fill-current" />
-                              {t(locale, 'settings.accounts.defaultBadge')}
-                            </span>
-                          )}
-                          {account.displayName && account.displayName !== account.emailAddress && (
-                            <span>{account.displayName}</span>
-                          )}
-                        </div>
-                        {syncErrors[account.id] && (
-                          <p className="text-xs text-destructive">
-                            {t(locale, 'sync.syncFailed')}: {syncErrors[account.id]}
-                          </p>
-                        )}
-                      </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        {defaultAccountId !== account.id && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setDefaultAccount(account.id)}
-                          >
-                            {t(locale, 'settings.accounts.setDefault')}
-                          </Button>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={syncingId === account.id}
-                          onClick={() => void handleSync(account.id)}
-                        >
-                          {syncingId === account.id
+                <TooltipProvider delayDuration={300}>
+                  {accounts.length > 0 ? (
+                    <section className="overflow-hidden rounded-[10px] border border-border/70 bg-card">
+                      {accounts.map((account, index) => {
+                        const isDefault = defaultAccountId === account.id;
+                        const setDefaultLabel = t(locale, 'settings.accounts.setDefault');
+                        const syncLabel =
+                          syncingId === account.id
                             ? t(locale, 'sync.syncing')
-                            : t(locale, 'settings.syncNow')}
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="rounded-full"
-                          onClick={() => handleEdit(account)}
-                        >
-                          {t(locale, 'settings.manage')}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-destructive"
-                          onClick={() => handleDelete(account.id)}
-                        >
-                          {t(locale, 'common.delete')}
-                        </Button>
-                      </div>
-                    </div>
-                  ))}
+                            : t(locale, 'settings.syncNow');
+                        const manageLabel = t(locale, 'settings.manage');
+                        const deleteLabel = t(locale, 'common.delete');
+                        return (
+                          <div
+                            key={account.id}
+                            className={cn(
+                              'flex items-center gap-3 px-4 py-3',
+                              index > 0 && 'border-t border-border/60',
+                            )}
+                          >
+                            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent text-[13px] font-medium text-foreground">
+                              {(account.displayName || account.emailAddress)
+                                .charAt(0)
+                                .toUpperCase()}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex min-w-0 items-baseline gap-2">
+                                <span className="truncate text-[13.5px] font-medium">
+                                  {account.emailAddress}
+                                </span>
+                                {isDefault ? (
+                                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                                    {t(locale, 'settings.accounts.defaultBadge')}
+                                  </span>
+                                ) : null}
+                              </div>
+                              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px] text-muted-foreground">
+                                <span
+                                  className={cn(
+                                    'size-1.5 rounded-full',
+                                    syncErrors[account.id] ? 'bg-destructive' : 'bg-ok',
+                                  )}
+                                />
+                                {account.lastSyncAt ? (
+                                  <span>
+                                    {t(locale, 'sync.lastSync')}:{' '}
+                                    {formatLastSync(account.lastSyncAt)}
+                                  </span>
+                                ) : null}
+                                <span>{account.protocol.toUpperCase()}</span>
+                                {account.displayName &&
+                                account.displayName !== account.emailAddress ? (
+                                  <span>{account.displayName}</span>
+                                ) : null}
+                              </div>
+                              {syncErrors[account.id] ? (
+                                <p className="mt-1 text-xs text-destructive">
+                                  {t(locale, 'sync.syncFailed')}: {syncErrors[account.id]}
+                                </p>
+                              ) : null}
+                            </div>
+                            <div className="flex shrink-0 items-center gap-0.5">
+                              {!isDefault ? (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon-sm"
+                                      aria-label={setDefaultLabel}
+                                      onClick={() => setDefaultAccount(account.id)}
+                                    >
+                                      <Star className="size-3.5" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>{setDefaultLabel}</TooltipContent>
+                                </Tooltip>
+                              ) : (
+                                <span
+                                  className="flex size-8 items-center justify-center text-muted-foreground"
+                                  title={t(locale, 'settings.accounts.defaultBadge')}
+                                >
+                                  <Star className="size-3.5 fill-current" />
+                                </span>
+                              )}
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    aria-label={syncLabel}
+                                    disabled={syncingId === account.id}
+                                    onClick={() => void handleSync(account.id)}
+                                  >
+                                    <RefreshCw
+                                      className={cn(
+                                        'size-3.5',
+                                        syncingId === account.id && 'animate-spin',
+                                      )}
+                                    />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>{syncLabel}</TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    aria-label={manageLabel}
+                                    onClick={() => handleEdit(account)}
+                                  >
+                                    <Pencil className="size-3.5" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>{manageLabel}</TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    className="text-destructive hover:text-destructive"
+                                    aria-label={deleteLabel}
+                                    onClick={() => handleDelete(account.id)}
+                                  >
+                                    <Trash2 className="size-3.5" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>{deleteLabel}</TooltipContent>
+                              </Tooltip>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </section>
+                  ) : null}
 
-                  <div className="flex flex-col gap-2">
-                    <button
-                      type="button"
-                      className="flex w-full flex-col items-center justify-center gap-1.5 rounded-[10px] border border-border bg-secondary px-5 py-6 text-[13px] font-medium text-foreground hover:bg-accent"
-                      onClick={() => {
-                        resetForm();
-                        setEditingAccount(null);
-                        setShowAddForm(true);
-                      }}
-                    >
-                      <Plus size={18} className="text-ter-foreground" />
-                      {t(locale, 'settings.accounts.add')}
-                    </button>
-                  </div>
-                  {accounts.length === 0 && (
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-center gap-2 rounded-[10px] border border-dashed border-border/80 px-5 py-3.5 text-[13px] text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+                    onClick={() => {
+                      resetForm();
+                      setEditingAccount(null);
+                      setShowAddForm(true);
+                    }}
+                  >
+                    <Plus size={16} />
+                    {t(locale, 'settings.accounts.add')}
+                  </button>
+                  {accounts.length === 0 ? (
                     <p className="text-center text-xs text-muted-foreground">
                       {t(locale, 'settings.accounts.empty')}
                     </p>
-                  )}
-                </>
+                  ) : null}
+                </TooltipProvider>
               )}
             </>
           )}

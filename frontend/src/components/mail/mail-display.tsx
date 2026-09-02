@@ -41,6 +41,7 @@ import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
 import { api } from '@/lib/api-client';
+import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import {
   baseSubject,
   conversationKeyOf,
@@ -259,6 +260,7 @@ export function MailDisplay() {
   /** Hover-panel trash on a specific card (selection cleared only if it was selected). */
   const handleTrashFor = async (id: string) => {
     if (!token || busy) return;
+    if (!confirmMoveToTrash(locale)) return;
     setBusy(true);
     setActionError(null);
     try {
@@ -274,6 +276,7 @@ export function MailDisplay() {
 
   const handleAction = async (action: 'trash' | 'archive' | 'spam') => {
     if (!token || !mail || busy) return;
+    if (action === 'trash' && !confirmMoveToTrash(locale)) return;
     setBusy(true);
     setActionError(null);
     try {

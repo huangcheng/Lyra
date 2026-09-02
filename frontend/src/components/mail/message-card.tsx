@@ -194,7 +194,7 @@ export function MessageCard({
       <div
         role="toolbar"
         aria-label={t(locale, 'mail.messageActions')}
-        className="hidden items-center gap-0.5 rounded-[7px] border border-input bg-card p-0.5 shadow-whisper group-focus-within:flex group-hover:flex"
+        className="flex items-center gap-1 rounded-lg bg-background/95 p-1 opacity-0 ring-1 ring-border/60 transition-opacity duration-100 pointer-events-none group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
         onClick={(e) => e.stopPropagation()}
       >
         {(
@@ -211,9 +211,9 @@ export function MessageCard({
             title={label}
             aria-label={label}
             onClick={action}
-            className="flex size-7 items-center justify-center rounded-[5px] text-ter-foreground transition-colors hover:bg-accent hover:text-foreground"
+            className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
           >
-            <Icon className="size-3.5" />
+            <Icon className="size-4" />
           </button>
         ))}
       </div>

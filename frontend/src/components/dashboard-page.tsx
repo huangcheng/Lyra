@@ -7,7 +7,7 @@
  *
  * Mirrors the v3 main-screen conventions: responsive single-column layout
  * under 1024px (same breakpoint as the mail three-pane), ink chart bars
- * (`--primary` stays reserved for CTAs), today's bar in the unread gold,
+ * (`--primary` is ink for the stamp / sparse solid actions), today's bar in the unread gold,
  * and locale-correct date letters (zh renders via date-fns zhCN).
  */
 

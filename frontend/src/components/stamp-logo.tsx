@@ -1,6 +1,6 @@
 import { cn } from '@/lib/utils';
 
-/** Postage-stamp outline with sawtooth perforated edges (viewBox 0–32). */
+/** Postage-stamp mark: ink square with serif "L" (perforated sawtooth edge). */
 function stampPath(viewSize: number, teeth: number, depth: number): string {
   const v = viewSize;
   const t = v / teeth;
