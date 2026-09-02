@@ -23,7 +23,7 @@ import {
   StarOff,
   Trash2,
 } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 
 import {
   ContextMenu,
@@ -55,6 +55,7 @@ function MoveToSub({ convo, onMove }: { convo: Conversation; onMove: (folderId: 
   const locale = useUIStore((s) => s.locale);
   const folders = useMailStore((s) => s.folders);
   const [query, setQuery] = useState('');
+  const filterRef = useRef<HTMLInputElement>(null);
   const accountFolders = Object.values(folders)
     .filter((f) => f.accountId === convo.latest.accountId)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
@@ -72,12 +73,12 @@ function MoveToSub({ convo, onMove }: { convo: Conversation; onMove: (folderId: 
         className="w-56"
         onOpenAutoFocus={(e) => {
           e.preventDefault();
-          document.getElementById('move-to-filter')?.focus();
+          filterRef.current?.focus();
         }}
       >
         <div className="px-1 pb-1">
           <input
-            id="move-to-filter"
+            ref={filterRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.stopPropagation()}
@@ -112,8 +113,8 @@ export function ConversationContextMenu({
   children,
 }: {
   convo: Conversation;
-  /** Surface a failure in the list's error line. */
-  onActionError: (message: string) => void;
+  /** Surface a failure in the list's error line (null clears it). */
+  onActionError: (message: string | null) => void;
   children: ReactNode;
 }) {
   const locale = useUIStore((s) => s.locale);
@@ -121,9 +122,7 @@ export function ConversationContextMenu({
   const ids = convo.messages.map((m) => m.id);
   const today = new Date();
 
-  const report = (error: string | null) => {
-    if (error) onActionError(error);
-  };
+  const report = (error: string | null) => onActionError(error);
   const run = (p: Promise<{ error: string | null }>) => void p.then((r) => report(r.error));
 
   const snoozeOptions: Array<{ key: string; until: Date }> = [
@@ -194,6 +193,9 @@ export function ConversationContextMenu({
             const ui = useUIStore.getState();
             for (const id of ids) {
               if (!ui.mutedMessageIds.includes(id)) ui.toggleMuteMessage(id);
+            }
+            if (ui.selectedMessageId && ids.includes(ui.selectedMessageId)) {
+              ui.setSelectedMessage(null);
             }
           }}
         >
