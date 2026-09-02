@@ -38,7 +38,7 @@ marker on the account row in the sidebar.
 ### 1. `src/lib/sync-progress.ts` (new, pure)
 
 - `AccountSyncStatus` type:
-  - `state: 'idle' | 'syncing' | 'error'`
+  - `state: 'syncing' | 'error'` (idle = account absent from the map)
   - `currentFolderId: string | null`
   - `fetched: number`, `total: number` (from latest `folder_progress`)
   - `error: string | null`

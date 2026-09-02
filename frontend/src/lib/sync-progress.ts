@@ -41,7 +41,7 @@ export function reduceSyncProgress(
         currentFolderId: ev.folderId,
         fetched: ev.fetched,
         total: ev.total,
-        error: next.get(ev.accountId)?.error ?? null,
+        error: null,
       });
       break;
     case 'folder_complete':

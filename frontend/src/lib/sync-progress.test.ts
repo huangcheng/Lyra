@@ -118,6 +118,22 @@ describe('reduceSyncProgress', () => {
     expect(map.get('a2')).toMatchObject({ state: 'syncing', error: null });
   });
 
+  it('folder_progress clears a prior error', () => {
+    let map: SyncProgressMap = reduceSyncProgress(new Map(), {
+      type: 'sync_error',
+      accountId: 'a1',
+      error: 'boom',
+    });
+    map = reduceSyncProgress(map, {
+      type: 'folder_progress',
+      accountId: 'a1',
+      folderId: 'f1',
+      fetched: 1,
+      total: 2,
+    });
+    expect(map.get('a1')).toMatchObject({ state: 'syncing', error: null });
+  });
+
   it('does not mutate the input map', () => {
     const input = new Map();
     reduceSyncProgress(input, started);
