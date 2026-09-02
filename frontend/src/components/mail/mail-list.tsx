@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
 import { ErrorBanner, type ErrorBannerVariant } from '@/components/error-banner';
+import { ConversationContextMenu } from '@/components/mail/conversation-context-menu';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -118,6 +119,7 @@ export function MailList() {
     message: string;
     variant: ErrorBannerVariant;
   } | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const resolveFetchError = useCallback(
     (err: unknown): { message: string; variant: ErrorBannerVariant } => {
@@ -266,6 +268,11 @@ export function MailList() {
           }}
         />
       ) : null}
+      {actionError ? (
+        <div className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">
+          {actionError}
+        </div>
+      ) : null}
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col">
           {listRows.map((row) => {
@@ -312,127 +319,132 @@ export function MailList() {
                 .catch(() => {});
             };
             return (
-              <div
-                key={convo.key}
-                role="button"
-                tabIndex={0}
-                className={cn(
-                  'group relative flex w-full cursor-pointer gap-3 border-b border-border/60 px-4 py-3 text-left text-sm transition-colors hover:bg-accent/40',
-                  isSelected &&
-                    'bg-secondary shadow-[inset_2px_0_0_var(--color-foreground)] hover:bg-secondary',
-                )}
-                onClick={() => {
-                  const target = convo.messages.find((m) => !m.isRead) ?? convo.latest;
-                  setSelectedMessage(target.id);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
+              <ConversationContextMenu key={convo.key} convo={convo} onActionError={setActionError}>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  className={cn(
+                    'group relative flex w-full cursor-pointer gap-3 border-b border-border/60 px-4 py-3 text-left text-sm transition-colors hover:bg-accent/40',
+                    isSelected &&
+                      'bg-secondary shadow-[inset_2px_0_0_var(--color-foreground)] hover:bg-secondary',
+                  )}
+                  onClick={() => {
                     const target = convo.messages.find((m) => !m.isRead) ?? convo.latest;
                     setSelectedMessage(target.id);
-                  }
-                }}
-              >
-                <div className="absolute right-3 top-2 hidden items-center gap-0.5 rounded-[7px] border border-input bg-card p-0.5 shadow-whisper group-hover:flex">
-                  <button
-                    type="button"
-                    className="flex size-6 items-center justify-center rounded-[5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    title={t(locale, 'mail.archive')}
-                    aria-label={t(locale, 'mail.archive')}
-                    onClick={(e) => quickAction(e, 'archive')}
-                  >
-                    <Archive className="size-3.5" aria-hidden />
-                  </button>
-                  <button
-                    type="button"
-                    className="flex size-6 items-center justify-center rounded-[5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    title={t(locale, 'mail.moveToTrash')}
-                    aria-label={t(locale, 'mail.moveToTrash')}
-                    onClick={(e) => quickAction(e, 'trash')}
-                  >
-                    <Trash2 className="size-3.5" aria-hidden />
-                  </button>
-                </div>
-                <div className="flex w-3 shrink-0 items-start justify-center pt-1.5">
-                  {convo.anyReplied ? (
-                    <CornerUpLeft
-                      className={cn(
-                        'h-3 w-3',
-                        isSelected ? 'text-muted-foreground' : 'text-ter-foreground',
-                      )}
-                      aria-hidden
-                    />
-                  ) : isUnread ? (
-                    <span className="size-1.5 rounded-full bg-unread" aria-hidden />
-                  ) : null}
-                </div>
-                <ListAvatar email={item.from.email} label={fromLabel} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <div className={cn('min-w-0 truncate', isUnread && 'font-semibold')}>
-                      {fromLabel}
+                  }}
+                  onContextMenu={() => {
+                    const target = convo.messages.find((m) => !m.isRead) ?? convo.latest;
+                    setSelectedMessage(target.id);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      const target = convo.messages.find((m) => !m.isRead) ?? convo.latest;
+                      setSelectedMessage(target.id);
+                    }
+                  }}
+                >
+                  <div className="absolute right-3 top-2 hidden items-center gap-0.5 rounded-[7px] border border-input bg-card p-0.5 shadow-whisper group-hover:flex">
+                    <button
+                      type="button"
+                      className="flex size-6 items-center justify-center rounded-[5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      title={t(locale, 'mail.archive')}
+                      aria-label={t(locale, 'mail.archive')}
+                      onClick={(e) => quickAction(e, 'archive')}
+                    >
+                      <Archive className="size-3.5" aria-hidden />
+                    </button>
+                    <button
+                      type="button"
+                      className="flex size-6 items-center justify-center rounded-[5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      title={t(locale, 'mail.moveToTrash')}
+                      aria-label={t(locale, 'mail.moveToTrash')}
+                      onClick={(e) => quickAction(e, 'trash')}
+                    >
+                      <Trash2 className="size-3.5" aria-hidden />
+                    </button>
+                  </div>
+                  <div className="flex w-3 shrink-0 items-start justify-center pt-1.5">
+                    {convo.anyReplied ? (
+                      <CornerUpLeft
+                        className={cn(
+                          'h-3 w-3',
+                          isSelected ? 'text-muted-foreground' : 'text-ter-foreground',
+                        )}
+                        aria-hidden
+                      />
+                    ) : isUnread ? (
+                      <span className="size-1.5 rounded-full bg-unread" aria-hidden />
+                    ) : null}
+                  </div>
+                  <ListAvatar email={item.from.email} label={fromLabel} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <div className={cn('min-w-0 truncate', isUnread && 'font-semibold')}>
+                        {fromLabel}
+                      </div>
+                      {convo.messages.length > 1 ? (
+                        <span
+                          className="shrink-0 rounded-full border border-border px-1.5 text-[11px] leading-4 tabular-nums text-muted-foreground"
+                          aria-label={t(locale, 'mail.conversationCount', {
+                            count: convo.messages.length,
+                          })}
+                        >
+                          {convo.messages.length}
+                        </span>
+                      ) : null}
+                      {showAccountBadge && accountLabel ? (
+                        <Badge
+                          variant="outline"
+                          className="max-w-[8rem] shrink-0 truncate rounded-md px-1.5 py-0 text-[11px] font-normal"
+                        >
+                          {accountLabel}
+                        </Badge>
+                      ) : null}
+                      <div
+                        className={cn(
+                          'ml-auto shrink-0 text-[11px] tabular-nums transition-opacity group-hover:opacity-0',
+                          isSelected ? 'text-muted-foreground' : 'text-ter-foreground',
+                        )}
+                      >
+                        {relative}
+                      </div>
                     </div>
-                    {convo.messages.length > 1 ? (
-                      <span
-                        className="shrink-0 rounded-full border border-border px-1.5 text-[11px] leading-4 tabular-nums text-muted-foreground"
-                        aria-label={t(locale, 'mail.conversationCount', {
-                          count: convo.messages.length,
-                        })}
-                      >
-                        {convo.messages.length}
-                      </span>
-                    ) : null}
-                    {showAccountBadge && accountLabel ? (
-                      <Badge
-                        variant="outline"
-                        className="max-w-[8rem] shrink-0 truncate rounded-md px-1.5 py-0 text-[11px] font-normal"
-                      >
-                        {accountLabel}
-                      </Badge>
-                    ) : null}
                     <div
                       className={cn(
-                        'ml-auto shrink-0 text-[11px] tabular-nums transition-opacity group-hover:opacity-0',
-                        isSelected ? 'text-muted-foreground' : 'text-ter-foreground',
+                        'mt-0.5 truncate text-[13px] leading-snug',
+                        isUnread ? 'font-medium text-foreground' : 'text-foreground/90',
                       )}
                     >
-                      {relative}
+                      {item.subject || '—'}
                     </div>
+                    {showSnippet ? (
+                      <div className="mt-1 flex items-start gap-1 text-xs leading-relaxed text-muted-foreground">
+                        {hasAttachments ? (
+                          <Paperclip
+                            className="mt-0.5 size-3 shrink-0 text-ter-foreground"
+                            aria-hidden
+                          />
+                        ) : null}
+                        <span className="line-clamp-2 min-w-0">{snippet.slice(0, 300)}</span>
+                      </div>
+                    ) : null}
+                    {labels.length ? (
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        {labels.map((label) => (
+                          <Badge
+                            key={label}
+                            variant={getBadgeVariantFromLabel(label)}
+                            className="rounded-md"
+                          >
+                            {label}
+                          </Badge>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
-                  <div
-                    className={cn(
-                      'mt-0.5 truncate text-[13px] leading-snug',
-                      isUnread ? 'font-medium text-foreground' : 'text-foreground/90',
-                    )}
-                  >
-                    {item.subject || '—'}
-                  </div>
-                  {showSnippet ? (
-                    <div className="mt-1 flex items-start gap-1 text-xs leading-relaxed text-muted-foreground">
-                      {hasAttachments ? (
-                        <Paperclip
-                          className="mt-0.5 size-3 shrink-0 text-ter-foreground"
-                          aria-hidden
-                        />
-                      ) : null}
-                      <span className="line-clamp-2 min-w-0">{snippet.slice(0, 300)}</span>
-                    </div>
-                  ) : null}
-                  {labels.length ? (
-                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      {labels.map((label) => (
-                        <Badge
-                          key={label}
-                          variant={getBadgeVariantFromLabel(label)}
-                          className="rounded-md"
-                        >
-                          {label}
-                        </Badge>
-                      ))}
-                    </div>
-                  ) : null}
                 </div>
-              </div>
+              </ConversationContextMenu>
             );
           })}
         </div>
