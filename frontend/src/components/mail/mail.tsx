@@ -14,6 +14,7 @@ import { MailDndProvider } from '@/components/mail/mail-dnd';
 import { MailList } from '@/components/mail/mail-list';
 import { SidebarFolders } from '@/components/mail/sidebar-folders';
 import { SyncAllButton } from '@/components/mail/sync-all-button';
+import { SyncStatusPopover } from '@/components/mail/sync-status-popover';
 import { LyraWordmark } from '@/components/lyra-wordmark';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -97,6 +98,7 @@ function NavContent({ isCollapsed }: { isCollapsed: boolean }) {
           <SyncStatusDot />
           <div className="flex-1" />
           <SyncAllButton />
+          <SyncStatusPopover />
         </div>
       )}
     </div>
