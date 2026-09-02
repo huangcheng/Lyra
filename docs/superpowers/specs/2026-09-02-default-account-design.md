@@ -49,8 +49,9 @@ setDefaultAccount(id: string | null): void
 
 ### Persistence (`frontend/src/lib/persist-view-state.ts`)
 
-- `applyViewState` restores `defaultAccountId` when it is a string
-  (absent/invalid → `null`). No cross-check against the account list at
+- `applyViewState` restores `defaultAccountId` when it is a string;
+  invalid non-strings are ignored and an absent key leaves the current
+  value untouched. No cross-check against the account list at
   restore time; stale ids (deleted accounts) simply fail the lookup at use
   time and fall back — same pattern as `accountOrder`.
 - The debounced PATCH body includes `defaultAccountId`, and the store

@@ -68,6 +68,17 @@ describe('startViewStatePersistence accountOrder', () => {
     });
   });
 
+  it('includes defaultAccountId in the PATCH payload when it changes', async () => {
+    const stop = startViewStatePersistence();
+    useUIStore.getState().setDefaultAccount('acc-1');
+    await vi.advanceTimersByTimeAsync(500);
+    stop();
+    expect(mockedApi).toHaveBeenCalledWith('/auth/preferences', {
+      method: 'PATCH',
+      body: expect.stringContaining('"defaultAccountId":"acc-1"'),
+    });
+  });
+
   it('does not PATCH when only unrelated state changes', async () => {
     mockedApi.mockClear();
     const stop = startViewStatePersistence();
