@@ -1835,4 +1835,4 @@ git add -A && git commit -m "chore: format" || true
 
 - Spec coverage: drag-to-folder (Task 5), context menu with filter (Task 4), sync-all (Task 6), i18n (Task 4 step 1), tests (Tasks 1/2/6), spec-as-built sync (Task 7 step 2). Out-of-scope items stay out.
 - Type consistency: `ConversationDragData` / `FolderDropData` / `UnifiedRoleDropData` are defined once (Task 2 lib, Task 5 provider) and imported elsewhere; `BatchResult` is the single error channel; `reduceSyncEvent`/`useSyncingAccounts` used by both the dot and the button.
-- Known trade-off: no keyboard-accessible drag for conversations (matches the deferred keyboard-reorder note on account dnd); no `TouchSensor` — pointer only, consistent with existing account reorder.
+- Known trade-off: no keyboard-accessible drag for conversations (matches the deferred keyboard-reorder note on account dnd); touch uses `TouchSensor` long-press (200ms) so list scrolling still wins.

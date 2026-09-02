@@ -35,7 +35,7 @@ Consequences for this design:
 3. The **Move to… submenu gets a folder-name filter input** (Fastmail/Yandex
    pattern) — important for accounts with deep custom trees like this user's
    Fastmail account.
-4. A header-level sync/refresh icon next to the sidebar header matches Yandex's
+4. A sync/refresh icon in the sidebar footer matches Yandex's
    Compose-adjacent refresh button.
 5. **Mute joins the menu** (Apple Mail + Fastmail both have it) via the existing
    session-local `toggleMuteMessage` — it mutes every message of the
@@ -51,10 +51,15 @@ action reuses existing `/api/v1` endpoints.
 
 Users drag a conversation row from the mail list onto a sidebar folder to move it.
 
-- **DnD context**: hoist a new `DndContext` into `mail.tsx` wrapping both the
-  `MailList` pane and the `SidebarFolders` pane. The existing account-reorder
-  `DndContext` inside `sidebar-folders.tsx` stays nested as-is — dnd-kit scopes a
-  drag to the context whose sensor fired, so account reordering is unaffected.
+- **DnD context**: a single `DndContext` lives in `mail.tsx`
+  (`MailDndProvider`) wrapping both the `MailList` pane and the
+  `SidebarFolders` pane — the sidebar's original nested account-reorder
+  context was removed (dnd-kit registers droppables with the *nearest*
+  context, so a nested one would hide folder targets from list drags).
+  Account reordering shares the same context; drag kinds are told apart by
+  `active.data.current?.type`. Sensors: `PointerSensor` (distance 6) for
+  mouse/pen plus `TouchSensor` (200ms long-press) so touch scrolling still
+  wins over drag.
 - **Draggable**: each conversation row in `mail-list.tsx` gets `useDraggable` with
   data `{ type: 'conversation', accountId, messageIds: string[], subject }`
   (`messageIds` = all messages in the conversation). A `DragOverlay` renders the
@@ -101,16 +106,18 @@ Right-clicking a conversation row opens a context menu.
     (session-local `toggleMuteMessage` for every not-yet-muted message of the
     conversation, matching the reader's overflow menu), Snooze
     (existing `POST /messages/{id}/snooze`).
-- **Errors**: same inline-error pattern as drag-and-drop.
+- **Errors**: context-menu actions report failures into a destructive error
+  line at the top of the mail list (cleared on the next successful action);
+  drag-and-drop instead uses the DnD provider's transient status chip (§1).
 - **i18n**: all labels added to en + zh translation tables.
 
 ## 3. Sync-all button
 
 A manual "sync every account" trigger in the sidebar.
 
-- **Placement**: `RefreshCw` icon button in the sidebar header next to the
-  existing `SyncStatusDot` in `mail.tsx`, with an en/zh tooltip ("Sync all
-  accounts" / "同步所有账户").
+- **Placement**: `RefreshCw` icon button in the sidebar **footer** of
+  `mail.tsx`, at the right end of the `LyraWordmark` + `SyncStatusDot` row,
+  with an en/zh tooltip ("Sync all accounts" / "同步所有账户").
 - **Behavior**: on click, loop `useMailStore.accounts` and call
   `POST /api/v1/accounts/{id}/sync` for each; the backend already dedups
   pending/running jobs and returns 202.
