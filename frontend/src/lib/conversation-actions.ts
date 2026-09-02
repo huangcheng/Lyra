@@ -147,6 +147,7 @@ export async function editDraftFromList(id: string): Promise<string | null> {
     useUIStore.getState().setSelectedMessage(id);
     useUIStore.getState().openCompose({
       mode: 'draft',
+      accountId: m.accountId,
       to: m.to.map((a) => a.email).join(', '),
       cc: (m.cc ?? []).map((a) => a.email).join(', '),
       subject: m.subject ?? '',

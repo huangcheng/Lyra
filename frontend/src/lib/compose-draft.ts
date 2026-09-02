@@ -45,6 +45,7 @@ export function buildReplyDraft(
     : m.from.email;
   return {
     mode: 'reply',
+    accountId: m.accountId,
     to,
     subject: m.subject.startsWith('Re:') ? m.subject : `Re: ${m.subject}`,
     body: quoteBody(m),
@@ -59,6 +60,7 @@ export function buildForwardDraft(m: MailMessage, accounts: MailAccount[]): Part
     .map((a) => ({ id: a.id, filename: a.filename, contentType: a.contentType }));
   return {
     mode: 'forward',
+    accountId: m.accountId,
     to: '',
     subject: m.subject.startsWith('Fwd:') ? m.subject : `Fwd: ${m.subject}`,
     body: quoteBody(m),

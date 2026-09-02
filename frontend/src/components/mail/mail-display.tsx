@@ -291,6 +291,7 @@ export function MailDisplay() {
     if (!mail) return;
     openCompose({
       mode: 'draft',
+      accountId: mail.accountId,
       to: mail.to.map((a) => a.email).join(', '),
       cc: (mail.cc ?? []).map((a) => a.email).join(', '),
       subject: mail.subject ?? '',
