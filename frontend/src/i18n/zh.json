@@ -191,7 +191,13 @@
     "syncComplete": "同步完成",
     "syncError": "同步错误",
     "syncFailed": "同步失败",
-    "lastSync": "上次同步"
+    "lastSync": "上次同步",
+    "details": "同步详情",
+    "starting": "正在启动…",
+    "syncingFolder": "正在同步 {{folder}} — {{fetched}}/{{total}}",
+    "folderFallback": "文件夹",
+    "notSyncedYet": "尚未同步",
+    "syncAccount": "立即同步"
   },
   "settings": {
     "title": "设置",
@@ -297,6 +303,11 @@
       "edit": "编辑账户",
       "empty": "暂无账户配置。添加您的第一个邮箱账户以开始使用。",
       "confirmDelete": "确定要删除此账户吗？",
+      "errorLog": "错误日志",
+      "errorLogEmpty": "暂无失败的同步记录。",
+      "errorLogLoadError": "无法加载错误日志。请确认服务端已更新到最新版本。",
+      "showErrorLog": "查看错误日志",
+      "hideErrorLog": "收起错误日志",
       "signature": "签名",
       "signatureHint": "附加在回复与转发中；纯文本或简单 HTML。",
       "displayName": "显示名称",

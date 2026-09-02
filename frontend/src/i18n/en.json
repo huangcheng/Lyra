@@ -191,7 +191,13 @@
     "syncComplete": "Sync complete",
     "syncError": "Sync error",
     "syncFailed": "Sync failed",
-    "lastSync": "Last synced"
+    "lastSync": "Last synced",
+    "details": "Sync details",
+    "starting": "Starting…",
+    "syncingFolder": "Syncing {{folder}} — {{fetched}}/{{total}}",
+    "folderFallback": "folder",
+    "notSyncedYet": "Not synced yet",
+    "syncAccount": "Sync now"
   },
   "settings": {
     "title": "Settings",
@@ -297,6 +303,11 @@
       "edit": "Edit Account",
       "empty": "No accounts configured. Add your first mail account to get started.",
       "confirmDelete": "Are you sure you want to delete this account?",
+      "errorLog": "Error log",
+      "errorLogEmpty": "No failed sync jobs recorded yet.",
+      "errorLogLoadError": "Couldn't load the error log. Is the server up to date?",
+      "showErrorLog": "Show error log",
+      "hideErrorLog": "Hide error log",
       "signature": "Signature",
       "signatureHint": "Appended to replies and forwards; plain text or simple HTML.",
       "displayName": "Display Name",
