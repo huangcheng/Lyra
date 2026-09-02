@@ -69,6 +69,10 @@ pub enum ImapSecurity {
     Starttls,
 }
 
+/// Metadata FETCH chunk size: kept small because QQ resets connections
+/// mid-response after a few dozen envelopes (see fetch_metadata).
+pub(crate) const METADATA_CHUNK: usize = 8;
+
 /// Connection parameters for an IMAP server.
 #[derive(Debug, Clone)]
 pub struct ImapConfig {
@@ -465,7 +469,6 @@ impl ImapClient {
     /// each response small — every command completes inside the timeout
     /// and fully drained.
     pub async fn fetch_metadata(&mut self, uids: &[u32]) -> Result<Vec<ImapMessage>, ImapError> {
-        const METADATA_CHUNK: usize = 8;
         const MAX_RETRIES_PER_CHUNK: u8 = 3;
         if uids.len() <= METADATA_CHUNK {
             return self.fetch_metadata_once(uids).await;

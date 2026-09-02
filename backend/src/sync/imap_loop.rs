@@ -123,7 +123,7 @@ pub(crate) async fn run_imap_sync(
     let mut total_updated = 0;
     let mut total_deleted = 0;
 
-    for folder in &folders {
+    'folder: for folder in &folders {
         // Hierarchy placeholders (`Archive/` with \Noselect) cannot be SELECTed;
         // one failure here would abort the whole account's sync.
         if folder.attributes.iter().any(|a| a.contains("Noselect")) {
@@ -233,7 +233,7 @@ pub(crate) async fn run_imap_sync(
                 continue;
             }
         };
-        let mut messages = if client.supports_condstore() && stored_modseq > 0 {
+        let messages = if client.supports_condstore() && stored_modseq > 0 {
             match client.fetch_changed_since(stored_modseq).await {
                 Ok(msgs) => msgs,
                 Err(err) => {
@@ -261,36 +261,61 @@ pub(crate) async fn run_imap_sync(
             .into_iter()
             .filter(|uid| !changed_uids.contains(uid))
             .collect();
-        if !fetch_uids.is_empty() {
-            match client.fetch_metadata(&fetch_uids).await {
-                Ok(msgs) => messages.extend(msgs),
-                Err(err) => {
-                    tracing::warn!(
-                        account_id,
-                        folder = %folder.name,
-                        error = %error_chain(&err),
-                        "metadata fetch failed"
-                    );
-                    if session_may_be_poisoned(&err) {
-                        tracing::warn!(
-                            account_id,
-                            "IMAP session state uncertain; ending account pass"
-                        );
-                        break;
-                    }
-                    continue;
-                }
-            }
-        }
-
         let new_modseq = if client.supports_condstore() && highest_modseq > 0 {
             highest_modseq
         } else {
             0
         };
 
+        // New-UID metadata: fetch in chunks and persist each chunk as it
+        // lands. Servers that drop connections mid-response (QQ resets
+        // every few dozen envelopes) would otherwise lose the whole
+        // folder's progress — the cursor only advanced on full-folder
+        // success, so a 500-message folder retried from zero forever.
+        let mut chunk_cursor = cursor.as_ref().map_or(0, |c| c.last_uid);
+        let mut uidvalidity_cleared = false;
+        'chunks: for chunk in fetch_uids.chunks(crate::imap::METADATA_CHUNK) {
+            match client.fetch_metadata(chunk).await {
+                Ok(msgs) if msgs.is_empty() => {}
+                Ok(msgs) => {
+                    let chunk_max = msgs.iter().map(|m| m.uid).max().unwrap_or(0);
+                    chunk_cursor = std::cmp::max(chunk_cursor, chunk_max);
+                    let (n, u) = persist_imap_folder_batch(
+                        db,
+                        account_id,
+                        &folder_id,
+                        &msgs,
+                        uid_validity,
+                        chunk_cursor,
+                        new_modseq,
+                        uidvalidity_changed && !uidvalidity_cleared,
+                    )
+                    .await?;
+                    uidvalidity_cleared = true;
+                    total_new += n;
+                    total_updated += u;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        account_id,
+                        folder = %folder.name,
+                        error = %error_chain(&err),
+                        "metadata fetch failed after chunk retries"
+                    );
+                    if session_may_be_poisoned(&err) {
+                        tracing::warn!(
+                            account_id,
+                            "IMAP session state uncertain; ending account pass"
+                        );
+                        break 'folder;
+                    }
+                    break 'chunks;
+                }
+            }
+        }
+
         if messages.is_empty() {
-            if uidvalidity_changed {
+            if uidvalidity_changed && !uidvalidity_cleared {
                 persist_imap_folder_batch(
                     db,
                     account_id,
@@ -309,7 +334,7 @@ pub(crate) async fn run_imap_sync(
                     &folder_id,
                     &[],
                     uid_validity,
-                    cursor.as_ref().map_or(0, |c| c.last_uid),
+                    chunk_cursor,
                     new_modseq,
                     false,
                 )
@@ -319,11 +344,7 @@ pub(crate) async fn run_imap_sync(
         }
 
         let max_uid = messages.iter().map(|m| m.uid).max().unwrap_or(0);
-        let new_cursor_uid = if uidvalidity_changed {
-            max_uid
-        } else {
-            std::cmp::max(max_uid, cursor.map_or(0, |c| c.last_uid))
-        };
+        let new_cursor_uid = std::cmp::max(max_uid, chunk_cursor);
         let (n, u) = persist_imap_folder_batch(
             db,
             account_id,
