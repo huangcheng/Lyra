@@ -1820,6 +1820,7 @@ Then in the UI (http://localhost:3000), verify:
 6. Right-click a draft conversation → Edit draft opens the composer.
 7. Sync-all button spins while syncing and new mail arrives.
 8. Switch locale to zh and confirm the new labels render Chinese.
+9. Touch (or device-emulated) check: long-press starts a conversation drag, quick swipe still scrolls the list; long-press account reorder still works.
 
 - [ ] **Step 4: Final commit (if fmt changed files)**
 
