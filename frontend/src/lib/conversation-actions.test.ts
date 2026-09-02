@@ -43,7 +43,7 @@ beforeEach(() => {
   useMailStore.setState({
     messages: { m1: msg('m1'), m2: msg('m2'), m3: msg('m3') },
   });
-  useUIStore.setState({ selectedMessageId: null });
+  useUIStore.setState({ selectedMessageId: null, composeOpen: false, composeDraft: null });
 });
 
 describe('moveMessages', () => {
