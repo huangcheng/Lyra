@@ -38,6 +38,28 @@ describe('applyViewState accountOrder', () => {
   });
 });
 
+describe('applyViewState defaultAccountId', () => {
+  beforeEach(() => {
+    useUIStore.setState({ defaultAccountId: null });
+  });
+
+  it('restores a valid string', () => {
+    applyViewState({ defaultAccountId: 'acc-1' });
+    expect(useUIStore.getState().defaultAccountId).toBe('acc-1');
+  });
+
+  it('ignores non-string values', () => {
+    applyViewState({ defaultAccountId: 42 });
+    expect(useUIStore.getState().defaultAccountId).toBeNull();
+  });
+
+  it('leaves the current value when the key is absent', () => {
+    useUIStore.setState({ defaultAccountId: 'keep' });
+    applyViewState({ accountOrder: ['x'] });
+    expect(useUIStore.getState().defaultAccountId).toBe('keep');
+  });
+});
+
 describe('startViewStatePersistence accountOrder', () => {
   it('includes accountOrder in the PATCH payload when it changes', async () => {
     const stop = startViewStatePersistence();

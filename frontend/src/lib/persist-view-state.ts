@@ -1,7 +1,7 @@
 /**
  * Persist mail view-state (selected account/folder, sidebar folder
- * expansion, sidebar account order) to the server so the sidebar restores
- * identically after a reload — and on any other device.
+ * expansion, sidebar account order, default account) to the server so the
+ * sidebar restores identically after a reload — and on any other device.
  *
  * Server-side store: `lyra_user.ui_state` JSON blob via
  * `PATCH /api/v1/auth/preferences` (debounced, fire-and-forget).
@@ -47,6 +47,9 @@ export function applyViewState(uiState: Record<string, unknown> | null | undefin
   if (Array.isArray(uiState.accountOrder)) {
     ui.setAccountOrder(uiState.accountOrder.filter((x): x is string => typeof x === 'string'));
   }
+  if (typeof uiState.defaultAccountId === 'string' && uiState.defaultAccountId) {
+    ui.setDefaultAccount(uiState.defaultAccountId);
+  }
 }
 
 /** Subscribe once; writes are debounced and skipped while logged out. */
@@ -58,7 +61,8 @@ export function startViewStatePersistence(): () => void {
       state.selectedFolderId === prev.selectedFolderId &&
       state.selectedFolderRole === prev.selectedFolderRole &&
       state.folderExpansion === prev.folderExpansion &&
-      state.accountOrder === prev.accountOrder
+      state.accountOrder === prev.accountOrder &&
+      state.defaultAccountId === prev.defaultAccountId
     ) {
       return;
     }
@@ -75,6 +79,7 @@ export function startViewStatePersistence(): () => void {
             selectedFolderRole: s.selectedFolderRole,
             folderExpansion: s.folderExpansion,
             accountOrder: s.accountOrder,
+            defaultAccountId: s.defaultAccountId,
           },
         }),
       }).catch(() => {
