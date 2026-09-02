@@ -574,6 +574,18 @@ pub(crate) struct JmapSeam {
     auth_header: String,
 }
 
+/// Keys of a JMAP `mailboxIds` object whose values are `true`.
+fn mailbox_ids_from_json(value: Option<&serde_json::Value>) -> Vec<String> {
+    match value {
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .filter(|(_, v)| v.as_bool() == Some(true))
+            .map(|(k, _)| k.clone())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 impl JmapSeam {
     /// Discover + connect (no caching). Pre-resolves well-known redirects
     /// with the same-origin follower, then pins the session URLs.
@@ -1298,6 +1310,24 @@ impl JmapSeam {
         let mut resp = request.send_single::<EmailSetResponse>().await?;
         resp.updated(email_id)?;
         Ok(())
+    }
+
+    /// Add a mailbox to an email without removing existing ones (same-account copy).
+    pub(crate) async fn add_email_mailbox(
+        &self,
+        email_id: &str,
+        mailbox_id: &str,
+    ) -> Result<(), JmapError> {
+        let (emails, _) = self.get_emails(&[email_id.to_owned()]).await?;
+        let email = emails.into_iter().next().ok_or_else(|| {
+            JmapError::InvalidResponse(format!("Email/get returned no email for {email_id}"))
+        })?;
+        let mut ids = mailbox_ids_from_json(email.mailbox_ids.as_ref());
+        if ids.iter().any(|id| id == mailbox_id) {
+            return Ok(());
+        }
+        ids.push(mailbox_id.to_owned());
+        self.set_email_mailboxes(email_id, &ids).await
     }
 
     /// Create a draft Email (no submission) in the Drafts mailbox; returns

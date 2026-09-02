@@ -17,6 +17,7 @@ import {
   Clock,
   FolderInput,
   Forward,
+  Copy,
   MailOpen,
   MoreVertical,
   Reply,
@@ -39,7 +40,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { t } from '@/i18n';
+import { t, type SupportedLocale } from '@/i18n';
 import { api } from '@/lib/api-client';
 import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import {
@@ -53,6 +54,7 @@ import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { buildForwardDraft, buildReplyDraft } from '@/lib/compose-draft';
 import { textToHtml } from '@/lib/compose-html';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
+import { buildAccountMoveFolderEntries, type MoveFolderEntry } from '@/lib/folder-tree';
 import { useMediaQuery } from '@/lib/use-media-query';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
@@ -60,6 +62,10 @@ import { useUIStore } from '@/stores/ui';
 import type { MailMessage } from '@/types';
 
 const SCROLL_END_THRESHOLD_PX = 32;
+
+function folderPickerLabel(entry: MoveFolderEntry, locale: SupportedLocale): string {
+  return entry.role ? t(locale, `mail.folder.${entry.role}`) : entry.name;
+}
 
 function isScrolledToBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_END_THRESHOLD_PX;
@@ -322,6 +328,22 @@ export function MailDisplay() {
     }
   };
 
+  const handleCopyToFolder = async (folderId: string) => {
+    if (!token || !mail || busy || folderId === mail.folderId) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await api(`/messages/${mail.id}/copy`, {
+        method: 'POST',
+        body: JSON.stringify({ folderId }),
+      });
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : t(locale, 'common.error'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleSnooze = async (until: Date) => {
     if (!token || !mail || busy) return;
     setBusy(true);
@@ -363,9 +385,10 @@ export function MailDisplay() {
 
   const accountFolders = useMemo(
     () =>
-      Object.values(folders)
-        .filter((f) => f.accountId === mail?.accountId)
-        .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)),
+      buildAccountMoveFolderEntries(
+        Object.values(folders).filter((f) => f.accountId === mail?.accountId),
+        folders,
+      ),
     [folders, mail?.accountId],
   );
 
@@ -373,316 +396,385 @@ export function MailDisplay() {
   const toolbarIconClass =
     'shrink-0 rounded-[7px] text-ter-foreground hover:bg-accent hover:text-foreground disabled:opacity-50';
 
+  // No selection: hide the ghost action bar on desktop (mobile keeps Back only).
+  const showToolbar = Boolean(mail) || isMobile;
+
   return (
     <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center overflow-x-auto p-2">
-        <div className="flex items-center gap-1.5">
-          {isMobile ? (
-            <Button
-              variant="ghost"
-              size="icon"
-              className={toolbarIconClass}
-              onClick={() => setSelectedMessage(null)}
-            >
-              <ChevronLeft className="h-4 w-4" />
-              <span className="sr-only">{t(locale, 'common.back')}</span>
-            </Button>
-          ) : null}
-          {!isMobile && convoPosition.index >= 0 && searchQuery.trim().length < 2 ? (
-            <>
-              <div className="flex items-center gap-0.5 text-[11px] tabular-nums text-muted-foreground">
+      {showToolbar ? (
+        <>
+          <div className="flex shrink-0 items-center overflow-x-auto p-2">
+            <div className="flex items-center gap-1.5">
+              {isMobile ? (
                 <Button
                   variant="ghost"
                   size="icon"
                   className={toolbarIconClass}
-                  disabled={convoPosition.index + 1 >= convoPosition.total}
-                  onClick={() => stepConversation(1)}
+                  onClick={() => setSelectedMessage(null)}
                 >
                   <ChevronLeft className="h-4 w-4" />
-                  <span className="sr-only">{t(locale, 'mail.prevConversation')}</span>
+                  <span className="sr-only">{t(locale, 'common.back')}</span>
                 </Button>
-                <span>
-                  {convoPosition.index + 1} / {convoPosition.total}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className={toolbarIconClass}
-                  disabled={convoPosition.index <= 0}
-                  onClick={() => stepConversation(-1)}
-                >
-                  <ChevronRight className="h-4 w-4" />
-                  <span className="sr-only">{t(locale, 'mail.nextConversation')}</span>
-                </Button>
-              </div>
-              <Separator orientation="vertical" className="mx-1 h-6" />
-            </>
-          ) : null}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={toolbarIconClass}
-                disabled={disabled}
-                onClick={() => void handleAction('archive')}
-              >
-                <Archive className="h-4 w-4" />
-                <span className="sr-only">{t(locale, 'mail.archive')}</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t(locale, 'mail.archive')}</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={toolbarIconClass}
-                disabled={disabled}
-                onClick={() => void handleAction('spam')}
-              >
-                <ArchiveX className="h-4 w-4" />
-                <span className="sr-only">{t(locale, 'mail.moveToJunk')}</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t(locale, 'mail.moveToJunk')}</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={toolbarIconClass}
-                disabled={disabled}
-                onClick={() => void handleAction('trash')}
-              >
-                <Trash2 className="h-4 w-4" />
-                <span className="sr-only">{t(locale, 'mail.moveToTrash')}</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t(locale, 'mail.moveToTrash')}</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <Popover>
-              <PopoverTrigger asChild>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className={toolbarIconClass}
-                    disabled={disabled}
-                  >
-                    <FolderInput className="h-4 w-4" />
-                    <span className="sr-only">{t(locale, 'mail.moveToFolder')}</span>
-                  </Button>
-                </TooltipTrigger>
-              </PopoverTrigger>
-              <TooltipContent>{t(locale, 'mail.moveToFolder')}</TooltipContent>
-              <PopoverContent className="w-60 p-1" align="start">
-                <div className="max-h-72 overflow-y-auto">
-                  {accountFolders.length === 0 ? (
-                    <p className="px-2 py-1.5 text-xs text-muted-foreground">
-                      {t(locale, 'mail.noFolders')}
-                    </p>
-                  ) : (
-                    accountFolders.map((f) => (
-                      <button
-                        key={f.id}
-                        type="button"
-                        disabled={busy || f.id === mail?.folderId}
-                        className="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent disabled:opacity-40"
-                        onClick={() => void handleMoveToFolder(f.id)}
-                      >
-                        <span className="truncate">{f.name}</span>
-                        {f.id === mail?.folderId ? <Check className="size-3.5 shrink-0" /> : null}
-                      </button>
-                    ))
-                  )}
-                </div>
-              </PopoverContent>
-            </Popover>
-          </Tooltip>
-          {mail?.isDraft ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className={toolbarIconClass}
-                  disabled={disabled}
-                  onClick={handleEditDraft}
-                >
-                  <Reply className="h-4 w-4" />
-                  <span className="sr-only">{t(locale, 'mail.editDraft')}</span>
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{t(locale, 'mail.editDraft')}</TooltipContent>
-            </Tooltip>
-          ) : null}
-          <Separator orientation="vertical" className="mx-1 h-6" />
-          <Tooltip>
-            <Popover>
-              <PopoverTrigger asChild>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className={toolbarIconClass}
-                    disabled={disabled}
-                  >
-                    <Clock className="h-4 w-4" />
-                    <span className="sr-only">{t(locale, 'mail.snooze')}</span>
-                  </Button>
-                </TooltipTrigger>
-              </PopoverTrigger>
-              <PopoverContent className="flex w-[535px] p-0">
-                <div className="flex flex-col gap-2 border-r px-2 py-4">
-                  <div className="px-4 text-sm font-medium">{t(locale, 'mail.snoozeUntil')}</div>
-                  <div className="grid min-w-[250px] gap-1">
+              ) : null}
+              {mail && !isMobile && convoPosition.index >= 0 && searchQuery.trim().length < 2 ? (
+                <>
+                  <div className="flex items-center gap-0.5 text-[11px] tabular-nums text-muted-foreground">
                     <Button
                       variant="ghost"
-                      className="justify-start font-normal"
-                      onClick={() => void handleSnooze(addHours(today, 4))}
+                      size="icon"
+                      className={toolbarIconClass}
+                      disabled={convoPosition.index + 1 >= convoPosition.total}
+                      onClick={() => stepConversation(1)}
                     >
-                      {t(locale, 'mail.laterToday')}{' '}
-                      <span className="ml-auto text-muted-foreground">
-                        {format(addHours(today, 4), 'h:mm a')}
-                      </span>
+                      <ChevronLeft className="h-4 w-4" />
+                      <span className="sr-only">{t(locale, 'mail.prevConversation')}</span>
                     </Button>
+                    <span>
+                      {convoPosition.index + 1} / {convoPosition.total}
+                    </span>
                     <Button
                       variant="ghost"
-                      className="justify-start font-normal"
-                      onClick={() => void handleSnooze(addDays(today, 1))}
+                      size="icon"
+                      className={toolbarIconClass}
+                      disabled={convoPosition.index <= 0}
+                      onClick={() => stepConversation(-1)}
                     >
-                      {t(locale, 'mail.tomorrow')}
-                      <span className="ml-auto text-muted-foreground">
-                        {format(addDays(today, 1), 'h:mm a')}
-                      </span>
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      className="justify-start font-normal"
-                      onClick={() => void handleSnooze(nextSaturday(today))}
-                    >
-                      {t(locale, 'mail.thisWeekend')}
-                      <span className="ml-auto text-muted-foreground">
-                        {format(nextSaturday(today), 'h:mm a')}
-                      </span>
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      className="justify-start font-normal"
-                      onClick={() => void handleSnooze(addDays(today, 7))}
-                    >
-                      {t(locale, 'mail.nextWeek')}
-                      <span className="ml-auto text-muted-foreground">
-                        {format(addDays(today, 7), 'h:mm a')}
-                      </span>
+                      <ChevronRight className="h-4 w-4" />
+                      <span className="sr-only">{t(locale, 'mail.nextConversation')}</span>
                     </Button>
                   </div>
+                  <Separator orientation="vertical" className="mx-1 h-6" />
+                </>
+              ) : null}
+              {mail ? (
+                <>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className={toolbarIconClass}
+                        disabled={disabled}
+                        onClick={() => void handleAction('archive')}
+                      >
+                        <Archive className="h-4 w-4" />
+                        <span className="sr-only">{t(locale, 'mail.archive')}</span>
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t(locale, 'mail.archive')}</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className={toolbarIconClass}
+                        disabled={disabled}
+                        onClick={() => void handleAction('spam')}
+                      >
+                        <ArchiveX className="h-4 w-4" />
+                        <span className="sr-only">{t(locale, 'mail.moveToJunk')}</span>
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t(locale, 'mail.moveToJunk')}</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className={toolbarIconClass}
+                        disabled={disabled}
+                        onClick={() => void handleAction('trash')}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        <span className="sr-only">{t(locale, 'mail.moveToTrash')}</span>
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t(locale, 'mail.moveToTrash')}</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className={toolbarIconClass}
+                            disabled={disabled}
+                          >
+                            <FolderInput className="h-4 w-4" />
+                            <span className="sr-only">{t(locale, 'mail.moveToFolder')}</span>
+                          </Button>
+                        </TooltipTrigger>
+                      </PopoverTrigger>
+                      <TooltipContent>{t(locale, 'mail.moveToFolder')}</TooltipContent>
+                      <PopoverContent className="w-60 p-1" align="start">
+                        <div className="max-h-72 overflow-y-auto">
+                          {accountFolders.length === 0 ? (
+                            <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                              {t(locale, 'mail.noFolders')}
+                            </p>
+                          ) : (
+                            accountFolders.map((f) => (
+                              <button
+                                key={f.id}
+                                type="button"
+                                disabled={busy || f.id === mail?.folderId}
+                                className="flex w-full items-center justify-between gap-2 rounded-sm py-1.5 pr-2 text-sm hover:bg-accent disabled:opacity-40"
+                                style={{ paddingLeft: `${0.5 + f.depth * 0.75}rem` }}
+                                onClick={() => void handleMoveToFolder(f.id)}
+                              >
+                                <span className="truncate">{folderPickerLabel(f, locale)}</span>
+                                {f.id === mail?.folderId ? (
+                                  <Check className="size-3.5 shrink-0" />
+                                ) : null}
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                  </Tooltip>
+                  <Tooltip>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className={toolbarIconClass}
+                            disabled={disabled}
+                          >
+                            <Copy className="h-4 w-4" />
+                            <span className="sr-only">{t(locale, 'mail.copyToFolder')}</span>
+                          </Button>
+                        </TooltipTrigger>
+                      </PopoverTrigger>
+                      <TooltipContent>{t(locale, 'mail.copyToFolder')}</TooltipContent>
+                      <PopoverContent className="w-60 p-1" align="start">
+                        <div className="max-h-72 overflow-y-auto">
+                          {accountFolders.length === 0 ? (
+                            <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                              {t(locale, 'mail.noFolders')}
+                            </p>
+                          ) : (
+                            accountFolders.map((f) => (
+                              <button
+                                key={f.id}
+                                type="button"
+                                disabled={busy || f.id === mail?.folderId}
+                                className="flex w-full items-center justify-between gap-2 rounded-sm py-1.5 pr-2 text-sm hover:bg-accent disabled:opacity-40"
+                                style={{ paddingLeft: `${0.5 + f.depth * 0.75}rem` }}
+                                onClick={() => void handleCopyToFolder(f.id)}
+                              >
+                                <span className="truncate">{folderPickerLabel(f, locale)}</span>
+                                {f.id === mail?.folderId ? (
+                                  <Check className="size-3.5 shrink-0" />
+                                ) : null}
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                  </Tooltip>
+                  {mail?.isDraft ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={toolbarIconClass}
+                          disabled={disabled}
+                          onClick={handleEditDraft}
+                        >
+                          <Reply className="h-4 w-4" />
+                          <span className="sr-only">{t(locale, 'mail.editDraft')}</span>
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{t(locale, 'mail.editDraft')}</TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  <Separator orientation="vertical" className="mx-1 h-6" />
+                  <Tooltip>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className={toolbarIconClass}
+                            disabled={disabled}
+                          >
+                            <Clock className="h-4 w-4" />
+                            <span className="sr-only">{t(locale, 'mail.snooze')}</span>
+                          </Button>
+                        </TooltipTrigger>
+                      </PopoverTrigger>
+                      <PopoverContent className="flex w-[535px] p-0">
+                        <div className="flex flex-col gap-2 border-r px-2 py-4">
+                          <div className="px-4 text-sm font-medium">
+                            {t(locale, 'mail.snoozeUntil')}
+                          </div>
+                          <div className="grid min-w-[250px] gap-1">
+                            <Button
+                              variant="ghost"
+                              className="justify-start font-normal"
+                              onClick={() => void handleSnooze(addHours(today, 4))}
+                            >
+                              {t(locale, 'mail.laterToday')}{' '}
+                              <span className="ml-auto text-muted-foreground">
+                                {format(addHours(today, 4), 'h:mm a')}
+                              </span>
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              className="justify-start font-normal"
+                              onClick={() => void handleSnooze(addDays(today, 1))}
+                            >
+                              {t(locale, 'mail.tomorrow')}
+                              <span className="ml-auto text-muted-foreground">
+                                {format(addDays(today, 1), 'h:mm a')}
+                              </span>
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              className="justify-start font-normal"
+                              onClick={() => void handleSnooze(nextSaturday(today))}
+                            >
+                              {t(locale, 'mail.thisWeekend')}
+                              <span className="ml-auto text-muted-foreground">
+                                {format(nextSaturday(today), 'h:mm a')}
+                              </span>
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              className="justify-start font-normal"
+                              onClick={() => void handleSnooze(addDays(today, 7))}
+                            >
+                              {t(locale, 'mail.nextWeek')}
+                              <span className="ml-auto text-muted-foreground">
+                                {format(addDays(today, 7), 'h:mm a')}
+                              </span>
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="p-2">
+                          <Calendar
+                            mode="single"
+                            onSelect={(date) => {
+                              if (!date) return;
+                              const until = new Date(date);
+                              until.setHours(18, 0, 0, 0);
+                              void handleSnooze(until);
+                            }}
+                          />
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                    <TooltipContent>{t(locale, 'mail.snooze')}</TooltipContent>
+                  </Tooltip>
+                </>
+              ) : null}
+            </div>
+            {mail ? (
+              <>
+                <div className="ml-auto flex items-center gap-1.5">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className={toolbarIconClass}
+                        disabled={disabled}
+                        onClick={() => handleReply()}
+                      >
+                        <Reply className="h-4 w-4" />
+                        <span className="sr-only">{t(locale, 'mail.reply')}</span>
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t(locale, 'mail.reply')}</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className={toolbarIconClass}
+                        disabled={disabled}
+                        onClick={() => handleReply(true)}
+                      >
+                        <ReplyAll className="h-4 w-4" />
+                        <span className="sr-only">{t(locale, 'mail.replyAll')}</span>
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t(locale, 'mail.replyAll')}</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className={toolbarIconClass}
+                        disabled={disabled}
+                        onClick={handleForward}
+                      >
+                        <Forward className="h-4 w-4" />
+                        <span className="sr-only">{t(locale, 'mail.forward')}</span>
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t(locale, 'mail.forward')}</TooltipContent>
+                  </Tooltip>
                 </div>
-                <div className="p-2">
-                  <Calendar
-                    mode="single"
-                    onSelect={(date) => {
-                      if (!date) return;
-                      const until = new Date(date);
-                      until.setHours(18, 0, 0, 0);
-                      void handleSnooze(until);
-                    }}
-                  />
-                </div>
-              </PopoverContent>
-            </Popover>
-            <TooltipContent>{t(locale, 'mail.snooze')}</TooltipContent>
-          </Tooltip>
-        </div>
-        <div className="ml-auto flex items-center gap-1.5">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={toolbarIconClass}
-                disabled={disabled}
-                onClick={() => handleReply()}
-              >
-                <Reply className="h-4 w-4" />
-                <span className="sr-only">{t(locale, 'mail.reply')}</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t(locale, 'mail.reply')}</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={toolbarIconClass}
-                disabled={disabled}
-                onClick={() => handleReply(true)}
-              >
-                <ReplyAll className="h-4 w-4" />
-                <span className="sr-only">{t(locale, 'mail.replyAll')}</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t(locale, 'mail.replyAll')}</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={toolbarIconClass}
-                disabled={disabled}
-                onClick={handleForward}
-              >
-                <Forward className="h-4 w-4" />
-                <span className="sr-only">{t(locale, 'mail.forward')}</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t(locale, 'mail.forward')}</TooltipContent>
-          </Tooltip>
-        </div>
-        <Separator orientation="vertical" className="mx-2 h-6" />
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className={toolbarIconClass} disabled={disabled}>
-              <MoreVertical className="h-4 w-4" />
-              <span className="sr-only">{t(locale, 'mail.more')}</span>
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            {mail && !mail.isRead ? (
-              <DropdownMenuItem onClick={() => void handlePatch({ isRead: true })}>
-                {t(locale, 'mail.markRead')}
-              </DropdownMenuItem>
+                <Separator orientation="vertical" className="mx-2 h-6" />
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className={toolbarIconClass}
+                      disabled={disabled}
+                    >
+                      <MoreVertical className="h-4 w-4" />
+                      <span className="sr-only">{t(locale, 'mail.more')}</span>
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    {!mail.isRead ? (
+                      <DropdownMenuItem onClick={() => void handlePatch({ isRead: true })}>
+                        {t(locale, 'mail.markRead')}
+                      </DropdownMenuItem>
+                    ) : null}
+                    <DropdownMenuItem onClick={() => void handlePatch({ isRead: false })}>
+                      {t(locale, 'mail.markUnread')}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => void handlePatch({ isStarred: !mail.isStarred })}
+                    >
+                      {t(locale, 'mail.starThread')}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem disabled>{t(locale, 'mail.addLabel')}</DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => {
+                        toggleMuteMessage(mail.id);
+                        if (!mutedMessageIds.includes(mail.id)) {
+                          setSelectedMessage(null);
+                        }
+                      }}
+                    >
+                      {mutedMessageIds.includes(mail.id)
+                        ? t(locale, 'mail.unmuteThread')
+                        : t(locale, 'mail.muteThread')}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </>
             ) : null}
-            <DropdownMenuItem onClick={() => void handlePatch({ isRead: false })}>
-              {t(locale, 'mail.markUnread')}
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => void handlePatch({ isStarred: !mail?.isStarred })}>
-              {t(locale, 'mail.starThread')}
-            </DropdownMenuItem>
-            <DropdownMenuItem disabled>{t(locale, 'mail.addLabel')}</DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={() => {
-                if (!mail) return;
-                toggleMuteMessage(mail.id);
-                if (!mutedMessageIds.includes(mail.id)) {
-                  setSelectedMessage(null);
-                }
-              }}
-            >
-              {mail && mutedMessageIds.includes(mail.id)
-                ? t(locale, 'mail.unmuteThread')
-                : t(locale, 'mail.muteThread')}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-      <Separator />
+          </div>
+          <Separator />
+        </>
+      ) : null}
       {actionError ? (
         <div className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">
           {actionError}
@@ -725,7 +817,7 @@ export function MailDisplay() {
           </div>
         </div>
       ) : (
-        <EmptyState icon={MailOpen} title={t(locale, 'mail.selectMessage')} />
+        <EmptyState icon={MailOpen} title={t(locale, 'mail.selectMessage')} quiet />
       )}
     </div>
   );

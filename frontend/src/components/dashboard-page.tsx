@@ -2,16 +2,13 @@
  * Dashboard page: mail volume, top senders, and per-account unread.
  *
  * Data comes from `GET /api/v1/messages/stats`; per-account unread/messages
- * are derived from the folder counts already in the mail store. Storage has
- * no backend endpoint yet, so that KPI renders an honest empty state.
+ * are derived from the folder counts already in the mail store.
  *
- * Mirrors the v3 main-screen conventions: responsive single-column layout
- * under 1024px (same breakpoint as the mail three-pane), ink chart bars
- * (`--primary` is ink for the stamp / sparse solid actions), today's bar in the unread gold,
- * and locale-correct date letters (zh renders via date-fns zhCN).
+ * Mirrors the mail shell: cool neutrals, hairline panels (no heavy card stack),
+ * ink chart bars with today's bar in unread gold, locale-correct date letters.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { format, parseISO } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { ArrowLeft, BarChart3, Inbox, Users } from 'lucide-react';
@@ -215,18 +212,20 @@ function DashboardBody({
 
   return (
     <>
-      <div
+      <section
         className={cn(
-          'stagger-in grid gap-3 pt-6',
-          mobile ? 'grid-cols-2 px-4' : 'grid-cols-4 gap-4 px-8',
+          'stagger-in overflow-hidden rounded-[10px] border border-border/70 bg-card',
+          mobile
+            ? 'mx-4 mt-6 grid grid-cols-2 divide-x divide-y divide-border/60'
+            : 'mx-8 mt-6 grid grid-cols-4 divide-x divide-border/60',
         )}
       >
-        <KpiCard
+        <KpiCell
           label={t(locale, 'dash.unread')}
           value={stats.totals.unread}
           sub={t(locale, 'mail.folder.inbox')}
         />
-        <KpiCard
+        <KpiCell
           label={t(locale, 'dash.receivedToday')}
           value={daily.length > 0 ? daily[daily.length - 1].received : 0}
           sub={new Date().toLocaleDateString(locale === 'zh' ? 'zh-CN' : 'en-US', {
@@ -234,32 +233,33 @@ function DashboardBody({
             day: 'numeric',
           })}
         />
-        <KpiCard
+        <KpiCell
           label={t(locale, 'dash.sentThisWeek')}
           value={stats.totals.sent}
           sub={t(locale, `dash.range${days}`)}
         />
-        <KpiCard
-          label={t(locale, 'dash.storage')}
-          value="—"
-          sub={t(locale, 'dash.storageUnavailable')}
+        <KpiCell
+          label={t(locale, 'dash.accounts')}
+          value={accountStats.length}
+          sub={t(locale, 'dash.accountsConnected')}
         />
-      </div>
+      </section>
 
       <section
         className={cn(
-          'rounded-[10px] border border-border bg-card px-5 py-4',
+          'rounded-[10px] border border-border/70 bg-card px-5 py-4',
           mobile ? 'mx-4 mt-3' : 'mx-8 mt-4',
         )}
       >
-        <h2 className="text-[13.5px] font-semibold">{t(locale, 'dash.volume', { days })}</h2>
+        <h2 className="text-[13px] font-medium text-foreground">
+          {t(locale, 'dash.volume', { days })}
+        </h2>
         <div className="mt-3 flex h-[140px] items-end gap-1.5">
           {daily.map((d, i) => (
             <div key={d.date} className="flex h-full flex-1 items-end">
               <div
                 className={cn(
                   'w-full rounded-sm',
-                  // Ink bars; today alone carries the unread gold.
                   i === daily.length - 1 ? 'bg-unread' : 'bg-foreground',
                 )}
                 style={{
@@ -285,44 +285,46 @@ function DashboardBody({
           mobile ? 'grid-cols-1 px-4' : 'grid-cols-2 gap-4 px-8 py-4',
         )}
       >
-        <section className="rounded-[10px] border border-border bg-card px-5 py-4">
-          <h2 className="text-[13.5px] font-semibold">{t(locale, 'dash.topSenders')}</h2>
+        <section className="rounded-[10px] border border-border/70 bg-card px-5 py-4">
+          <h2 className="text-[13px] font-medium">{t(locale, 'dash.topSenders')}</h2>
           {stats.topSenders.length === 0 ? (
-            <EmptyState icon={Users} title={t(locale, 'dash.topSenders')} />
+            <EmptyState icon={Users} title={t(locale, 'dash.topSenders')} quiet />
           ) : (
             <ul className="mt-3 space-y-2.5">
               {stats.topSenders.map((sender) => (
                 <li key={sender.address} className="flex items-center gap-2.5">
-                  <span className="flex size-6 items-center justify-center rounded-md bg-muted text-[10px] font-medium text-muted-foreground">
+                  <span className="flex size-6 items-center justify-center rounded-md bg-accent text-[10px] font-medium text-muted-foreground">
                     {getInitials(sender.name ?? sender.address)}
                   </span>
                   <span className="flex-1 truncate text-[13px]">
                     {sender.name ?? sender.address}
                   </span>
-                  <span className="text-[11.5px] text-muted-foreground">{sender.count}</span>
+                  <span className="text-[11.5px] tabular-nums text-muted-foreground">
+                    {sender.count}
+                  </span>
                 </li>
               ))}
             </ul>
           )}
         </section>
 
-        <section className="rounded-[10px] border border-border bg-card px-5 py-4">
-          <h2 className="text-[13.5px] font-semibold">{t(locale, 'dash.byAccount')}</h2>
+        <section className="rounded-[10px] border border-border/70 bg-card px-5 py-4">
+          <h2 className="text-[13px] font-medium">{t(locale, 'dash.byAccount')}</h2>
           {accountStats.length === 0 ? (
-            <EmptyState icon={Inbox} title={t(locale, 'dash.byAccount')} />
+            <EmptyState icon={Inbox} title={t(locale, 'dash.byAccount')} quiet />
           ) : (
             <div className="mt-3 space-y-3.5">
               {accountStats.map(({ account, unread, total }) => (
                 <div key={account.id}>
                   <div className="flex items-baseline justify-between gap-2">
                     <span className="truncate text-[13px]">{account.displayName}</span>
-                    <span className="text-[11.5px] text-muted-foreground">
+                    <span className="text-[11.5px] tabular-nums text-muted-foreground">
                       {unread} / {total}
                     </span>
                   </div>
-                  <div className="mt-1 h-2 rounded bg-accent">
+                  <div className="mt-1 h-1.5 rounded-full bg-accent">
                     <div
-                      className="h-2 rounded bg-foreground"
+                      className="h-1.5 rounded-full bg-foreground"
                       style={{ width: `${(total / maxAccountTotal) * 100}%` }}
                     />
                   </div>
@@ -353,13 +355,13 @@ function fillDailySeries(daily: DailyVolume[], days: number): DailyVolume[] {
   return series;
 }
 
-function KpiCard({ label, value, sub }: { label: string; value: React.ReactNode; sub: string }) {
+function KpiCell({ label, value, sub }: { label: string; value: ReactNode; sub: string }) {
   return (
-    <div className="rounded-[10px] border border-border bg-card p-4">
+    <div className="p-4">
       <p className="text-[10.5px] font-semibold uppercase tracking-[0.8px] text-muted-foreground">
         {label}
       </p>
-      <p className="mt-1.5 font-display text-2xl font-medium">{value}</p>
+      <p className="mt-1.5 font-display text-2xl font-medium tabular-nums">{value}</p>
       <p className="mt-0.5 text-[11.5px] text-muted-foreground">{sub}</p>
     </div>
   );

@@ -77,6 +77,7 @@ pub fn routes() -> Router<AuthState> {
             axum::routing::delete(discard_draft),
         )
         .route("/api/v1/messages/{message_id}/move", post(move_message))
+        .route("/api/v1/messages/{message_id}/copy", post(copy_message))
         .route("/api/v1/messages/{message_id}/trash", post(trash_message))
         .route(
             "/api/v1/messages/{message_id}/archive",
@@ -1725,6 +1726,69 @@ pub(crate) async fn move_message(
     })))
 }
 
+/// POST /api/v1/messages/{id}/copy — duplicate into another folder of the
+/// same account (cross-account copies are rejected). Leaves the original.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CopyMessageRequest {
+    folder_id: String,
+}
+
+pub(crate) async fn copy_message(
+    State(state): State<AuthState>,
+    Path(message_id): Path<String>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<CopyMessageRequest>,
+) -> Result<Json<serde_json::Value>, SyncError> {
+    let db = state.db();
+    let row = load_message_row(db, &user_id, &message_id).await?;
+
+    let folder_value = id_value(db, &body.folder_id)?;
+    let dest = query_first(db, |q| {
+        q.expr_as(Expr::col(folder::Column::Id), Alias::new("id"))
+            .expr_as(
+                Expr::col(folder::Column::AccountId),
+                Alias::new("account_id"),
+            )
+            .expr_as(
+                Expr::col(folder::Column::ExternalId),
+                Alias::new("external_id"),
+            )
+            .expr_as(Expr::col(folder::Column::Name), Alias::new("name"))
+            .from(folder::Entity)
+            .and_where(Expr::col(folder::Column::Id).eq(Expr::val(folder_value)));
+    })
+    .await?
+    .ok_or(SyncError::MessageNotFound)?;
+
+    let dest_id = row_id(&dest, "id").map_err(orm_err)?;
+    let dest_account = row_id(&dest, "account_id").map_err(orm_err)?;
+    if dest_account != row.account_id {
+        return Err(SyncError::InvalidInput(
+            "cross-account copies are not supported; pick a folder of the same account".into(),
+        ));
+    }
+    if dest_id == row.folder_id {
+        return Ok(Json(serde_json::json!({
+            "status": "ok",
+            "action": "noop",
+            "folderId": dest_id,
+        })));
+    }
+
+    let external_id: Option<String> = dest.try_get("", "external_id").map_err(orm_err)?;
+    let name: String = dest.try_get("", "name").map_err(orm_err)?;
+    let dest_name = external_id.clone().unwrap_or(name);
+
+    apply_message_copy(db, &user_id, &row, external_id, dest_name).await?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "action": "copied",
+        "folderId": dest_id,
+    })))
+}
+
 /// POST /api/v1/drafts — create or replace a draft in the account's Drafts
 /// folder. IMAP: APPEND (+ delete-and-expunge of the replaced draft), then a
 /// targeted account sync so the appended copy gains a local row (located via
@@ -2194,6 +2258,47 @@ pub(crate) async fn apply_message_move(
 
     update_folder_counts(db, &row.folder_id).await?;
     update_folder_counts(db, dest_id).await?;
+    Ok(())
+}
+
+/// Server-side copy (IMAP UID COPY / JMAP mailboxIds union). Does not rewrite
+/// the local `folder_id` — the duplicate appears after the next sync.
+pub(crate) async fn apply_message_copy(
+    db: &DbPool,
+    user_id: &str,
+    row: &MessageRow,
+    dest_external: Option<String>,
+    dest_name: String,
+) -> Result<(), SyncError> {
+    match row.protocol.as_str() {
+        "imap" => {
+            let uid = parse_imap_uid(row.external_id.as_deref())?;
+            let (mut client, _) = connect_imap_for_account(db, user_id, &row.account_id).await?;
+            client.select(&row.folder_name).await?;
+            client.copy_uid(uid, &dest_name).await?;
+        }
+        "jmap" => {
+            let email_id = row
+                .external_id
+                .as_deref()
+                .ok_or_else(|| SyncError::InvalidInput("JMAP message has no server id".into()))?;
+            let mailbox_id = dest_external.ok_or_else(|| {
+                SyncError::InvalidInput("JMAP target folder has no server id".into())
+            })?;
+            let seam = connect_jmap_for_account(db, user_id, &row.account_id).await?;
+            if let Err(err) = seam.add_email_mailbox(email_id, &mailbox_id).await {
+                if err.is_auth() {
+                    crate::sync::jmap_client::JmapSeam::evict(&row.account_id);
+                }
+                return Err(err.into());
+            }
+        }
+        other => {
+            return Err(SyncError::InvalidInput(format!(
+                "unsupported receive protocol: {other}"
+            )));
+        }
+    }
     Ok(())
 }
 

@@ -6,6 +6,7 @@ import { api } from '@/lib/api-client';
 import {
   actOnMessages,
   canDropConversation,
+  copyMessages,
   editDraftFromList,
   ensureFullMessage,
   moveMessages,
@@ -73,6 +74,20 @@ describe('moveMessages', () => {
     useUIStore.setState({ selectedMessageId: 'm1' });
     await moveMessages(['m1'], 'f2');
     expect(useUIStore.getState().selectedMessageId).toBeNull();
+  });
+});
+
+describe('copyMessages', () => {
+  it('copies each message without removing locally', async () => {
+    const res = await copyMessages(['m1', 'm2'], 'f2');
+    expect(res.error).toBeNull();
+    expect(res.done).toEqual(['m1', 'm2']);
+    expect(mockedApi).toHaveBeenCalledWith('/messages/m1/copy', {
+      method: 'POST',
+      body: JSON.stringify({ folderId: 'f2' }),
+    });
+    expect(useMailStore.getState().messages.m1).toBeDefined();
+    expect(useMailStore.getState().messages.m2).toBeDefined();
   });
 });
 

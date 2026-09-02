@@ -63,6 +63,21 @@ export function moveMessages(
   );
 }
 
+/** Copy messages into a folder (same account). Leaves originals in place. */
+export function copyMessages(
+  messageIds: string[],
+  folderId: string,
+  onProgress?: (doneCount: number) => void,
+): Promise<BatchResult> {
+  return runBatch(
+    messageIds,
+    async (id) => {
+      await api(`/messages/${id}/copy`, { method: 'POST', body: JSON.stringify({ folderId }) });
+    },
+    onProgress,
+  );
+}
+
 /** Archive / spam / trash every message. */
 export function actOnMessages(
   messageIds: string[],

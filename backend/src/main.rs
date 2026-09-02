@@ -663,6 +663,48 @@ mod tests {
         assert_eq!(json["action"].as_str(), Some("noop"));
     }
 
+    #[tokio::test]
+    async fn http_copy_message_rejects_cross_account_folder() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (_, _, message_id) = seed_account_folder_message(&db, &user_id).await;
+        let foreign = seed_foreign_folder(&db, &user_id).await;
+
+        let (status, json) = request_json(
+            app,
+            Method::POST,
+            &format!("/api/v1/messages/{message_id}/copy"),
+            Some(&serde_json::json!({ "folderId": foreign })),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("cross-account")
+        );
+    }
+
+    #[tokio::test]
+    async fn http_copy_message_same_folder_is_noop() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (_, folder_id, message_id) = seed_account_folder_message(&db, &user_id).await;
+
+        let (status, json) = request_json(
+            app,
+            Method::POST,
+            &format!("/api/v1/messages/{message_id}/copy"),
+            Some(&serde_json::json!({ "folderId": folder_id })),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["action"].as_str(), Some("noop"));
+    }
+
     /// A drafts-role folder + one draft-flagged message on the seeded account.
     async fn seed_draft_message(db: &DbPool, user_id: &str) -> (String, String) {
         let (_, folder_id, _) = seed_account_folder_message(db, user_id).await;

@@ -707,6 +707,18 @@ impl ImapClient {
         .await
     }
 
+    /// Copy a message UID into another mailbox (IMAP `UID COPY`). Leaves the source.
+    pub async fn copy_uid(&mut self, uid: u32, destination: &str) -> Result<(), ImapError> {
+        timed(COMMAND_TIMEOUT, async {
+            self.session
+                .uid_copy(uid.to_string(), destination)
+                .await
+                .map_err(ImapError::Imap)?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Log out and close the connection.
     #[allow(dead_code)]
     pub async fn logout(mut self) -> Result<(), ImapError> {

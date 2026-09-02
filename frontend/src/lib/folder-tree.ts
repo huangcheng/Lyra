@@ -71,3 +71,46 @@ export function buildRoleChildren(
 ): FolderTreeNode[] {
   return makeTree(accountFolders).childrenOf(roleFolderId);
 }
+
+/** One row in a move-to picker: same nesting as the sidebar, flattened for menus. */
+export interface MoveFolderEntry {
+  id: string;
+  name: string;
+  role?: string | null;
+  depth: number;
+}
+
+function flattenTree(nodes: FolderTreeNode[], depth: number): MoveFolderEntry[] {
+  const rows: MoveFolderEntry[] = [];
+  for (const node of nodes) {
+    rows.push({ id: node.id, name: node.title, depth });
+    rows.push(...flattenTree(node.children, depth + 1));
+  }
+  return rows;
+}
+
+/**
+ * Move-to destination list for one account: role folders (with nested
+ * children), then the custom folder tree — never a cross-account or
+ * alphabetically flattened dump.
+ */
+export function buildAccountMoveFolderEntries(
+  accountFolders: MailFolder[],
+  allFolders: Record<string, MailFolder>,
+): MoveFolderEntry[] {
+  const rows: MoveFolderEntry[] = [];
+  const roleFolders = accountFolders.filter((folder) => folder.role).sort(sortFolders);
+
+  for (const role of roleFolders) {
+    rows.push({
+      id: role.id,
+      name: role.name,
+      role: role.role,
+      depth: 0,
+    });
+    rows.push(...flattenTree(buildRoleChildren(role.id, accountFolders), 1));
+  }
+
+  rows.push(...flattenTree(buildCustomFolderTree(accountFolders, allFolders), 0));
+  return rows;
+}

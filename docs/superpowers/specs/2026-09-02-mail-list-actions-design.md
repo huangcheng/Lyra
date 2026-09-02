@@ -41,8 +41,9 @@ Consequences for this design:
    session-local `toggleMuteMessage` — it mutes every message of the
    conversation that is not already muted.
 6. Deferred ideas (not in scope): Open in new window, Copy link, Pin, Flag
-   colors, Unsubscribe, Forward as attachment, Copy to folder, Apply Rules,
-   Download .eml.
+   colors, Unsubscribe, Forward as attachment, Apply Rules,
+   Download .eml. **Copy to folder** shipped separately in
+   `2026-09-02-mail-copy-to-folder-design.md` (same-account only).
 
 Three frontend-only additions to the mail list. No backend or API changes; every
 action reuses existing `/api/v1` endpoints.

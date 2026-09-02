@@ -674,6 +674,35 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
 
+  /api/v1/messages/{message_id}/copy:
+    post:
+      tags: [messages]
+      summary: Copy a message into another folder of its own account
+      description: >
+        IMAP: UID COPY (source unchanged). JMAP: Email/set mailboxIds union
+        (add destination, keep existing). Cross-account copies are rejected
+        400; same-folder copy is a 200 noop. The local duplicate appears after
+        the next sync.
+      parameters:
+        - $ref: "#/components/parameters/MessageId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [folderId]
+              properties:
+                folderId:
+                  type: string
+      responses:
+        "200":
+          description: 'JSON `{status, action: copied|noop, folderId}`'
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
   /api/v1/messages/{message_id}/trash:
     post:
       tags: [messages]

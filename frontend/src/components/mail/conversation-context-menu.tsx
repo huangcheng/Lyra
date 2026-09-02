@@ -12,6 +12,7 @@ import {
   BellOff,
   Check,
   Clock,
+  Copy,
   FolderInput,
   Forward,
   MailOpen,
@@ -36,10 +37,11 @@ import {
   ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
-import { t } from '@/i18n';
+import { t, type SupportedLocale } from '@/i18n';
 import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import {
   actOnMessages,
+  copyMessages,
   editDraftFromList,
   forwardFromList,
   moveMessages,
@@ -48,8 +50,13 @@ import {
   snoozeMessages,
 } from '@/lib/conversation-actions';
 import type { Conversation } from '@/lib/conversation';
+import { buildAccountMoveFolderEntries, type MoveFolderEntry } from '@/lib/folder-tree';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
+
+function folderPickerLabel(entry: MoveFolderEntry, locale: SupportedLocale): string {
+  return entry.role ? t(locale, `mail.folder.${entry.role}`) : entry.name;
+}
 
 /** Filter input that focuses itself on mount (i.e. when the submenu opens).
  *  Radix omits `onOpenAutoFocus` from SubContent props, and its own mount
@@ -80,25 +87,49 @@ function FilterInput({
   );
 }
 
-/** Move-to submenu with a folder-name filter (Fastmail/Yandex pattern). */
-function MoveToSub({ convo, onMove }: { convo: Conversation; onMove: (folderId: string) => void }) {
+/** Move/Copy submenu: same account only, nested like the sidebar tree. */
+function FolderPickerSub({
+  convo,
+  labelKey,
+  icon,
+  onPick,
+}: {
+  convo: Conversation;
+  labelKey: 'mail.moveToFolder' | 'mail.copyToFolder';
+  icon: ReactNode;
+  onPick: (folderId: string) => void;
+}) {
   const locale = useUIStore((s) => s.locale);
   const folders = useMailStore((s) => s.folders);
+  const account = useMailStore((s) => s.getAccountById(convo.latest.accountId));
   const [query, setQuery] = useState('');
-  const accountFolders = Object.values(folders)
-    .filter((f) => f.accountId === convo.latest.accountId)
-    .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+  const entries = buildAccountMoveFolderEntries(
+    Object.values(folders).filter((f) => f.accountId === convo.latest.accountId),
+    folders,
+  );
   const q = query.trim().toLowerCase();
-  const shown = q ? accountFolders.filter((f) => f.name.toLowerCase().includes(q)) : accountFolders;
+  const shown = q
+    ? entries
+        .filter((e) => {
+          const label = folderPickerLabel(e, locale).toLowerCase();
+          return label.includes(q) || e.name.toLowerCase().includes(q);
+        })
+        .map((e) => ({ ...e, depth: 0 }))
+    : entries;
   const currentFolderIds = new Set(convo.messages.map((m) => m.folderId));
 
   return (
     <ContextMenuSub>
       <ContextMenuSubTrigger>
-        <FolderInput />
-        {t(locale, 'mail.moveToFolder')}
+        {icon}
+        {t(locale, labelKey)}
       </ContextMenuSubTrigger>
       <ContextMenuSubContent className="w-56">
+        {account ? (
+          <ContextMenuLabel className="truncate">
+            {account.displayName || account.emailAddress}
+          </ContextMenuLabel>
+        ) : null}
         <div className="px-1 pb-1">
           <FilterInput
             value={query}
@@ -114,9 +145,10 @@ function MoveToSub({ convo, onMove }: { convo: Conversation; onMove: (folderId: 
               <ContextMenuItem
                 key={f.id}
                 disabled={currentFolderIds.has(f.id)}
-                onSelect={() => onMove(f.id)}
+                onSelect={() => onPick(f.id)}
+                style={{ paddingLeft: `${0.5 + f.depth * 0.75}rem` }}
               >
-                <span className="truncate">{f.name}</span>
+                <span className="truncate">{folderPickerLabel(f, locale)}</span>
                 {currentFolderIds.has(f.id) ? <Check className="ml-auto" /> : null}
               </ContextMenuItem>
             ))
@@ -196,7 +228,18 @@ export function ConversationContextMenu({
           <Trash2 />
           {t(locale, 'mail.moveToTrash')}
         </ContextMenuItem>
-        <MoveToSub convo={convo} onMove={(folderId) => run(moveMessages(ids, folderId))} />
+        <FolderPickerSub
+          convo={convo}
+          labelKey="mail.moveToFolder"
+          icon={<FolderInput />}
+          onPick={(folderId) => run(moveMessages(ids, folderId))}
+        />
+        <FolderPickerSub
+          convo={convo}
+          labelKey="mail.copyToFolder"
+          icon={<Copy />}
+          onPick={(folderId) => run(copyMessages(ids, folderId))}
+        />
         <ContextMenuSeparator />
         {convo.unreadCount > 0 ? (
           <ContextMenuItem onSelect={() => run(patchMessages(ids, { isRead: true }))}>

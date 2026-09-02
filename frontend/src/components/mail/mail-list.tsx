@@ -24,6 +24,7 @@ import type { ConversationDragData } from '@/lib/conversation-actions';
 import { fetchMessagesForView } from '@/lib/load-mail-messages';
 import { ALL_ACCOUNTS, mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { getInitials, avatarTone, cn } from '@/lib/utils';
+import { useSyncingAccounts } from '@/lib/use-syncing-accounts';
 import { syncEvents$ } from '@/rxjs/sync-events';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
@@ -118,6 +119,7 @@ export function MailList() {
   const listTab = useUIStore((s) => s.listTab);
   const mutedMessageIds = useUIStore((s) => s.mutedMessageIds);
   const token = useAuthStore((s) => s.token);
+  const syncing = useSyncingAccounts().size > 0;
   const upsertMessage = useMailStore((s) => s.upsertMessage);
   const removeMessage = useMailStore((s) => s.removeMessage);
   const replaceMessagesForView = useMailStore((s) => s.replaceMessagesForView);
@@ -279,8 +281,10 @@ export function MailList() {
     return (
       <EmptyState
         icon={isSearch ? SearchX : Inbox}
-        title={t(locale, 'mail.noMessages')}
-        hint={isSearch ? undefined : t(locale, 'mail.noMessagesHint')}
+        title={
+          !isSearch && syncing ? t(locale, 'mail.noMessagesSyncing') : t(locale, 'mail.noMessages')
+        }
+        hint={isSearch || syncing ? undefined : t(locale, 'mail.noMessagesHint')}
       />
     );
   }
@@ -359,7 +363,7 @@ export function MailList() {
                     role="button"
                     tabIndex={0}
                     className={cn(
-                      'group relative flex w-full cursor-pointer gap-3 border-b border-border/60 px-4 py-3 text-left text-sm transition-[background-color,box-shadow] duration-150 ease-out-quart hover:bg-accent/40',
+                      'group relative flex w-full cursor-pointer gap-3 border-b border-border/60 px-4 py-2 text-left text-sm transition-[background-color,box-shadow] duration-150 ease-out-quart hover:bg-accent/40',
                       isSelected &&
                         'bg-secondary shadow-[inset_2px_0_0_var(--color-foreground)] hover:bg-secondary',
                     )}
@@ -455,18 +459,18 @@ export function MailList() {
                         {item.subject || '—'}
                       </div>
                       {showSnippet ? (
-                        <div className="mt-1 flex items-start gap-1 text-xs leading-relaxed text-muted-foreground">
+                        <div className="mt-0.5 flex items-center gap-1 text-xs leading-snug text-muted-foreground">
                           {hasAttachments ? (
                             <Paperclip
-                              className="mt-0.5 size-3 shrink-0 text-ter-foreground"
+                              className="size-3 shrink-0 text-ter-foreground"
                               aria-hidden
                             />
                           ) : null}
-                          <span className="line-clamp-2 min-w-0">{snippet.slice(0, 300)}</span>
+                          <span className="min-w-0 truncate">{snippet.slice(0, 160)}</span>
                         </div>
                       ) : null}
                       {labels.length ? (
-                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
                           {labels.map((label) => (
                             <Badge
                               key={label}
