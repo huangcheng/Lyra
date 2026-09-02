@@ -51,6 +51,7 @@ describe('buildReplyDraft', () => {
   it('replies to the sender and prefixes Re:', () => {
     const d = buildReplyDraft(msg(), false, accounts);
     expect(d.mode).toBe('reply');
+    expect(d.accountId).toBe('acc1');
     expect(d.to).toBe('alice@example.com');
     expect(d.subject).toBe('Re: Hello');
     expect(d.initialHtml).toContain('plain body');
@@ -81,6 +82,7 @@ describe('buildForwardDraft', () => {
       accounts,
     );
     expect(d.mode).toBe('forward');
+    expect(d.accountId).toBe('acc1');
     expect(d.subject).toBe('Fwd: Hello');
     expect(d.forwardAttachments).toEqual([{ id: 'a1', filename: 'x.pdf', contentType: undefined }]);
   });

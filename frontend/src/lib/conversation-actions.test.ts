@@ -6,6 +6,7 @@ import { api } from '@/lib/api-client';
 import {
   actOnMessages,
   canDropConversation,
+  editDraftFromList,
   ensureFullMessage,
   moveMessages,
   patchMessages,
@@ -132,6 +133,17 @@ describe('replyFromList', () => {
     const err = await replyFromList('m1', false);
     expect(err).toBe('network down');
     expect(useUIStore.getState().composeOpen).toBe(false);
+  });
+});
+
+describe('editDraftFromList', () => {
+  it("opens compose carrying the source message's accountId", async () => {
+    useMailStore.setState({ messages: { m1: msg('m1', { bodyText: 'cached body' }) } });
+    const err = await editDraftFromList('m1');
+    expect(err).toBeNull();
+    expect(useUIStore.getState().composeDraft).toEqual(
+      expect.objectContaining({ mode: 'draft', accountId: 'acc1', draftMessageId: 'm1' }),
+    );
   });
 });
 

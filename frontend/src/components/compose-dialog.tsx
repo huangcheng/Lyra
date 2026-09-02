@@ -28,6 +28,7 @@ import { formatBytes } from '@/lib/attachments';
 import { signatureHtml } from '@/lib/compose-html';
 import { htmlToText } from '@/lib/html-text';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
+import { resolveFromAccountId } from '@/lib/resolve-from-account';
 import { cn } from '@/lib/utils';
 import {
   listOpengpgKeys,
@@ -58,6 +59,7 @@ export function ComposeDialog() {
   const setComposeOpen = useUIStore((s) => s.setComposeOpen);
   const clearComposeDraft = useUIStore((s) => s.clearComposeDraft);
   const selectedAccountId = useUIStore((s) => s.selectedAccountId);
+  const defaultAccountId = useUIStore((s) => s.defaultAccountId);
   const accounts = useMailStore((s) => s.accounts);
 
   const [fromAccountId, setFromAccountId] = useState('');
@@ -133,8 +135,12 @@ export function ComposeDialog() {
     // draft mid-compose (observed live: autosave → push → form reset).
     if (seededForRef.current === composeDraft) return;
     seededForRef.current = composeDraft;
-    const effectiveFrom =
-      selectedAccountId === ALL_ACCOUNTS ? (accounts[0]?.id ?? '') : selectedAccountId;
+    const effectiveFrom = resolveFromAccountId({
+      draftAccountId: composeDraft?.accountId,
+      selectedAccountId,
+      defaultAccountId,
+      accounts,
+    });
     setForm({
       to: '',
       cc: '',
