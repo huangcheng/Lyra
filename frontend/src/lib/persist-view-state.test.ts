@@ -17,7 +17,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   useAuthStore.getState().clearSession();
-  useUIStore.getState().setAccountOrder([]);
+  useUIStore.setState({ accountOrder: [], defaultAccountId: null });
 });
 
 describe('applyViewState accountOrder', () => {
@@ -39,10 +39,6 @@ describe('applyViewState accountOrder', () => {
 });
 
 describe('applyViewState defaultAccountId', () => {
-  beforeEach(() => {
-    useUIStore.setState({ defaultAccountId: null });
-  });
-
   it('restores a valid string', () => {
     applyViewState({ defaultAccountId: 'acc-1' });
     expect(useUIStore.getState().defaultAccountId).toBe('acc-1');
