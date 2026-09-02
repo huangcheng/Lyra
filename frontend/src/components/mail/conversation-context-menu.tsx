@@ -23,7 +23,7 @@ import {
   StarOff,
   Trash2,
 } from 'lucide-react';
-import { useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 import {
   ContextMenu,
@@ -50,12 +50,40 @@ import type { Conversation } from '@/lib/conversation';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 
+/** Filter input that focuses itself on mount (i.e. when the submenu opens).
+ *  Radix omits `onOpenAutoFocus` from SubContent props, and its own mount
+ *  focus runs in a parent effect — so we focus in a rAF after it. */
+function FilterInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => ref.current?.focus());
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  return (
+    <input
+      ref={ref}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={(e) => e.stopPropagation()}
+      placeholder={placeholder}
+      className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm outline-none focus:border-ring"
+    />
+  );
+}
+
 /** Move-to submenu with a folder-name filter (Fastmail/Yandex pattern). */
 function MoveToSub({ convo, onMove }: { convo: Conversation; onMove: (folderId: string) => void }) {
   const locale = useUIStore((s) => s.locale);
   const folders = useMailStore((s) => s.folders);
   const [query, setQuery] = useState('');
-  const filterRef = useRef<HTMLInputElement>(null);
   const accountFolders = Object.values(folders)
     .filter((f) => f.accountId === convo.latest.accountId)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
@@ -69,21 +97,12 @@ function MoveToSub({ convo, onMove }: { convo: Conversation; onMove: (folderId: 
         <FolderInput />
         {t(locale, 'mail.moveToFolder')}
       </ContextMenuSubTrigger>
-      <ContextMenuSubContent
-        className="w-56"
-        onOpenAutoFocus={(e) => {
-          e.preventDefault();
-          filterRef.current?.focus();
-        }}
-      >
+      <ContextMenuSubContent className="w-56">
         <div className="px-1 pb-1">
-          <input
-            ref={filterRef}
+          <FilterInput
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => e.stopPropagation()}
+            onChange={setQuery}
             placeholder={t(locale, 'mail.filterFolders')}
-            className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm outline-none focus:border-ring"
           />
         </div>
         <div className="max-h-64 overflow-y-auto">

@@ -837,7 +837,7 @@ import {
   StarOff,
   Trash2,
 } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 import {
   ContextMenu,
@@ -863,6 +863,35 @@ import {
 import type { Conversation } from '@/lib/conversation';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
+
+/** Filter input that focuses itself on mount (i.e. when the submenu opens).
+ *  Radix omits `onOpenAutoFocus` from SubContent props, and its own mount
+ *  focus runs in a parent effect — so we focus in a rAF after it. */
+function FilterInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => ref.current?.focus());
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  return (
+    <input
+      ref={ref}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={(e) => e.stopPropagation()}
+      placeholder={placeholder}
+      className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm outline-none focus:border-ring"
+    />
+  );
+}
 
 /** Move-to submenu with a folder-name filter (Fastmail/Yandex pattern). */
 function MoveToSub({
@@ -890,21 +919,12 @@ function MoveToSub({
         <FolderInput />
         {t(locale, 'mail.moveToFolder')}
       </ContextMenuSubTrigger>
-      <ContextMenuSubContent
-        className="w-56"
-        onOpenAutoFocus={(e) => {
-          e.preventDefault();
-          document.getElementById('move-to-filter')?.focus();
-        }}
-      >
+      <ContextMenuSubContent className="w-56">
         <div className="px-1 pb-1">
-          <input
-            id="move-to-filter"
+          <FilterInput
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => e.stopPropagation()}
+            onChange={setQuery}
             placeholder={t(locale, 'mail.filterFolders')}
-            className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm outline-none focus:border-ring"
           />
         </div>
         <div className="max-h-64 overflow-y-auto">

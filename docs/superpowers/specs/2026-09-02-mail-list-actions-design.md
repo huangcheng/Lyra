@@ -72,10 +72,10 @@ Users drag a conversation row from the mail list onto a sidebar folder to move i
   target folder, moved messages appear on the next `sync_complete` refetch —
   identical to today's move-from-reader behavior.
 - **Errors**: the move endpoint is synchronous-with-remote. On failure, stop the
-  loop, keep remaining messages in place, and show a short inline error line at
-  the top of the mail list (mirroring `mail-display.tsx`'s `actionError`
-  pattern; the app has no toast system). A subtle "Moving…" indicator shows on
-  the list while the loop runs.
+  loop and keep remaining messages in place. Progress and errors surface as a
+  transient floating status chip (auto-dismiss ~6s) rendered by the DnD
+  provider — the provider lives above both panes, so an in-list banner would
+  need lifted state for no real gain (the app has no toast system).
 
 ## 2. Context menu
 
