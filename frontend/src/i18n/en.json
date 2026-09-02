@@ -288,6 +288,8 @@
     "accounts": {
       "title": "Mail Accounts",
       "add": "Add Account",
+      "setDefault": "Set as default",
+      "defaultBadge": "Default",
       "edit": "Edit Account",
       "empty": "No accounts configured. Add your first mail account to get started.",
       "confirmDelete": "Are you sure you want to delete this account?",

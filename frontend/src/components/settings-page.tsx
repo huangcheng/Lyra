@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
-import { Flag, KeyRound, Plus, Shield, SlidersHorizontal, Users, X } from 'lucide-react';
+import { Flag, KeyRound, Plus, Shield, SlidersHorizontal, Star, Users, X } from 'lucide-react';
 import { t } from '../i18n';
 import { SlimPageNav, type SlimNavItem } from '@/components/slim-page-nav';
 import { FolderRoleMapping } from './folder-role-mapping';
@@ -117,6 +117,8 @@ export function SettingsPage() {
   const theme = useUIStore((s) => s.theme);
   const setTheme = useUIStore((s) => s.setTheme);
   const markReadPolicy = useUIStore((s) => s.markReadPolicy);
+  const defaultAccountId = useUIStore((s) => s.defaultAccountId);
+  const setDefaultAccount = useUIStore((s) => s.setDefaultAccount);
   const token = useAuthStore((s) => s.token);
   const clearSession = useAuthStore((s) => s.clearSession);
   const navigate = useNavigate();
@@ -1049,6 +1051,12 @@ export function SettingsPage() {
                             </span>
                           )}
                           <span>{account.protocol.toUpperCase()}</span>
+                          {defaultAccountId === account.id && (
+                            <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                              <Star size={11} className="fill-current" />
+                              {t(locale, 'settings.accounts.defaultBadge')}
+                            </span>
+                          )}
                           {account.displayName && account.displayName !== account.emailAddress && (
                             <span>{account.displayName}</span>
                           )}
@@ -1060,6 +1068,15 @@ export function SettingsPage() {
                         )}
                       </div>
                       <div className="flex shrink-0 items-center gap-2">
+                        {defaultAccountId !== account.id && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setDefaultAccount(account.id)}
+                          >
+                            {t(locale, 'settings.accounts.setDefault')}
+                          </Button>
+                        )}
                         <Button
                           variant="ghost"
                           size="sm"

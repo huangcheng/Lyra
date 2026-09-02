@@ -288,6 +288,8 @@
     "accounts": {
       "title": "邮箱账户",
       "add": "添加账户",
+      "setDefault": "设为默认",
+      "defaultBadge": "默认",
       "edit": "编辑账户",
       "empty": "暂无账户配置。添加您的第一个邮箱账户以开始使用。",
       "confirmDelete": "确定要删除此账户吗？",
