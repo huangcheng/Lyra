@@ -1,7 +1,39 @@
 # Mail List Actions — Drag-to-Folder, Context Menu, Sync-All (Design)
 
 Date: 2026-09-02
-Status: Approved (design)
+Status: Approved (design, revised after webmail comparison)
+
+## Prior-art comparison (Outlook / Fastmail / Yandex web)
+
+Investigated live via the user's logged-in sessions, 2026-09-02:
+
+- **Outlook web**: right-click menu is folder-adaptive (in Junk: Forward, Delete,
+  Move ▸, Copy ▸, Mark unread, Categories, Flag, Rules, Report, Block, Download,
+  Find related, View, Advanced). Move submenu shows a few recent folders +
+  "Choose another folder" + "New folder". Both message rows and folder tree
+  items are HTML5 draggable.
+- **Fastmail**: right-click menu has Open in new window, Copy link, Find all
+  conversations with sender, Reply / Reply to all / Forward / Forward as
+  attachment, a contextual "Move to inbox", Delete, Move to ▸, Mark unread, Pin,
+  Notify/Mute replies, Report spam/phishing. **Move to ▸ is a searchable folder
+  picker** (filter input on top, folder tree, "Create folder…" at bottom).
+- **Yandex Mail**: right-click selects the row (checkbox) and opens: Open in new
+  tab, Reply, Forward, Delete, Archive, Unread, To folder ▸, Label ▸, Spam!,
+  Create filter. **To folder ▸ also has a folder-name filter input** + "New
+  folder". A circular-refresh icon button sits next to Compose as the manual
+  refresh affordance.
+
+Consequences for this design:
+
+1. The standard-set menu is confirmed by all three.
+2. Right-click selecting the row (already in this design) matches Yandex.
+3. The **Move to… submenu gets a folder-name filter input** (Fastmail/Yandex
+   pattern) — important for accounts with deep custom trees like this user's
+   Fastmail account.
+4. A header-level sync/refresh icon next to the sidebar header matches Yandex's
+   Compose-adjacent refresh button.
+5. Deferred ideas (not in scope): Open in new window, Copy link, Pin, Mute,
+   Unsubscribe, Forward as attachment, Copy to folder, Download .eml.
 
 Three frontend-only additions to the mail list. No backend or API changes; every
 action reuses existing `/api/v1` endpoints.
@@ -52,8 +84,10 @@ Right-clicking a conversation row opens a context menu.
     store's `openCompose`, fetching the full message first if its body is not
     loaded. These three target the conversation's latest message only.
   - *(divider)* Archive / Spam / Trash — existing `POST /messages/{id}/{action}`.
-  - Move to… — `ContextMenuSub` listing the account's folders (role folders +
-    custom tree); picking one runs the same move loop as drag-and-drop.
+  - Move to… — `ContextMenuSub` with a folder-name filter input at the top
+    (Fastmail/Yandex pattern), followed by the account's role folders + custom
+    tree flattened/indented; picking one runs the same move loop as
+    drag-and-drop. Filtering matches folder display names case-insensitively.
   - *(divider)* Mark Read/Unread (`PATCH /messages/{id}`), Star/Unstar, Snooze
     (existing `POST /messages/{id}/snooze`).
 - **Errors**: same inline-error pattern as drag-and-drop.
