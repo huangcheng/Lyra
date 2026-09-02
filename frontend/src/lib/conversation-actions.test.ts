@@ -6,8 +6,10 @@ import { api } from '@/lib/api-client';
 import {
   actOnMessages,
   canDropConversation,
+  ensureFullMessage,
   moveMessages,
   patchMessages,
+  replyFromList,
 } from '@/lib/conversation-actions';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -95,6 +97,40 @@ describe('patchMessages', () => {
     useMailStore.setState({ messages: { m1: msg('m1', { isStarred: true }) } });
     await patchMessages(['m1'], { isStarred: true });
     expect(useMailStore.getState().messages.m1.isStarred).toBe(true);
+  });
+});
+
+describe('ensureFullMessage', () => {
+  it('returns the cached message without calling the API when a body is present', async () => {
+    useMailStore.setState({ messages: { m1: msg('m1', { bodyText: 'cached body' }) } });
+    const full = await ensureFullMessage('m1');
+    expect(full.bodyText).toBe('cached body');
+    expect(mockedApi).not.toHaveBeenCalled();
+  });
+
+  it('fetches and upserts when the cached message has no body', async () => {
+    mockedApi.mockResolvedValueOnce({
+      id: 'm4',
+      accountId: 'acc1',
+      folderId: 'f1',
+      isRead: false,
+      isStarred: false,
+      hasAttachments: false,
+      bodyText: 'full body',
+    });
+    const full = await ensureFullMessage('m4');
+    expect(mockedApi).toHaveBeenCalledWith('/messages/m4');
+    expect(full.bodyText).toBe('full body');
+    expect(useMailStore.getState().messages.m4?.bodyText).toBe('full body');
+  });
+});
+
+describe('replyFromList', () => {
+  it('returns the error and does not open compose when the fetch fails', async () => {
+    mockedApi.mockRejectedValueOnce(new Error('network down'));
+    const err = await replyFromList('m1', false);
+    expect(err).toBe('network down');
+    expect(useUIStore.getState().composeOpen).toBe(false);
   });
 });
 

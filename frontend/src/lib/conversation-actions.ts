@@ -8,6 +8,7 @@
 
 import { api } from '@/lib/api-client';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
+import { textToHtml } from '@/lib/compose-html';
 import { buildForwardDraft, buildReplyDraft } from '@/lib/compose-draft';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -100,8 +101,8 @@ export function snoozeMessages(messageIds: string[], until: Date): Promise<Batch
   });
 }
 
-/** Fetch the full message (body) into the store if we only have list data. */
-export async function ensureFullMessage(id: string): Promise<MailMessage | null> {
+/** Fetch the full message (body) into the store if we only have list data. Throws on fetch failure. */
+export async function ensureFullMessage(id: string): Promise<MailMessage> {
   const store = useMailStore.getState();
   const cached = store.messages[id];
   if (cached && (cached.bodyHtml != null || cached.bodyText != null)) return cached;
@@ -111,36 +112,52 @@ export async function ensureFullMessage(id: string): Promise<MailMessage | null>
   return full;
 }
 
-/** Right-click reply: select the message, then open the composer. */
-export async function replyFromList(id: string, all: boolean): Promise<void> {
-  const m = await ensureFullMessage(id);
-  if (!m) return;
-  useUIStore.getState().setSelectedMessage(id);
-  useUIStore.getState().openCompose(buildReplyDraft(m, all, useMailStore.getState().accounts));
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
-/** Right-click forward: select the message, then open the composer. */
-export async function forwardFromList(id: string): Promise<void> {
-  const m = await ensureFullMessage(id);
-  if (!m) return;
-  useUIStore.getState().setSelectedMessage(id);
-  useUIStore.getState().openCompose(buildForwardDraft(m, useMailStore.getState().accounts));
+/** Right-click reply: select the message, then open the composer. Returns an error message on failure. */
+export async function replyFromList(id: string, all: boolean): Promise<string | null> {
+  try {
+    const m = await ensureFullMessage(id);
+    useUIStore.getState().setSelectedMessage(id);
+    useUIStore.getState().openCompose(buildReplyDraft(m, all, useMailStore.getState().accounts));
+    return null;
+  } catch (err) {
+    return errorMessage(err);
+  }
 }
 
-/** Open an existing draft for editing (mirrors the reader's Edit draft). */
-export async function editDraftFromList(id: string): Promise<void> {
-  const m = await ensureFullMessage(id);
-  if (!m) return;
-  useUIStore.getState().setSelectedMessage(id);
-  useUIStore.getState().openCompose({
-    mode: 'draft',
-    to: m.to.map((a) => a.email).join(', '),
-    cc: (m.cc ?? []).map((a) => a.email).join(', '),
-    subject: m.subject ?? '',
-    body: m.bodyText ?? '',
-    initialHtml: m.bodyHtml ?? undefined,
-    draftMessageId: m.id,
-  });
+/** Right-click forward: select the message, then open the composer. Returns an error message on failure. */
+export async function forwardFromList(id: string): Promise<string | null> {
+  try {
+    const m = await ensureFullMessage(id);
+    useUIStore.getState().setSelectedMessage(id);
+    useUIStore.getState().openCompose(buildForwardDraft(m, useMailStore.getState().accounts));
+    return null;
+  } catch (err) {
+    return errorMessage(err);
+  }
+}
+
+/** Open an existing draft for editing (mirrors the reader's Edit draft). Returns an error message on failure. */
+export async function editDraftFromList(id: string): Promise<string | null> {
+  try {
+    const m = await ensureFullMessage(id);
+    useUIStore.getState().setSelectedMessage(id);
+    useUIStore.getState().openCompose({
+      mode: 'draft',
+      to: m.to.map((a) => a.email).join(', '),
+      cc: (m.cc ?? []).map((a) => a.email).join(', '),
+      subject: m.subject ?? '',
+      body: m.bodyText ?? '',
+      initialHtml: m.bodyHtml ?? textToHtml(m.bodyText ?? ''),
+      draftMessageId: m.id,
+    });
+    return null;
+  } catch (err) {
+    return errorMessage(err);
+  }
 }
 
 /** Drag payload for a conversation row (dnd-kit `data.current`). */
