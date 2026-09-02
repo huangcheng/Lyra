@@ -430,7 +430,25 @@ impl ImapClient {
     /// Fetch message metadata (envelope + flags + size) for the given UIDs.
     ///
     /// Does **not** fetch message bodies — use `fetch_bodies` for that.
+    /// Fetch envelopes for many UIDs. Large mailbox folders (QQ custom
+    /// folders run 1000+) exceed the per-command timeout in one shot, and a
+    /// timed-out FETCH stream is cancelled mid-response — the undrained
+    /// bytes then desync the session so even the next SELECT fails parsing
+    /// leftover `* n FETCH` lines. Chunked commands keep every response
+    /// inside the budget and fully drained.
     pub async fn fetch_metadata(&mut self, uids: &[u32]) -> Result<Vec<ImapMessage>, ImapError> {
+        const METADATA_CHUNK: usize = 200;
+        if uids.len() <= METADATA_CHUNK {
+            return self.fetch_metadata_once(uids).await;
+        }
+        let mut out = Vec::with_capacity(uids.len());
+        for chunk in uids.chunks(METADATA_CHUNK) {
+            out.extend(self.fetch_metadata_once(chunk).await?);
+        }
+        Ok(out)
+    }
+
+    async fn fetch_metadata_once(&mut self, uids: &[u32]) -> Result<Vec<ImapMessage>, ImapError> {
         if uids.is_empty() {
             return Ok(Vec::new());
         }

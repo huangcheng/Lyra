@@ -8,9 +8,20 @@ use super::store::{
     reconcile_folder_deletions, repair_imap_messages, upsert_folder,
 };
 use super::types::{SyncError, SyncResponse, error_chain};
-use crate::imap::{ImapClient, ImapConfig, ImapSecurity};
+use crate::imap::{ImapClient, ImapConfig, ImapError, ImapSecurity};
 use crate::protocol::SyncOutcome;
 use crate::storage::DbPool;
+
+/// Errors that leave the IMAP byte stream in an unknown state (timeout
+/// cancels a mid-flight response; io/parse errors mean desync). Continuing
+/// the pass on such a session misparses every later command — end the pass
+/// instead; per-folder cursors keep progress and the next poll reconnects.
+fn session_may_be_poisoned(err: &ImapError) -> bool {
+    matches!(
+        err,
+        ImapError::Timeout | ImapError::Imap(_) | ImapError::Connection(_) | ImapError::Tls(_)
+    )
+}
 
 /// Load an IMAP account and run the existing IMAP fetch loop.
 pub(crate) async fn imap_sync_account(
@@ -134,8 +145,15 @@ pub(crate) async fn run_imap_sync(
                     account_id,
                     folder = %folder.name,
                     error = %error_chain(&err),
-                    "folder select failed; skipping folder this pass"
+                    "folder select failed"
                 );
+                if session_may_be_poisoned(&err) {
+                    tracing::warn!(
+                        account_id,
+                        "IMAP session state uncertain; ending account pass"
+                    );
+                    break;
+                }
                 continue;
             }
         };
@@ -203,8 +221,15 @@ pub(crate) async fn run_imap_sync(
                     account_id,
                     folder = %folder.name,
                     error = %error_chain(&err),
-                    "UID search failed; skipping folder this pass"
+                    "UID search failed"
                 );
+                if session_may_be_poisoned(&err) {
+                    tracing::warn!(
+                        account_id,
+                        "IMAP session state uncertain; ending account pass"
+                    );
+                    break;
+                }
                 continue;
             }
         };
@@ -216,8 +241,15 @@ pub(crate) async fn run_imap_sync(
                         account_id,
                         folder = %folder.name,
                         error = %error_chain(&err),
-                        "CONDSTORE fetch failed; skipping folder this pass"
+                        "CONDSTORE fetch failed"
                     );
+                    if session_may_be_poisoned(&err) {
+                        tracing::warn!(
+                            account_id,
+                            "IMAP session state uncertain; ending account pass"
+                        );
+                        break;
+                    }
                     continue;
                 }
             }
@@ -237,8 +269,15 @@ pub(crate) async fn run_imap_sync(
                         account_id,
                         folder = %folder.name,
                         error = %error_chain(&err),
-                        "metadata fetch failed; skipping folder this pass"
+                        "metadata fetch failed"
                     );
+                    if session_may_be_poisoned(&err) {
+                        tracing::warn!(
+                            account_id,
+                            "IMAP session state uncertain; ending account pass"
+                        );
+                        break;
+                    }
                     continue;
                 }
             }
