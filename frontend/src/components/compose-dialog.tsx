@@ -438,7 +438,7 @@ export function ComposeDialog() {
   const cryptoActive = signMessage || encryptMessage || attachPublicKey;
 
   const iconBtn =
-    'relative flex size-8 items-center justify-center rounded-md text-muted-foreground transition-all hover:bg-accent hover:text-foreground active:scale-[0.96] disabled:pointer-events-none disabled:opacity-50';
+    'relative flex size-8 items-center justify-center rounded-md text-muted-foreground transition-[color,background-color,transform] duration-150 ease-out-quart hover:bg-accent hover:text-foreground active:scale-[0.96] disabled:pointer-events-none disabled:opacity-50';
 
   return (
     <Dialog open={composeOpen} onOpenChange={(open) => !open && handleClose()}>
@@ -686,7 +686,7 @@ export function ComposeDialog() {
                   disabled={!cryptoAllowed}
                   onClick={toggle}
                   className={cn(
-                    'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-all active:scale-[0.97] disabled:pointer-events-none disabled:opacity-40',
+                    'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-[color,background-color,border-color,transform] duration-150 ease-out-quart active:scale-[0.97] disabled:pointer-events-none disabled:opacity-40',
                     on
                       ? 'border-foreground/25 bg-foreground/[0.06] text-foreground'
                       : 'border-border/70 text-muted-foreground hover:border-foreground/20 hover:text-foreground',

@@ -93,7 +93,7 @@ export function LoginForm({
 
   return (
     <div className={cn('flex flex-col', className)} {...props}>
-      <div className="w-full max-w-[380px] rounded-xl border border-border bg-card px-9 pb-8 pt-10">
+      <div className="w-full max-w-[380px] animate-in fade-in slide-in-from-bottom-2 zoom-in-[0.98] duration-300 ease-out-quart rounded-xl border border-border bg-card px-9 pb-8 pt-10">
         <div className="flex items-center justify-center gap-3">
           <StampLogo size={40} className="rounded-[9px]" />
           <span className="font-brand text-[28px]">Lyra</span>

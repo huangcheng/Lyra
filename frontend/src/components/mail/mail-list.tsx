@@ -357,7 +357,7 @@ export function MailList() {
                     role="button"
                     tabIndex={0}
                     className={cn(
-                      'group relative flex w-full cursor-pointer gap-3 border-b border-border/60 px-4 py-3 text-left text-sm transition-colors hover:bg-accent/40',
+                      'group relative flex w-full cursor-pointer gap-3 border-b border-border/60 px-4 py-3 text-left text-sm transition-[background-color,box-shadow] duration-150 ease-out-quart hover:bg-accent/40',
                       isSelected &&
                         'bg-secondary shadow-[inset_2px_0_0_var(--color-foreground)] hover:bg-secondary',
                     )}

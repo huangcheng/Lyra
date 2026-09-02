@@ -269,7 +269,9 @@ export function Mail() {
               onResize={(size) => {
                 setIsCollapsed(size.asPercentage < 10 || size.inPixels <= 56);
               }}
-              className={cn(isCollapsed && 'min-w-[50px] transition-all duration-300 ease-in-out')}
+              className={cn(
+                isCollapsed && 'min-w-[50px] transition-[min-width] duration-200 ease-out-quart',
+              )}
             >
               <NavContent isCollapsed={isCollapsed} />
             </ResizablePanel>
