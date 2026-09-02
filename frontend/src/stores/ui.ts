@@ -16,6 +16,8 @@ export interface ComposeDraft {
   mode: 'new' | 'reply' | 'forward' | 'draft';
   /** Local message id of the server draft being edited (autosave replaces it). */
   draftMessageId?: string;
+  /** Source message's account — reply/forward/draft send From this account. */
+  accountId?: string;
   /** Initial rich-editor content (reply/forward quote, restored draft body). */
   initialHtml?: string;
   /** Forwarding carries the original's non-inline attachments (metadata). */
@@ -45,6 +47,8 @@ interface UIState {
   folderExpansion: Record<string, AccountExpansion>;
   /** Custom sidebar account order (account ids; persisted server-side). */
   accountOrder: string[];
+  /** Default compose From account (persisted server-side); null = first account. */
+  defaultAccountId: string | null;
   locale: SupportedLocale;
   markReadPolicy: MarkReadPolicy;
   theme: ThemeMode;
@@ -64,6 +68,7 @@ interface UIState {
   /** Bulk-restore from the server-persisted view-state blob. */
   setFolderExpansion: (map: Record<string, AccountExpansion>) => void;
   setAccountOrder: (ids: string[]) => void;
+  setDefaultAccount: (id: string | null) => void;
   setLocale: (locale: SupportedLocale) => void;
   setMarkReadPolicy: (policy: MarkReadPolicy) => void;
   setTheme: (theme: ThemeMode) => void;
@@ -81,6 +86,7 @@ export const useUIStore = create<UIState>((set) => ({
   mutedMessageIds: [],
   folderExpansion: {},
   accountOrder: [],
+  defaultAccountId: null,
   locale: 'en',
   markReadPolicy: 'on_open' as MarkReadPolicy,
   theme: getStoredTheme(),
@@ -118,6 +124,7 @@ export const useUIStore = create<UIState>((set) => ({
         body: draft?.body ?? '',
         mode: draft?.mode ?? 'new',
         draftMessageId: draft?.draftMessageId,
+        accountId: draft?.accountId,
         initialHtml: draft?.initialHtml,
         forwardAttachments: draft?.forwardAttachments,
       },
@@ -154,6 +161,8 @@ export const useUIStore = create<UIState>((set) => ({
   setFolderExpansion: (map) => set({ folderExpansion: map }),
 
   setAccountOrder: (ids) => set({ accountOrder: ids }),
+
+  setDefaultAccount: (id) => set({ defaultAccountId: id }),
 
   setLocale: (locale) => set({ locale }),
 

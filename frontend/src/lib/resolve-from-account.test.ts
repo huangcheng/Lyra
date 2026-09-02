@@ -80,6 +80,16 @@ describe('resolveFromAccountId', () => {
     ).toBe('b');
   });
 
+  it('falls back when the browsed account is stale', () => {
+    expect(
+      resolveFromAccountId({
+        selectedAccountId: 'gone',
+        defaultAccountId: 'b',
+        accounts,
+      }),
+    ).toBe('b');
+  });
+
   it('returns empty string with no accounts', () => {
     expect(
       resolveFromAccountId({
