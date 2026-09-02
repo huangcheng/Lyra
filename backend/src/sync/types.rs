@@ -128,3 +128,19 @@ impl IntoResponse for SyncError {
         (status, Json(ApiErrorBody::new(message, code))).into_response()
     }
 }
+
+/// Full `error: cause1: cause2: …` chain for operator logs. thiserror's
+/// `Display` renders only the outermost layer — e.g. `ImapError::Imap` wraps
+/// async-imap errors whose own Display is a bare "IMAP error", hiding the
+/// actual protocol/IO cause. Server-side logs must use this; user-facing
+/// storage keeps the coarse [`crate::jobs`]-side sanitization.
+pub(crate) fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut chain = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    chain
+}

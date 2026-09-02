@@ -427,7 +427,14 @@ pub async fn process_job(
                         account_id: account_id.clone(),
                         error: safe.to_string(),
                     });
-                    tracing::warn!(job_id = %job.id, error = %safe, "sync job failed");
+                    // Full cause chain for operators; the sanitized category
+                    // is what gets stored and shown.
+                    tracing::warn!(
+                        job_id = %job.id,
+                        error = %crate::sync::types::error_chain(&err),
+                        category = safe,
+                        "sync job failed"
+                    );
                     mark_failed(db, &job.id, safe).await?;
                 }
             }

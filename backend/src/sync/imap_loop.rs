@@ -7,7 +7,7 @@ use super::store::{
     mojibake_message_uids, outcome_from_response, persist_imap_folder_batch,
     reconcile_folder_deletions, repair_imap_messages, upsert_folder,
 };
-use super::types::{SyncError, SyncResponse};
+use super::types::{SyncError, SyncResponse, error_chain};
 use crate::imap::{ImapClient, ImapConfig, ImapSecurity};
 use crate::protocol::SyncOutcome;
 use crate::storage::DbPool;
@@ -122,7 +122,23 @@ pub(crate) async fn run_imap_sync(
 
         let folder_id = get_folder_id(db, account_id, &folder.name).await?;
 
-        let select = client.select(&folder.name).await?;
+        // Per-folder failures skip that folder for this pass — one flaky
+        // mailbox (QQ rate-limits aggressively) must not abort the whole
+        // account every cycle: cursors are per-folder, so the next pass
+        // retries exactly the folders that failed. Connect/login-level
+        // failures above remain fatal for the pass.
+        let select = match client.select(&folder.name).await {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(
+                    account_id,
+                    folder = %folder.name,
+                    error = %error_chain(&err),
+                    "folder select failed; skipping folder this pass"
+                );
+                continue;
+            }
+        };
         let uid_validity = select.uid_validity;
         let highest_modseq = select.highest_modseq.unwrap_or(0);
 
@@ -180,9 +196,31 @@ pub(crate) async fn run_imap_sync(
             cursor.as_ref().map_or(0, |c| c.last_modseq)
         };
 
-        let new_uids = client.search_uids(after_uid).await?;
+        let new_uids = match client.search_uids(after_uid).await {
+            Ok(uids) => uids,
+            Err(err) => {
+                tracing::warn!(
+                    account_id,
+                    folder = %folder.name,
+                    error = %error_chain(&err),
+                    "UID search failed; skipping folder this pass"
+                );
+                continue;
+            }
+        };
         let mut messages = if client.supports_condstore() && stored_modseq > 0 {
-            client.fetch_changed_since(stored_modseq).await?
+            match client.fetch_changed_since(stored_modseq).await {
+                Ok(msgs) => msgs,
+                Err(err) => {
+                    tracing::warn!(
+                        account_id,
+                        folder = %folder.name,
+                        error = %error_chain(&err),
+                        "CONDSTORE fetch failed; skipping folder this pass"
+                    );
+                    continue;
+                }
+            }
         } else {
             Vec::new()
         };
@@ -192,7 +230,18 @@ pub(crate) async fn run_imap_sync(
             .filter(|uid| !changed_uids.contains(uid))
             .collect();
         if !fetch_uids.is_empty() {
-            messages.extend(client.fetch_metadata(&fetch_uids).await?);
+            match client.fetch_metadata(&fetch_uids).await {
+                Ok(msgs) => messages.extend(msgs),
+                Err(err) => {
+                    tracing::warn!(
+                        account_id,
+                        folder = %folder.name,
+                        error = %error_chain(&err),
+                        "metadata fetch failed; skipping folder this pass"
+                    );
+                    continue;
+                }
+            }
         }
 
         let new_modseq = if client.supports_condstore() && highest_modseq > 0 {

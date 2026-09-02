@@ -18,7 +18,7 @@ mod send;
 pub(crate) mod store;
 #[cfg(not(test))]
 mod store;
-mod types;
+pub(crate) mod types;
 
 pub use http::routes;
 pub use types::{SyncError, SyncResponse};
