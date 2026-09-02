@@ -98,7 +98,7 @@ export function LoginForm({
           <StampLogo size={40} className="rounded-[9px]" />
           <span className="font-brand text-[28px]">Lyra</span>
         </div>
-        <p className="pb-7 pt-2 text-center text-[13px] text-ter-foreground">
+        <p className="pb-7 pt-2 text-center text-[13px] text-muted-foreground">
           {t(locale, 'auth.tagline')}
         </p>
 
@@ -255,7 +255,7 @@ export function LoginForm({
             type="button"
             className={cn(
               'rounded px-1 py-0.5 text-xs hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none',
-              locale === 'en' ? 'font-medium text-foreground' : 'text-ter-foreground',
+              locale === 'en' ? 'font-medium text-foreground' : 'text-muted-foreground',
             )}
             onClick={() => setLocale('en')}
           >
@@ -265,14 +265,14 @@ export function LoginForm({
             type="button"
             className={cn(
               'rounded px-1 py-0.5 text-xs hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none',
-              locale === 'zh' ? 'font-medium text-foreground' : 'text-ter-foreground',
+              locale === 'zh' ? 'font-medium text-foreground' : 'text-muted-foreground',
             )}
             onClick={() => setLocale('zh')}
           >
             中文
           </button>
           <span className="flex-1" />
-          <span className="text-[11px] text-ter-foreground">{t(locale, 'auth.selfHosted')}</span>
+          <span className="text-[11px] text-muted-foreground">{t(locale, 'auth.selfHosted')}</span>
         </div>
       </div>
     </div>

@@ -776,7 +776,7 @@ export function SettingsPage() {
   };
 
   const soonBadge = (
-    <Badge variant="outline" className="text-[10.5px] font-normal text-ter-foreground">
+    <Badge variant="outline" className="text-[10.5px] font-normal text-muted-foreground">
       {t(locale, 'common.soon')}
     </Badge>
   );
@@ -790,7 +790,7 @@ export function SettingsPage() {
               below, and the whole column centers on wide screens. */}
           <div className="mx-auto w-full max-w-2xl">
             <h1 className="font-display text-xl font-medium">{sectionMeta[section].title}</h1>
-            <p className="text-[12.5px] text-ter-foreground">{sectionMeta[section].subtitle}</p>
+            <p className="text-[12.5px] text-muted-foreground">{sectionMeta[section].subtitle}</p>
           </div>
         </header>
 
@@ -842,7 +842,7 @@ export function SettingsPage() {
                     <div className="text-[13px] font-medium">
                       {t(locale, 'settings.preferences.markRead')}
                     </div>
-                    <div className="text-xs text-ter-foreground">
+                    <div className="text-xs text-muted-foreground">
                       {t(locale, 'settings.preferences.readingStatus')}
                     </div>
                   </div>
@@ -919,7 +919,7 @@ export function SettingsPage() {
                     <h3 className="text-[13px] font-medium">
                       {t(locale, 'settings.security.disableTotpTitle')}
                     </h3>
-                    <p className="text-xs text-ter-foreground">
+                    <p className="text-xs text-muted-foreground">
                       {t(locale, 'settings.security.disableTotpDescription')}
                     </p>
                     <div className="space-y-2">
@@ -963,7 +963,7 @@ export function SettingsPage() {
                         <h3 className="text-[13px] font-medium">
                           {t(locale, 'settings.security.enableTotpTitle')}
                         </h3>
-                        <p className="text-xs text-ter-foreground">
+                        <p className="text-xs text-muted-foreground">
                           {t(locale, 'settings.security.enableTotpDescription')}
                         </p>
                         <Button
@@ -1105,7 +1105,7 @@ export function SettingsPage() {
                     </button>
                   </div>
                   {accounts.length === 0 && (
-                    <p className="text-center text-xs text-ter-foreground">
+                    <p className="text-center text-xs text-muted-foreground">
                       {t(locale, 'settings.accounts.empty')}
                     </p>
                   )}
@@ -1141,7 +1141,7 @@ export function SettingsPage() {
                       <div className="text-[13px] font-medium">
                         {t(locale, `settings.spam.${key}`)}
                       </div>
-                      <div className="text-xs text-ter-foreground">
+                      <div className="text-xs text-muted-foreground">
                         {t(locale, `settings.spam.${descKey}`)}
                       </div>
                     </div>
@@ -1161,7 +1161,7 @@ export function SettingsPage() {
                   </h2>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <div className="text-xs text-ter-foreground">
+                  <div className="text-xs text-muted-foreground">
                     {t(locale, 'settings.spam.sensitivityDesc')}
                   </div>
                   <div className="flex h-8 items-center rounded-lg bg-accent p-0.5 text-muted-foreground">
@@ -1190,7 +1190,7 @@ export function SettingsPage() {
                 <div className="flex items-center gap-2">
                   <h2 className="text-[13px] font-medium">{t(locale, 'settings.spam.blocked')}</h2>
                 </div>
-                <p className="text-xs text-ter-foreground">
+                <p className="text-xs text-muted-foreground">
                   {t(locale, 'settings.spam.blockedDesc')}
                 </p>
                 {(spamSettings?.senders ?? [])
@@ -1249,11 +1249,11 @@ export function SettingsPage() {
                 <h2 className="text-[13px] font-medium">
                   {t(locale, 'settings.privacy.remoteImages')}
                 </h2>
-                <p className="text-xs text-ter-foreground">
+                <p className="text-xs text-muted-foreground">
                   {t(locale, 'settings.privacy.remoteImagesHint')}
                 </p>
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <span className="text-xs text-ter-foreground">
+                  <span className="text-xs text-muted-foreground">
                     {t(locale, `settings.privacy.remoteImagesModeHelp.${remoteImagesMode}`)}
                   </span>
                   <Select
@@ -1284,7 +1284,7 @@ export function SettingsPage() {
                     <h2 className="text-[13px] font-medium">
                       {t(locale, 'settings.privacy.gravatarAvatars')}
                     </h2>
-                    <p className="text-xs text-ter-foreground">
+                    <p className="text-xs text-muted-foreground">
                       {t(locale, 'settings.privacy.gravatarAvatarsHint')}
                     </p>
                   </div>
@@ -1303,7 +1303,7 @@ export function SettingsPage() {
                 <h2 className="text-[13px] font-medium">
                   {t(locale, 'settings.privacy.allowlistTitle')}
                 </h2>
-                <p className="text-xs text-ter-foreground">
+                <p className="text-xs text-muted-foreground">
                   {t(locale, 'settings.privacy.allowlistHint')}
                 </p>
                 {remoteContentAllowlist.length === 0 ? (
@@ -1356,7 +1356,7 @@ export function SettingsPage() {
                       <div className="text-[13px] font-medium">
                         {t(locale, `settings.privacy.${key}`)}
                       </div>
-                      <div className="text-xs text-ter-foreground">
+                      <div className="text-xs text-muted-foreground">
                         {t(locale, `settings.privacy.${descKey}`)}
                       </div>
                     </div>
@@ -1377,7 +1377,7 @@ export function SettingsPage() {
                     <div className="text-[13px] font-medium">
                       {t(locale, 'settings.privacy.exportData')}
                     </div>
-                    <div className="text-xs text-ter-foreground">
+                    <div className="text-xs text-muted-foreground">
                       {t(locale, 'settings.privacy.exportDataDesc')}
                     </div>
                   </div>
@@ -1390,7 +1390,7 @@ export function SettingsPage() {
                     <div className="text-[13px] font-medium text-destructive">
                       {t(locale, 'settings.privacy.deleteData')}
                     </div>
-                    <div className="text-xs text-ter-foreground">
+                    <div className="text-xs text-muted-foreground">
                       {t(locale, 'settings.privacy.deleteDataDesc')}
                     </div>
                   </div>

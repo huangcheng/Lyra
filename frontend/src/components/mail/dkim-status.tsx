@@ -15,7 +15,7 @@ function DetailRow({ label, value }: { label: string; value: string | null | und
   if (!value) return null;
   return (
     <div className="flex gap-2 text-xs">
-      <span className="w-36 shrink-0 text-ter-foreground">{label}</span>
+      <span className="w-36 shrink-0 text-muted-foreground">{label}</span>
       <span className="min-w-0 break-words">{value}</span>
     </div>
   );
@@ -34,7 +34,7 @@ export function DkimStatus({ dkim, locale }: { dkim: DkimInfo; locale: Supported
             'flex items-center gap-1.5 rounded-md px-1.5 py-1 text-xs transition-colors hover:bg-accent/60',
             dkim.status === 'pass' && 'text-green-700 dark:text-green-400',
             dkim.status === 'fail' && 'text-destructive',
-            (dkim.status === 'none' || dkim.status === 'temperror') && 'text-ter-foreground',
+            (dkim.status === 'none' || dkim.status === 'temperror') && 'text-muted-foreground',
           )}
         >
           <Icon className="size-3.5 shrink-0" aria-hidden />

@@ -354,7 +354,7 @@ export function EncryptionSettings() {
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
             <div className="text-[13px] font-medium">{key.primaryEmail}</div>
-            <div className="font-mono text-[11px] text-ter-foreground">
+            <div className="font-mono text-[11px] text-muted-foreground">
               …{shortFp(key.fingerprint)}
             </div>
             <div className="mt-1 flex flex-wrap gap-1.5">
@@ -489,7 +489,7 @@ export function EncryptionSettings() {
         <div className="text-[13px] font-medium">
           {t(locale, 'settings.encryption.rememberTitle')}
         </div>
-        <p className="text-xs text-ter-foreground">
+        <p className="text-xs text-muted-foreground">
           {t(locale, 'settings.encryption.rememberHint')}
         </p>
         <div className="flex flex-wrap items-center gap-3">
@@ -555,16 +555,16 @@ export function EncryptionSettings() {
         />
 
         {loading ? (
-          <div className="text-xs text-ter-foreground">{t(locale, 'common.loading')}</div>
+          <div className="text-xs text-muted-foreground">{t(locale, 'common.loading')}</div>
         ) : !showGroups ? (
-          <div className="text-xs text-ter-foreground">
+          <div className="text-xs text-muted-foreground">
             {t(locale, 'settings.encryption.empty')}
           </div>
         ) : (
           <div className="space-y-4">
             {filteredIdentity.length > 0 ? (
               <div className="space-y-1">
-                <div className="text-[11px] uppercase tracking-wide text-ter-foreground">
+                <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
                   {t(locale, 'settings.encryption.groupIdentity')}
                 </div>
                 <ul>{filteredIdentity.map(renderKeyRow)}</ul>
@@ -572,7 +572,7 @@ export function EncryptionSettings() {
             ) : null}
             {filteredContact.length > 0 ? (
               <div className="space-y-1">
-                <div className="text-[11px] uppercase tracking-wide text-ter-foreground">
+                <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
                   {t(locale, 'settings.encryption.groupContact')}
                 </div>
                 <ul>{filteredContact.map(renderKeyRow)}</ul>
@@ -586,7 +586,7 @@ export function EncryptionSettings() {
         <div className="text-[13px] font-medium">
           {t(locale, 'settings.encryption.accountsTitle')}
         </div>
-        <p className="text-xs text-ter-foreground">
+        <p className="text-xs text-muted-foreground">
           {t(locale, 'settings.encryption.accountsHint')}
         </p>
         <ul className="space-y-2">
@@ -600,7 +600,7 @@ export function EncryptionSettings() {
               >
                 <div>
                   <div className="text-[13px] font-medium">{acct.emailAddress}</div>
-                  <div className="text-xs text-ter-foreground">
+                  <div className="text-xs text-muted-foreground">
                     {primary ? (
                       <>
                         {t(locale, 'settings.encryption.primary')} · …{shortFp(primary.fingerprint)}
@@ -618,7 +618,9 @@ export function EncryptionSettings() {
             );
           })}
           {accounts.length === 0 ? (
-            <li className="text-xs text-ter-foreground">{t(locale, 'settings.accounts.empty')}</li>
+            <li className="text-xs text-muted-foreground">
+              {t(locale, 'settings.accounts.empty')}
+            </li>
           ) : null}
         </ul>
       </section>
@@ -634,7 +636,7 @@ export function EncryptionSettings() {
           className="min-h-[100px] font-mono text-xs"
         />
         <label className="block space-y-1 text-xs">
-          <span className="text-ter-foreground">
+          <span className="text-muted-foreground">
             {t(locale, 'settings.encryption.importTargetLabel')}
           </span>
           <Select value={importAccountId} onValueChange={(v) => setImportAccountId(v)}>
@@ -656,7 +658,7 @@ export function EncryptionSettings() {
             {t(locale, 'settings.encryption.import')}
           </Button>
         </div>
-        <p className="text-xs text-ter-foreground">
+        <p className="text-xs text-muted-foreground">
           {t(locale, 'settings.encryption.generateHint')}
         </p>
       </section>
@@ -677,7 +679,7 @@ export function EncryptionSettings() {
           </DialogHeader>
           <div className="grid gap-2 sm:grid-cols-2">
             <label className="space-y-1 text-xs sm:col-span-2">
-              <span className="text-ter-foreground">
+              <span className="text-muted-foreground">
                 {t(locale, 'settings.encryption.genPassphrase')}
               </span>
               <input
@@ -689,7 +691,7 @@ export function EncryptionSettings() {
               />
             </label>
             <label className="space-y-1 text-xs sm:col-span-2">
-              <span className="text-ter-foreground">
+              <span className="text-muted-foreground">
                 {t(locale, 'settings.encryption.algorithm')}
               </span>
               <Select value={genAlgo} onValueChange={(v) => setGenAlgo(v as 'rsa4096' | 'ed25519')}>
@@ -743,7 +745,7 @@ export function EncryptionSettings() {
           ) : (
             <div className="space-y-3">
               <label className="space-y-1 text-xs">
-                <span className="text-ter-foreground">
+                <span className="text-muted-foreground">
                   {t(locale, 'settings.encryption.passphrase')}
                 </span>
                 <input
@@ -759,7 +761,7 @@ export function EncryptionSettings() {
                 />
               </label>
               <label className="space-y-1 text-xs">
-                <span className="text-ter-foreground">
+                <span className="text-muted-foreground">
                   {t(locale, 'settings.encryption.rememberChoice')}
                 </span>
                 <Select
@@ -824,7 +826,7 @@ export function EncryptionSettings() {
             </DialogDescription>
           </DialogHeader>
           <label className="space-y-1 text-xs">
-            <span className="text-ter-foreground">
+            <span className="text-muted-foreground">
               {t(locale, 'settings.security.currentPassword')}
             </span>
             <input

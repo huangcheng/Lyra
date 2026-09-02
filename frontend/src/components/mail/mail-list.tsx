@@ -312,7 +312,7 @@ export function MailList() {
               return (
                 <div
                   key={`h-${row.key}`}
-                  className="sticky top-0 z-10 -mx-0 bg-background/85 px-4 pt-3 pb-1.5 text-[11px] font-medium tracking-wide text-ter-foreground backdrop-blur-sm"
+                  className="sticky top-0 z-10 -mx-0 bg-background/85 px-4 pt-3 pb-1.5 text-[11px] font-medium tracking-wide text-muted-foreground backdrop-blur-sm"
                 >
                   {t(locale, `mail.${row.key}`)}
                 </div>
@@ -400,10 +400,7 @@ export function MailList() {
                     <div className="flex w-3 shrink-0 items-start justify-center pt-1.5">
                       {convo.anyReplied ? (
                         <CornerUpLeft
-                          className={cn(
-                            'h-3 w-3',
-                            isSelected ? 'text-muted-foreground' : 'text-ter-foreground',
-                          )}
+                          className={cn('h-3 w-3', 'text-ter-foreground')}
                           aria-hidden
                         />
                       ) : isUnread ? (
@@ -436,8 +433,7 @@ export function MailList() {
                         ) : null}
                         <div
                           className={cn(
-                            'ml-auto shrink-0 text-[11px] tabular-nums transition-opacity group-hover:opacity-0',
-                            isSelected ? 'text-muted-foreground' : 'text-ter-foreground',
+                            'ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0',
                           )}
                         >
                           {relative}

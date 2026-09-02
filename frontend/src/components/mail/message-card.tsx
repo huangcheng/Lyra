@@ -238,7 +238,7 @@ export function MessageCard({
           </Avatar>
           <span className={cn('shrink-0', !mail.isRead && 'font-semibold')}>{fromLabel}</span>
           <span className="min-w-0 flex-1 truncate text-muted-foreground">{snippet}</span>
-          <span className="shrink-0 text-[11px] tabular-nums text-ter-foreground">
+          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
             {format(new Date(mail.date), 'MMM d, h:mm a')}
           </span>
         </button>
@@ -322,7 +322,7 @@ export function MessageCard({
       {pixelAdvisory && !showRemoteBanner ? (
         <div className="px-4 pb-1">
           <div
-            className="flex items-center gap-2 rounded-lg border border-border/80 bg-muted/40 px-3.5 py-2 text-[12px] text-ter-foreground"
+            className="flex items-center gap-2 rounded-lg border border-border/80 bg-muted/40 px-3.5 py-2 text-[12px] text-muted-foreground"
             role="status"
           >
             <Shield className="size-3.5 shrink-0 opacity-70" aria-hidden />
@@ -371,7 +371,7 @@ export function MessageCard({
         )}
         {visibleAttachments.length > 0 ? (
           <div className="mt-4 space-y-1.5">
-            <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-ter-foreground">
+            <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
               <Paperclip className="size-3" aria-hidden />
               {t(locale, 'mail.attachments')}
             </div>
@@ -394,7 +394,7 @@ export function MessageCard({
                         {att.filename || t(locale, 'mail.attachmentUnnamed')}
                       </span>
                       {att.sizeBytes != null ? (
-                        <span className="block text-ter-foreground">
+                        <span className="block text-muted-foreground">
                           {formatBytes(att.sizeBytes)}
                         </span>
                       ) : null}

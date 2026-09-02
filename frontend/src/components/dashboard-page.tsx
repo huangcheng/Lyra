@@ -110,11 +110,11 @@ export function DashboardPage() {
           <div className="flex w-full items-center gap-2.5">
             <StampLogo size={24} />
             <span className="font-brand text-base text-foreground">Lyra</span>
-            <span className="text-[10.5px] font-semibold uppercase tracking-[0.8px] text-ter-foreground">
+            <span className="text-[10.5px] font-semibold uppercase tracking-[0.8px] text-muted-foreground">
               {t(locale, 'dash.section')}
             </span>
           </div>
-          <p className="w-full text-[12.5px] text-ter-foreground">{t(locale, 'dash.subtitle')}</p>
+          <p className="w-full text-[12.5px] text-muted-foreground">{t(locale, 'dash.subtitle')}</p>
         </header>
         <main className="flex-1 overflow-auto">
           <DashboardBody
@@ -151,7 +151,7 @@ export function DashboardPage() {
           <header className="flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border px-8 pb-5 pt-7">
             <div>
               <h1 className="font-display text-xl font-medium">{t(locale, 'dash.section')}</h1>
-              <p className="text-[12.5px] text-ter-foreground">{t(locale, 'dash.subtitle')}</p>
+              <p className="text-[12.5px] text-muted-foreground">{t(locale, 'dash.subtitle')}</p>
             </div>
             <div className="flex-1" />
             {rangeTabs}
@@ -269,7 +269,7 @@ function DashboardBody({
         </div>
         <div className="mt-1.5 flex gap-1.5">
           {daily.map((d) => (
-            <div key={d.date} className="flex-1 text-center text-[10px] text-ter-foreground">
+            <div key={d.date} className="flex-1 text-center text-[10px] text-muted-foreground">
               {format(parseISO(d.date), 'EEEEE', { locale: dateLocale })}
             </div>
           ))}
@@ -353,7 +353,7 @@ function fillDailySeries(daily: DailyVolume[], days: number): DailyVolume[] {
 function KpiCard({ label, value, sub }: { label: string; value: React.ReactNode; sub: string }) {
   return (
     <div className="rounded-[10px] border border-border bg-card p-4">
-      <p className="text-[10.5px] font-semibold uppercase tracking-[0.8px] text-ter-foreground">
+      <p className="text-[10.5px] font-semibold uppercase tracking-[0.8px] text-muted-foreground">
         {label}
       </p>
       <p className="mt-1.5 font-display text-2xl font-medium">{value}</p>

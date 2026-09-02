@@ -82,7 +82,7 @@ export function NotificationSettings() {
               <div className="text-[13px] font-medium">
                 {t(locale, 'settings.notifications.title')}
               </div>
-              <div className="text-xs text-ter-foreground">
+              <div className="text-xs text-muted-foreground">
                 {t(locale, 'settings.notifications.hint')}
               </div>
             </div>
@@ -102,17 +102,17 @@ export function NotificationSettings() {
           </div>
         </div>
         {permission === 'denied' ? (
-          <p className="text-xs text-ter-foreground">
+          <p className="text-xs text-muted-foreground">
             {t(locale, 'settings.notifications.denied')}
           </p>
         ) : null}
         {permission === 'unsupported' ? (
-          <p className="text-xs text-ter-foreground">
+          <p className="text-xs text-muted-foreground">
             {t(locale, 'settings.notifications.unsupported')}
           </p>
         ) : null}
         {enabled && permission === 'granted' ? (
-          <p className="text-xs text-ter-foreground">
+          <p className="text-xs text-muted-foreground">
             {t(locale, 'settings.notifications.runningNote')}
           </p>
         ) : null}
@@ -131,7 +131,7 @@ export function NotificationSettings() {
                   </Badge>
                 ) : null}
               </div>
-              <div className="text-xs text-ter-foreground">
+              <div className="text-xs text-muted-foreground">
                 {t(locale, 'settings.install.hint')}
               </div>
             </div>
@@ -148,7 +148,7 @@ export function NotificationSettings() {
           ) : null}
         </div>
         {!standalone && !installable && ios ? (
-          <p className="text-xs text-ter-foreground">{t(locale, 'settings.install.iosHint')}</p>
+          <p className="text-xs text-muted-foreground">{t(locale, 'settings.install.iosHint')}</p>
         ) : null}
       </section>
     </>

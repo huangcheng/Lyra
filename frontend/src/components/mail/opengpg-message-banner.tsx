@@ -156,7 +156,7 @@ export function OpengpgMessageBanner({
           </DialogHeader>
           <div className="space-y-3">
             <label className="space-y-1 text-xs">
-              <span className="text-ter-foreground">
+              <span className="text-muted-foreground">
                 {t(locale, 'settings.encryption.passphrase')}
               </span>
               <input
@@ -172,7 +172,7 @@ export function OpengpgMessageBanner({
               />
             </label>
             <label className="space-y-1 text-xs">
-              <span className="text-ter-foreground">
+              <span className="text-muted-foreground">
                 {t(locale, 'settings.encryption.rememberChoice')}
               </span>
               <Select

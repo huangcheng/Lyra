@@ -386,7 +386,7 @@ export function MailDisplay() {
           ) : null}
           {!isMobile && convoPosition.index >= 0 && searchQuery.trim().length < 2 ? (
             <>
-              <div className="flex items-center gap-0.5 text-[11px] tabular-nums text-ter-foreground">
+              <div className="flex items-center gap-0.5 text-[11px] tabular-nums text-muted-foreground">
                 <Button
                   variant="ghost"
                   size="icon"

@@ -629,7 +629,7 @@ export function ComposeDialog() {
               >
                 <Paperclip className="size-3 shrink-0 text-muted-foreground" aria-hidden />
                 <span className="min-w-0 truncate font-medium">{f.name}</span>
-                <span className="shrink-0 text-ter-foreground tabular-nums">
+                <span className="shrink-0 text-muted-foreground tabular-nums">
                   {formatBytes(f.size)}
                 </span>
                 <button
@@ -756,13 +756,13 @@ export function ComposeDialog() {
               {t(locale, 'mail.sendSuccess')}
             </span>
           ) : (
-            <span className="ml-1 hidden text-[11px] text-ter-foreground md:inline">
+            <span className="ml-1 hidden text-[11px] text-muted-foreground md:inline">
               {t(locale, 'mail.sendShortcut')}
             </span>
           )}
           <div className="ml-auto flex items-center gap-0.5">
             {draftSavedAt && !success ? (
-              <span className="mr-1.5 text-[11px] text-ter-foreground tabular-nums">
+              <span className="mr-1.5 text-[11px] text-muted-foreground tabular-nums">
                 {t(locale, 'mail.draftSaved')}
               </span>
             ) : null}

@@ -97,7 +97,7 @@ export function FolderRoleMapping({ accountId, locale }: FolderRoleMappingProps)
 
   if (folders.length === 0 && !error) {
     return (
-      <p className="text-xs text-ter-foreground">
+      <p className="text-xs text-muted-foreground">
         {t(locale, 'settings.accounts.folderRolesEmpty')}
       </p>
     );
@@ -106,7 +106,7 @@ export function FolderRoleMapping({ accountId, locale }: FolderRoleMappingProps)
   return (
     <fieldset className="space-y-3">
       <legend>{t(locale, 'settings.accounts.folderRoles')}</legend>
-      <p className="text-xs text-ter-foreground">
+      <p className="text-xs text-muted-foreground">
         {t(locale, 'settings.accounts.folderRolesHint')}
       </p>
       {error ? <div className="text-sm text-destructive">{error}</div> : null}
