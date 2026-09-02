@@ -49,27 +49,14 @@ import {
 } from '@/lib/conversation';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
-import { forwardHtml, quotedReplyHtml, textToHtml } from '@/lib/compose-html';
+import { buildForwardDraft, buildReplyDraft } from '@/lib/compose-draft';
+import { textToHtml } from '@/lib/compose-html';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
-import { sanitizeEmailHtml } from '@/lib/sanitize-email-html';
 import { useMediaQuery } from '@/lib/use-media-query';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 import type { MailMessage } from '@/types';
-
-function quoteBody(message: {
-  from: { email: string };
-  date: string;
-  bodyText?: string;
-  snippet: string;
-}) {
-  const quoted = (message.bodyText ?? message.snippet)
-    .split('\n')
-    .map((line) => `> ${line}`)
-    .join('\n');
-  return `\n\nOn ${message.date}, ${message.from.email} wrote:\n${quoted}`;
-}
 
 const SCROLL_END_THRESHOLD_PX = 32;
 
@@ -236,23 +223,7 @@ export function MailDisplay() {
   }, [markReadPolicy, mail, tryAutoMarkRead, visibleConversation.length]);
 
   const replyToMessage = (m: MailMessage, all: boolean) => {
-    const to = all
-      ? [m.from.email, ...m.to.map((a) => a.email)].filter(Boolean).join(', ')
-      : m.from.email;
-    const source = {
-      fromName: m.from.name ?? '',
-      fromEmail: m.from.email,
-      date: m.date,
-      bodyHtml: m.bodyHtml ? sanitizeEmailHtml(m.bodyHtml) : undefined,
-      bodyText: m.bodyText,
-    };
-    openCompose({
-      mode: 'reply',
-      to,
-      subject: m.subject.startsWith('Re:') ? m.subject : `Re: ${m.subject}`,
-      body: quoteBody(m),
-      initialHtml: quotedReplyHtml(source, signatureOf(m.accountId)),
-    });
+    openCompose(buildReplyDraft(m, all, accounts));
   };
 
   const handleReply = (all = false) => {
@@ -269,26 +240,7 @@ export function MailDisplay() {
   };
 
   const forwardMessage = (m: MailMessage) => {
-    // Forward carries the original's regular attachments (inline images stay
-    // in the quoted body). Reply intentionally drops them.
-    const forwardAttachments = (m.attachments ?? [])
-      .filter((a) => !a.isInline)
-      .map((a) => ({ id: a.id, filename: a.filename, contentType: a.contentType }));
-    const source = {
-      fromName: m.from.name ?? '',
-      fromEmail: m.from.email,
-      date: m.date,
-      bodyHtml: m.bodyHtml ? sanitizeEmailHtml(m.bodyHtml) : undefined,
-      bodyText: m.bodyText,
-    };
-    openCompose({
-      mode: 'forward',
-      to: '',
-      subject: m.subject.startsWith('Fwd:') ? m.subject : `Fwd: ${m.subject}`,
-      body: quoteBody(m),
-      initialHtml: forwardHtml(source, signatureOf(m.accountId)),
-      forwardAttachments: forwardAttachments.length > 0 ? forwardAttachments : undefined,
-    });
+    openCompose(buildForwardDraft(m, accounts));
   };
 
   const handleForward = () => {
@@ -404,9 +356,6 @@ export function MailDisplay() {
       toggleStar(mail.id);
     }
   };
-
-  const signatureOf = (accountId: string): string | undefined =>
-    accounts.find((a) => a.id === accountId)?.signature ?? undefined;
 
   const accountFolders = useMemo(
     () =>
