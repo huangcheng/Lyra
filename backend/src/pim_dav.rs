@@ -112,11 +112,11 @@ pub(crate) async fn sync_carddav(
         let (to_fetch, removed, next_token) = delta(client, collection, prior.as_deref()).await?;
         let items = client.addressbook_multiget(collection, &to_fetch).await?;
         for item in items {
-            if upsert_contact(db, account_id, collection, &item, store_photo)
-                .await
-                .is_ok()
-            {
-                outcome.changed += 1;
+            match upsert_contact(db, account_id, collection, &item, store_photo).await {
+                Ok(()) => outcome.changed += 1,
+                Err(e) => {
+                    tracing::warn!(href = %item.href, error = %e, "contact upsert failed");
+                }
             }
         }
         for href in removed {
@@ -167,6 +167,7 @@ async fn upsert_contact(
     let Some(vcard) = item.data.as_deref() else {
         return Ok(());
     };
+    let account = crate::sync::queries::id_value_pub(db, account_id)?;
     let (display_name, emails, phones, org) = crate::dav::parse_vcard_fields(vcard);
     let photo_path = match crate::dav::parse_vcard_photo(vcard) {
         Some(photo) => store_photo(photo).await,
@@ -180,7 +181,7 @@ async fn upsert_contact(
         .column(contact::Column::Id)
         .column(contact::Column::Etag)
         .from(contact::Entity)
-        .and_where(contact::Column::AccountId.eq(account_id))
+        .and_where(contact::Column::AccountId.eq(account.clone()))
         .and_where(contact::Column::ExternalId.eq(item.href.clone()));
     let row = db.orm().query_one(&existing).await?;
 
@@ -238,7 +239,7 @@ async fn upsert_contact(
             ])
             .values_panic([
                 Expr::val(id),
-                Expr::val(account_id),
+                Expr::val(account.clone()),
                 Expr::val(item.href.clone()),
                 Expr::val(vcard.to_string()),
                 Expr::val(display_name.unwrap_or_default()),
@@ -255,9 +256,12 @@ async fn upsert_contact(
 }
 
 async fn tombstone_contact(db: &DbPool, account_id: &str, href: &str) {
+    let Ok(account) = crate::sync::queries::id_value_pub(db, account_id) else {
+        return;
+    };
     let mut del = Sq::delete();
     del.from_table(contact::Entity)
-        .and_where(contact::Column::AccountId.eq(account_id))
+        .and_where(contact::Column::AccountId.eq(account))
         .and_where(contact::Column::ExternalId.eq(href));
     let _ = db.orm().execute(&del).await;
 }
@@ -297,9 +301,12 @@ pub(crate) async fn sync_caldav(
             }
         }
         for href in removed {
+            let Ok(acct) = crate::sync::queries::id_value_pub(db, account_id) else {
+                continue;
+            };
             let mut del = Sq::delete();
             del.from_table(calendar_event::Entity)
-                .and_where(calendar_event::Column::AccountId.eq(account_id))
+                .and_where(calendar_event::Column::AccountId.eq(acct))
                 .and_where(calendar_event::Column::ExternalId.eq(href.clone()));
             let _ = db.orm().execute(&del).await;
             outcome.removed += 1;
@@ -358,6 +365,7 @@ async fn upsert_event(
     let Some(ical) = item.data.as_deref() else {
         return Ok(());
     };
+    let account = crate::sync::queries::id_value_pub(db, account_id)?;
     let (summary, description, dtstart, dtend, location, _is_all_day) =
         crate::dav::parse_vevent_fields(ical);
     let mut existing = Sq::select();
@@ -365,7 +373,7 @@ async fn upsert_event(
         .column(calendar_event::Column::Id)
         .column(calendar_event::Column::Etag)
         .from(calendar_event::Entity)
-        .and_where(calendar_event::Column::AccountId.eq(account_id))
+        .and_where(calendar_event::Column::AccountId.eq(account.clone()))
         .and_where(calendar_event::Column::ExternalId.eq(item.href.clone()));
     let row = db.orm().query_one(&existing).await?;
 
@@ -422,7 +430,7 @@ async fn upsert_event(
             ])
             .values_panic([
                 Expr::val(id),
-                Expr::val(account_id),
+                Expr::val(account.clone()),
                 Expr::val(item.href.clone()),
                 Expr::val(ical.to_string()),
                 Expr::val(summary.clone()),

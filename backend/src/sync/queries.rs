@@ -44,6 +44,10 @@ pub(super) fn orm_err(err: sea_orm::DbErr) -> SyncError {
 
 /// Dialect-aware bind for a UUID-column value: TEXT on SQLite, native UUID on
 /// Postgres.
+pub fn id_value_pub(db: &DbPool, id: &str) -> Result<Value, sea_orm::DbErr> {
+    id_value(db, id).map_err(|e| sea_orm::DbErr::Custom(e.to_string()))
+}
+
 pub(super) fn id_value(db: &DbPool, id: &str) -> Result<Value, SyncError> {
     Ok(match id_param(db, id)? {
         IdParam::Text(s) => Value::String(Some(s)),

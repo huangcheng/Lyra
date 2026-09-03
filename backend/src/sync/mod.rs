@@ -12,7 +12,7 @@ mod imap_loop;
 pub(crate) mod jmap_client;
 mod jmap_loop;
 mod labels;
-mod queries;
+pub(crate) mod queries;
 mod recovery;
 mod send;
 #[cfg(test)]
