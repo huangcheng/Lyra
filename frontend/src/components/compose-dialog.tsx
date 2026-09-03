@@ -59,6 +59,25 @@ interface ComposeForm {
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_ATTACHMENTS = 10;
 
+/** Pick a collision-free filename: `name`, else `name-2.ext`, `name-3.ext`, …
+ * Filenames must be unique within one compose — the backend's
+ * `apply_inline_meta` matches inline parts to `files` parts by filename. */
+function uniqueFileName(name: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  for (let i = 2; ; i += 1) {
+    const candidate = `${stem}-${i}${ext}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** Same bytes/type under a new name (no copy when the name is unchanged). */
+function renamedFile(file: File, name: string): File {
+  return name === file.name ? file : new File([file], name, { type: file.type });
+}
+
 export function ComposeDialog() {
   const locale = useUIStore((s) => s.locale);
   const composeOpen = useUIStore((s) => s.composeOpen);
@@ -185,6 +204,8 @@ export function ComposeDialog() {
     const sources = composeDraft?.inlineSources ?? [];
     if (sources.length > 0 && seeded.toLowerCase().includes('cid:')) {
       let cancelled = false;
+      // No .catch needed: resolveInlineSources swallows per-source failures
+      // internally (broken parts keep their inert cid: ref).
       void resolveInlineSources(seeded, sources, (id) =>
         apiBlob(`/attachments/${id}/download`),
       ).then(({ html, urlToImage }) => {
@@ -247,9 +268,20 @@ export function ComposeDialog() {
     setFiles((prev) => {
       if (prev.length + ok.length > MAX_ATTACHMENTS) {
         setError(t(locale, 'mail.attachmentCountLimit', { count: String(MAX_ATTACHMENTS) }));
-        return [...prev, ...ok].slice(0, MAX_ATTACHMENTS);
       }
-      return [...prev, ...ok];
+      // Rename against existing attachments AND tracked inline images (and
+      // siblings in this batch) so no two parts share a filename.
+      const taken = new Set<string>([
+        ...prev.map((f) => f.name),
+        ...[...inlineImagesRef.current.values()].map((e) => e.file.name),
+      ]);
+      const room = Math.max(0, MAX_ATTACHMENTS - prev.length);
+      const renamed = ok.slice(0, room).map((f) => {
+        const name = uniqueFileName(f.name, taken);
+        taken.add(name);
+        return renamedFile(f, name);
+      });
+      return [...prev, ...renamed];
     });
   }
 
@@ -257,21 +289,13 @@ export function ComposeDialog() {
     setFiles((prev) => prev.filter((_, i) => i !== index));
   }
 
-  /** Filenames must be unique within one compose — the backend matches inline
-   * parts to `files` parts by filename. Duplicates get `-2`, `-3`, … suffixes. */
+  /** Inline insert path: rename against existing attachments + inline images. */
   const uniqueNamed = (file: File): File => {
     const taken = new Set<string>([
       ...files.map((f) => f.name),
       ...[...inlineImagesRef.current.values()].map((e) => e.file.name),
     ]);
-    if (!taken.has(file.name)) return file;
-    const dot = file.name.lastIndexOf('.');
-    const stem = dot > 0 ? file.name.slice(0, dot) : file.name;
-    const ext = dot > 0 ? file.name.slice(dot) : '';
-    for (let i = 2; ; i += 1) {
-      const name = `${stem}-${i}${ext}`;
-      if (!taken.has(name)) return new File([file], name, { type: file.type });
-    }
+    return renamedFile(file, uniqueFileName(file.name, taken));
   };
 
   /** Editor toolbar/paste/drop image hook: validate, track, hand back an
