@@ -214,11 +214,12 @@ impl DavClient {
             .await
             .map_err(DavError::Http)?;
         let mut base = resp.url().to_string();
-        if let Some(principal) = self
+        if let Some(body) = self
             .propfind_text(&base, "<D:current-user-principal/>")
             .await
             .ok()
-            .and_then(|body| tag_text(&body, "href"))
+            && let Some((start, len)) = element(&body, "current-user-principal")
+            && let Some(principal) = tag_text(&body[start..start + len], "href")
         {
             base = super::dav::resolve_href(&base, &principal);
         }
@@ -239,11 +240,12 @@ impl DavClient {
     /// chain): RFC 5397 current-user-principal, then the homeset property.
     pub async fn homeset_direct(&self, base: &str, homeset_prop: &str) -> Result<String, DavError> {
         let mut principal_base = base.to_string();
-        if let Some(principal) = self
+        if let Some(body) = self
             .propfind_text(base, "<D:current-user-principal/>")
             .await
             .ok()
-            .and_then(|body| tag_text(&body, "href"))
+            && let Some((start, len)) = element(&body, "current-user-principal")
+            && let Some(principal) = tag_text(&body[start..start + len], "href")
         {
             principal_base = super::dav::resolve_href(base, &principal);
         }
