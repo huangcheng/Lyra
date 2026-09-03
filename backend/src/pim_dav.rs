@@ -440,13 +440,91 @@ async fn upsert_event(
 }
 
 /// RFC 6764 discovery for both protocols; returns discovered URLs.
-pub(crate) async fn discover(client: &DavClient) -> Result<(String, String), crate::dav::DavError> {
-    let carddav = client
-        .discover_homeset("/.well-known/carddav", "addressbook-home-set")
-        .await?;
-    let caldav = client
-        .discover_homeset("/.well-known/caldav", "calendar-home-set")
-        .await?;
+/// Bootstrap origins for RFC 6764 discovery. Provider hints cover servers
+/// that publish neither well-known nor SRV (Fastmail documents fixed DAV
+/// hosts); otherwise well-known on the bare mail domain.
+pub(crate) struct Bootstrap {
+    pub origin: String,
+    pub client: DavClient,
+    /// True when the origin IS the DAV root (provider hint): PROPFIND it
+    /// directly instead of chaining through /.well-known.
+    pub direct: bool,
+}
+
+pub(crate) fn bootstrap_origins(domain: &str, email: &str, password: &str) -> Vec<Bootstrap> {
+    let hints: &[(&str, &str, &str)] = &[
+        (
+            "fastmail.com",
+            "https://carddav.fastmail.com/dav/",
+            "https://caldav.fastmail.com/dav/",
+        ),
+        (
+            "fastmailusercontent.com",
+            "https://carddav.fastmail.com/dav/",
+            "https://caldav.fastmail.com/dav/",
+        ),
+    ];
+    let mk = |origin: &str| DavClient::new(email.to_string(), password.to_string(), origin);
+    for (suffix, carddav, caldav) in hints {
+        if domain.ends_with(suffix)
+            && let (Ok(c), Ok(l)) = (mk(carddav), mk(caldav))
+        {
+            return vec![
+                Bootstrap {
+                    origin: carddav.to_string(),
+                    client: c,
+                    direct: true,
+                },
+                Bootstrap {
+                    origin: caldav.to_string(),
+                    client: l,
+                    direct: true,
+                },
+            ];
+        }
+    }
+    let origin = format!("https://{domain}");
+    match (mk(&origin), mk(&origin)) {
+        (Ok(c), Ok(l)) => vec![
+            Bootstrap {
+                origin: origin.clone(),
+                client: c,
+                direct: false,
+            },
+            Bootstrap {
+                origin,
+                client: l,
+                direct: false,
+            },
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// RFC 6764 discovery over per-protocol clients; returns home-set URLs.
+pub(crate) async fn discover(
+    bootstraps: &[Bootstrap],
+) -> Result<(String, String), crate::dav::DavError> {
+    let card = &bootstraps[0];
+    let cal = &bootstraps[1];
+    let carddav = if card.direct {
+        card.client
+            .homeset_direct(&card.origin, "addressbook-home-set")
+            .await?
+    } else {
+        card.client
+            .discover_homeset("/.well-known/carddav", "addressbook-home-set")
+            .await?
+    };
+    let caldav = if cal.direct {
+        cal.client
+            .homeset_direct(&cal.origin, "calendar-home-set")
+            .await?
+    } else {
+        cal.client
+            .discover_homeset("/.well-known/caldav", "calendar-home-set")
+            .await?
+    };
     Ok((carddav, caldav))
 }
 

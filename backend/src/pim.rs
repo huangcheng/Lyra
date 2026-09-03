@@ -679,8 +679,6 @@ async fn pim_discover(
     // Bootstrap origin from the mail domain (SRV host discovery is a
     // follow-up; well-known on the mail host covers common providers).
     let domain = email.rsplit('@').next().unwrap_or_default().to_string();
-    let origin = format!("https://{domain}");
-
     let (dek, credential_json) =
         crate::auth::AuthState::get_user_dek_and_credential(state.db(), &user_id, &account_id)
             .await
@@ -688,9 +686,11 @@ async fn pim_discover(
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 
-    let client = crate::dav::DavClient::new(email, password, &origin)
-        .map_err(|e| PimError::SyncError(e.to_string()))?;
-    let (carddav, caldav) = crate::pim_dav::discover(&client)
+    let bootstraps = crate::pim_dav::bootstrap_origins(&domain, &email, &password);
+    if bootstraps.len() < 2 {
+        return Err(PimError::SyncError("could not build DAV clients".into()));
+    }
+    let (carddav, caldav) = crate::pim_dav::discover(&bootstraps)
         .await
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 

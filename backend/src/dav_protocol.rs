@@ -231,24 +231,65 @@ impl DavClient {
         Ok(super::dav::resolve_href(&base, &href))
     }
 
-    async fn propfind_text(&self, url: &str, props: &str) -> Result<String, DavError> {
-        let resp = self
-            .http
-            .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
-            .timeout(DAV_TIMEOUT)
-            .header("Depth", "0")
-            .header(reqwest::header::CONTENT_TYPE, XML_CONTENT_TYPE)
-            .body(propfind_body(props))
-            .send()
+    /// Principal → homeset starting from a known DAV root (no well-known
+    /// chain): RFC 5397 current-user-principal, then the homeset property.
+    pub async fn homeset_direct(&self, base: &str, homeset_prop: &str) -> Result<String, DavError> {
+        let mut principal_base = base.to_string();
+        if let Some(principal) = self
+            .propfind_text(base, "<D:current-user-principal/>")
             .await
-            .map_err(DavError::Http)?;
-        if !resp.status().is_success() {
-            return Err(DavError::Protocol(format!(
-                "PROPFIND {url}: {}",
-                resp.status()
-            )));
+            .ok()
+            .and_then(|body| tag_text(&body, "href"))
+        {
+            principal_base = super::dav::resolve_href(base, &principal);
         }
-        Ok(resp.text().await.unwrap_or_default())
+        let body = self
+            .propfind_text(&principal_base, &format!("<{homeset_prop}/>"))
+            .await?;
+        let href = tag_text(&body, homeset_prop)
+            .or_else(|| tag_text(&body, "href"))
+            .ok_or_else(|| DavError::Protocol(format!("no {homeset_prop} in response")))?;
+        Ok(super::dav::resolve_href(&principal_base, &href))
+    }
+
+    async fn propfind_text(&self, url: &str, props: &str) -> Result<String, DavError> {
+        // RFC 6764 discovery chains redirect (302 to the DAV root); reqwest
+        // does not follow redirects for PROPFIND, so follow Location
+        // manually, bounded, staying within the client's origin pin.
+        let mut current = url.to_string();
+        for _ in 0..3 {
+            let resp = self
+                .http
+                .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &current)
+                .timeout(DAV_TIMEOUT)
+                .header("Depth", "0")
+                .header(reqwest::header::CONTENT_TYPE, XML_CONTENT_TYPE)
+                .body(propfind_body(props))
+                .send()
+                .await
+                .map_err(DavError::Http)?;
+            if resp.status().is_redirection() {
+                let loc = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| {
+                        DavError::Protocol(format!("PROPFIND {current}: redirect without Location"))
+                    })?;
+                current = super::dav::resolve_href(&self.origin, loc);
+                continue;
+            }
+            if !resp.status().is_success() {
+                return Err(DavError::Protocol(format!(
+                    "PROPFIND {current}: {}",
+                    resp.status()
+                )));
+            }
+            return Ok(resp.text().await.unwrap_or_default());
+        }
+        Err(DavError::Protocol(format!(
+            "PROPFIND {url}: too many redirects"
+        )))
     }
 
     /// Collections matching `resourcetype` local name under `home`
