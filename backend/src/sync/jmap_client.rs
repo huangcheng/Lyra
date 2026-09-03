@@ -1057,17 +1057,28 @@ impl JmapSeam {
                 sent_id.as_deref(),
             );
         }
-        let mut responses = request.send().await?.unwrap_method_responses();
-        if responses.len() != 2 {
-            return Err(JmapError::InvalidResponse(format!(
-                "expected Email/import + EmailSubmission/set responses, got {}",
-                responses.len()
-            )));
+        let responses = request.send().await?.unwrap_method_responses();
+        // RFC 8621 §6: the onSuccessUpdateEmail patch comes back as an EXTRA
+        // Email/set response (Fastmail returns 3 entries for this 2-call
+        // batch). Match by variant instead of counting.
+        let mut import_resp = None;
+        let mut sub_resp = None;
+        for resp in responses {
+            if resp.is_type(Method::ImportEmail) {
+                if import_resp.is_none() {
+                    import_resp = Some(resp.unwrap_import_email()?);
+                }
+            } else if resp.is_type(Method::SetEmailSubmission) && sub_resp.is_none() {
+                sub_resp = Some(resp.unwrap_set_email_submission()?);
+            }
         }
         // Unwrap Email/import FIRST: the submission's `#{create_id}` reference
         // fails with it and would otherwise mask the root error.
-        let mut import_resp = responses.remove(0).unwrap_import_email()?;
-        let mut sub_resp = responses.remove(0).unwrap_set_email_submission()?;
+        let mut import_resp = import_resp
+            .ok_or_else(|| JmapError::InvalidResponse("missing Email/import response".into()))?;
+        let mut sub_resp = sub_resp.ok_or_else(|| {
+            JmapError::InvalidResponse("missing EmailSubmission/set response".into())
+        })?;
         import_resp.created(&import_create_id)?;
         let mut submission = sub_resp.created("sub")?;
         Ok(submission.take_id())
