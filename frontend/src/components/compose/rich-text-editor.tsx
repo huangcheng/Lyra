@@ -55,7 +55,9 @@ import type { PlateElementProps } from 'platejs/react';
 import { serializeHtml } from 'platejs/static';
 
 import { Button } from '@/components/ui/button';
+import { t } from '@/i18n';
 import { cn } from '@/lib/utils';
+import { useUIStore } from '@/stores/ui';
 
 export interface RichTextEditorProps {
   /** Initial HTML; only read once when the editor mounts. */
@@ -217,6 +219,7 @@ function Toolbar({
 }) {
   const editor = useEditorRef();
   const block = useBlockState();
+  const locale = useUIStore((s) => s.locale);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const marks = useEditorSelector(
     (ed) => ({
@@ -390,7 +393,7 @@ function Toolbar({
         disabled={disabled || !onImageFile}
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => imageInputRef.current?.click()}
-        aria-label="Insert image"
+        aria-label={t(locale, 'mail.insertImage')}
       >
         <ImageIcon className="size-3.5" />
       </Button>
