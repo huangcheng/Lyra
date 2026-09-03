@@ -8,11 +8,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import {
+  CalendarDays,
+  Contact,
   Flag,
   KeyRound,
   Pencil,
   Plus,
   RefreshCw,
+  Radar,
   Shield,
   SlidersHorizontal,
   Star,
@@ -20,6 +23,13 @@ import {
   Users,
   X,
 } from 'lucide-react';
+
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { t } from '../i18n';
 import { SlimPageNav, type SlimNavItem } from '@/components/slim-page-nav';
 import { FolderRoleMapping } from './folder-role-mapping';
@@ -166,6 +176,8 @@ export function SettingsPage() {
   const [probing, setProbing] = useState(false);
   const [probeResult, setProbeResult] = useState<ProbeResult | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [pimBusyId, setPimBusyId] = useState<string | null>(null);
+  const [pimResult, setPimResult] = useState<Record<string, string>>({});
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [errorLogOpenId, setErrorLogOpenId] = useState<string | null>(null);
@@ -386,6 +398,48 @@ export function SettingsPage() {
       setSyncErrors((prev) => ({ ...prev, [id]: message }));
     } finally {
       setSyncingId(null);
+    }
+  }
+
+  /** PIM actions: RFC 6764 discovery + CardDAV/CalDAV sync (account-scoped). */
+  async function runPim(id: string, action: 'discover' | 'contacts' | 'calendars') {
+    try {
+      setPimBusyId(id);
+      setPimResult((prev) => ({ ...prev, [id]: '' }));
+      if (action === 'discover') {
+        const res = await api<{ carddavUrl?: string; caldavUrl?: string }>(
+          `/accounts/${id}/pim/discover`,
+          { method: 'POST' },
+        );
+        setPimResult((prev) => ({
+          ...prev,
+          [id]: t(locale, 'settings.pim.discovered', {
+            carddav: res.carddavUrl ? '✓' : '—',
+            caldav: res.caldavUrl ? '✓' : '—',
+          }),
+        }));
+        await fetchAccounts();
+      } else {
+        const path = action === 'contacts' ? 'contacts/sync' : 'calendars/sync';
+        const res = await api<{ status?: string; synced?: number; removed?: number }>(
+          `/accounts/${id}/${path}`,
+        );
+        setPimResult((prev) => ({
+          ...prev,
+          [id]:
+            res.status === 'skipped'
+              ? t(locale, 'settings.pim.skipped')
+              : t(locale, 'settings.pim.synced', {
+                  synced: res.synced ?? 0,
+                  removed: res.removed ?? 0,
+                }),
+        }));
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      setPimResult((prev) => ({ ...prev, [id]: message }));
+    } finally {
+      setPimBusyId(null);
     }
   }
 
@@ -1104,6 +1158,7 @@ export function SettingsPage() {
                             : t(locale, 'settings.syncNow');
                         const manageLabel = t(locale, 'settings.manage');
                         const deleteLabel = t(locale, 'common.delete');
+                        const pimMessage = pimResult[account.id];
                         return (
                           <div
                             key={account.id}
@@ -1202,6 +1257,52 @@ export function SettingsPage() {
                                 </TooltipTrigger>
                                 <TooltipContent>{syncLabel}</TooltipContent>
                               </Tooltip>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    aria-label={t(locale, 'settings.pim.menu')}
+                                    disabled={pimBusyId === account.id}
+                                  >
+                                    <Radar
+                                      className={cn(
+                                        'size-3.5',
+                                        pimBusyId === account.id && 'animate-spin',
+                                      )}
+                                    />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onClick={() => void runPim(account.id, 'discover')}
+                                  >
+                                    <Radar className="size-3.5" />
+                                    {t(locale, 'settings.pim.discover')}
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => void runPim(account.id, 'contacts')}
+                                  >
+                                    <Contact className="size-3.5" />
+                                    {t(locale, 'settings.pim.syncContacts')}
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => void runPim(account.id, 'calendars')}
+                                  >
+                                    <CalendarDays className="size-3.5" />
+                                    {t(locale, 'settings.pim.syncCalendars')}
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                              {pimMessage ? (
+                                <span
+                                  className="max-w-40 truncate text-[10.5px] text-muted-foreground"
+                                  title={pimMessage}
+                                  role="status"
+                                >
+                                  {pimMessage}
+                                </span>
+                              ) : null}
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Button

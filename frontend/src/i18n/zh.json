@@ -459,6 +459,15 @@
       "button": "安装应用",
       "iosHint": "在 iPhone/iPad 上：点按 Safari 的分享按钮，选择“添加到主屏幕”。",
       "installed": "已安装"
+    },
+    "pim": {
+      "menu": "联系人日历",
+      "discover": "自动发现（CardDAV/CalDAV）",
+      "syncContacts": "同步联系人",
+      "syncCalendars": "同步日历",
+      "discovered": "CardDAV {carddav} · CalDAV {caldav}",
+      "synced": "同步 {synced} 条，移除 {removed} 条",
+      "skipped": "未配置——请先运行自动发现"
     }
   },
   "contacts": {

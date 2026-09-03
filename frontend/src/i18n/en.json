@@ -459,6 +459,15 @@
       "button": "Install app",
       "iosHint": "On iPhone/iPad: tap the Share button in Safari, then choose “Add to Home Screen”.",
       "installed": "Installed"
+    },
+    "pim": {
+      "menu": "Contacts & calendars",
+      "discover": "Discover (CardDAV/CalDAV)",
+      "syncContacts": "Sync contacts",
+      "syncCalendars": "Sync calendars",
+      "discovered": "CardDAV {carddav} · CalDAV {caldav}",
+      "synced": "{synced} synced, {removed} removed",
+      "skipped": "Not configured — run Discover"
     }
   },
   "contacts": {
