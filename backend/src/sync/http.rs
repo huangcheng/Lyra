@@ -2720,6 +2720,8 @@ mod learn_hook_tests {
     fn spam_row() -> MessageRow {
         MessageRow {
             id: "00000000-0000-7000-8000-0000000000aa".into(),
+            in_reply_to: None,
+            references_headers: None,
             account_id: "acc".into(),
             folder_id: "fld".into(),
             folder_name: "Spam".into(),

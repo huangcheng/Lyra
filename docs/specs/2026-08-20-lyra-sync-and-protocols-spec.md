@@ -448,6 +448,14 @@ Status key: **done** = implemented and tested · **partial** = core path works, 
 | IMAP IDLE push (RFC 2177) | **done** | CAPABILITY gate; INBOX IDLE supervisor enqueues sync on EXISTS |
 | AUTH PLAIN + XOAUTH2 | **done** | PLAIN/LOGIN + Microsoft OAuth XOAUTH2 (CHE-26) |
 | BODY.PEEK[] lazy fetch | **done** | On-demand in HTTP handler |
+| UID EXPUNGE (RFC 4315) with safe no-UIDPLUS fallback | **done** | `expunge_uid_if_safe`: mailbox-wide EXPUNGE only when `UID SEARCH DELETED` proves the target is the sole flagged message; otherwise the `\Deleted` flag stays (audit 2026-09-02) |
+
+#### Format & threading (RFC 5322)
+
+| Requirement | Status | Notes / tracking |
+|-------------|--------|------------------|
+| Thread by `In-Reply-To`/`References` chains (§3.6.4), identical-Message-ID copies unioned, `Re:`-prefix-only fallback; subject similarity never threads | **done** | `frontend/src/lib/conversation.ts` union-find; verification-code regression test; audit 2026-09-02 |
+| `in_reply_to` / `references_headers` in list + detail payloads (references capped 2048) | **done** | `sync/queries.rs` |
 
 #### JMAP (RFC 8620 / 8621)
 

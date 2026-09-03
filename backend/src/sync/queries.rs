@@ -173,6 +173,8 @@ const MESSAGE_LIST_COLS: &[message::Column] = &[
     message::Column::AccountId,
     message::Column::FolderId,
     message::Column::MessageIdHeader,
+    message::Column::InReplyTo,
+    message::Column::ReferencesHeaders,
     message::Column::Subject,
     message::Column::FromAddress,
     message::Column::ToAddresses,
@@ -258,6 +260,10 @@ pub(super) fn message_response_from_query_row(
         account_id: row_id(row, "account_id")?,
         folder_id: row_id(row, "folder_id")?,
         message_id_header: row.try_get("", "message_id_header")?,
+        in_reply_to: row.try_get("", "in_reply_to")?,
+        references_headers: row
+            .try_get::<Option<String>>("", "references_headers")?
+            .map(|s| s.chars().take(2048).collect()),
         subject: row
             .try_get::<Option<String>>("", "subject")?
             .map(|s| crate::imap::decode_mime_header(&s)),
@@ -355,8 +361,14 @@ pub struct MessageResponse {
     pub account_id: String,
     pub folder_id: String,
     /// RFC 5322 Message-ID — clients use it to recognize cross-folder
-    /// copies of the same message (e.g. INBOX + Archive).
+    /// copies of the same message (e.g. INBOX + Archive) and to link
+    /// replies via In-Reply-To/References into threads.
     pub message_id_header: Option<String>,
+    /// RFC 5322 In-Reply-To — direct parent Message-ID(s).
+    pub in_reply_to: Option<String>,
+    /// RFC 5322 References — ancestor Message-ID chain (capped to bound
+    /// list payload weight).
+    pub references_headers: Option<String>,
     pub subject: Option<String>,
     pub from_address: Option<String>,
     pub to_addresses: Option<String>,
@@ -551,6 +563,8 @@ pub(crate) struct MessageRow {
     pub(super) folder_name: String,
     pub(super) external_id: Option<String>,
     pub(super) message_id_header: Option<String>,
+    pub(super) in_reply_to: Option<String>,
+    pub(super) references_headers: Option<String>,
     pub(super) protocol: String,
     pub(super) body_text: Option<String>,
     pub(super) body_html: Option<String>,
@@ -600,6 +614,11 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         account_id: row.account_id.clone(),
         folder_id: row.folder_id.clone(),
         message_id_header: row.message_id_header.clone(),
+        in_reply_to: row.in_reply_to.clone(),
+        references_headers: row
+            .references_headers
+            .as_deref()
+            .map(|s| s.chars().take(2048).collect()),
         subject: row.subject.as_deref().map(crate::imap::decode_mime_header),
         from_address: row
             .from_address
@@ -641,6 +660,8 @@ const MESSAGE_LOAD_COLS: &[message::Column] = &[
     message::Column::FolderId,
     message::Column::ExternalId,
     message::Column::MessageIdHeader,
+    message::Column::InReplyTo,
+    message::Column::ReferencesHeaders,
     message::Column::Subject,
     message::Column::FromAddress,
     message::Column::ToAddresses,
@@ -705,6 +726,8 @@ pub(crate) async fn load_message_row(
         folder_name: row.try_get("", "folder_name").map_err(orm_err)?,
         external_id: row.try_get("", "external_id").map_err(orm_err)?,
         message_id_header: row.try_get("", "message_id_header").map_err(orm_err)?,
+        in_reply_to: row.try_get("", "in_reply_to").map_err(orm_err)?,
+        references_headers: row.try_get("", "references_headers").map_err(orm_err)?,
         protocol: row.try_get("", "protocol").map_err(orm_err)?,
         body_text: row.try_get("", "body_text").map_err(orm_err)?,
         body_html: row.try_get("", "body_html").map_err(orm_err)?,

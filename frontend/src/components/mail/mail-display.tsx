@@ -43,12 +43,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { t, type SupportedLocale } from '@/i18n';
 import { api } from '@/lib/api-client';
 import { confirmMoveToTrash } from '@/lib/confirm-trash';
-import {
-  baseSubject,
-  conversationKeyOf,
-  conversationMembers,
-  groupIntoConversations,
-} from '@/lib/conversation';
+import { baseSubject, conversationMembers, groupIntoConversations } from '@/lib/conversation';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { buildForwardDraft, buildReplyDraft } from '@/lib/compose-draft';
@@ -147,7 +142,9 @@ export function MailDisplay() {
     () => (mail ? conversationMembers(mail, messages) : []),
     [mail, messages],
   );
-  const conversationKey = mail ? conversationKeyOf(mail) : null;
+  // Thread-root id as the expand-override reset key (conversationKeyOf was
+  // removed with subject-based grouping).
+  const conversationKey = conversation.length ? `th:${conversation[0].id}` : null;
 
   // Conversation partners may live in folders the current view never
   // loaded (e.g. the Inbox original while reading Sent). Subject search is

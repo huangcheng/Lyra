@@ -640,8 +640,7 @@ impl ImapClient {
         .await
     }
 
-    /// Mark a UID `\Deleted` and expunge it (UIDPLUS `UID EXPUNGE` when
-    /// available, mailbox-wide EXPUNGE otherwise).
+    /// Mark a UID `\Deleted` and expunge it.
     pub async fn delete_uid(&mut self, uid: u32) -> Result<(), ImapError> {
         timed(COMMAND_TIMEOUT, async {
             let uid_str = uid.to_string();
@@ -652,20 +651,44 @@ impl ImapClient {
                 .await
                 .map_err(ImapError::Imap)?;
             let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
-            if self.capabilities.has_str("UIDPLUS") {
-                let stream = self
-                    .session
-                    .uid_expunge(&uid_str)
-                    .await
-                    .map_err(ImapError::Imap)?;
-                let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
-            } else {
-                let stream = self.session.expunge().await.map_err(ImapError::Imap)?;
-                let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
-            }
-            Ok(())
+            self.expunge_uid_if_safe(uid).await
         })
         .await
+    }
+
+    /// Expunge exactly `uid` after a `STORE \Deleted`. UIDPLUS servers use
+    /// `UID EXPUNGE` (RFC 4315). Without UIDPLUS a mailbox-wide `EXPUNGE`
+    /// would irreversibly remove EVERY `\Deleted` message — including ones
+    /// other sessions flagged deliberately — so it is only issued when
+    /// `UID SEARCH DELETED` proves this uid is the only one flagged; the
+    /// flag alone otherwise (the caller's local row already moved).
+    pub async fn expunge_uid_if_safe(&mut self, uid: u32) -> Result<(), ImapError> {
+        let uid_str = uid.to_string();
+        if self.capabilities.has_str("UIDPLUS") {
+            let stream = self
+                .session
+                .uid_expunge(&uid_str)
+                .await
+                .map_err(ImapError::Imap)?;
+            let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+            return Ok(());
+        }
+        let flagged = self
+            .session
+            .uid_search("DELETED")
+            .await
+            .map_err(ImapError::Imap)?;
+        if flagged.len() == 1 && flagged.contains(&uid) {
+            let stream = self.session.expunge().await.map_err(ImapError::Imap)?;
+            let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
+        } else {
+            tracing::info!(
+                uid,
+                others = flagged.len().saturating_sub(1),
+                "mailbox has other \\Deleted mail; leaving flag without EXPUNGE"
+            );
+        }
+        Ok(())
     }
 
     pub async fn move_uid(&mut self, uid: u32, destination: &str) -> Result<(), ImapError> {
@@ -691,17 +714,7 @@ impl ImapClient {
                 .await
                 .map_err(ImapError::Imap)?;
             let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
-            if self.capabilities.has_str("UIDPLUS") {
-                let stream = self
-                    .session
-                    .uid_expunge(&uid_str)
-                    .await
-                    .map_err(ImapError::Imap)?;
-                let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
-            } else {
-                let stream = self.session.expunge().await.map_err(ImapError::Imap)?;
-                let _: Vec<_> = stream.try_collect().await.map_err(ImapError::Imap)?;
-            }
+            self.expunge_uid_if_safe(uid).await?;
             Ok(())
         })
         .await

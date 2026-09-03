@@ -29,6 +29,10 @@ export interface MailMessage {
   threadId?: string;
   /** RFC 5322 Message-ID — identifies cross-folder copies of one message. */
   messageIdHeader?: string;
+  /** RFC 5322 In-Reply-To — direct parent Message-ID(s). */
+  inReplyTo?: string;
+  /** RFC 5322 References — ancestor Message-ID chain (capped by the API). */
+  referencesHeaders?: string;
   subject: string;
   from: MailAddress;
   to: MailAddress[];

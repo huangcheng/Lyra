@@ -30,6 +30,8 @@ export interface ApiMessage {
   accountId: string;
   folderId: string;
   messageIdHeader?: string;
+  inReplyTo?: string;
+  referencesHeaders?: string;
   subject?: string;
   fromAddress?: string;
   toAddresses?: string;
@@ -142,6 +144,8 @@ export function mapApiMessage(msg: ApiMessage | Record<string, unknown>): MailMe
     accountId: String(row.accountId),
     folderId: String(row.folderId),
     messageIdHeader: row.messageIdHeader ?? undefined,
+    inReplyTo: row.inReplyTo ?? undefined,
+    referencesHeaders: row.referencesHeaders ?? undefined,
     subject: row.subject ?? '(no subject)',
     from: parseAddress(row.fromAddress),
     to: parseAddresses(row.toAddresses),
