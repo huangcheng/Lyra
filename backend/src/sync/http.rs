@@ -1905,42 +1905,7 @@ pub(crate) async fn save_draft(
         None => None,
     };
 
-    let to = crate::sync::parse_address_list(&body.to);
-    if to.is_empty() && body.subject.trim().is_empty() {
-        return Err(SyncError::InvalidInput(
-            "draft needs recipients or a subject".into(),
-        ));
-    }
-    let outbound = crate::smtp::OutboundMessage {
-        from_email: email_address,
-        from_name: None,
-        to,
-        cc: body
-            .cc
-            .as_ref()
-            .map(|v| crate::sync::parse_address_list(v))
-            .unwrap_or_default(),
-        bcc: body
-            .bcc
-            .as_ref()
-            .map(|v| crate::sync::parse_address_list(v))
-            .unwrap_or_default(),
-        subject: body.subject.clone(),
-        body_text: body.body_text.clone(),
-        body_html: body.body_html.clone(),
-        in_reply_to: body.in_reply_to.clone(),
-        references: body.references.clone(),
-        mime_content_type: None,
-        mime_body: None,
-        attachments: parse_inline_attachments(
-            &body.inline_attachments,
-            state.max_attachment_bytes,
-        )?,
-        message_id: Some(format!(
-            "<lyra-draft-{}@lyra>",
-            uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext))
-        )),
-    };
+    let outbound = draft_outbound_message(email_address, &body, state.max_attachment_bytes)?;
 
     match protocol.as_str() {
         "imap" => {
@@ -1984,6 +1949,8 @@ pub(crate) async fn save_draft(
             let local_id =
                 upsert_jmap_draft_row(db, &body.account_id, &dest_id, &server_id, &outbound)
                     .await?;
+            persist_draft_attachments(db, &state.data_dir, &body.account_id, &local_id, &outbound)
+                .await?;
             Ok(Json(serde_json::json!({
                 "status": "saved",
                 "draftMessageId": local_id,
@@ -1993,6 +1960,48 @@ pub(crate) async fn save_draft(
             "unsupported receive protocol: {other}"
         ))),
     }
+}
+
+/// Save-draft request → outbound message, stamping a draft Message-ID so a
+/// later sync can locate the appended/imported copy.
+fn draft_outbound_message(
+    email_address: String,
+    body: &SaveDraftRequest,
+    max_attachment_bytes: u64,
+) -> Result<crate::smtp::OutboundMessage, SyncError> {
+    let to = crate::sync::parse_address_list(&body.to);
+    if to.is_empty() && body.subject.trim().is_empty() {
+        return Err(SyncError::InvalidInput(
+            "draft needs recipients or a subject".into(),
+        ));
+    }
+    Ok(crate::smtp::OutboundMessage {
+        from_email: email_address,
+        from_name: None,
+        to,
+        cc: body
+            .cc
+            .as_ref()
+            .map(|v| crate::sync::parse_address_list(v))
+            .unwrap_or_default(),
+        bcc: body
+            .bcc
+            .as_ref()
+            .map(|v| crate::sync::parse_address_list(v))
+            .unwrap_or_default(),
+        subject: body.subject.clone(),
+        body_text: body.body_text.clone(),
+        body_html: body.body_html.clone(),
+        in_reply_to: body.in_reply_to.clone(),
+        references: body.references.clone(),
+        mime_content_type: None,
+        mime_body: None,
+        attachments: parse_inline_attachments(&body.inline_attachments, max_attachment_bytes)?,
+        message_id: Some(format!(
+            "<lyra-draft-{}@lyra>",
+            uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext))
+        )),
+    })
 }
 
 /// Draft inline images → outbound inline parts; same caps as send.
@@ -2221,6 +2230,35 @@ async fn upsert_jmap_draft_row(
     db.orm().execute(&insert).await.map_err(orm_err)?;
     update_folder_counts(db, folder_id).await?;
     Ok(id)
+}
+
+/// Persist a JMAP draft's locally-authored attachments (blob bytes + rows)
+/// so reopen-before-sync resolves inline parts and `/attachments/:id/download`
+/// serves them — the download endpoint reads local `storage_path`, not the
+/// server. Mirrors what the sync parse does for received mail.
+async fn persist_draft_attachments(
+    db: &DbPool,
+    data_dir: &std::path::Path,
+    account_id: &str,
+    message_id: &str,
+    outbound: &crate::smtp::OutboundMessage,
+) -> Result<(), SyncError> {
+    if outbound.attachments.is_empty() {
+        return Ok(());
+    }
+    let mut extracted = Vec::with_capacity(outbound.attachments.len());
+    for att in &outbound.attachments {
+        extracted.push(crate::imap::ExtractedAttachment {
+            filename: att.filename.clone(),
+            content_type: att.content_type.clone(),
+            data: att.decode().map_err(|e| {
+                SyncError::InvalidInput(format!("attachment {}: {e}", att.filename))
+            })?,
+            content_id: att.content_id.clone(),
+            is_inline: att.content_id.is_some(),
+        });
+    }
+    persist_attachments(db, data_dir, account_id, message_id, &extracted).await
 }
 
 pub(crate) async fn message_id_by_server_id(
@@ -3059,5 +3097,140 @@ mod inline_attachment_tests {
     fn rejects_oversize() {
         let err = parse_inline_attachments(&[inline("a.png", "img1@lyra", "AQID")], 2).unwrap_err();
         assert!(matches!(err, SyncError::InvalidInput(_)));
+    }
+}
+
+#[cfg(test)]
+mod draft_attachment_tests {
+    //! The seeded SQLite accounts are IMAP, so the JMAP save-draft arm's row
+    //! writing is exercised directly: `upsert_jmap_draft_row` +
+    //! `persist_draft_attachments`, the same composition `save_draft` runs.
+    use super::*;
+    use crate::storage::{DbPool, Storage};
+    use crate::sync::store::{get_folder_id, new_uuid_text, upsert_folder};
+
+    async fn seed_jmap_account() -> (DbPool, sqlx::SqlitePool, String, String) {
+        let storage = Storage::new("sqlite::memory:").await.unwrap();
+        storage.run_migrations().await.unwrap();
+        let db = storage.pool().clone();
+        let DbPool::Sqlite(pool) = &db else {
+            panic!("sqlite")
+        };
+        let user_id = new_uuid_text();
+        let account_id = new_uuid_text();
+        sqlx::query(
+            "INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) \
+             VALUES (?, ?, 'hash', '[]')",
+        )
+        .bind(&user_id)
+        .bind(format!("draft-att-{user_id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mail_account (\
+                 id, user_id, display_name, email_address, protocol, auth_type, \
+                 credential, imap_host, imap_port, imap_security, is_active, sync_enabled\
+             ) VALUES (?, ?, 'Drafts', 'drafts@example.com', 'jmap', 'password', \
+                       'cred', 'jmap.example.com', 443, 'tls', 1, 1)",
+        )
+        .bind(&account_id)
+        .bind(&user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        upsert_folder(&db, &account_id, "Drafts", None, &[])
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&db, &account_id, "Drafts").await.unwrap();
+        let pool = pool.clone();
+        (db, pool, account_id, folder_id)
+    }
+
+    fn draft_outbound() -> crate::smtp::OutboundMessage {
+        crate::smtp::OutboundMessage {
+            from_email: "drafts@example.com".into(),
+            from_name: None,
+            to: vec![(None, "rcpt@example.com".into())],
+            cc: vec![],
+            bcc: vec![],
+            subject: "draft".into(),
+            body_text: Some("body".into()),
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+            mime_content_type: None,
+            mime_body: None,
+            attachments: vec![],
+            message_id: Some("<draft-att@example.com>".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn jmap_draft_save_persists_inline_attachment_rows() {
+        let (db, pool, account_id, folder_id) = seed_jmap_account().await;
+        let mut outbound = draft_outbound();
+        outbound
+            .attachments
+            .push(crate::smtp::OutboundAttachment::from_bytes_inline(
+                "a.png",
+                "image/png",
+                b"\x89PNG",
+                "img1@lyra",
+            ));
+
+        let local_id = upsert_jmap_draft_row(&db, &account_id, &folder_id, "server-1", &outbound)
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        persist_draft_attachments(&db, dir.path(), &account_id, &local_id, &outbound)
+            .await
+            .unwrap();
+
+        let rows: Vec<(String, Option<String>, bool, i64, String)> = sqlx::query_as(
+            "SELECT filename, content_id, is_inline, size_bytes, storage_path \
+             FROM attachment WHERE message_id = ?",
+        )
+        .bind(&local_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "inline part must produce an attachment row");
+        let (filename, content_id, is_inline, size, storage_path) = &rows[0];
+        assert_eq!(filename, "a.png");
+        assert_eq!(content_id.as_deref(), Some("img1@lyra"));
+        assert!(is_inline);
+        assert_eq!(*size, 4);
+        // The download endpoint reads local storage_path — bytes must be there.
+        let bytes = crate::blobs::read(dir.path(), storage_path).await.unwrap();
+        assert_eq!(bytes, b"\x89PNG");
+
+        let has_attachments: bool =
+            sqlx::query_scalar("SELECT has_attachments FROM message WHERE id = ?")
+                .bind(&local_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(has_attachments);
+    }
+
+    #[tokio::test]
+    async fn jmap_draft_save_without_attachments_writes_no_rows() {
+        let (db, pool, account_id, folder_id) = seed_jmap_account().await;
+        let outbound = draft_outbound();
+        let local_id = upsert_jmap_draft_row(&db, &account_id, &folder_id, "server-2", &outbound)
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        persist_draft_attachments(&db, dir.path(), &account_id, &local_id, &outbound)
+            .await
+            .unwrap();
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachment WHERE message_id = ?")
+            .bind(&local_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
