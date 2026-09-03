@@ -222,9 +222,13 @@ impl DavClient {
         {
             base = super::dav::resolve_href(&base, &principal);
         }
-        let body = self
-            .propfind_text(&base, &format!("<{homeset_prop}/>"))
-            .await?;
+        let ns = if homeset_prop.starts_with("calendar") {
+            "urn:ietf:params:xml:ns:caldav"
+        } else {
+            "urn:ietf:params:xml:ns:carddav"
+        };
+        let prop = format!("<x:{homeset_prop} xmlns:x='{ns}'/>");
+        let body = self.propfind_text(&base, &prop).await?;
         let href = tag_text(&body, homeset_prop)
             .or_else(|| tag_text(&body, "href"))
             .ok_or_else(|| DavError::Protocol(format!("no {homeset_prop} in response")))?;
@@ -243,9 +247,13 @@ impl DavClient {
         {
             principal_base = super::dav::resolve_href(base, &principal);
         }
-        let body = self
-            .propfind_text(&principal_base, &format!("<{homeset_prop}/>"))
-            .await?;
+        let ns = if homeset_prop.starts_with("calendar") {
+            "urn:ietf:params:xml:ns:caldav"
+        } else {
+            "urn:ietf:params:xml:ns:carddav"
+        };
+        let prop = format!("<x:{homeset_prop} xmlns:x='{ns}'/>");
+        let body = self.propfind_text(&principal_base, &prop).await?;
         let href = tag_text(&body, homeset_prop)
             .or_else(|| tag_text(&body, "href"))
             .ok_or_else(|| DavError::Protocol(format!("no {homeset_prop} in response")))?;
