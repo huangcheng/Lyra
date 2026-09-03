@@ -10,6 +10,7 @@
 
 import {
   Bold,
+  Image as ImageIcon,
   Italic,
   Link2,
   List,
@@ -40,6 +41,7 @@ import { toggleList } from '@platejs/list';
 import { ListPlugin } from '@platejs/list/react';
 import { BulletedListRules, OrderedListRules } from '@platejs/list';
 import { MarkdownPlugin } from '@platejs/markdown';
+import { ImagePlugin } from '@platejs/media/react';
 import { HistoryPlugin, HtmlPlugin } from 'platejs';
 import {
   ParagraphPlugin,
@@ -49,6 +51,7 @@ import {
   useEditorSelector,
   usePlateEditor,
 } from 'platejs/react';
+import type { PlateElementProps } from 'platejs/react';
 import { serializeHtml } from 'platejs/static';
 
 import { Button } from '@/components/ui/button';
@@ -66,6 +69,26 @@ export interface RichTextEditorProps {
   /** Toolbar placement; compose uses a bottom bar, reply keeps the top. */
   toolbarPosition?: 'top' | 'bottom';
   disabled?: boolean;
+  /**
+   * Image file from toolbar/paste/drop → object URL to display, or null to
+   * reject (size/type). Ownership of the URL stays with the caller.
+   */
+  onImageFile?: (file: File) => string | null;
+}
+
+/** Minimal void image node; children carry Slate's hidden selection text. */
+function ImageElement({ attributes, children, element }: PlateElementProps) {
+  return (
+    <div {...attributes} className="my-1 select-none">
+      <img
+        src={(element as { url?: string }).url}
+        alt=""
+        className="max-h-64 max-w-full rounded"
+        contentEditable={false}
+      />
+      {children}
+    </div>
+  );
 }
 
 const PLUGINS = [
@@ -84,6 +107,9 @@ const PLUGINS = [
     inputRules: [BulletedListRules.markdown(), OrderedListRules.markdown()],
   }),
   LinkPlugin,
+  ImagePlugin.configure({
+    render: { node: ImageElement },
+  }),
 ];
 
 const UL_STYLE = 'disc';
@@ -98,6 +124,7 @@ export function RichTextEditor({
   contentClassName,
   toolbarPosition = 'top',
   disabled,
+  onImageFile,
 }: RichTextEditorProps) {
   const editor = usePlateEditor({ plugins: PLUGINS });
   const onChangeRef = useRef(onChange);
@@ -115,6 +142,18 @@ export function RichTextEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);
 
+  const insertImageFile = (file: File) => {
+    if (!onImageFile || !file.type.startsWith('image/')) return;
+    const url = onImageFile(file);
+    if (!url) return; // rejected (too large) — the caller surfaced the error
+    editor.tf.insertNodes({ type: ImagePlugin.key, url, children: [{ text: '' }] });
+  };
+
+  const imageFilesFrom = (files: FileList | null | undefined) =>
+    Array.from(files ?? []).filter((f) => f.type.startsWith('image/'));
+
+  const toolbarProps = { disabled, onImageFile, insertImageFile };
+
   return (
     <div className={cn('rounded-md border border-input', className)}>
       <Plate
@@ -124,7 +163,7 @@ export function RichTextEditor({
           void serializeHtml(editor).then((html) => onChangeRef.current(html));
         }}
       >
-        {toolbarPosition === 'top' ? <Toolbar disabled={disabled} position="top" /> : null}
+        {toolbarPosition === 'top' ? <Toolbar {...toolbarProps} position="top" /> : null}
         <PlateContent
           className={cn(
             'lyra-editor max-h-72 min-h-32 overflow-y-auto px-3 py-2 text-sm outline-none',
@@ -132,8 +171,22 @@ export function RichTextEditor({
           )}
           placeholder={placeholder}
           onKeyDown={onKeyDown}
+          onPaste={(e) => {
+            const files = imageFilesFrom(e.clipboardData?.files);
+            if (files.length > 0) {
+              e.preventDefault();
+              files.forEach(insertImageFile);
+            }
+          }}
+          onDrop={(e) => {
+            const files = imageFilesFrom(e.dataTransfer?.files);
+            if (files.length > 0) {
+              e.preventDefault();
+              files.forEach(insertImageFile);
+            }
+          }}
         />
-        {toolbarPosition === 'bottom' ? <Toolbar disabled={disabled} position="bottom" /> : null}
+        {toolbarPosition === 'bottom' ? <Toolbar {...toolbarProps} position="bottom" /> : null}
       </Plate>
     </div>
   );
@@ -154,12 +207,17 @@ function useBlockState() {
 function Toolbar({
   disabled,
   position = 'top',
+  onImageFile,
+  insertImageFile,
 }: {
   disabled?: boolean;
   position?: 'top' | 'bottom';
+  onImageFile?: (file: File) => string | null;
+  insertImageFile?: (file: File) => void;
 }) {
   const editor = useEditorRef();
   const block = useBlockState();
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const marks = useEditorSelector(
     (ed) => ({
       bold: Boolean(ed.api.mark(BoldPlugin.key)),
@@ -312,6 +370,29 @@ function Toolbar({
         aria-label="Link"
       >
         <Link2 className="size-3.5" />
+      </Button>
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          Array.from(e.target.files ?? []).forEach((f) => insertImageFile?.(f));
+          e.target.value = '';
+        }}
+      />
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className={btn}
+        disabled={disabled || !onImageFile}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => imageInputRef.current?.click()}
+        aria-label="Insert image"
+      >
+        <ImageIcon className="size-3.5" />
       </Button>
     </div>
   );
