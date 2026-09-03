@@ -3,7 +3,7 @@
 use axum::{Json, extract::FromRequest, extract::State};
 use sea_orm::sea_query::Query as Sq;
 use sea_orm::{ColumnTrait, ConnectionTrait, QueryResult, Value};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::types::SyncError;
@@ -113,6 +113,36 @@ pub(crate) struct SendRequest {
     pub files: Vec<OutboundAttachment>,
 }
 
+/// `inlineMeta` form-field JSON entry (camelCase on the wire).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InlineMetaEntry {
+    pub filename: String,
+    pub content_id: String,
+}
+
+/// Apply `inlineMeta` entries to parsed files (matched by filename, first
+/// unmatched wins). Unmatched meta entries are ignored; invalid ids error.
+pub(crate) fn apply_inline_meta(
+    mut files: Vec<OutboundAttachment>,
+    inline_meta: &[InlineMetaEntry],
+) -> Result<Vec<OutboundAttachment>, SyncError> {
+    let mut used = vec![false; inline_meta.len()];
+    for file in &mut files {
+        if let Some((idx, meta)) = inline_meta
+            .iter()
+            .enumerate()
+            .find(|(i, m)| !used[*i] && m.filename == file.filename)
+        {
+            crate::smtp::validate_content_id(&meta.content_id)
+                .map_err(|e| SyncError::InvalidInput(e.to_string()))?;
+            file.content_id = Some(meta.content_id.clone());
+            used[idx] = true;
+        }
+    }
+    Ok(files)
+}
+
 impl FromRequest<AuthState> for SendRequest {
     type Rejection = SyncError;
 
@@ -141,6 +171,7 @@ impl FromRequest<AuthState> for SendRequest {
             .map_err(|e| SyncError::InvalidInput(e.to_string()))?;
         let mut payload: Option<SendMessageRequest> = None;
         let mut files = Vec::new();
+        let mut inline_meta: Vec<InlineMetaEntry> = Vec::new();
         while let Some(field) = multipart
             .next_field()
             .await
@@ -187,6 +218,14 @@ impl FromRequest<AuthState> for SendRequest {
                         &bytes,
                     ));
                 }
+                Some("inlineMeta") => {
+                    let text = field
+                        .text()
+                        .await
+                        .map_err(|e| SyncError::InvalidInput(e.to_string()))?;
+                    inline_meta = serde_json::from_str(&text)
+                        .map_err(|e| SyncError::InvalidInput(format!("inlineMeta: {e}")))?;
+                }
                 _ => {} // tolerate unknown parts (forward-compatible)
             }
         }
@@ -194,7 +233,7 @@ impl FromRequest<AuthState> for SendRequest {
             json: payload.ok_or_else(|| {
                 SyncError::InvalidInput("multipart send requires a payload part".into())
             })?,
-            files,
+            files: apply_inline_meta(files, &inline_meta)?,
         })
     }
 }
@@ -600,6 +639,46 @@ pub(crate) fn subject_from_raw(raw: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::smtp::OutboundAttachment;
+
+    #[test]
+    fn inline_meta_marks_matching_file() {
+        let files = vec![
+            OutboundAttachment::from_bytes("a.png", "image/png", b"1"),
+            OutboundAttachment::from_bytes("b.pdf", "application/pdf", b"2"),
+        ];
+        let meta = [InlineMetaEntry {
+            filename: "a.png".into(),
+            content_id: "x@lyra".into(),
+        }];
+        let out = apply_inline_meta(files, &meta).unwrap();
+        assert_eq!(out[0].content_id.as_deref(), Some("x@lyra"));
+        assert_eq!(out[1].content_id, None);
+    }
+
+    #[test]
+    fn inline_meta_ignores_unknown_names_and_rejects_bad_ids() {
+        let files = vec![OutboundAttachment::from_bytes("a.png", "image/png", b"1")];
+        let unknown = [InlineMetaEntry {
+            filename: "nope.png".into(),
+            content_id: "x@lyra".into(),
+        }];
+        assert!(
+            apply_inline_meta(files.clone(), &unknown).unwrap()[0]
+                .content_id
+                .is_none()
+        );
+        let bad = [InlineMetaEntry {
+            filename: "a.png".into(),
+            content_id: "a>b".into(),
+        }];
+        assert!(apply_inline_meta(files, &bad).is_err());
+    }
 }
 
 #[cfg(test)]
