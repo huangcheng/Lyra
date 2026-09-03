@@ -13,10 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  registerConfirmHost,
-  type ConfirmPending,
-} from '@/lib/confirm-action';
+import { registerConfirmHost, type ConfirmPending } from '@/lib/confirm-action';
 import { t } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/ui';

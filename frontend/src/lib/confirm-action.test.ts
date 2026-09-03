@@ -1,10 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
-import {
-  confirmAction,
-  registerConfirmHost,
-  type ConfirmPending,
-} from './confirm-action';
+import { confirmAction, registerConfirmHost, type ConfirmPending } from './confirm-action';
 
 describe('confirmAction', () => {
   afterEach(() => {

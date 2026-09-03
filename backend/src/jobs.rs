@@ -333,12 +333,14 @@ pub(crate) fn scrub_error_detail(raw: &str) -> String {
     static RE_BEARER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static RE_TOKENISH: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static RE_JSON_SECRET: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static RE_BYTE_DUMP: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
     let re_password = RE_PASSWORD.get_or_init(|| {
         regex::Regex::new(r"(?i)(password|passwd|pwd)\s*[=:]\s*\S+").expect("password regex")
     });
-    let re_bearer = RE_BEARER
-        .get_or_init(|| regex::Regex::new(r"(?i)bearer\s+[A-Za-z0-9._\-+=/]+").expect("bearer regex"));
+    let re_bearer = RE_BEARER.get_or_init(|| {
+        regex::Regex::new(r"(?i)bearer\s+[A-Za-z0-9._\-+=/]+").expect("bearer regex")
+    });
     let re_tokenish = RE_TOKENISH.get_or_init(|| {
         // Long opaque runs that look like API tokens / session secrets.
         regex::Regex::new(r"(?i)(access_token|refresh_token|client_secret|api[_-]?key|authorization)\s*[=:]\s*\S+")
@@ -350,10 +352,8 @@ pub(crate) fn scrub_error_detail(raw: &str) -> String {
         )
         .expect("json secret regex")
     });
-    static RE_BYTE_DUMP: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re_byte_dump = RE_BYTE_DUMP.get_or_init(|| {
-        regex::Regex::new(r"input:\s*\[[0-9,\s]{40,}\]").expect("byte dump regex")
-    });
+    let re_byte_dump = RE_BYTE_DUMP
+        .get_or_init(|| regex::Regex::new(r"input:\s*\[[0-9,\s]{40,}\]").expect("byte dump regex"));
 
     let mut s = re_password.replace_all(raw, "$1=***").into_owned();
     s = re_bearer.replace_all(&s, "Bearer ***").into_owned();
@@ -374,7 +374,10 @@ pub(crate) async fn mark_completed(db: &DbPool, id: &str) -> Result<(), sqlx::Er
     jobs::Entity::update_many()
         .col_expr(jobs::Column::Status, Expr::val("completed"))
         .col_expr(jobs::Column::LastError, Expr::val(Value::String(None)))
-        .col_expr(jobs::Column::LastErrorDetail, Expr::val(Value::String(None)))
+        .col_expr(
+            jobs::Column::LastErrorDetail,
+            Expr::val(Value::String(None)),
+        )
         .col_expr(jobs::Column::UpdatedAt, Expr::val(updated_at_value(db)))
         .filter(jobs::Column::Id.eq(id))
         .exec(&db.orm())
@@ -395,10 +398,7 @@ async fn mark_failed(
     jobs::Entity::update_many()
         .col_expr(jobs::Column::Status, Expr::val("failed"))
         .col_expr(jobs::Column::LastError, Expr::val(last_error))
-        .col_expr(
-            jobs::Column::LastErrorDetail,
-            Expr::val(last_error_detail),
-        )
+        .col_expr(jobs::Column::LastErrorDetail, Expr::val(last_error_detail))
         .col_expr(
             jobs::Column::Attempts,
             Expr::col(jobs::Column::Attempts).add(1),
@@ -614,6 +614,10 @@ fn job_stamp_to_rfc3339(raw: &str) -> String {
     raw.to_string()
 }
 
+/// Raw column tuple selected by [`list_sync_account_errors`]:
+/// `(id, payload_json, last_error, last_error_detail, attempts, updated_at)`.
+type SyncErrorRow = (String, String, Option<String>, Option<String>, i32, String);
+
 /// Recent failed `SyncAccount` jobs for one account (newest first).
 pub async fn list_sync_account_errors(
     db: &DbPool,
@@ -624,23 +628,22 @@ pub async fn list_sync_account_errors(
     let limit = limit.clamp(1, 50);
     // `created_at` / `updated_at` are TEXT on both engines — never decode the full
     // Entity Model (`DateTimeUtc`); select columns as strings like other job paths.
-    let rows: Vec<(String, String, Option<String>, Option<String>, i32, String)> =
-        jobs::Entity::find()
-            .filter(jobs::Column::Status.eq("failed"))
-            .filter(jobs::Column::Kind.eq("sync_account"))
-            .order_by_desc(jobs::Column::UpdatedAt)
-            .limit(200)
-            .select_only()
-            .column(jobs::Column::Id)
-            .column(jobs::Column::Payload)
-            .column(jobs::Column::LastError)
-            .column(jobs::Column::LastErrorDetail)
-            .column(jobs::Column::Attempts)
-            .column(jobs::Column::UpdatedAt)
-            .into_tuple()
-            .all(&db.orm())
-            .await
-            .map_err(orm_err)?;
+    let rows: Vec<SyncErrorRow> = jobs::Entity::find()
+        .filter(jobs::Column::Status.eq("failed"))
+        .filter(jobs::Column::Kind.eq("sync_account"))
+        .order_by_desc(jobs::Column::UpdatedAt)
+        .limit(200)
+        .select_only()
+        .column(jobs::Column::Id)
+        .column(jobs::Column::Payload)
+        .column(jobs::Column::LastError)
+        .column(jobs::Column::LastErrorDetail)
+        .column(jobs::Column::Attempts)
+        .column(jobs::Column::UpdatedAt)
+        .into_tuple()
+        .all(&db.orm())
+        .await
+        .map_err(orm_err)?;
 
     let mut items = Vec::new();
     for (id, payload_json, last_error, last_error_detail, attempts, updated_at) in rows {
