@@ -34,6 +34,15 @@ describe('quotedReplyHtml', () => {
     expect(html).toContain('<blockquote><p>hi</p></blockquote>');
     expect(html).toContain('Jane');
   });
+
+  it('leads with a blank paragraph so the user can type above the quote', () => {
+    const html = quotedReplyHtml(
+      { fromName: 'Bob', fromEmail: 'bob@example.com', date: '2026-08-27', bodyHtml: '<p>hi</p>' },
+      undefined,
+    );
+    expect(html.startsWith('<p><br></p>')).toBe(true);
+    expect(html.indexOf('<p><br></p>')).toBeLessThan(html.indexOf('wrote:'));
+  });
 });
 
 describe('forwardHtml', () => {
@@ -46,8 +55,15 @@ describe('forwardHtml', () => {
     expect(html).toContain('bob@example.com');
     expect(html).toContain('yo');
   });
-});
 
+  it('leads with a blank paragraph above the forward header', () => {
+    const html = forwardHtml(
+      { fromName: 'Bob', fromEmail: 'bob@example.com', date: 'x', bodyText: 'yo' },
+      undefined,
+    );
+    expect(html.startsWith('<p><br></p>')).toBe(true);
+  });
+});
 describe('htmlToText', () => {
   it('converts paragraphs, breaks, lists, links, quotes', () => {
     const html =

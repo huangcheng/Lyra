@@ -33,19 +33,21 @@ export interface QuoteSource {
 
 /**
  * Thunderbird-style quoted reply body:
+ *   [empty paragraph for typing]
  *   [signature]
  *   On {date}, {name} wrote:
  *   <blockquote>…original…</blockquote>
- * The signature sits above the quote for replies, below the text for new mail.
+ * The blank lead gives the caret somewhere to type; signature sits above the
+ * quote for replies (below the body for new mail).
  */
 export function quotedReplyHtml(source: QuoteSource, signature: string | undefined): string {
   const sig = signatureHtml(signature);
   const attribution = `On ${source.date}, ${source.fromName || source.fromEmail} wrote:`;
   const original = source.bodyHtml?.trim() || textToHtml(source.bodyText ?? '') || '<p></p>';
-  return `${sig}<p>${escapeHtml(attribution)}</p><blockquote>${original}</blockquote>`;
+  return `<p><br></p>${sig}<p>${escapeHtml(attribution)}</p><blockquote>${original}</blockquote>`;
 }
 
-/** Forward: quoted original under an Fw header; signature at the bottom. */
+/** Forward: blank typing lead, then Fw header + quote; signature at the bottom. */
 export function forwardHtml(source: QuoteSource, signature: string | undefined): string {
   const header = textToHtml(
     [
@@ -56,5 +58,5 @@ export function forwardHtml(source: QuoteSource, signature: string | undefined):
   );
   const original = source.bodyHtml?.trim() || textToHtml(source.bodyText ?? '') || '<p></p>';
   const sig = signatureHtml(signature);
-  return `${header}<blockquote>${original}</blockquote>${sig}`;
+  return `<p><br></p>${header}<blockquote>${original}</blockquote>${sig}`;
 }
