@@ -263,6 +263,7 @@ impl DavClient {
                 .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &current)
                 .timeout(DAV_TIMEOUT)
                 .header("Depth", "0")
+                .header(reqwest::header::AUTHORIZATION, self.auth_header())
                 .header(reqwest::header::CONTENT_TYPE, XML_CONTENT_TYPE)
                 .body(propfind_body(props))
                 .send()
@@ -304,6 +305,7 @@ impl DavClient {
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), home)
             .timeout(DAV_TIMEOUT)
             .header("Depth", "1")
+            .header(reqwest::header::AUTHORIZATION, self.auth_header())
             .header(reqwest::header::CONTENT_TYPE, XML_CONTENT_TYPE)
             .body(propfind_body("<D:resourcetype/><D:displayname/>"))
             .send()
@@ -413,6 +415,7 @@ impl DavClient {
             .http
             .request(reqwest::Method::from_bytes(b"REPORT").unwrap(), url)
             .timeout(DAV_TIMEOUT)
+            .header(reqwest::header::AUTHORIZATION, self.auth_header())
             .header(reqwest::header::CONTENT_TYPE, XML_CONTENT_TYPE)
             .body(body)
             .send()
@@ -438,6 +441,7 @@ impl DavClient {
             )
             .timeout(DAV_TIMEOUT)
             .header("Depth", "1")
+            .header(reqwest::header::AUTHORIZATION, self.auth_header())
             .header(reqwest::header::CONTENT_TYPE, XML_CONTENT_TYPE)
             .body(propfind_body("<D:getetag/>"))
             .send()
@@ -474,6 +478,7 @@ impl DavClient {
             .http
             .put(href)
             .timeout(DAV_TIMEOUT)
+            .header(reqwest::header::AUTHORIZATION, self.auth_header())
             .header(reqwest::header::CONTENT_TYPE, content_type)
             .header("If-None-Match", "*")
             .body(body.to_string())
@@ -495,6 +500,7 @@ impl DavClient {
             .http
             .put(href)
             .timeout(DAV_TIMEOUT)
+            .header(reqwest::header::AUTHORIZATION, self.auth_header())
             .header(reqwest::header::CONTENT_TYPE, content_type)
             .header("If-Match", etag)
             .body(body.to_string())
@@ -506,7 +512,11 @@ impl DavClient {
 
     /// DELETE with `If-Match` (None = unconditional). 404 is success.
     pub async fn delete(&self, href: &str, etag: Option<&str>) -> Result<(), DavError> {
-        let mut req = self.http.delete(href).timeout(DAV_TIMEOUT);
+        let mut req = self
+            .http
+            .delete(href)
+            .timeout(DAV_TIMEOUT)
+            .header(reqwest::header::AUTHORIZATION, self.auth_header());
         if let Some(etag) = etag {
             req = req.header("If-Match", etag);
         }

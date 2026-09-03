@@ -23,7 +23,6 @@ pub enum DavError {
 /// pointing at a different origin are rejected before any request is made,
 /// so a malicious server cannot exfiltrate the account password by
 /// returning `<d:href>https://evil.example/x.vcf</d:href>`.
-#[allow(dead_code)] // username/password retained: re-auth use
 pub struct DavClient {
     pub(crate) http: reqwest::Client,
     pub(crate) username: String,
@@ -31,7 +30,6 @@ pub struct DavClient {
     pub(crate) origin: String,
 }
 
-#[allow(dead_code)] // v1 surface retained for callers + tests
 impl DavClient {
     /// Build a client with basic auth credentials pinned to `base_url`'s origin.
     pub fn new(username: String, password: String, base_url: &str) -> Result<Self, DavError> {
@@ -54,7 +52,8 @@ impl DavClient {
     }
 
     /// Refuse to send credentials to any origin other than the configured one.
-    fn check_origin(&self, url: &str) -> Result<(), DavError> {
+    #[cfg(test)]
+    pub(crate) fn check_origin(&self, url: &str) -> Result<(), DavError> {
         let target = crate::netsec::origin_of(url).map_err(DavError::Protocol)?;
         if target != self.origin {
             tracing::warn!(
@@ -69,7 +68,7 @@ impl DavClient {
         Ok(())
     }
 
-    fn auth_header(&self) -> HeaderValue {
+    pub(crate) fn auth_header(&self) -> HeaderValue {
         use base64::Engine;
         let token = base64::engine::general_purpose::STANDARD
             .encode(format!("{}:{}", self.username, self.password));
@@ -78,6 +77,7 @@ impl DavClient {
     }
 
     /// PROPFIND Depth 1 — returns hrefs found in the multistatus body.
+    #[cfg(test)]
     pub async fn propfind_hrefs(&self, url: &str) -> Result<Vec<String>, DavError> {
         self.check_origin(url)?;
         let body = r#"<?xml version="1.0" encoding="utf-8" ?>
@@ -114,6 +114,7 @@ impl DavClient {
     }
 
     /// GET a resource as bytes/text.
+    #[cfg(test)]
     pub async fn get_text(&self, url: &str) -> Result<String, DavError> {
         self.check_origin(url)?;
         let mut headers = HeaderMap::new();
