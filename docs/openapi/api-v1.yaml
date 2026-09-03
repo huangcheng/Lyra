@@ -600,6 +600,15 @@ paths:
                     LYRA_MAX_ATTACHMENT_BYTES, default 25 MiB). Sent as
                     multipart/mixed on SMTP; uploaded as blobs + Email/set
                     attachments on JMAP.
+                inlineMeta:
+                  type: string
+                  description: >
+                    JSON string: array of `{filename, contentId}` objects.
+                    `files` parts whose filename matches an entry are embedded
+                    as inline MIME parts with a `Content-ID` header (RFC
+                    2387/2392) instead of regular attachments, for use with
+                    `cid:` references in the HTML body.
+                  example: '[{"filename":"logo.png","contentId":"logo-1"}]'
             encoding:
               payload:
                 contentType: application/json
@@ -894,6 +903,30 @@ paths:
                 existingDraftId:
                   type: string
                   description: Local row id of the draft this save replaces
+                inlineAttachments:
+                  type: array
+                  description: >
+                    Inline images embedded in the draft's MIME as parts with a
+                    `Content-ID` header (RFC 2387/2392), for use with `cid:`
+                    references in `bodyHtml`. Not regular attachments.
+                  items:
+                    type: object
+                    required: [filename, contentType, contentId, dataBase64]
+                    properties:
+                      filename:
+                        type: string
+                        example: logo.png
+                      contentType:
+                        type: string
+                        example: image/png
+                      contentId:
+                        type: string
+                        description: Value referenced by `cid:` URLs in `bodyHtml`
+                        example: logo-1
+                      dataBase64:
+                        type: string
+                        format: byte
+                        description: Base64-encoded bytes of the part
       responses:
         "200":
           description: 'JSON `{status: saved, draftMessageId}` (id may be null when offline sync could not locate the appended copy)'

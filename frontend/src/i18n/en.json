@@ -82,6 +82,7 @@
     "plainText": "Plain",
     "draftSaved": "Draft saved",
     "addAttachment": "Attach files",
+    "insertImage": "Insert image",
     "removeAttachment": "Remove {{name}}",
     "attachmentTooLarge": "{{name}} exceeds the 25 MB per-file attachment limit.",
     "attachmentCountLimit": "You can attach at most {{count}} files.",

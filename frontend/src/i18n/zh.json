@@ -82,6 +82,7 @@
     "plainText": "纯文本",
     "draftSaved": "草稿已保存",
     "addAttachment": "添加附件",
+    "insertImage": "插入图片",
     "removeAttachment": "移除 {{name}}",
     "attachmentTooLarge": "{{name}} 超过单个附件 25 MB 的限制。",
     "attachmentCountLimit": "最多只能添加 {{count}} 个附件。",
