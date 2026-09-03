@@ -165,10 +165,20 @@ fn strip_tags(s: &str) -> String {
     let mut i = 0usize;
     while i < s.len() {
         if bytes[i] == b'<' {
-            // Skip the whole tag — open or close — through its '>'.
-            match s[i..].find('>') {
-                Some(gt) => i += gt + 1,
-                None => break,
+            if s[i..].starts_with("<![CDATA[") {
+                // CDATA section: pass content through verbatim, strip markers.
+                let content_start = i + "<![CDATA[".len();
+                let content_end = s[content_start..]
+                    .find("]]>")
+                    .map_or(s.len(), |n| content_start + n);
+                out.push_str(&s[content_start..content_end]);
+                i = (content_end + 3).min(s.len());
+            } else {
+                // Regular tag: skip through its '>'.
+                match s[i..].find('>') {
+                    Some(gt) => i += gt + 1,
+                    None => break,
+                }
             }
         } else {
             let start = i;
@@ -654,6 +664,38 @@ mod tests {
         // contributes none here.
         assert_eq!(all_tag_text(xml, "a").len(), 1);
         assert_eq!(all_tag_text("<x><a>1</a></x><a>2</a>", "a"), vec!["1", "2"]);
+    }
+
+    #[test]
+    fn parses_cdata_address_data() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:R="urn:ietf:params:xml:ns:carddav" xmlns:D="DAV:">
+  <D:response>
+    <D:href>/dav/addressbooks/user/x/Default/abc.vcf</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getetag>"966f3cb2"</D:getetag>
+        <R:address-data><![CDATA[BEGIN:VCARD
+VERSION:3.0
+UID:abc
+FN:Test User
+EMAIL:test@example.com
+END:VCARD
+]]></R:address-data>
+      </D:prop>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"#;
+        let blocks = response_blocks(xml);
+        assert_eq!(blocks.len(), 1, "blocks: {blocks:?}");
+        let href = tag_text(&blocks[0], "href");
+        assert_eq!(href.unwrap(), "/dav/addressbooks/user/x/Default/abc.vcf");
+        let data = tag_text(&blocks[0], "address-data");
+        assert!(data.is_some(), "address-data not found");
+        let d = data.unwrap();
+        assert!(d.contains("BEGIN:VCARD"), "no vcard start in: {d:?}");
+        assert!(d.contains("Test User"), "no FN in: {d:?}");
+        assert!(!d.contains("CDATA"), "CDATA marker leaked: {d:?}");
     }
 
     #[test]
