@@ -159,3 +159,7 @@ multipart/mixed                     ← RFC 2046 (only when file attachments exi
 - Autosave payload size: inline images are base64 in the `/drafts` JSON. With
   the 25 MB per-file cap this is bounded but heavy; if it proves sluggish, a
   follow-up can threshold autosave off above N MB of inline bytes.
+- Accepted deviation: lettre's `MultiPart::related()` emits
+  `multipart/related` without the `type=` parameter that RFC 2387 §3.4
+  technically requires. Gmail/Apple Mail/Outlook all resolve `cid:` refs in
+  `type`-less related parts; not worth post-processing lettre's output.
