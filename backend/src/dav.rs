@@ -5,7 +5,7 @@
 
 #![allow(clippy::doc_markdown)]
 
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::HeaderValue;
 use thiserror::Error;
 
 /// DAV / HTTP errors.
@@ -74,56 +74,6 @@ impl DavClient {
             .encode(format!("{}:{}", self.username, self.password));
         HeaderValue::from_str(&format!("Basic {token}"))
             .unwrap_or_else(|_| HeaderValue::from_static("Basic"))
-    }
-
-    /// PROPFIND Depth 1 — returns hrefs found in the multistatus body.
-    #[cfg(test)]
-    pub async fn propfind_hrefs(&self, url: &str) -> Result<Vec<String>, DavError> {
-        self.check_origin(url)?;
-        let body = r#"<?xml version="1.0" encoding="utf-8" ?>
-<d:propfind xmlns:d="DAV:">
-  <d:prop><d:displayname/><d:resourcetype/></d:prop>
-</d:propfind>"#;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, self.auth_header());
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/xml; charset=utf-8"),
-        );
-        headers.insert("Depth", HeaderValue::from_static("1"));
-
-        let res = self
-            .http
-            .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
-            .headers(headers)
-            .body(body)
-            .send()
-            .await?;
-
-        if !res.status().is_success() && res.status().as_u16() != 207 {
-            return Err(DavError::Protocol(format!(
-                "PROPFIND {} → {}",
-                url,
-                res.status()
-            )));
-        }
-
-        let text = res.text().await?;
-        Ok(extract_hrefs(&text))
-    }
-
-    /// GET a resource as bytes/text.
-    #[cfg(test)]
-    pub async fn get_text(&self, url: &str) -> Result<String, DavError> {
-        self.check_origin(url)?;
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, self.auth_header());
-        let res = self.http.get(url).headers(headers).send().await?;
-        if !res.status().is_success() {
-            return Err(DavError::Protocol(format!("GET {url} → {}", res.status())));
-        }
-        Ok(res.text().await?)
     }
 }
 
