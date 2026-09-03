@@ -282,6 +282,7 @@ pub(crate) async fn sync_caldav(
     )
     .await?;
     let collections = client.list_collections(&home, "calendar").await?;
+    tracing::info!(collections = ?collections, "caldav: collections");
     let mut outcome = DavSyncOutcome {
         changed: 0,
         removed: 0,
