@@ -869,6 +869,47 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
+    /// Inline-image parsing runs before any IMAP connect, so a bad
+    /// Content-ID rejects offline with a 400 instead of a connection error.
+    #[tokio::test]
+    async fn http_save_draft_rejects_bad_inline_content_id() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (account_id, _, _) = seed_account_folder_message(&db, &user_id).await;
+        // Drafts folder on the SAME account (seed_draft_message seeds its own).
+        let pool = sqlite_pool(&db);
+        sqlx::query(
+            "INSERT INTO folder (id, account_id, external_id, name, role, sort_order)              VALUES (?, ?, 'Drafts', 'Drafts', 'drafts', 1)",
+        )
+        .bind(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string())
+        .bind(&account_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let (status, json) = request_json(
+            app,
+            Method::POST,
+            "/api/v1/drafts",
+            Some(&serde_json::json!({
+                "accountId": account_id,
+                "to": [{"email": "bob@example.com"}],
+                "subject": "hi",
+                "bodyHtml": "<p>hi</p><img src=\"cid:bad>id\">",
+                "inlineAttachments": [{
+                    "filename": "a.png",
+                    "contentType": "image/png",
+                    "contentId": "bad>id",
+                    "dataBase64": "AQID"
+                }]
+            })),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap_or("").contains("content-id"));
+    }
+
     #[tokio::test]
     async fn http_discard_draft_rejects_non_draft() {
         let (app, db) = test_app().await;

@@ -142,7 +142,6 @@ impl OutboundAttachment {
 
     /// Inline part constructor: bytes + the Content-ID the HTML references.
     #[must_use]
-    #[allow(dead_code)] // used by tests now; the HTTP layer adopts it in a follow-up task
     pub fn from_bytes_inline(
         filename: &str,
         content_type: &str,

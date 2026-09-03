@@ -1869,6 +1869,19 @@ pub(crate) struct SaveDraftRequest {
     /// Local row id of the draft this save replaces (edit / re-autosave).
     #[serde(default)]
     existing_draft_id: Option<String>,
+    /// Inline images referenced as `cid:` from `body_html` (RFC 2392);
+    /// persisted inside the draft's MIME so reopens restore them.
+    #[serde(default)]
+    inline_attachments: Vec<InlineAttachment>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InlineAttachment {
+    filename: String,
+    content_type: String,
+    content_id: String,
+    data_base64: String,
 }
 
 pub(crate) async fn save_draft(
@@ -1919,7 +1932,10 @@ pub(crate) async fn save_draft(
         references: body.references.clone(),
         mime_content_type: None,
         mime_body: None,
-        attachments: Vec::new(),
+        attachments: parse_inline_attachments(
+            &body.inline_attachments,
+            state.max_attachment_bytes,
+        )?,
         message_id: Some(format!(
             "<lyra-draft-{}@lyra>",
             uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext))
@@ -1977,6 +1993,37 @@ pub(crate) async fn save_draft(
             "unsupported receive protocol: {other}"
         ))),
     }
+}
+
+/// Draft inline images → outbound inline parts; same caps as send.
+fn parse_inline_attachments(
+    inline: &[InlineAttachment],
+    max_bytes: u64,
+) -> Result<Vec<crate::smtp::OutboundAttachment>, SyncError> {
+    use base64::Engine as _;
+    let mut out = Vec::with_capacity(inline.len());
+    for att in inline {
+        crate::smtp::validate_content_id(&att.content_id)
+            .map_err(|e| SyncError::InvalidInput(e.to_string()))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(att.data_base64.as_bytes())
+            .map_err(|e| {
+                SyncError::InvalidInput(format!("inline {}: bad base64: {e}", att.filename))
+            })?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(SyncError::InvalidInput(format!(
+                "inline image {} exceeds {max_bytes} bytes",
+                att.filename
+            )));
+        }
+        out.push(crate::smtp::OutboundAttachment::from_bytes_inline(
+            &att.filename,
+            &att.content_type,
+            &bytes,
+            &att.content_id,
+        ));
+    }
+    Ok(out)
 }
 
 /// JMAP arm of `save_draft`: create the server draft, then best-effort
@@ -2969,5 +3016,48 @@ mod dkim_lazy_tests {
         let dkim = resp.dkim.expect("stored verdict must surface");
         assert_eq!(dkim.status, "pass");
         assert_eq!(dkim.sdid.as_deref(), Some("example.com"));
+    }
+}
+
+#[cfg(test)]
+mod inline_attachment_tests {
+    use super::*;
+
+    fn inline(filename: &str, cid: &str, data_b64: &str) -> InlineAttachment {
+        InlineAttachment {
+            filename: filename.into(),
+            content_type: "image/png".into(),
+            content_id: cid.into(),
+            data_base64: data_b64.into(),
+        }
+    }
+
+    #[test]
+    fn parses_valid_inline_image() {
+        let out = parse_inline_attachments(&[inline("a.png", "img1@lyra", "AQID")], 1024).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].filename, "a.png");
+        assert_eq!(out[0].content_type, "image/png");
+        assert_eq!(out[0].content_id.as_deref(), Some("img1@lyra"));
+        assert_eq!(out[0].decode().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn rejects_bad_content_id() {
+        let err = parse_inline_attachments(&[inline("a.png", "bad>id", "AQID")], 1024).unwrap_err();
+        assert!(matches!(err, SyncError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn rejects_bad_base64() {
+        let err =
+            parse_inline_attachments(&[inline("a.png", "img1@lyra", "!!!")], 1024).unwrap_err();
+        assert!(matches!(err, SyncError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn rejects_oversize() {
+        let err = parse_inline_attachments(&[inline("a.png", "img1@lyra", "AQID")], 2).unwrap_err();
+        assert!(matches!(err, SyncError::InvalidInput(_)));
     }
 }
