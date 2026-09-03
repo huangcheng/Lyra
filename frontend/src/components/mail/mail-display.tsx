@@ -46,7 +46,7 @@ import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import { baseSubject, conversationMembers, groupIntoConversations } from '@/lib/conversation';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
-import { buildForwardDraft, buildReplyDraft } from '@/lib/compose-draft';
+import { buildForwardDraft, buildReplyDraft, inlineSourcesOf } from '@/lib/compose-draft';
 import { textToHtml } from '@/lib/compose-html';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { buildAccountMoveFolderEntries, type MoveFolderEntry } from '@/lib/folder-tree';
@@ -304,6 +304,7 @@ export function MailDisplay() {
       body: mail.bodyText ?? '',
       initialHtml: mail.bodyHtml ?? textToHtml(mail.bodyText ?? ''),
       draftMessageId: mail.id,
+      inlineSources: inlineSourcesOf(mail),
     });
   };
 

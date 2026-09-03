@@ -68,6 +68,33 @@ describe('buildReplyDraft', () => {
     const d = buildReplyDraft(msg(), true, accounts);
     expect(d.to).toBe('alice@example.com, me@work.example');
   });
+
+  it('carries inline attachments as inlineSources', () => {
+    const d = buildReplyDraft(
+      msg({
+        attachments: [
+          { id: 'a1', filename: 'x.pdf', isInline: false },
+          {
+            id: 'a2',
+            filename: 'logo.png',
+            contentType: 'image/png',
+            isInline: true,
+            contentId: 'cid-1@x',
+          },
+          { id: 'a3', filename: 'no-cid.png', isInline: true },
+        ],
+      }),
+      false,
+      accounts,
+    );
+    expect(d.inlineSources).toEqual([
+      { id: 'a2', filename: 'logo.png', contentType: 'image/png', contentId: 'cid-1@x' },
+    ]);
+  });
+
+  it('omits inlineSources when the message has no inline attachments', () => {
+    expect(buildReplyDraft(msg(), false, accounts).inlineSources).toBeUndefined();
+  });
 });
 
 describe('buildForwardDraft', () => {
@@ -89,5 +116,26 @@ describe('buildForwardDraft', () => {
 
   it('omits forwardAttachments when there are none to carry', () => {
     expect(buildForwardDraft(msg(), accounts).forwardAttachments).toBeUndefined();
+  });
+
+  it('carries inline attachments as inlineSources and omits them when absent', () => {
+    const withInline = buildForwardDraft(
+      msg({
+        attachments: [
+          {
+            id: 'a2',
+            filename: 'logo.png',
+            contentType: 'image/png',
+            isInline: true,
+            contentId: 'cid-1@x',
+          },
+        ],
+      }),
+      accounts,
+    );
+    expect(withInline.inlineSources).toEqual([
+      { id: 'a2', filename: 'logo.png', contentType: 'image/png', contentId: 'cid-1@x' },
+    ]);
+    expect(buildForwardDraft(msg(), accounts).inlineSources).toBeUndefined();
   });
 });

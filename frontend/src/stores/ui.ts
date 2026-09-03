@@ -22,6 +22,14 @@ export interface ComposeDraft {
   initialHtml?: string;
   /** Forwarding carries the original's non-inline attachments (metadata). */
   forwardAttachments?: Array<{ id: string; filename?: string; contentType?: string }>;
+  /** Inline (cid:) parts of the source message/draft — resolved to object
+   *  URLs when the dialog seeds, re-attached with their original Content-ID. */
+  inlineSources?: Array<{
+    id: string;
+    filename?: string;
+    contentType?: string;
+    contentId?: string;
+  }>;
 }
 
 /** Sidebar expansion for one account: section open + expanded folder ids. */
@@ -127,6 +135,7 @@ export const useUIStore = create<UIState>((set) => ({
         accountId: draft?.accountId,
         initialHtml: draft?.initialHtml,
         forwardAttachments: draft?.forwardAttachments,
+        inlineSources: draft?.inlineSources,
       },
     }),
 

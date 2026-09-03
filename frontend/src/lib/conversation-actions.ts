@@ -9,7 +9,7 @@
 import { api } from '@/lib/api-client';
 import { mapApiMessage, type ApiMessage, type StandardFolderRole } from '@/lib/mail-api';
 import { textToHtml } from '@/lib/compose-html';
-import { buildForwardDraft, buildReplyDraft } from '@/lib/compose-draft';
+import { buildForwardDraft, buildReplyDraft, inlineSourcesOf } from '@/lib/compose-draft';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 import type { MailFolder, MailMessage } from '@/types';
@@ -169,6 +169,7 @@ export async function editDraftFromList(id: string): Promise<string | null> {
       body: m.bodyText ?? '',
       initialHtml: m.bodyHtml ?? textToHtml(m.bodyText ?? ''),
       draftMessageId: m.id,
+      inlineSources: inlineSourcesOf(m),
     });
     return null;
   } catch (err) {

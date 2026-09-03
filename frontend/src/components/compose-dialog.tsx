@@ -27,6 +27,13 @@ import { api, apiBlob } from '@/lib/api-client';
 import { formatBytes } from '@/lib/attachments';
 import { signatureHtml } from '@/lib/compose-html';
 import { htmlToText } from '@/lib/html-text';
+import {
+  extractInlineImages,
+  fileToBase64,
+  newContentId,
+  resolveInlineSources,
+  type InlineImageEntry,
+} from '@/lib/inline-images';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
 import { resolveFromAccountId } from '@/lib/resolve-from-account';
 import { cn } from '@/lib/utils';
@@ -95,6 +102,8 @@ export function ComposeDialog() {
   const [showBcc, setShowBcc] = useState(false);
   const [cryptoOpen, setCryptoOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /** objectURL → {file, contentId} for every inline image in the editor. */
+  const inlineImagesRef = useRef(new Map<string, InlineImageEntry>());
   /** Last autosave payload sent — prevents re-saving unchanged drafts. */
   const autosavePayloadRef = useRef<string | null>(null);
   /** Forward drafts load their original attachments once, not per rerender. */
@@ -171,6 +180,24 @@ export function ComposeDialog() {
     const seeded =
       composeDraft?.initialHtml ??
       signatureHtml(accounts.find((a) => a.id === effectiveFrom)?.signature);
+    // Quoted/reopened bodies reference inline parts as cid: — fetch their
+    // bytes and swap in object URLs before the editor sees the HTML.
+    const sources = composeDraft?.inlineSources ?? [];
+    if (sources.length > 0 && seeded.toLowerCase().includes('cid:')) {
+      let cancelled = false;
+      void resolveInlineSources(seeded, sources, (id) =>
+        apiBlob(`/attachments/${id}/download`),
+      ).then(({ html, urlToImage }) => {
+        if (cancelled) return;
+        inlineImagesRef.current = urlToImage;
+        setEditorHtml(html);
+        setInitialHtml(html);
+        setEditorKey((k) => k + 1);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
     setEditorHtml(seeded);
     setInitialHtml(seeded);
     setEditorKey((k) => k + 1);
@@ -230,6 +257,35 @@ export function ComposeDialog() {
     setFiles((prev) => prev.filter((_, i) => i !== index));
   }
 
+  /** Filenames must be unique within one compose — the backend matches inline
+   * parts to `files` parts by filename. Duplicates get `-2`, `-3`, … suffixes. */
+  const uniqueNamed = (file: File): File => {
+    const taken = new Set<string>([
+      ...files.map((f) => f.name),
+      ...[...inlineImagesRef.current.values()].map((e) => e.file.name),
+    ]);
+    if (!taken.has(file.name)) return file;
+    const dot = file.name.lastIndexOf('.');
+    const stem = dot > 0 ? file.name.slice(0, dot) : file.name;
+    const ext = dot > 0 ? file.name.slice(dot) : '';
+    for (let i = 2; ; i += 1) {
+      const name = `${stem}-${i}${ext}`;
+      if (!taken.has(name)) return new File([file], name, { type: file.type });
+    }
+  };
+
+  /** Editor toolbar/paste/drop image hook: validate, track, hand back an
+   * object URL the editor inserts as an image node. */
+  const insertImageFile = (file: File): string | null => {
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      setError(t(locale, 'mail.attachmentTooLarge', { name: file.name || 'image' }));
+      return null;
+    }
+    const url = URL.createObjectURL(file);
+    inlineImagesRef.current.set(url, { file: uniqueNamed(file), contentId: newContentId() });
+    return url;
+  };
+
   useEffect(() => {
     if (!composeOpen) {
       setKeys(null);
@@ -282,6 +338,19 @@ export function ComposeDialog() {
       autosavePayloadRef.current = autosavePayload;
       void (async () => {
         try {
+          // Inline images ride along as base64 (multipart sends skip drafts).
+          const { html: draftHtml, parts: draftInline } = extractInlineImages(
+            currentBodyHtml ?? '',
+            inlineImagesRef.current,
+          );
+          const inlineAttachments = await Promise.all(
+            draftInline.map(async (p) => ({
+              filename: p.filename,
+              contentType: p.contentType,
+              contentId: p.contentId,
+              dataBase64: await fileToBase64(p.file),
+            })),
+          );
           const res = await api<{ status: string; draftMessageId?: string | null }>('/drafts', {
             method: 'POST',
             body: JSON.stringify({
@@ -290,8 +359,9 @@ export function ComposeDialog() {
               cc: fullCc.map((email) => ({ email })),
               subject: form.subject,
               bodyText: currentBodyText,
-              bodyHtml: currentBodyHtml,
+              bodyHtml: richMode ? draftHtml || undefined : undefined,
               existingDraftId: draftMessageId,
+              ...(inlineAttachments.length > 0 ? { inlineAttachments } : {}),
             }),
           });
           if (res.draftMessageId) setDraftMessageId(res.draftMessageId);
@@ -365,6 +435,8 @@ export function ComposeDialog() {
     setEditorHtml('');
     setInitialHtml('');
     autosavePayloadRef.current = null;
+    for (const url of inlineImagesRef.current.keys()) URL.revokeObjectURL(url);
+    inlineImagesRef.current = new Map();
   };
 
   const handleDiscard = () => {
@@ -403,7 +475,11 @@ export function ComposeDialog() {
             }
           : undefined;
 
-      const bodyHtml = richMode ? editorHtml || null : null;
+      const { html: sendHtml, parts: inlineParts } = extractInlineImages(
+        editorHtml,
+        inlineImagesRef.current,
+      );
+      const bodyHtml = richMode ? sendHtml || null : null;
       const bodyText = richMode ? htmlToText(editorHtml ?? '') : form.body;
       const payload = {
         accountId: fromAccountId,
@@ -416,11 +492,20 @@ export function ComposeDialog() {
         opengpg,
       };
 
-      if (files.length > 0) {
+      if (files.length > 0 || inlineParts.length > 0) {
         // Multipart: `payload` JSON part + `files` parts (backend contract).
         const fd = new FormData();
         fd.append('payload', new Blob([JSON.stringify(payload)], { type: 'application/json' }));
         for (const f of files) fd.append('files', f, f.name);
+        for (const part of inlineParts) fd.append('files', part.file, part.filename);
+        if (inlineParts.length > 0) {
+          fd.append(
+            'inlineMeta',
+            JSON.stringify(
+              inlineParts.map((p) => ({ filename: p.filename, contentId: p.contentId })),
+            ),
+          );
+        }
         await api('/messages/send', { method: 'POST', body: fd });
       } else {
         await api('/messages/send', {
@@ -601,6 +686,7 @@ export function ComposeDialog() {
               contentClassName="max-h-none min-h-56 flex-1 px-4 py-3"
               initialHtml={initialHtml}
               onChange={setEditorHtml}
+              onImageFile={insertImageFile}
               placeholder={t(locale, 'mail.bodyPlaceholder')}
               onKeyDown={(e) => {
                 if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {

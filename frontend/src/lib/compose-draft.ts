@@ -34,6 +34,20 @@ function quoteSource(m: MailMessage) {
   };
 }
 
+/** Inline (cid:) parts of the source message — the dialog resolves these to
+ * object URLs so quoted inline images render and re-attach on send. */
+export function inlineSourcesOf(m: MailMessage): ComposeDraft['inlineSources'] {
+  const sources = (m.attachments ?? [])
+    .filter((a) => a.isInline && a.contentId)
+    .map((a) => ({
+      id: a.id,
+      filename: a.filename,
+      contentType: a.contentType,
+      contentId: a.contentId ?? undefined,
+    }));
+  return sources.length > 0 ? sources : undefined;
+}
+
 /** Reply draft; `all` adds the original To recipients. */
 export function buildReplyDraft(
   m: MailMessage,
@@ -50,6 +64,7 @@ export function buildReplyDraft(
     subject: m.subject.startsWith('Re:') ? m.subject : `Re: ${m.subject}`,
     body: quoteBody(m),
     initialHtml: quotedReplyHtml(quoteSource(m), signatureOf(accounts, m.accountId)),
+    inlineSources: inlineSourcesOf(m),
   };
 }
 
@@ -66,5 +81,6 @@ export function buildForwardDraft(m: MailMessage, accounts: MailAccount[]): Part
     body: quoteBody(m),
     initialHtml: forwardHtml(quoteSource(m), signatureOf(accounts, m.accountId)),
     forwardAttachments: forwardAttachments.length > 0 ? forwardAttachments : undefined,
+    inlineSources: inlineSourcesOf(m),
   };
 }
