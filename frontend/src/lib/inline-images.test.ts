@@ -9,7 +9,9 @@ import {
   extractInlineImages,
   fileToBase64,
   newContentId,
+  renamedFile,
   resolveInlineSources,
+  uniqueFileName,
 } from '@/lib/inline-images';
 
 const png = new File([new Uint8Array([1, 2, 3])], 'photo.png', { type: 'image/png' });
@@ -98,5 +100,35 @@ describe('fileToBase64', () => {
   it('round-trips bytes', async () => {
     const b64 = await fileToBase64(png);
     expect(b64).toBe('AQID');
+  });
+});
+
+describe('uniqueFileName', () => {
+  it('returns the name when nothing is taken', () => {
+    expect(uniqueFileName('a.png', new Set())).toBe('a.png');
+  });
+
+  it('suffixes before the extension', () => {
+    expect(uniqueFileName('a.png', new Set(['a.png']))).toBe('a-2.png');
+    expect(uniqueFileName('a.png', new Set(['a.png', 'a-2.png']))).toBe('a-3.png');
+  });
+
+  it('handles names without an extension', () => {
+    expect(uniqueFileName('README', new Set(['README']))).toBe('README-2');
+  });
+});
+
+describe('renamedFile', () => {
+  it('returns the same File when the name is unchanged', () => {
+    const f = new File([new Uint8Array([1])], 'a.png', { type: 'image/png' });
+    expect(renamedFile(f, 'a.png')).toBe(f);
+  });
+
+  it('returns a new File with same bytes and type when renamed', async () => {
+    const f = new File([new Uint8Array([1, 2])], 'a.png', { type: 'image/png' });
+    const g = renamedFile(f, 'a-2.png');
+    expect(g.name).toBe('a-2.png');
+    expect(g.type).toBe('image/png');
+    expect(new Uint8Array(await g.arrayBuffer())).toEqual(new Uint8Array([1, 2]));
   });
 });

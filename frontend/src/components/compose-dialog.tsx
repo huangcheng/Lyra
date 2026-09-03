@@ -31,7 +31,9 @@ import {
   extractInlineImages,
   fileToBase64,
   newContentId,
+  renamedFile,
   resolveInlineSources,
+  uniqueFileName,
   type InlineImageEntry,
 } from '@/lib/inline-images';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
@@ -58,25 +60,6 @@ interface ComposeForm {
 /** Mirrors the backend's per-file cap and count limit (LYRA_MAX_ATTACHMENT_BYTES). */
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_ATTACHMENTS = 10;
-
-/** Pick a collision-free filename: `name`, else `name-2.ext`, `name-3.ext`, …
- * Filenames must be unique within one compose — the backend's
- * `apply_inline_meta` matches inline parts to `files` parts by filename. */
-function uniqueFileName(name: string, taken: ReadonlySet<string>): string {
-  if (!taken.has(name)) return name;
-  const dot = name.lastIndexOf('.');
-  const stem = dot > 0 ? name.slice(0, dot) : name;
-  const ext = dot > 0 ? name.slice(dot) : '';
-  for (let i = 2; ; i += 1) {
-    const candidate = `${stem}-${i}${ext}`;
-    if (!taken.has(candidate)) return candidate;
-  }
-}
-
-/** Same bytes/type under a new name (no copy when the name is unchanged). */
-function renamedFile(file: File, name: string): File {
-  return name === file.name ? file : new File([file], name, { type: file.type });
-}
 
 export function ComposeDialog() {
   const locale = useUIStore((s) => s.locale);
@@ -115,6 +98,9 @@ export function ComposeDialog() {
   const [editorHtml, setEditorHtml] = useState('');
   const [editorKey, setEditorKey] = useState(0);
   const [initialHtml, setInitialHtml] = useState('');
+  /** True while an async inline-source seed is fetching — blocks typing and
+   * autosave so the resolved body can't wipe half-written content. */
+  const [seeding, setSeeding] = useState(false);
   const [draftMessageId, setDraftMessageId] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
   const [showCc, setShowCc] = useState(false);
@@ -156,6 +142,7 @@ export function ComposeDialog() {
   useEffect(() => {
     if (!composeOpen) {
       seededForRef.current = null;
+      setSeeding(false);
       return;
     }
     // Seed once per open: the accounts/folders arrays get fresh identities on
@@ -163,6 +150,9 @@ export function ComposeDialog() {
     // draft mid-compose (observed live: autosave → push → form reset).
     if (seededForRef.current === composeDraft) return;
     seededForRef.current = composeDraft;
+    // A new seed supersedes any in-flight one; the cancelled fetch below only
+    // revokes its own URLs and never touches this flag again.
+    setSeeding(false);
     const effectiveFrom = resolveFromAccountId({
       draftAccountId: composeDraft?.accountId,
       selectedAccountId,
@@ -204,16 +194,22 @@ export function ComposeDialog() {
     const sources = composeDraft?.inlineSources ?? [];
     if (sources.length > 0 && seeded.toLowerCase().includes('cid:')) {
       let cancelled = false;
+      setSeeding(true);
       // No .catch needed: resolveInlineSources swallows per-source failures
       // internally (broken parts keep their inert cid: ref).
       void resolveInlineSources(seeded, sources, (id) =>
         apiBlob(`/attachments/${id}/download`),
       ).then(({ html, urlToImage }) => {
-        if (cancelled) return;
+        if (cancelled) {
+          // Dialog closed/reopened mid-fetch: the URLs are orphaned here.
+          for (const url of urlToImage.keys()) URL.revokeObjectURL(url);
+          return;
+        }
         inlineImagesRef.current = urlToImage;
         setEditorHtml(html);
         setInitialHtml(html);
         setEditorKey((k) => k + 1);
+        setSeeding(false);
       });
       return () => {
         cancelled = true;
@@ -356,7 +352,7 @@ export function ComposeDialog() {
     draftMessageId,
   });
   useEffect(() => {
-    if (!composeOpen || !draftDirty || files.length > 0 || sending) return;
+    if (!composeOpen || !draftDirty || files.length > 0 || sending || seeding) return;
     if (autosavePayloadRef.current === autosavePayload) return;
     const timer = window.setTimeout(() => {
       autosavePayloadRef.current = autosavePayload;
@@ -397,7 +393,7 @@ export function ComposeDialog() {
     }, 1500);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [composeOpen, autosavePayload, files.length, sending]);
+  }, [composeOpen, autosavePayload, files.length, sending, seeding]);
 
   // Emails join to a stable key: re-lookup only when the recipient set
   // actually changes, not when the source arrays get new identities.
@@ -711,6 +707,7 @@ export function ComposeDialog() {
               initialHtml={initialHtml}
               onChange={setEditorHtml}
               onImageFile={insertImageFile}
+              disabled={sending || seeding}
               placeholder={t(locale, 'mail.bodyPlaceholder')}
               onKeyDown={(e) => {
                 if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {

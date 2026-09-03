@@ -103,3 +103,22 @@ export async function fileToBase64(file: File): Promise<string> {
   }
   return btoa(binary);
 }
+
+/** Pick a collision-free filename: `name`, else `name-2.ext`, `name-3.ext`, …
+ * Filenames must be unique within one compose — the backend's
+ * `apply_inline_meta` matches inline parts to `files` parts by filename. */
+export function uniqueFileName(name: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  for (let i = 2; ; i += 1) {
+    const candidate = `${stem}-${i}${ext}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** Same bytes/type under a new name (no copy when the name is unchanged). */
+export function renamedFile(file: File, name: string): File {
+  return name === file.name ? file : new File([file], name, { type: file.type });
+}
