@@ -122,6 +122,10 @@ pub struct OutboundAttachment {
     pub filename: String,
     pub content_type: String,
     pub data_base64: String,
+    /// RFC 2045 Content-ID (without angle brackets); `Some` = inline part
+    /// referenced as `cid:` from the HTML body (RFC 2392).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
 }
 
 impl OutboundAttachment {
@@ -132,7 +136,22 @@ impl OutboundAttachment {
             filename: filename.to_owned(),
             content_type: content_type.to_owned(),
             data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+            content_id: None,
         }
+    }
+
+    /// Inline part constructor: bytes + the Content-ID the HTML references.
+    #[must_use]
+    #[allow(dead_code)] // used by tests now; the HTTP layer adopts it in a follow-up task
+    pub fn from_bytes_inline(
+        filename: &str,
+        content_type: &str,
+        data: &[u8],
+        content_id: &str,
+    ) -> Self {
+        let mut att = Self::from_bytes(filename, content_type, data);
+        att.content_id = Some(content_id.to_owned());
+        att
     }
 
     /// Decode the payload; an invalid base64 string is a programming error on
@@ -329,6 +348,12 @@ enum BodyPart {
     Alternative(MultiPart),
 }
 
+/// Any MIME level: a single leaf part or a multipart container.
+enum Part {
+    Single(SinglePart),
+    Multi(MultiPart),
+}
+
 /// Build the body part: OpenGPG MIME wrapper, multipart text+html, or a
 /// single text/html part.
 fn build_body_part(msg: &OutboundMessage) -> Result<BodyPart, SmtpError> {
@@ -375,6 +400,20 @@ fn build_body_part(msg: &OutboundMessage) -> Result<BodyPart, SmtpError> {
     })
 }
 
+/// Content-IDs become a header value: printable ASCII, no whitespace, no
+/// angle brackets (build_message adds them). Anything else is rejected.
+pub(crate) fn validate_content_id(cid: &str) -> Result<(), SmtpError> {
+    let ok = !cid.is_empty()
+        && cid
+            .chars()
+            .all(|c| c.is_ascii_graphic() && c != '<' && c != '>');
+    if ok {
+        Ok(())
+    } else {
+        Err(SmtpError::Permanent(format!("invalid content-id: {cid:?}")))
+    }
+}
+
 /// Attachment → lettre part (base64 body, `attachment` disposition).
 fn attachment_part(att: &OutboundAttachment) -> Result<SinglePart, SmtpError> {
     let bytes = att.decode()?;
@@ -382,6 +421,26 @@ fn attachment_part(att: &OutboundAttachment) -> Result<SinglePart, SmtpError> {
         ContentType::parse("application/octet-stream").expect("static MIME type parses")
     });
     Ok(Attachment::new(att.filename.clone()).body(bytes, content_type))
+}
+
+/// Inline attachment → lettre part: `inline` disposition (RFC 2183) +
+/// `Content-ID` (RFC 2045) so the HTML body's `cid:` refs (RFC 2392) resolve.
+fn inline_part(att: &OutboundAttachment) -> Result<SinglePart, SmtpError> {
+    let cid = att.content_id.as_deref().ok_or_else(|| {
+        SmtpError::Permanent(format!(
+            "inline attachment {}: missing content_id",
+            att.filename
+        ))
+    })?;
+    validate_content_id(cid)?;
+    let bytes = att.decode()?;
+    let content_type = ContentType::parse(&att.content_type).unwrap_or_else(|_| {
+        ContentType::parse("application/octet-stream").expect("static MIME type parses")
+    });
+    Ok(
+        Attachment::new_inline_with_name(cid.to_owned(), att.filename.clone())
+            .body(bytes, content_type),
+    )
 }
 
 /// Build a `lettre::Message` from an `OutboundMessage`.
@@ -423,21 +482,45 @@ pub(crate) fn build_message(msg: &OutboundMessage) -> Result<Message, SmtpError>
     }
 
     let body_part = build_body_part(msg)?;
-    let message = if msg.attachments.is_empty() {
+    // OpenGPG replaces the body with a crypto wrapper (mime_body); inline
+    // parts would leak outside the envelope, so they degrade to attachments.
+    let inline_allowed = msg.mime_body.is_none();
+    let (inline, regular): (Vec<&OutboundAttachment>, Vec<&OutboundAttachment>) = msg
+        .attachments
+        .iter()
+        .partition(|a| inline_allowed && a.content_id.is_some());
+
+    // RFC 2387 multipart/related: body + inline parts, only when present.
+    let body_level: Part = if inline.is_empty() {
         match body_part {
-            BodyPart::Single(sp) => builder.singlepart(sp)?,
-            BodyPart::Alternative(mp) => builder.multipart(mp)?,
+            BodyPart::Single(sp) => Part::Single(sp),
+            BodyPart::Alternative(mp) => Part::Multi(mp),
         }
     } else {
-        // RFC 2046 multipart/mixed: body first, then attachments.
-        let mut mixed = match body_part {
-            BodyPart::Single(sp) => MultiPart::mixed().singlepart(sp),
-            BodyPart::Alternative(mp) => MultiPart::mixed().multipart(mp),
+        let mut related = match body_part {
+            BodyPart::Single(sp) => MultiPart::related().singlepart(sp),
+            BodyPart::Alternative(mp) => MultiPart::related().multipart(mp),
         };
-        for att in &msg.attachments {
-            mixed = mixed.singlepart(attachment_part(att)?);
+        for att in inline {
+            related = related.singlepart(inline_part(att)?);
         }
-        builder.multipart(mixed)?
+        Part::Multi(related)
+    };
+
+    // RFC 2046 multipart/mixed: body level first, then regular attachments.
+    let message = match (body_level, regular.is_empty()) {
+        (Part::Single(sp), true) => builder.singlepart(sp)?,
+        (Part::Multi(mp), true) => builder.multipart(mp)?,
+        (level, false) => {
+            let mut mixed = match level {
+                Part::Single(sp) => MultiPart::mixed().singlepart(sp),
+                Part::Multi(mp) => MultiPart::mixed().multipart(mp),
+            };
+            for att in regular {
+                mixed = mixed.singlepart(attachment_part(att)?);
+            }
+            builder.multipart(mixed)?
+        }
     };
 
     Ok(message)
@@ -753,5 +836,111 @@ mod tests {
     fn outbound_attachment_base64_roundtrip() {
         let att = OutboundAttachment::from_bytes("f", "application/pdf", b"%PDF-1.7");
         assert_eq!(att.decode().unwrap(), b"%PDF-1.7");
+    }
+
+    fn inline_att(name: &str, cid: &str) -> OutboundAttachment {
+        OutboundAttachment::from_bytes_inline(name, "image/png", b"\x89PNG", cid)
+    }
+
+    fn base_msg() -> OutboundMessage {
+        OutboundMessage {
+            from_email: "a@example.com".into(),
+            from_name: None,
+            to: vec![(None, "b@example.com".into())],
+            cc: vec![],
+            bcc: vec![],
+            subject: "s".into(),
+            body_text: Some("hi".into()),
+            body_html: Some("<p>hi</p><img src=\"cid:img1@lyra\">".into()),
+            in_reply_to: None,
+            references: None,
+            mime_content_type: None,
+            mime_body: None,
+            attachments: vec![],
+            message_id: None,
+        }
+    }
+
+    fn formatted(msg: &OutboundMessage) -> String {
+        String::from_utf8(build_message(msg).unwrap().formatted()).unwrap()
+    }
+
+    #[test]
+    fn inline_attachment_produces_multipart_related() {
+        let mut msg = base_msg();
+        msg.attachments.push(inline_att("a.png", "img1@lyra"));
+        let raw = formatted(&msg);
+        assert!(raw.contains("multipart/related"), "{raw}");
+        assert!(raw.contains("Content-ID: <img1@lyra>"), "{raw}");
+        assert!(raw.contains("Content-Disposition: inline"), "{raw}");
+        assert!(!raw.contains("multipart/mixed"), "{raw}");
+        // related wraps the alternative body: html appears before the image part
+        let html_pos = raw.find("text/html").unwrap();
+        let img_pos = raw.find("Content-ID: <img1@lyra>").unwrap();
+        assert!(html_pos < img_pos, "{raw}");
+    }
+
+    #[test]
+    fn inline_plus_file_produces_mixed_wrapping_related() {
+        let mut msg = base_msg();
+        msg.attachments.push(inline_att("a.png", "img1@lyra"));
+        msg.attachments.push(OutboundAttachment::from_bytes(
+            "doc.pdf",
+            "application/pdf",
+            b"PDF",
+        ));
+        let raw = formatted(&msg);
+        assert!(raw.contains("multipart/mixed"), "{raw}");
+        assert!(raw.contains("multipart/related"), "{raw}");
+        assert!(raw.contains("Content-Disposition: inline"), "{raw}");
+        assert!(raw.contains("filename=\"doc.pdf\""), "{raw}");
+        let mixed_pos = raw.find("multipart/mixed").unwrap();
+        let related_pos = raw.find("multipart/related").unwrap();
+        assert!(mixed_pos < related_pos, "{raw}");
+    }
+
+    #[test]
+    fn regular_attachments_only_keep_todays_structure() {
+        let mut msg = base_msg();
+        msg.attachments.push(OutboundAttachment::from_bytes(
+            "doc.pdf",
+            "application/pdf",
+            b"PDF",
+        ));
+        let raw = formatted(&msg);
+        assert!(raw.contains("multipart/mixed"), "{raw}");
+        assert!(!raw.contains("multipart/related"), "{raw}");
+        assert!(!raw.contains("Content-Disposition: inline"), "{raw}");
+    }
+
+    #[test]
+    fn no_attachments_no_inline_markers() {
+        let raw = formatted(&base_msg());
+        assert!(!raw.contains("multipart/related"), "{raw}");
+        assert!(!raw.contains("multipart/mixed"), "{raw}");
+        assert!(raw.contains("multipart/alternative"), "{raw}");
+    }
+
+    #[test]
+    fn invalid_content_id_is_rejected() {
+        let mut msg = base_msg();
+        msg.attachments
+            .push(inline_att("a.png", "bad>\nbcc:evil@example.com"));
+        assert!(build_message(&msg).is_err());
+    }
+
+    #[test]
+    fn opengpg_wrapper_downgrades_inline_to_regular_attachment() {
+        let mut msg = base_msg();
+        msg.mime_content_type =
+            Some("multipart/encrypted; protocol=\"application/pgp-encrypted\"".into());
+        msg.mime_body = Some("wrapped".into());
+        msg.body_text = None;
+        msg.body_html = None;
+        msg.attachments.push(inline_att("a.png", "img1@lyra"));
+        let raw = formatted(&msg);
+        assert!(!raw.contains("multipart/related"), "{raw}");
+        assert!(!raw.contains("Content-Disposition: inline"), "{raw}");
+        assert!(raw.contains("multipart/encrypted"), "{raw}");
     }
 }
