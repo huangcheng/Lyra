@@ -21,7 +21,7 @@ Close the end-to-end mail path on the new kernel:
 5. Background poll every 5 minutes per active account.  
 6. **Snooze** (existing reading-pane control) becomes a real delayed job.
 
-**Out of this cycle:** POP3 implementation, Graph/EWS/OAuth, IMAP IDLE / JMAP push, send-later UI, email-OTP product flow, CardDAV/CalDAV polish, attachments/search in the reading pane, a separate `lyra-worker` binary.
+**Out of this cycle (POP3 dropped entirely — decided 2026-09-03):** Graph/EWS/OAuth, IMAP IDLE / JMAP push, send-later UI, email-OTP product flow, CardDAV/CalDAV polish, attachments/search in the reading pane, a separate `lyra-worker` binary.
 
 ---
 
@@ -35,7 +35,7 @@ App (kernel)
   └── Http mounts         each plugin adds its own /api routes
            ▲
            │ register()
-  auth · storage · kv · jobs · imap · jmap · smtp · probe · scheduler · pim · (pop3 later)
+  auth · storage · kv · jobs · imap · jmap · smtp · probe · scheduler · pim
 ```
 
 ### 2.1 Plugin shape
@@ -61,7 +61,7 @@ Core code never `match protocol`. It asks the registry (`app.receive("imap")`, `
 
 | Kind | Job | First adapters |
 |------|-----|----------------|
-| **Receive** | folders, fetch since cursor, flags | `imap`, `jmap` (`pop3` later) |
+| **Receive** | folders, fetch since cursor, flags | `imap`, `jmap` |
 | **Send** | outbound | `smtp` (JMAP submission later) |
 | **Probe** | guess hosts from email domain | Mozilla ISPDB, common patterns (SRV/autodiscover later) |
 | **Scheduler** | when work runs | startup, 5‑minute poll, job due-scan |
@@ -74,7 +74,7 @@ Core code never `match protocol`. It asks the registry (`app.receive("imap")`, `
 
 An account stores **two** ids (not a single `mail_account.protocol`):
 
-- `receive_protocol`: `imap` | `jmap` | (later `pop3`)  
+- `receive_protocol`: `imap` | `jmap`  
 - `send_protocol`: `smtp` | (later `jmap`)
 
 That is how POP3+SMTP and JMAP-only both fit. Keep existing `imap_*` / `smtp_*` / `jmap_base_url` columns; stop using a combined `protocol` as the source of truth (migrate: `jmap` → receive `jmap` + send `smtp` unless JMAP submission exists).

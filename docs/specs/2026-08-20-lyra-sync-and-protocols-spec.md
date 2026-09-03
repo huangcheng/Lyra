@@ -405,7 +405,7 @@ These match the running tree; older bullets above that still mention stubs are h
 | **IMAP** | RFC 3501; RFC 6851 (MOVE); RFC 7162 (CONDSTORE); RFC 6154 (SPECIAL-USE); Modified UTF-7 (RFC 3501 §5.1.3); RFC 2047 headers | `backend/src/imap.rs` |
 | **JMAP** | RFC 8620 (core); RFC 8621 (mail) | `backend/src/sync/jmap_client.rs` (seam over the `jmap-client` crate) |
 | **SMTP** | RFC 5321; RFC 5322 (message format); RFC 6531/6532 (UTF-8 mail) | `backend/src/smtp.rs` |
-| **POP3** | RFC 1939 | *(post-v1; plugin kernel `pop3` receive plugin)* |
+| **POP3** | RFC 1939 | **won't do** (decided 2026-09-03): single-mailbox, flagless, stateless — incompatible with Lyra's multi-folder sync model; every provider users actually have offers IMAP. Legacy-mail import will be an mbox/EML feature instead |
 
 MIME parsing and sanitization follow RFC 2045–2049 at the adapter/storage boundary (`mail-parser`, `ammonia`).
 
@@ -485,13 +485,13 @@ Status key: **done** = implemented and tested · **partial** = core path works, 
 | DSN (RFC 3461) when supported | **gap** | Optional post-v1 |
 | Permanent vs transient error handling | **done** | 4xx→retry job; 5xx→terminal (`SmtpError::Transient`/`Permanent`) |
 
-#### POP3 (RFC 1939)
+#### POP3 (RFC 1939) — won't do
 
-| Requirement | Status | Notes / tracking |
-|-------------|--------|------------------|
-| Receive plugin with honest capabilities (no folders) | **n/a** | Post-v1; CHE-127 |
-| UIDL-based opaque cursor | **n/a** | Post-v1; CHE-127 |
-| STLS / APOP / AUTH when supported | **n/a** | Post-v1; CHE-127 |
+Dropped 2026-09-03 (user decision): POP3 is single-mailbox, flagless, and
+server-stateless — it cannot express Lyra's folder/flag sync model, and every
+provider users actually use offers IMAP. The plugin-kernel capability seams
+stay; a future "import legacy mail" need is served by an mbox/EML import
+feature (no live protocol), not by a POP3 adapter.
 
 ### 13.3 When checklist changes
 
