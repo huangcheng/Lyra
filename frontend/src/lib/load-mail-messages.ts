@@ -14,6 +14,11 @@ export function messagesUrlForView(opts: {
   if (opts.folderId) {
     return `/folders/${opts.folderId}/messages`;
   }
+  if (opts.folderRole === 'starred') {
+    const params = new URLSearchParams({ isStarred: 'true' });
+    if (opts.accountId !== ALL_ACCOUNTS) params.set('accountId', opts.accountId);
+    return `/messages?${params}`;
+  }
   if (opts.folderRole) {
     const params = new URLSearchParams({ role: opts.folderRole });
     if (opts.accountId !== ALL_ACCOUNTS) params.set('accountId', opts.accountId);

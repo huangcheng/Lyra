@@ -57,6 +57,8 @@ interface UIState {
   accountOrder: string[];
   /** Default compose From account (persisted server-side); null = first account. */
   defaultAccountId: string | null;
+  /** Favorites → All Inboxes disclosure (null = default: expanded when ≥2 accounts). */
+  favoritesAllInboxesExpanded: boolean | null;
   locale: SupportedLocale;
   markReadPolicy: MarkReadPolicy;
   theme: ThemeMode;
@@ -77,6 +79,7 @@ interface UIState {
   setFolderExpansion: (map: Record<string, AccountExpansion>) => void;
   setAccountOrder: (ids: string[]) => void;
   setDefaultAccount: (id: string | null) => void;
+  setFavoritesAllInboxesExpanded: (expanded: boolean) => void;
   setLocale: (locale: SupportedLocale) => void;
   setMarkReadPolicy: (policy: MarkReadPolicy) => void;
   setTheme: (theme: ThemeMode) => void;
@@ -95,6 +98,7 @@ export const useUIStore = create<UIState>((set) => ({
   folderExpansion: {},
   accountOrder: [],
   defaultAccountId: null,
+  favoritesAllInboxesExpanded: null,
   locale: 'en',
   markReadPolicy: 'on_open' as MarkReadPolicy,
   theme: getStoredTheme(),
@@ -172,6 +176,8 @@ export const useUIStore = create<UIState>((set) => ({
   setAccountOrder: (ids) => set({ accountOrder: ids }),
 
   setDefaultAccount: (id) => set({ defaultAccountId: id }),
+
+  setFavoritesAllInboxesExpanded: (expanded) => set({ favoritesAllInboxesExpanded: expanded }),
 
   setLocale: (locale) => set({ locale }),
 

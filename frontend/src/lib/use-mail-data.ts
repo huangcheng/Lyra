@@ -5,14 +5,19 @@
 import { useCallback, useEffect } from 'react';
 
 import { api } from '@/lib/api-client';
-import { mapApiFolder, mapApiMessage, type ApiFolder, type ApiMessage } from '@/lib/mail-api';
+import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
+import {
+  FOLDER_REFRESH_DEBOUNCE_MS,
+  refreshFoldersNow,
+  scheduleFolderRefresh,
+} from '@/lib/refresh-folders';
 import { syncEvents$ } from '@/rxjs/sync-events';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import type { MailAccount } from '@/types';
 
-/** Coalesce rapid per-account sync_complete into one folders refresh. */
-export const SYNC_FOLDER_REFRESH_DEBOUNCE_MS = 400;
+/** @deprecated Prefer FOLDER_REFRESH_DEBOUNCE_MS from refresh-folders. */
+export const SYNC_FOLDER_REFRESH_DEBOUNCE_MS = FOLDER_REFRESH_DEBOUNCE_MS;
 
 interface ApiAccount {
   id: string;
@@ -28,7 +33,6 @@ interface ApiAccount {
 export function useMailData() {
   const token = useAuthStore((s) => s.token);
   const setAccounts = useMailStore((s) => s.setAccounts);
-  const setFolders = useMailStore((s) => s.setFolders);
   const upsertMessage = useMailStore((s) => s.upsertMessage);
 
   const fetchAccounts = useCallback(async () => {
@@ -53,13 +57,8 @@ export function useMailData() {
 
   const fetchFolders = useCallback(async () => {
     if (!token) return;
-    try {
-      const data = await api<ApiFolder[]>('/folders');
-      setFolders(data.map(mapApiFolder));
-    } catch {
-      /* keep last good snapshot */
-    }
-  }, [token, setFolders]);
+    await refreshFoldersNow();
+  }, [token]);
 
   const fetchMessages = useCallback(
     async (folderId: string) => {
@@ -80,20 +79,15 @@ export function useMailData() {
   }, [fetchAccounts, fetchFolders]);
 
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const sub = syncEvents$.subscribe((ev) => {
       if (ev.type !== 'sync_complete' && ev.type !== 'sync_error') return;
       // Sync changes folder counts / trees, not the account roster. Refetching
       // accounts remounts sortable sidebar rows and makes the list bounce when
       // several accounts finish in quick succession.
-      clearTimeout(timer);
-      timer = setTimeout(() => void fetchFolders(), SYNC_FOLDER_REFRESH_DEBOUNCE_MS);
+      scheduleFolderRefresh();
     });
-    return () => {
-      sub.unsubscribe();
-      clearTimeout(timer);
-    };
-  }, [fetchFolders]);
+    return () => sub.unsubscribe();
+  }, []);
 
   return { fetchAccounts, fetchFolders, fetchMessages };
 }

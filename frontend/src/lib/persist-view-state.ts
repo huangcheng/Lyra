@@ -50,6 +50,9 @@ export function applyViewState(uiState: Record<string, unknown> | null | undefin
   if (typeof uiState.defaultAccountId === 'string' && uiState.defaultAccountId) {
     ui.setDefaultAccount(uiState.defaultAccountId);
   }
+  if (typeof uiState.favoritesAllInboxesExpanded === 'boolean') {
+    ui.setFavoritesAllInboxesExpanded(uiState.favoritesAllInboxesExpanded);
+  }
 }
 
 /** Subscribe once; writes are debounced and skipped while logged out. */
@@ -62,7 +65,8 @@ export function startViewStatePersistence(): () => void {
       state.selectedFolderRole === prev.selectedFolderRole &&
       state.folderExpansion === prev.folderExpansion &&
       state.accountOrder === prev.accountOrder &&
-      state.defaultAccountId === prev.defaultAccountId
+      state.defaultAccountId === prev.defaultAccountId &&
+      state.favoritesAllInboxesExpanded === prev.favoritesAllInboxesExpanded
     ) {
       return;
     }
@@ -80,6 +84,7 @@ export function startViewStatePersistence(): () => void {
             folderExpansion: s.folderExpansion,
             accountOrder: s.accountOrder,
             defaultAccountId: s.defaultAccountId,
+            favoritesAllInboxesExpanded: s.favoritesAllInboxesExpanded,
           },
         }),
       }).catch(() => {

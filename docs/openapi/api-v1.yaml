@@ -530,6 +530,11 @@ paths:
           in: query
           schema:
             type: string
+        - name: isStarred
+          in: query
+          description: When true, only messages with the local starred/flagged flag (Favorites Starred view)
+          schema:
+            type: boolean
         - name: limit
           in: query
           schema:

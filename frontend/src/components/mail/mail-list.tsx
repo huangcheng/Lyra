@@ -22,6 +22,7 @@ import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import { groupIntoConversations, type Conversation } from '@/lib/conversation';
 import type { ConversationDragData } from '@/lib/conversation-actions';
 import { fetchMessagesForView } from '@/lib/load-mail-messages';
+import { scheduleFolderRefresh } from '@/lib/refresh-folders';
 import { ALL_ACCOUNTS, mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { getInitials, avatarTone, cn } from '@/lib/utils';
 import { useSyncingAccounts } from '@/lib/use-syncing-accounts';
@@ -185,6 +186,15 @@ export function MailList() {
       const mapped = await fetchMessagesForView(viewOpts);
       replaceMessagesForView(viewOpts, mapped);
       setFetchError(null);
+      // Self-heal stale sidebar badges: empty list but folder still claims unread.
+      if (mapped.length === 0 && viewOpts.folderId) {
+        const folder = useMailStore.getState().folders[viewOpts.folderId];
+        if (folder && folder.unreadCount > 0) scheduleFolderRefresh();
+      } else if (mapped.length === 0 && viewOpts.folderRole) {
+        const unified = useMailStore.getState().getUnifiedFolders();
+        const row = unified.find((f) => f.role === viewOpts.folderRole);
+        if (row && row.unreadCount > 0) scheduleFolderRefresh();
+      }
     } catch (err) {
       setFetchError(resolveFetchError(err));
     } finally {

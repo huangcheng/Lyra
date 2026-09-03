@@ -1154,6 +1154,53 @@ mod tests {
         assert_eq!(unread, 1);
     }
 
+    #[tokio::test]
+    async fn update_folder_counts_excludes_future_snoozed() {
+        let pool = test_pool().await;
+        let (_, account_id) = seed_user_and_account(&pool).await;
+
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+
+        upsert_message(
+            &as_db(&pool),
+            &account_id,
+            &folder_id,
+            &sample_imap_message(42),
+        )
+        .await
+        .unwrap();
+        let message_id = message_id_for_uid(&pool, &account_id, &folder_id, 42).await;
+        let future = sqlite_utc_datetime(chrono::Utc::now() + chrono::Duration::hours(2));
+        sqlx::query("UPDATE message SET snoozed_until = ?, is_read = 0 WHERE id = ?")
+            .bind(&future)
+            .bind(&message_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        update_folder_counts(&as_db(&pool), &folder_id)
+            .await
+            .unwrap();
+
+        let total: i32 = sqlx::query_scalar("SELECT total_messages FROM folder WHERE id = ?")
+            .bind(&folder_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let unread: i32 = sqlx::query_scalar("SELECT unread_messages FROM folder WHERE id = ?")
+            .bind(&folder_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 0, "future-snoozed must not count toward total");
+        assert_eq!(unread, 0, "future-snoozed must not count toward unread badge");
+    }
+
     fn sample_imap_message(uid: u32) -> ImapMessage {
         ImapMessage {
             uid,
@@ -1216,13 +1263,50 @@ mod tests {
             .await
             .unwrap();
 
-        let inbox = query_user_messages(&as_db(&pool), &user_id, Some("inbox"), None)
+        let inbox = query_user_messages(&as_db(&pool), &user_id, Some("inbox"), None, None)
             .await
             .unwrap();
         assert!(
             inbox.is_empty(),
             "future snoozed_until must hide the row from inbox"
         );
+    }
+
+    #[tokio::test]
+    async fn query_user_messages_filters_starred() {
+        let pool = test_pool().await;
+        let (user_id, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+        let mut starred = sample_imap_message(20);
+        starred.flags = vec!["\\Flagged".into()];
+        upsert_message(&as_db(&pool), &account_id, &folder_id, &starred)
+            .await
+            .unwrap();
+        upsert_message(
+            &as_db(&pool),
+            &account_id,
+            &folder_id,
+            &sample_imap_message(21),
+        )
+        .await
+        .unwrap();
+
+        let only_starred =
+            query_user_messages(&as_db(&pool), &user_id, None, None, Some(true))
+                .await
+                .unwrap();
+        assert_eq!(only_starred.len(), 1);
+        assert!(only_starred[0].is_starred);
+
+        let all = query_user_messages(&as_db(&pool), &user_id, Some("inbox"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2);
     }
 
     #[tokio::test]
@@ -1268,7 +1352,7 @@ mod tests {
             .await
             .unwrap();
 
-        let inbox = query_user_messages(&as_db(&pool), &user_id, Some("inbox"), None)
+        let inbox = query_user_messages(&as_db(&pool), &user_id, Some("inbox"), None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1418,7 +1502,7 @@ mod tests {
                 .unwrap();
         assert!(snoozed.is_none(), "dispatch must SET snoozed_until = NULL");
 
-        let inbox = query_user_messages(&as_db(&pool), &user_id, Some("inbox"), None)
+        let inbox = query_user_messages(&as_db(&pool), &user_id, Some("inbox"), None, None)
             .await
             .unwrap();
         assert_eq!(inbox.len(), 1, "unsnoozed message must reappear in inbox");

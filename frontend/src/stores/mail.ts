@@ -7,6 +7,7 @@
 import { create } from 'zustand';
 
 import { ALL_ACCOUNTS, STANDARD_FOLDER_ROLES, type StandardFolderRole } from '@/lib/mail-api';
+import { scheduleFolderRefresh } from '@/lib/refresh-folders';
 import type { MailAccount, MailFolder, MailMessage, MailThread } from '@/types';
 
 export interface UnifiedFolder {
@@ -124,6 +125,7 @@ export const useMailStore = create<MailState>((set, get) => ({
     const filtered = messages.filter((m) => {
       if (accountId !== ALL_ACCOUNTS && m.accountId !== accountId) return false;
       if (folderId) return m.folderId === folderId;
+      if (folderRole === 'starred') return m.isStarred;
       if (folderRole) return folders[m.folderId]?.role === folderRole;
       return false;
     });
@@ -160,9 +162,11 @@ export const useMailStore = create<MailState>((set, get) => ({
         if (accountId !== ALL_ACCOUNTS && msg.accountId !== accountId) continue;
         const inView = folderId
           ? msg.folderId === folderId
-          : folderRole
-            ? state.folders[msg.folderId]?.role === folderRole
-            : false;
+          : folderRole === 'starred'
+            ? msg.isStarred
+            : folderRole
+              ? state.folders[msg.folderId]?.role === folderRole
+              : false;
         if (inView && !ids.has(id)) delete next[id];
       }
       for (const msg of incoming) next[msg.id] = mergeMessage(next[msg.id], msg);
@@ -174,17 +178,22 @@ export const useMailStore = create<MailState>((set, get) => ({
       threads: { ...state.threads, [thread.id]: thread },
     })),
 
-  markMessageRead: (id) =>
+  markMessageRead: (id) => {
+    const msg = get().messages[id];
+    if (!msg || msg.isRead) return;
     set((state) => {
-      const msg = state.messages[id];
-      if (!msg) return state;
+      const current = state.messages[id];
+      if (!current) return state;
       return {
         messages: {
           ...state.messages,
-          [id]: { ...msg, isRead: true },
+          [id]: { ...current, isRead: true },
         },
       };
-    }),
+    });
+    // Folder unread badges live on GET /folders — refresh after flag changes.
+    scheduleFolderRefresh();
+  },
 
   toggleStar: (id) =>
     set((state) => {
@@ -198,9 +207,12 @@ export const useMailStore = create<MailState>((set, get) => ({
       };
     }),
 
-  removeMessage: (id) =>
+  removeMessage: (id) => {
     set((state) => {
       const { [id]: _removed, ...rest } = state.messages;
       return { messages: rest };
-    }),
+    });
+    // Trash / move / snooze remove the row locally; badge totals need a refetch.
+    scheduleFolderRefresh();
+  },
 }));

@@ -1747,13 +1747,27 @@ pub(crate) async fn clear_folder_messages_in_tx(
     Ok(())
 }
 
-/// Folder message count filtered to live (and optionally unread) rows.
-fn folder_count_stmt(folder_bind: Value, unread_only: bool) -> SelectStatement {
+/// Folder message count filtered to live visible rows (and optionally unread).
+///
+/// Matches list endpoints: not soft-deleted, and not future-snoozed. Without
+/// the snooze filter, badges can show unread while the folder list is empty.
+fn folder_count_stmt(db: &DbPool, folder_bind: Value, unread_only: bool) -> SelectStatement {
     let mut sel = Sq::select();
     sel.expr(Func::count(Expr::col(message::Column::Id)))
         .from(message::Entity)
         .and_where(message::Column::FolderId.eq(folder_bind))
         .and_where(message::Column::IsDeleted.eq(false));
+    match db {
+        DbPool::Sqlite(_) => {
+            sel.and_where(Expr::cust(
+                "(snoozed_until IS NULL OR snoozed_until <= datetime('now'))",
+            ));
+        }
+        #[cfg(feature = "postgres")]
+        DbPool::Postgres(_) => {
+            sel.and_where(Expr::cust("(snoozed_until IS NULL OR snoozed_until <= NOW())"));
+        }
+    }
     if unread_only {
         sel.and_where(message::Column::IsRead.eq(false));
     }
@@ -1766,8 +1780,8 @@ pub(crate) async fn update_folder_counts_in_tx(
     folder_id: &str,
 ) -> Result<(), SyncError> {
     let folder_bind = id_value(db, folder_id)?;
-    let total = tx_fetch_count(tx, &folder_count_stmt(folder_bind.clone(), false)).await?;
-    let unread = tx_fetch_count(tx, &folder_count_stmt(folder_bind.clone(), true)).await?;
+    let total = tx_fetch_count(tx, &folder_count_stmt(db, folder_bind.clone(), false)).await?;
+    let unread = tx_fetch_count(tx, &folder_count_stmt(db, folder_bind.clone(), true)).await?;
 
     let mut upd = Sq::update();
     upd.table(folder::Entity)

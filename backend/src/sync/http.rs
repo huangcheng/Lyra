@@ -490,9 +490,10 @@ pub(crate) async fn list_messages(
 pub(crate) struct ListMessagesQuery {
     role: Option<String>,
     account_id: Option<String>,
+    is_starred: Option<bool>,
 }
 
-/// List messages across folders, optionally filtered by standard role and account.
+/// List messages across folders, optionally filtered by standard role, account, and/or starred.
 pub(crate) async fn list_messages_query(
     State(state): State<AuthState>,
     AuthUser(user_id): AuthUser,
@@ -504,6 +505,7 @@ pub(crate) async fn list_messages_query(
         &user_id,
         query.role.as_deref(),
         query.account_id.as_deref(),
+        query.is_starred,
     )
     .await?;
     Ok(Json(messages))

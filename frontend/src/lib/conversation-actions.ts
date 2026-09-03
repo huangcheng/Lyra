@@ -10,6 +10,7 @@ import { api } from '@/lib/api-client';
 import { mapApiMessage, type ApiMessage, type StandardFolderRole } from '@/lib/mail-api';
 import { textToHtml } from '@/lib/compose-html';
 import { buildForwardDraft, buildReplyDraft, inlineSourcesOf } from '@/lib/compose-draft';
+import { scheduleFolderRefresh } from '@/lib/refresh-folders';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 import type { MailFolder, MailMessage } from '@/types';
@@ -100,7 +101,10 @@ export function patchMessages(
     const m = store.messages[id];
     if (!m) return;
     if (patch.isRead === true) store.markMessageRead(id);
-    if (patch.isRead === false) store.upsertMessage({ ...m, isRead: false });
+    if (patch.isRead === false) {
+      store.upsertMessage({ ...m, isRead: false });
+      scheduleFolderRefresh();
+    }
     if (patch.isStarred !== undefined && m.isStarred !== patch.isStarred) store.toggleStar(id);
   });
 }

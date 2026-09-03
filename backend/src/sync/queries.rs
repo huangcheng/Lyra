@@ -435,7 +435,7 @@ pub(super) fn folder_response_from_row(
     })
 }
 
-/// List messages for a user, optionally filtered by folder role and account.
+/// List messages for a user, optionally filtered by folder role, account, and/or starred.
 ///
 /// Optional filters become conditional `WHERE`s instead of the legacy
 /// `(? IS NULL OR … = ?)` duality — the resulting predicate set is identical.
@@ -444,6 +444,7 @@ pub(crate) async fn query_user_messages(
     user_id: &str,
     role: Option<&str>,
     account_id: Option<&str>,
+    is_starred: Option<bool>,
 ) -> Result<Vec<MessageResponse>, SyncError> {
     let user_value = id_value(db, user_id)?;
     let account_value = opt_id_value(db, account_id)?;
@@ -459,6 +460,9 @@ pub(crate) async fn query_user_messages(
         }
         if let Some(account_value) = account_value {
             q.and_where(aliased_col("m", "account_id").eq(Expr::val(account_value)));
+        }
+        if let Some(starred) = is_starred {
+            q.and_where(aliased_col("m", "is_starred").eq(Expr::val(starred)));
         }
         q.order_by_expr(Expr::cust("m.date"), Order::Desc)
             .limit(500);
@@ -824,7 +828,7 @@ mod postgres_live {
             .await
             .unwrap();
 
-            let list = super::query_user_messages(&db, &user_id, Some("inbox"), None)
+            let list = super::query_user_messages(&db, &user_id, Some("inbox"), None, None)
                 .await
                 .unwrap();
             let hit = list
