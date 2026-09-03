@@ -24,12 +24,12 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use jmap_client::client::{Client, Credentials};
-use jmap_client::core::error::MethodErrorType;
+use jmap_client::core::error::{MethodError, MethodErrorType};
 use jmap_client::core::get::GetRequest;
 use jmap_client::core::query::{QueryRequest, QueryResponse};
 use jmap_client::core::query_changes::QueryChangesResponse;
 use jmap_client::core::response::{
-    EmailChangesResponse, EmailGetResponse, EmailSetResponse, MailboxGetResponse,
+    EmailChangesResponse, EmailGetResponse, EmailSetResponse, MailboxGetResponse, MethodResponse,
 };
 use jmap_client::core::set::SetErrorType;
 use jmap_client::email::{self, Email, EmailAddress, EmailBodyPart, Property};
@@ -991,6 +991,7 @@ impl JmapSeam {
         // batch). Match by variant instead of counting.
         let mut email_resp = None;
         let mut sub_resp = None;
+        let mut method_error = None;
         for resp in responses {
             if resp.is_type(Method::SetEmail) {
                 if email_resp.is_none() {
@@ -998,16 +999,23 @@ impl JmapSeam {
                 }
             } else if resp.is_type(Method::SetEmailSubmission) {
                 sub_resp = Some(resp.unwrap_set_email_submission()?);
+            } else if resp.is_type(Method::Error) && method_error.is_none() {
+                method_error = match resp.unwrap_method_response() {
+                    MethodResponse::Error(err) => Some(err),
+                    _ => None,
+                };
             }
         }
         // Unwrap Email/set FIRST (symmetry with query_emails_page): when it
         // fails, the submission's `#draft` reference fails too, and unwrapping
-        // the submission first would mask the root error.
-        let mut email_resp = email_resp
-            .ok_or_else(|| JmapError::InvalidResponse("missing Email/set response".into()))?;
-        let mut sub_resp = sub_resp.ok_or_else(|| {
-            JmapError::InvalidResponse("missing EmailSubmission/set response".into())
-        })?;
+        // the submission first would mask the root error. A batch-level method
+        // error surfaces as itself, not as a generic "missing response".
+        let Some(mut email_resp) = email_resp else {
+            return Err(missing_response(method_error, "Email/set"));
+        };
+        let Some(mut sub_resp) = sub_resp else {
+            return Err(missing_response(method_error, "EmailSubmission/set"));
+        };
         // notCreated surfaces here as Error::Set (→ JmapError::Client).
         email_resp.created("draft")?;
         let mut submission = sub_resp.created("sub")?;
@@ -1063,6 +1071,7 @@ impl JmapSeam {
         // batch). Match by variant instead of counting.
         let mut import_resp = None;
         let mut sub_resp = None;
+        let mut method_error = None;
         for resp in responses {
             if resp.is_type(Method::ImportEmail) {
                 if import_resp.is_none() {
@@ -1070,15 +1079,22 @@ impl JmapSeam {
                 }
             } else if resp.is_type(Method::SetEmailSubmission) && sub_resp.is_none() {
                 sub_resp = Some(resp.unwrap_set_email_submission()?);
+            } else if resp.is_type(Method::Error) && method_error.is_none() {
+                method_error = match resp.unwrap_method_response() {
+                    MethodResponse::Error(err) => Some(err),
+                    _ => None,
+                };
             }
         }
         // Unwrap Email/import FIRST: the submission's `#{create_id}` reference
-        // fails with it and would otherwise mask the root error.
-        let mut import_resp = import_resp
-            .ok_or_else(|| JmapError::InvalidResponse("missing Email/import response".into()))?;
-        let mut sub_resp = sub_resp.ok_or_else(|| {
-            JmapError::InvalidResponse("missing EmailSubmission/set response".into())
-        })?;
+        // fails with it and would otherwise mask the root error. A batch-level
+        // method error surfaces as itself, not as a generic "missing response".
+        let Some(mut import_resp) = import_resp else {
+            return Err(missing_response(method_error, "Email/import"));
+        };
+        let Some(mut sub_resp) = sub_resp else {
+            return Err(missing_response(method_error, "EmailSubmission/set"));
+        };
         import_resp.created(&import_create_id)?;
         let mut submission = sub_resp.created("sub")?;
         Ok(submission.take_id())
@@ -1436,6 +1452,16 @@ fn lock_cache() -> MutexGuard<'static, HashMap<String, Arc<JmapSeam>>> {
 /// Email/set: inline parts need exact Content-ID/inline disposition control.
 fn needs_mime_import(outbound: &OutboundMessage) -> bool {
     outbound.mime_body.is_some() || outbound.attachments.iter().any(|a| a.content_id.is_some())
+}
+
+/// An expected response never materialized because the method call failed:
+/// surface the server's batch-level error as itself (same conversion the
+/// crate's `unwrap_*` accessors use) instead of a generic "missing response".
+fn missing_response(method_error: Option<MethodError>, what: &str) -> JmapError {
+    match method_error {
+        Some(err) => JmapError::from(jmap_client::Error::from(err)),
+        None => JmapError::InvalidResponse(format!("missing {what} response")),
+    }
 }
 
 // ── Crate → DTO mapping ─────────────────────────────────────────────
