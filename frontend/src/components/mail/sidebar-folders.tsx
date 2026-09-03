@@ -14,6 +14,7 @@ import {
   Flag,
   Folder,
   Inbox,
+  Loader2,
   Send,
   Trash2,
   type LucideIcon,
@@ -34,6 +35,7 @@ import {
 } from '@/lib/conversation-actions';
 import { buildCustomFolderTree, buildRoleChildren, type FolderTreeNode } from '@/lib/folder-tree';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
+import { useSyncProgress } from '@/lib/sync-progress';
 import { avatarTone, cn } from '@/lib/utils';
 import { useMailStore, type UnifiedFolder } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -344,6 +346,7 @@ function AccountSection({
   const totalUnread = accountFolders.reduce((sum, folder) => sum + folder.unreadCount, 0);
 
   const onToggleExpanded = (id: string) => toggleExpanded(account.id, id);
+  const isSyncing = useSyncProgress().get(account.id)?.state === 'syncing';
 
   return (
     <div className="min-w-0">
@@ -362,6 +365,9 @@ function AccountSection({
             ) : (
               <ChevronRight className="size-3.5 shrink-0 text-ter-foreground" />
             )}
+            {isSyncing ? (
+              <Loader2 className="size-3 shrink-0 animate-spin text-ter-foreground" />
+            ) : null}
             <span
               className="min-w-0 truncate text-[12.5px] font-semibold"
               title={account.displayName || account.emailAddress}
