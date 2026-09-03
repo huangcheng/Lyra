@@ -112,7 +112,11 @@ pub(crate) async fn sync_carddav(
         let (to_fetch, removed, next_token) = delta(client, collection, prior.as_deref()).await?;
         tracing::warn!(collection = %collection, fetch = to_fetch.len(), token = ?prior, "carddav delta result");
         let items = client.addressbook_multiget(collection, &to_fetch).await?;
-        tracing::warn!(items = items.len(), with_data = items.iter().filter(|i| i.data.is_some()).count(), "carddav multiget result");
+        tracing::warn!(
+            items = items.len(),
+            with_data = items.iter().filter(|i| i.data.is_some()).count(),
+            "carddav multiget result"
+        );
         for item in items {
             tracing::warn!(href = %item.href, has_data = item.data.is_some(), "carddav: upserting");
             match upsert_contact(db, account_id, collection, &item, store_photo).await {
@@ -224,7 +228,8 @@ async fn upsert_contact(
         }
         db.orm().execute(&update).await?;
     } else {
-        let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let raw_id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let id = crate::sync::queries::id_value_pub(db, &raw_id)?;
         let mut insert = Sq::insert();
         insert
             .into_table(contact::Entity)
@@ -331,7 +336,9 @@ async fn ensure_calendar(db: &DbPool, account_id: &str, collection: &str, name: 
     {
         return id;
     }
-    let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+    let raw_id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+    let id = crate::sync::queries::id_value_pub(db, &raw_id)
+        .unwrap_or(Value::String(Some(raw_id.clone())));
     let mut ins = Sq::insert();
     ins.into_table(crate::entities::calendar::Entity)
         .columns([
@@ -347,7 +354,7 @@ async fn ensure_calendar(db: &DbPool, account_id: &str, collection: &str, name: 
             Expr::val(name),
         ]);
     let _ = db.orm().execute(&ins).await;
-    id
+    raw_id
 }
 
 async fn load_calendar_token(db: &DbPool, calendar_id: String) -> Option<String> {
@@ -415,7 +422,8 @@ async fn upsert_event(
             .and_where(calendar_event::Column::Id.eq(id.clone()));
         db.orm().execute(&update).await?;
     } else {
-        let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let raw_id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let id = crate::sync::queries::id_value_pub(db, &raw_id)?;
         let mut insert = Sq::insert();
         insert
             .into_table(calendar_event::Entity)
