@@ -409,6 +409,24 @@ These match the running tree; older bullets above that still mention stubs are h
 
 MIME parsing and sanitization follow RFC 2045–2049 at the adapter/storage boundary (`mail-parser`, `ammonia`).
 
+### 13.1.1 Standards beyond transport (full client surface)
+
+| Concern | Primary specs | Where in Lyra |
+|---------|---------------|---------------|
+| **Message format** | RFC 5322 (incl. §3.6.4 `In-Reply-To`/`References` threading); RFC 2045–2049 (MIME); RFC 2047 (encoded-words); RFC 2231 (i18n filenames); RFC 3676 (format=flowed); RFC 6532 (UTF-8 mail) | `mail-parser` at ingest; `decode_mime_header`; conversation grouping keys on 5322 reference chains |
+| **IMAP modernization** | RFC 9051 (IMAP4rev2); RFC 4315 (UIDPLUS); RFC 6855 (UTF8=ACCEPT) | capability-gated when servers advertise |
+| **Submission** | RFC 6409 (submission profile, 587); RFC 8314 (implicit TLS); RFC 4954 (AUTH); RFC 3207 (STARTTLS) | `smtp.rs` |
+| **Auth** | RFC 6749 + 7636 (OAuth 2.0 + PKCE); RFC 7628 (OAUTHBEARER); RFC 6238 (TOTP); RFC 8018 (PBKDF2) | `oauth/`, `auth/` |
+| **Sender verification** | RFC 6376 + 8301 (DKIM); RFC 7208 (SPF); RFC 7489 (DMARC, incl. §3.1.1 alignment for the BIMI gate); BIMI = IETF draft + CA/B Forum VMCs (not yet RFC) | `dkim.rs`, `bimi.rs`, `avatars.rs` |
+| **End-to-end encryption** | RFC 9580 (OpenPGP crypto refresh, 2024; supersedes 4880) | `opengpg/` |
+| **PIM** | RFC 5545/5546 (iCalendar); RFC 6350 (vCard — incl. PHOTO); RFC 4791/6352 (CalDAV/CardDAV, unsynced) | `pim.rs`, contacts vCard import |
+| **Auto-configuration** | Thunderbird ISPDB autoconfig (de-facto); RFC 6186 (SRV discovery) | `accounts.rs` probe |
+
+Non-RFC conventions the client honors: JWZ reference-chain threading (union-find over
+5322 headers, subject-prefix fallback only for explicit `Re:`/`回复:` — same-subject
+mail like verification codes never groups); port 993/465 implicit-TLS defaults per
+RFC 8314; UTF-7-modified mailbox wire names preserved verbatim in `external_id`.
+
 ### 13.2 Compliance checklist
 
 Status key: **done** = implemented and tested · **partial** = core path works, gaps remain · **gap** = not implemented · **n/a** = out of v1 scope
