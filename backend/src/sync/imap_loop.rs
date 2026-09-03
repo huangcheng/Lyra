@@ -122,6 +122,10 @@ pub(crate) async fn run_imap_sync(
     let mut total_new = 0;
     let mut total_updated = 0;
     let mut total_deleted = 0;
+    // Soft per-folder skips stay non-fatal; a poisoned session (parse/io/timeout
+    // mid-command) ends the pass and surfaces as a failed job so Settings →
+    // error log gets scrubbed detail instead of a silent "completed".
+    let mut session_poison: Option<ImapError> = None;
 
     'folder: for folder in &folders {
         // Hierarchy placeholders (`Archive/` with \Noselect) cannot be SELECTed;
@@ -152,7 +156,8 @@ pub(crate) async fn run_imap_sync(
                         account_id,
                         "IMAP session state uncertain; ending account pass"
                     );
-                    break;
+                    session_poison = Some(err);
+                    break 'folder;
                 }
                 continue;
             }
@@ -228,7 +233,8 @@ pub(crate) async fn run_imap_sync(
                         account_id,
                         "IMAP session state uncertain; ending account pass"
                     );
-                    break;
+                    session_poison = Some(err);
+                    break 'folder;
                 }
                 continue;
             }
@@ -248,7 +254,8 @@ pub(crate) async fn run_imap_sync(
                             account_id,
                             "IMAP session state uncertain; ending account pass"
                         );
-                        break;
+                        session_poison = Some(err);
+                        break 'folder;
                     }
                     continue;
                 }
@@ -307,6 +314,7 @@ pub(crate) async fn run_imap_sync(
                             account_id,
                             "IMAP session state uncertain; ending account pass"
                         );
+                        session_poison = Some(err);
                         break 'folder;
                     }
                     break 'chunks;
@@ -362,6 +370,10 @@ pub(crate) async fn run_imap_sync(
 
     // Clean logout
     let _ = client.logout().await;
+
+    if let Some(err) = session_poison {
+        return Err(SyncError::Imap(err));
+    }
 
     Ok(SyncResponse {
         account_id: account_id.to_string(),

@@ -114,10 +114,8 @@ export function MessageCard({
     return () => window.clearTimeout(timer);
   }, [expanded, isSelected, mail, markReadPolicy, messageId, markMessageRead]);
 
-  // Sanitize the body, then resolve inline cid: parts against the detail
-  // payload's attachment metadata (bytes go through apiBlob for auth).
-  // Resolved HTML is keyed by its source string and applied during render,
-  // so state is only ever set from the async resolution — never synchronously.
+  // Sanitize + resolve cid: before first paint when possible, so we don't
+  // mount broken images then remount with blob URLs (layout bounce).
   const bodyHtml = mail?.bodyHtml ?? null;
   const bodyAttachments = mail?.attachments;
   const [resolvedBody, setResolvedBody] = useState<{ html: string; source: string } | null>(null);
@@ -139,7 +137,15 @@ export function MessageCard({
       if (revoke) revoke();
     };
   }, [bodyHtml, bodyAttachments]);
-  const renderHtml = resolvedBody && resolvedBody.source === bodyHtml ? resolvedBody.html : null;
+  const hasInlineCid = Boolean(bodyHtml && /src=["']cid:/i.test(bodyHtml));
+  const renderHtml =
+    resolvedBody && resolvedBody.source === bodyHtml
+      ? resolvedBody.html
+      : hasInlineCid
+        ? null
+        : bodyHtml
+          ? sanitizeEmailHtml(bodyHtml)
+          : null;
 
   // Tracking-pixel advisory on the rendered body. The advisory resets
   // when the rendered body changes (keyed during render), and the effect
@@ -349,15 +355,19 @@ export function MessageCard({
             <div className="h-3.5 w-full animate-pulse rounded bg-muted" />
             <div className="h-3.5 w-5/6 animate-pulse rounded bg-muted" />
           </div>
-        ) : mail.bodyHtml ? (
+        ) : mail.bodyHtml && !renderHtml ? (
+          <div className="space-y-3 py-1" aria-hidden>
+            <div className="h-3.5 w-2/3 animate-pulse rounded bg-muted" />
+            <div className="h-3.5 w-full animate-pulse rounded bg-muted" />
+            <div className="h-3.5 w-5/6 animate-pulse rounded bg-muted" />
+          </div>
+        ) : renderHtml ? (
           <div
             ref={mailBodyRef}
-            className="mail-body animate-in fade-in duration-150"
+            className="mail-body"
             // Sanitized via sanitizeEmailHtml (class/style-tag stripped);
             // inline cid: images resolved to object URLs after sanitize.
-            dangerouslySetInnerHTML={{
-              __html: renderHtml ?? sanitizeEmailHtml(mail.bodyHtml),
-            }}
+            dangerouslySetInnerHTML={{ __html: renderHtml }}
           />
         ) : mail.bodyText ? (
           <div className="whitespace-pre-wrap">{mail.bodyText}</div>

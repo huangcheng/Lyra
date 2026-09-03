@@ -705,6 +705,71 @@ mod tests {
         assert_eq!(json["action"].as_str(), Some("noop"));
     }
 
+    #[tokio::test]
+    async fn http_account_sync_errors_returns_empty_list() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (account_id, _, _) = seed_account_folder_message(&db, &user_id).await;
+
+        let (status, json) = request_json(
+            app,
+            Method::GET,
+            &format!("/api/v1/accounts/{account_id}/sync-errors"),
+            None,
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let items = json["items"].as_array().expect("items array");
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn http_account_sync_errors_returns_failed_job() {
+        let (app, db) = test_app().await;
+        let (user_id, token) = bootstrap_user(app.clone()).await;
+        let (account_id, _, _) = seed_account_folder_message(&db, &user_id).await;
+
+        let job_id = crate::jobs::enqueue(
+            &db,
+            &crate::jobs::JobPayload::SyncAccount {
+                account_id: account_id.clone(),
+                user_id: user_id.clone(),
+            },
+            "2026-09-02T00:00:00+00:00",
+        )
+        .await
+        .unwrap();
+        // mark_failed is crate-private; fail via SQL matching worker shape.
+        let pool = sqlite_pool(&db);
+        sqlx::query(
+            "UPDATE jobs SET status = 'failed', last_error = 'IMAP error', last_error_detail = 'TLS EOF', attempts = 1, updated_at = '2026-09-02 16:40:58.010024' WHERE id = ?",
+        )
+        .bind(&job_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let (status, json) = request_json(
+            app,
+            Method::GET,
+            &format!("/api/v1/accounts/{account_id}/sync-errors"),
+            None,
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let items = json["items"].as_array().expect("items array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], job_id);
+        assert_eq!(items[0]["category"], "IMAP error");
+        assert_eq!(items[0]["detail"], "TLS EOF");
+        assert!(
+            items[0]["at"].as_str().unwrap_or("").contains('T'),
+            "at should be RFC3339"
+        );
+    }
+
     /// A drafts-role folder + one draft-flagged message on the seeded account.
     async fn seed_draft_message(db: &DbPool, user_id: &str) -> (String, String) {
         let (_, folder_id, _) = seed_account_folder_message(db, user_id).await;

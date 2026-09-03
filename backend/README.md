@@ -42,14 +42,19 @@ All config via environment variables:
 | `LYRA_MS_OAUTH_CLIENT_ID` | unset | Microsoft Entra app client ID (enables Outlook OAuth) |
 | `LYRA_MS_OAUTH_CLIENT_SECRET` | unset | App secret (confidential clients; omit for public+PKCE-only) |
 | `LYRA_MS_OAUTH_TENANT` | `common` | Entra tenant (`common`, `organizations`, or tenant GUID) |
+| `LYRA_YANDEX_OAUTH_CLIENT_ID` | unset | Yandex OAuth client ID |
+| `LYRA_YANDEX_OAUTH_CLIENT_SECRET` | unset | Yandex OAuth client secret |
 
-When Microsoft OAuth is configured, Settings → Accounts shows **Sign in with Microsoft**. Register this redirect URI in Entra (and in every future mail OAuth app — same URL for all providers):
+When Microsoft or Yandex OAuth is configured, Settings → Accounts shows the
+matching **Sign in with …** button. Register this redirect URI in each provider
+app (same URL for all providers):
 
 ```text
 {LYRA_PUBLIC_URL}/api/v1/oauth/callback
 ```
 
-Start flow: `GET /api/v1/oauth/start?email=user@live.in` (provider inferred from the mailbox domain; `email` is required).
+Start flow: `GET /api/v1/oauth/start?email=user@example.com` (provider inferred
+from the mailbox domain; `email` is required).
 
 ### Database URLs
 
@@ -143,10 +148,9 @@ src/
   auth.rs       ← Username/password + optional TOTP; bearer sessions in kv
   storage.rs    ← Storage seam (SQLite + PostgreSQL on one sea-orm pool; WAL)
   entities/     ← SeaORM entity per table (schema truth for all queries)
-  db_sql.rs     ← Legacy macro layer (transition-only; being removed)
-  db_row.rs     ← Legacy row/binding adapters (transition-only)
   sync/         ← HTTP, IMAP/JMAP loops, JMAP seam (jmap_client.rs), persist batches, SMTP send
   imap.rs / smtp.rs
+  oauth/        ← Microsoft + Yandex OAuth (PKCE) + XOAUTH2
   jobs.rs / scheduler.rs / kernel/
 ```
 
@@ -323,8 +327,28 @@ curl -s -X POST $BASE/api/v1/accounts/probe \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"emailAddress": "user@gmail.com"}' | jq .
 
+# ─── List recent sync errors (operator detail) ─────────────────────
+echo "=== Sync error log ==="
+curl -s "$BASE/api/v1/accounts/$ACCOUNT_ID/sync-errors?limit=20" \
+  -H "Authorization: Bearer $TOKEN" | jq .
+# items[].category is the sanitized SSE label; items[].detail is scrubbed
+# cause text (null for failures recorded before migration 0018).
+
 # ─── Delete account ────────────────────────────────────────────────
 echo "=== Delete Account ==="
 curl -s -X DELETE $BASE/api/v1/accounts/$ACCOUNT_ID \
   -H "Authorization: Bearer $TOKEN" -w '\nHTTP %{http_code}'
 ```
+
+## Message actions (copy)
+
+Same-account folder copy (IMAP `UID COPY` / JMAP mailbox union):
+
+```bash
+curl -s -X POST "$BASE/api/v1/messages/$MESSAGE_ID/copy" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"folderId":"'"$FOLDER_ID"'"}' | jq .
+```
+
+Full route list: [`docs/openapi/api-v1.yaml`](../docs/openapi/api-v1.yaml).

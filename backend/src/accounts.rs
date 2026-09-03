@@ -10,7 +10,7 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -37,6 +37,10 @@ pub fn routes() -> Router<AuthState> {
         .route(
             "/api/v1/accounts/{id}",
             get(get_account).put(update_account).delete(delete_account),
+        )
+        .route(
+            "/api/v1/accounts/{id}/sync-errors",
+            get(list_account_sync_errors),
         )
         .route("/api/v1/accounts/probe", post(probe_server_config))
         .route("/api/v1/accounts/test-connection", post(test_connection))
@@ -345,6 +349,33 @@ async fn get_account(
     let db = state.db();
     let account = find_account(db, id_value(db, &id)?, id_value(db, &user_id)?).await?;
     Ok(Json(account))
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncErrorsQuery {
+    limit: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncErrorsResponse {
+    items: Vec<crate::jobs::SyncErrorLogItem>,
+}
+
+/// GET /api/v1/accounts/{id}/sync-errors — recent failed sync jobs (operator detail).
+async fn list_account_sync_errors(
+    State(state): State<AuthState>,
+    Path(id): Path<String>,
+    Query(query): Query<SyncErrorsQuery>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<SyncErrorsResponse>, AccountError> {
+    let db = state.db();
+    // Ownership check (404 if missing / not this user's).
+    let _ = find_account(db, id_value(db, &id)?, id_value(db, &user_id)?).await?;
+    let items = crate::jobs::list_sync_account_errors(db, &id, &user_id, query.limit.unwrap_or(20))
+        .await
+        .map_err(AccountError::Database)?;
+    Ok(Json(SyncErrorsResponse { items }))
 }
 
 /// Create a new mail account.

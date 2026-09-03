@@ -306,6 +306,7 @@
       "errorLog": "错误日志",
       "errorLogEmpty": "暂无失败的同步记录。",
       "errorLogLoadError": "无法加载错误日志。请确认服务端已更新到最新版本。",
+      "errorLogNoDetail": "此失败未记录详细原因（仅有分类）。",
       "showErrorLog": "查看错误日志",
       "hideErrorLog": "收起错误日志",
       "signature": "签名",

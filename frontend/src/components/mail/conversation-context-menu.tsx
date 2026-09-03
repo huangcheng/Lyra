@@ -221,8 +221,10 @@ export function ConversationContextMenu({
         <ContextMenuItem
           variant="destructive"
           onSelect={() => {
-            if (!confirmMoveToTrash(locale, ids.length)) return;
-            run(actOnMessages(ids, 'trash'));
+            void (async () => {
+              if (!(await confirmMoveToTrash(locale, ids.length))) return;
+              run(actOnMessages(ids, 'trash'));
+            })();
           }}
         >
           <Trash2 />

@@ -39,6 +39,7 @@ import {
   type PrivacySettings,
 } from '@/lib/privacy-api';
 import { fetchOAuthProviders, startOAuth } from '@/lib/oauth-api';
+import { confirmAction } from '@/lib/confirm-action';
 import {
   addSpamSender,
   fetchSpamSettings,
@@ -167,6 +168,15 @@ export function SettingsPage() {
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [errorLogOpenId, setErrorLogOpenId] = useState<string | null>(null);
+  const [errorLogs, setErrorLogs] = useState<
+    Record<
+      string,
+      { id: string; at: string; category: string; detail?: string | null; attempts: number }[]
+    >
+  >({});
+  const [errorLogLoadingId, setErrorLogLoadingId] = useState<string | null>(null);
+  const [errorLogFetchError, setErrorLogFetchError] = useState<Record<string, boolean>>({});
 
   // Security section state
   const [totpEnabled, setTotpEnabled] = useState(false);
@@ -290,10 +300,13 @@ export function SettingsPage() {
       if (ev.type === 'sync_error') {
         setSyncingId((id) => (id === ev.accountId ? null : id));
         setSyncErrors((prev) => ({ ...prev, [ev.accountId]: ev.error }));
+        if (errorLogOpenId === ev.accountId) {
+          void fetchErrorLog(ev.accountId);
+        }
       }
     });
     return () => sub.unsubscribe();
-  }, [locale]);
+  }, [locale, errorLogOpenId]);
 
   async function fetchAccounts() {
     try {
@@ -305,6 +318,42 @@ export function SettingsPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function fetchErrorLog(accountId: string) {
+    setErrorLogLoadingId(accountId);
+    setErrorLogFetchError((prev) => {
+      const next = { ...prev };
+      delete next[accountId];
+      return next;
+    });
+    try {
+      const data = await api<{
+        items: {
+          id: string;
+          at: string;
+          category: string;
+          detail?: string | null;
+          attempts: number;
+        }[];
+      }>(`/accounts/${accountId}/sync-errors?limit=20`);
+      setErrorLogs((prev) => ({ ...prev, [accountId]: data.items }));
+    } catch {
+      // Don't pretend the log is empty — old backends 404 this route.
+      setErrorLogs((prev) => ({ ...prev, [accountId]: [] }));
+      setErrorLogFetchError((prev) => ({ ...prev, [accountId]: true }));
+    } finally {
+      setErrorLogLoadingId((id) => (id === accountId ? null : id));
+    }
+  }
+
+  function openErrorLog(accountId: string) {
+    setErrorLogOpenId(accountId);
+    void fetchErrorLog(accountId);
+  }
+
+  function closeErrorLog() {
+    setErrorLogOpenId(null);
   }
 
   async function pollUntilSyncIdle() {
@@ -572,7 +621,13 @@ export function SettingsPage() {
   }
 
   async function handleDelete(id: string) {
-    if (!confirm(t(locale, 'settings.accounts.confirmDelete'))) return;
+    const ok = await confirmAction({
+      title: t(locale, 'settings.accounts.confirmDelete'),
+      tone: 'destructive',
+      confirmLabel: t(locale, 'common.delete'),
+      cancelLabel: t(locale, 'common.cancel'),
+    });
+    if (!ok) return;
     try {
       await api(`/accounts/${id}`, { method: 'DELETE' });
       fetchAccounts();
@@ -1097,8 +1152,15 @@ export function SettingsPage() {
                                   {t(locale, 'sync.syncFailed')}: {syncErrors[account.id]}
                                 </p>
                               ) : null}
+                              <button
+                                type="button"
+                                className="mt-1 text-[11.5px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                                onClick={() => openErrorLog(account.id)}
+                              >
+                                {t(locale, 'settings.accounts.showErrorLog')}
+                              </button>
                             </div>
-                            <div className="flex shrink-0 items-center gap-0.5">
+                            <div className="flex shrink-0 items-center gap-0.5 self-start">
                               {!isDefault ? (
                                 <Tooltip>
                                   <TooltipTrigger asChild>
@@ -1486,6 +1548,63 @@ export function SettingsPage() {
 
           {section === 'encryption' && <EncryptionSettings />}
         </div>
+
+        <Dialog
+          open={errorLogOpenId !== null}
+          onOpenChange={(open) => {
+            if (!open) closeErrorLog();
+          }}
+        >
+          <DialogContent
+            className="max-h-[min(32rem,calc(100dvh-2rem))] grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0 sm:max-w-lg"
+            showCloseButton
+          >
+            <DialogHeader className="border-b border-border/70 px-5 py-4 pr-12">
+              <DialogTitle className="text-base font-semibold tracking-tight">
+                {t(locale, 'settings.accounts.errorLog')}
+                {errorLogOpenId
+                  ? ` · ${accounts.find((a) => a.id === errorLogOpenId)?.emailAddress ?? ''}`
+                  : null}
+              </DialogTitle>
+            </DialogHeader>
+            <div className="min-h-0 overflow-y-auto px-5 py-3">
+              {errorLogOpenId && errorLogLoadingId === errorLogOpenId ? (
+                <p className="text-sm text-muted-foreground">{t(locale, 'common.loading')}</p>
+              ) : errorLogOpenId && errorLogFetchError[errorLogOpenId] ? (
+                <p className="text-sm text-destructive">
+                  {t(locale, 'settings.accounts.errorLogLoadError')}
+                </p>
+              ) : errorLogOpenId && (errorLogs[errorLogOpenId] ?? []).length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, 'settings.accounts.errorLogEmpty')}
+                </p>
+              ) : errorLogOpenId ? (
+                <ul className="divide-y divide-border/60">
+                  {(errorLogs[errorLogOpenId] ?? []).map((item) => (
+                    <li key={item.id} className="py-3 first:pt-0 last:pb-0">
+                      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[12px] text-muted-foreground">
+                        <span className="font-medium text-foreground">{item.category}</span>
+                        <span>
+                          {formatLastSync(item.at)}
+                          {item.attempts > 1 ? ` · ×${item.attempts}` : null}
+                        </span>
+                      </div>
+                      {item.detail ? (
+                        <pre className="mt-1.5 whitespace-pre-wrap break-all font-mono text-[11.5px] leading-snug text-foreground/90">
+                          {item.detail}
+                        </pre>
+                      ) : (
+                        <p className="mt-1 text-[11.5px] text-muted-foreground">
+                          {t(locale, 'settings.accounts.errorLogNoDetail')}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          </DialogContent>
+        </Dialog>
 
         <Dialog
           open={showAddForm}

@@ -237,11 +237,18 @@
   overflow-wrap: break-word;
   word-wrap: break-word;
   color: var(--foreground);
+  /* Keep scroll position stable when images/layout below the fold expand. */
+  overflow-anchor: auto;
 }
 
 .mail-body img {
   max-width: 100%;
+  /* Cap tall marketing/screenshots so load doesn't yank the reading pane. */
+  max-height: min(70vh, 36rem);
+  width: auto;
   height: auto;
+  object-fit: contain;
+  vertical-align: middle;
 }
 
 .mail-body table {

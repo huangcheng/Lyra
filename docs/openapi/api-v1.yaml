@@ -417,6 +417,53 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
 
+  /api/v1/accounts/{id}/sync-errors:
+    parameters:
+      - $ref: "#/components/parameters/AccountId"
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 20
+    get:
+      tags: [accounts]
+      summary: Recent failed sync jobs for an account (operator detail)
+      description: >
+        Returns sanitized category plus scrubbed cause chain for failed
+        SyncAccount jobs. Secrets (passwords, tokens) are redacted; hostnames
+        and TLS/protocol phrases are kept for self-hosted diagnosis.
+      responses:
+        "200":
+          description: Error log items newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, at, category, attempts]
+                      properties:
+                        id:
+                          type: string
+                        at:
+                          type: string
+                          format: date-time
+                        category:
+                          type: string
+                        detail:
+                          type: string
+                          nullable: true
+                        attempts:
+                          type: integer
+        "404":
+          $ref: "#/components/responses/Error"
+
   /api/v1/accounts/{account_id}/sync:
     parameters:
       - name: account_id

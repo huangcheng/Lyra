@@ -11,6 +11,9 @@ import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import type { MailAccount } from '@/types';
 
+/** Coalesce rapid per-account sync_complete into one folders refresh. */
+export const SYNC_FOLDER_REFRESH_DEBOUNCE_MS = 400;
+
 interface ApiAccount {
   id: string;
   displayName: string;
@@ -77,14 +80,20 @@ export function useMailData() {
   }, [fetchAccounts, fetchFolders]);
 
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const sub = syncEvents$.subscribe((ev) => {
-      if (ev.type === 'sync_complete' || ev.type === 'sync_error') {
-        void fetchAccounts();
-        void fetchFolders();
-      }
+      if (ev.type !== 'sync_complete' && ev.type !== 'sync_error') return;
+      // Sync changes folder counts / trees, not the account roster. Refetching
+      // accounts remounts sortable sidebar rows and makes the list bounce when
+      // several accounts finish in quick succession.
+      clearTimeout(timer);
+      timer = setTimeout(() => void fetchFolders(), SYNC_FOLDER_REFRESH_DEBOUNCE_MS);
     });
-    return () => sub.unsubscribe();
-  }, [fetchAccounts, fetchFolders]);
+    return () => {
+      sub.unsubscribe();
+      clearTimeout(timer);
+    };
+  }, [fetchFolders]);
 
   return { fetchAccounts, fetchFolders, fetchMessages };
 }

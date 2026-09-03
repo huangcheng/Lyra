@@ -81,21 +81,23 @@ Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall
 
 ```
 Lyra/
+  README.md                     ← quick start + links (Docker / make / docs)
   AGENTS.md
   Makefile                      ← fmt / lint / check / secretscan
-  PRODUCT.md / DESIGN.md / DESIGN.json  ← impeccable design context (brand + visual system); read before UI work
+  PRODUCT.md / DESIGN.md / DESIGN.json  ← brand + visual system; read before UI work
   docs/
     product/                    ← product spec + far-horizon roadmaps (multi-client, AI assist)
     specs/                      ← data model, sync, engineering standards
-  frontend/                     ← Vite + React + TanStack Router + shadcn mail
+    openapi/api-v1.yaml
+  frontend/                     ← Vite + React (see frontend/README.md)
     src/
-      components/               ← shadcn/ui + mail example (unified inbox)
+      components/               ← shadcn/ui + mail (unified inbox)
       stores/                   ← Zustand (mail data, UI state)
       machines/                 ← XState (auth flow)
       lib/                      ← `/api/v1` client, session restore, mappers
       rxjs/                     ← RxJS (SSE sync event stream)
       i18n/                     ← en + zh translations
-  backend/                      ← Rust + Axum
+  backend/                      ← Rust + Axum (see backend/README.md)
     src/
       main.rs                   ← health + version routes, SPA, entry point
       config.rs                 ← env-based configuration (`LYRA_MASTER_KEY` required)
@@ -104,20 +106,22 @@ Lyra/
       entities/                 ← SeaORM entity per table (schema truth for data-layer code)
       sync/                     ← sync HTTP, IMAP/JMAP loops, JMAP seam (jmap_client.rs), persist transactions
       imap.rs / smtp.rs
-      oauth/ ← Microsoft mail OAuth (PKCE) + XOAUTH2 token resolve
+      oauth/                    ← Microsoft + Yandex mail OAuth (PKCE) + XOAUTH2
       jobs.rs / scheduler.rs / kernel/
     migrations/
       sqlite/                   ← SQLite migration SQL files
       postgres/                 ← PostgreSQL migration SQL files
-    README.md                   ← how to run + migration docs
+  deploy/                       ← Docker Compose / HTTPS / install script notes
   scripts/
     secretscan.sh               ← gitleaks scanner
 ```
 
 | Area | Path | Notes |
 |------|------|--------|
+| Intro / quick start | `README.md` | Docker Compose, make targets, doc index |
 | Web UI | `frontend/` | React, TanStack Router, Tailwind + shadcn mail, en/zh i18n; typed `api()` client |
 | API + sync | `backend/` | Rust + Axum; `/api/v1`; health + version unversioned |
+| Deploy | `deploy/README.md` | Postgres override, HTTPS, install script |
 | Tests | `backend/` + `frontend/` | Binary crate: `cargo test --bin lyra_backend` (not `--lib`); frontend vitest (`npm test`). New SQL seams get `postgres_live` roundtrips; new frontend form logic goes in `src/lib/` with colocated tests |
 | DB | `backend/migrations/` | sqlx; SQLite + PostgreSQL; auto-migrate on startup |
 

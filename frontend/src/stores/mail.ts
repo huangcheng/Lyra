@@ -23,7 +23,14 @@ export interface UnifiedFolder {
 function mergeMessage(existing: MailMessage | undefined, incoming: MailMessage): MailMessage {
   if (!existing) return incoming;
   const incomingHasBody = incoming.bodyHtml != null || incoming.bodyText != null;
-  if (incomingHasBody) return incoming;
+  if (incomingHasBody) {
+    // Detail fetch must not wipe a list-row snippet (empty snippet + bodyText
+    // would otherwise grow the list when the reader opens).
+    return {
+      ...incoming,
+      snippet: incoming.snippet || existing.snippet,
+    };
+  }
   const existingHasBody = existing.bodyHtml != null || existing.bodyText != null;
   if (!existingHasBody) return incoming;
   return {
@@ -31,6 +38,7 @@ function mergeMessage(existing: MailMessage | undefined, incoming: MailMessage):
     bodyHtml: existing.bodyHtml,
     bodyText: existing.bodyText,
     opengpg: incoming.opengpg ?? existing.opengpg,
+    snippet: incoming.snippet || existing.snippet,
   };
 }
 

@@ -655,6 +655,23 @@ INSERT INTO message_fts (subject) VALUES ('x');
     }
 
     #[tokio::test]
+    async fn migration_0018_adds_job_error_detail() {
+        let storage = Storage::new("sqlite::memory:").await.unwrap();
+        storage.run_migrations().await.unwrap();
+
+        let pool = match storage.pool() {
+            DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "postgres")]
+            DbPool::Postgres(_) => panic!("Expected SQLite"),
+        };
+
+        sqlx::query("SELECT last_error_detail FROM jobs LIMIT 0")
+            .fetch_optional(pool)
+            .await
+            .expect("last_error_detail column missing");
+    }
+
+    #[tokio::test]
     async fn migration_0017_adds_dkim_columns() {
         let storage = Storage::new("sqlite::memory:").await.unwrap();
         storage.run_migrations().await.unwrap();

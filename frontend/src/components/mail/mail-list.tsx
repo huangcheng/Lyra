@@ -340,7 +340,7 @@ export function MailList() {
             } catch {
               relative = item.date;
             }
-            const snippet = (item.snippet || item.bodyText || '').replace(/\s+/g, ' ').trim();
+            const snippet = (item.snippet || '').replace(/\s+/g, ' ').trim();
             const subjectNorm = (item.subject || '').replace(/\s+/g, ' ').trim();
             const showSnippet =
               snippet.length > 0 &&
@@ -348,13 +348,16 @@ export function MailList() {
             const hasAttachments = (item.attachments ?? []).some((a) => !a.isInline);
             const quickAction = (e: React.MouseEvent, action: 'archive' | 'trash') => {
               e.stopPropagation();
-              if (action === 'trash' && !confirmMoveToTrash(locale)) return;
-              void api(`/messages/${item.id}/${action}`, { method: 'POST' })
-                .then(() => {
+              void (async () => {
+                if (action === 'trash' && !(await confirmMoveToTrash(locale))) return;
+                try {
+                  await api(`/messages/${item.id}/${action}`, { method: 'POST' });
                   removeMessage(item.id);
                   if (selectedMessageId === item.id) setSelectedMessage(null);
-                })
-                .catch(() => {});
+                } catch {
+                  /* list row quick actions stay quiet */
+                }
+              })();
             };
             return (
               <DraggableConversationRow key={convo.key} convo={convo}>

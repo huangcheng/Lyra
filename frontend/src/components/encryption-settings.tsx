@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useMachine } from '@xstate/react';
 import { KeyRound, Lock, Unlock } from 'lucide-react';
 import { t } from '@/i18n';
+import { confirmAction } from '@/lib/confirm-action';
 import { useUIStore } from '@/stores/ui';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -256,7 +257,13 @@ export function EncryptionSettings() {
   }
 
   async function onDelete(id: string) {
-    if (!confirm(t(locale, 'settings.encryption.confirmDelete'))) return;
+    const ok = await confirmAction({
+      title: t(locale, 'settings.encryption.confirmDelete'),
+      tone: 'destructive',
+      confirmLabel: t(locale, 'common.delete'),
+      cancelLabel: t(locale, 'common.cancel'),
+    });
+    if (!ok) return;
     setBusy(true);
     setError(null);
     try {

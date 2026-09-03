@@ -18,6 +18,7 @@ import { SettingsPage } from './components/settings-page';
 import { ContactsPage } from './components/contacts-page';
 import { CalendarPage } from './components/calendar-page';
 import { DashboardPage } from './components/dashboard-page';
+import { ConfirmDialogHost } from './components/confirm-dialog-host';
 import { useAuthStore } from './stores/auth';
 import { useSyncEventSource } from './lib/use-sync-event-source';
 import { useMailNotifications } from '@/lib/use-mail-notifications';
@@ -34,6 +35,7 @@ function RootLayout() {
   return (
     <div className="app-root">
       <Outlet />
+      <ConfirmDialogHost />
     </div>
   );
 }

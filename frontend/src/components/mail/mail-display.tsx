@@ -263,7 +263,7 @@ export function MailDisplay() {
   /** Hover-panel trash on a specific card (selection cleared only if it was selected). */
   const handleTrashFor = async (id: string) => {
     if (!token || busy) return;
-    if (!confirmMoveToTrash(locale)) return;
+    if (!(await confirmMoveToTrash(locale))) return;
     setBusy(true);
     setActionError(null);
     try {
@@ -279,7 +279,7 @@ export function MailDisplay() {
 
   const handleAction = async (action: 'trash' | 'archive' | 'spam') => {
     if (!token || !mail || busy) return;
-    if (action === 'trash' && !confirmMoveToTrash(locale)) return;
+    if (action === 'trash' && !(await confirmMoveToTrash(locale))) return;
     setBusy(true);
     setActionError(null);
     try {
@@ -779,7 +779,10 @@ export function MailDisplay() {
       ) : null}
       {mail ? (
         <div className="flex min-h-0 flex-1 flex-col">
-          <div ref={bodyScrollRef} className="min-h-0 flex-1 overflow-auto bg-secondary/60">
+          <div
+            ref={bodyScrollRef}
+            className="min-h-0 flex-1 overflow-auto bg-secondary/60 [overflow-anchor:auto]"
+          >
             <div className="w-full px-4 py-4">
               {visibleConversation.length > 1 ? (
                 <div className="px-1.5 pb-3">

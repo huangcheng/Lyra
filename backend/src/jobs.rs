@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use sea_orm::sea_query::{Expr, Order, Query as Sq};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement, Value,
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    Statement, Value,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
@@ -322,10 +323,58 @@ fn sanitize_error(err: &SyncError) -> &'static str {
     }
 }
 
+const ERROR_DETAIL_CAP: usize = 2048;
+
+/// Scrub a cause chain for operator UI storage: drop credential-like spans,
+/// keep hostnames and protocol phrases. Truncates to [`ERROR_DETAIL_CAP`].
+pub(crate) fn scrub_error_detail(raw: &str) -> String {
+    // Lazy regexes: compiled once per process.
+    static RE_PASSWORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static RE_BEARER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static RE_TOKENISH: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static RE_JSON_SECRET: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+    let re_password = RE_PASSWORD.get_or_init(|| {
+        regex::Regex::new(r"(?i)(password|passwd|pwd)\s*[=:]\s*\S+").expect("password regex")
+    });
+    let re_bearer = RE_BEARER
+        .get_or_init(|| regex::Regex::new(r"(?i)bearer\s+[A-Za-z0-9._\-+=/]+").expect("bearer regex"));
+    let re_tokenish = RE_TOKENISH.get_or_init(|| {
+        // Long opaque runs that look like API tokens / session secrets.
+        regex::Regex::new(r"(?i)(access_token|refresh_token|client_secret|api[_-]?key|authorization)\s*[=:]\s*\S+")
+            .expect("tokenish regex")
+    });
+    let re_json_secret = RE_JSON_SECRET.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)"(password|passwd|secret|token|access_token|refresh_token|client_secret)"\s*:\s*"[^"]*""#,
+        )
+        .expect("json secret regex")
+    });
+    static RE_BYTE_DUMP: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re_byte_dump = RE_BYTE_DUMP.get_or_init(|| {
+        regex::Regex::new(r"input:\s*\[[0-9,\s]{40,}\]").expect("byte dump regex")
+    });
+
+    let mut s = re_password.replace_all(raw, "$1=***").into_owned();
+    s = re_bearer.replace_all(&s, "Bearer ***").into_owned();
+    s = re_tokenish.replace_all(&s, "$1=***").into_owned();
+    s = re_json_secret.replace_all(&s, r#""$1":"***""#).into_owned();
+    // Nom/async-imap parse errors dump the entire wire buffer as `input: [42, 32, …]`.
+    s = re_byte_dump.replace_all(&s, "input: […]").into_owned();
+
+    if s.chars().count() > ERROR_DETAIL_CAP {
+        let truncated: String = s.chars().take(ERROR_DETAIL_CAP).collect();
+        format!("{truncated}…")
+    } else {
+        s
+    }
+}
+
 pub(crate) async fn mark_completed(db: &DbPool, id: &str) -> Result<(), sqlx::Error> {
     jobs::Entity::update_many()
         .col_expr(jobs::Column::Status, Expr::val("completed"))
         .col_expr(jobs::Column::LastError, Expr::val(Value::String(None)))
+        .col_expr(jobs::Column::LastErrorDetail, Expr::val(Value::String(None)))
         .col_expr(jobs::Column::UpdatedAt, Expr::val(updated_at_value(db)))
         .filter(jobs::Column::Id.eq(id))
         .exec(&db.orm())
@@ -334,13 +383,22 @@ pub(crate) async fn mark_completed(db: &DbPool, id: &str) -> Result<(), sqlx::Er
     Ok(())
 }
 
-async fn mark_failed(db: &DbPool, id: &str, last_error: &str) -> Result<(), sqlx::Error> {
+async fn mark_failed(
+    db: &DbPool,
+    id: &str,
+    last_error: &str,
+    last_error_detail: Option<&str>,
+) -> Result<(), sqlx::Error> {
     // Scoped: blanket `ExprTrait` (for `.add`) shadows integer-inherent
     // `.min` / `.max`, so it must not leak into the whole module.
     use sea_orm::sea_query::ExprTrait;
     jobs::Entity::update_many()
         .col_expr(jobs::Column::Status, Expr::val("failed"))
         .col_expr(jobs::Column::LastError, Expr::val(last_error))
+        .col_expr(
+            jobs::Column::LastErrorDetail,
+            Expr::val(last_error_detail),
+        )
         .col_expr(
             jobs::Column::Attempts,
             Expr::col(jobs::Column::Attempts).add(1),
@@ -423,19 +481,20 @@ pub async fn process_job(
                 }
                 Err(err) => {
                     let safe = sanitize_error(&err);
+                    let detail = scrub_error_detail(&crate::sync::types::error_chain(&err));
                     app.events.emit(crate::kernel::AppEvent::SyncError {
                         account_id: account_id.clone(),
                         error: safe.to_string(),
                     });
-                    // Full cause chain for operators; the sanitized category
-                    // is what gets stored and shown.
+                    // Full cause chain for operators (process logs); scrubbed
+                    // detail is persisted for the Settings error log.
                     tracing::warn!(
                         job_id = %job.id,
                         error = %crate::sync::types::error_chain(&err),
                         category = safe,
                         "sync job failed"
                     );
-                    mark_failed(db, &job.id, safe).await?;
+                    mark_failed(db, &job.id, safe, Some(&detail)).await?;
                 }
             }
         }
@@ -476,7 +535,7 @@ async fn handle_send_message(
     outbound: &serde_json::Value,
 ) -> Result<(), sqlx::Error> {
     let Ok(raw) = serde_json::to_string(outbound) else {
-        mark_failed(db, job_id, "invalid outbound payload").await?;
+        mark_failed(db, job_id, "invalid outbound payload", None).await?;
         return Ok(());
     };
     let mut probe = Sq::select();
@@ -489,11 +548,11 @@ async fn handle_send_message(
         None => None,
     };
     let Some(protocol) = protocol.filter(|p| !p.is_empty()) else {
-        mark_failed(db, job_id, "send protocol not configured").await?;
+        mark_failed(db, job_id, "send protocol not configured", None).await?;
         return Ok(());
     };
     let Ok(plugin) = app.send(&protocol) else {
-        mark_failed(db, job_id, "unknown send protocol").await?;
+        mark_failed(db, job_id, "unknown send protocol", None).await?;
         return Ok(());
     };
     match plugin.send(account_id, &raw).await {
@@ -524,11 +583,95 @@ async fn handle_send_message(
                     "send error"
                 };
                 tracing::warn!(job_id = %job_id, error = %safe, "send job failed");
-                mark_failed(db, job_id, safe).await?;
+                mark_failed(db, job_id, safe, None).await?;
             }
         }
     }
     Ok(())
+}
+
+/// One failed sync job for the Settings → Accounts error log.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncErrorLogItem {
+    pub id: String,
+    pub at: String,
+    pub category: String,
+    pub detail: Option<String>,
+    pub attempts: i32,
+}
+
+/// Map jobs TEXT stamps (`YYYY-MM-DD HH:MM:SS[.ffffff]` or RFC3339) to RFC3339 UTC.
+fn job_stamp_to_rfc3339(raw: &str) -> String {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return dt.with_timezone(&chrono::Utc).to_rfc3339();
+    }
+    for fmt in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M:%S"] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(raw, fmt) {
+            return naive.and_utc().to_rfc3339();
+        }
+    }
+    raw.to_string()
+}
+
+/// Recent failed `SyncAccount` jobs for one account (newest first).
+pub async fn list_sync_account_errors(
+    db: &DbPool,
+    account_id: &str,
+    user_id: &str,
+    limit: u64,
+) -> Result<Vec<SyncErrorLogItem>, sqlx::Error> {
+    let limit = limit.clamp(1, 50);
+    // `created_at` / `updated_at` are TEXT on both engines — never decode the full
+    // Entity Model (`DateTimeUtc`); select columns as strings like other job paths.
+    let rows: Vec<(String, String, Option<String>, Option<String>, i32, String)> =
+        jobs::Entity::find()
+            .filter(jobs::Column::Status.eq("failed"))
+            .filter(jobs::Column::Kind.eq("sync_account"))
+            .order_by_desc(jobs::Column::UpdatedAt)
+            .limit(200)
+            .select_only()
+            .column(jobs::Column::Id)
+            .column(jobs::Column::Payload)
+            .column(jobs::Column::LastError)
+            .column(jobs::Column::LastErrorDetail)
+            .column(jobs::Column::Attempts)
+            .column(jobs::Column::UpdatedAt)
+            .into_tuple()
+            .all(&db.orm())
+            .await
+            .map_err(orm_err)?;
+
+    let mut items = Vec::new();
+    for (id, payload_json, last_error, last_error_detail, attempts, updated_at) in rows {
+        let Ok(payload) = serde_json::from_str::<JobPayload>(&payload_json) else {
+            continue;
+        };
+        let JobPayload::SyncAccount {
+            account_id: aid,
+            user_id: uid,
+        } = payload
+        else {
+            continue;
+        };
+        if aid != account_id || uid != user_id {
+            continue;
+        }
+        let Some(category) = last_error else {
+            continue;
+        };
+        items.push(SyncErrorLogItem {
+            id,
+            at: job_stamp_to_rfc3339(&updated_at),
+            category,
+            detail: last_error_detail,
+            attempts,
+        });
+        if items.len() as u64 >= limit {
+            break;
+        }
+    }
+    Ok(items)
 }
 
 /// Spawn the job poller after `AuthState` exists. Worker needs the db pool + `Arc<App>`.
@@ -935,6 +1078,72 @@ mod tests {
             assert!(!safe.contains("t0psecret"));
             assert!(!safe.contains("admin"));
         }
+    }
+
+    #[test]
+    fn scrub_error_detail_redacts_secrets_keeps_tls() {
+        let raw = "imap error: TLS error: unexpected EOF password=hunter2 Bearer abc.def.ghi \"access_token\":\"sekret\"";
+        let scrubbed = scrub_error_detail(raw);
+        assert!(scrubbed.contains("TLS error: unexpected EOF"));
+        assert!(!scrubbed.contains("hunter2"));
+        assert!(!scrubbed.contains("abc.def.ghi"));
+        assert!(!scrubbed.contains("sekret"));
+        assert!(scrubbed.contains("password=***"));
+        assert!(scrubbed.contains("Bearer ***"));
+    }
+
+    #[test]
+    fn scrub_error_detail_collapses_wire_byte_dumps() {
+        let raw = "imap error: io: Error(Error { input: [42, 32, 55, 32, 70, 69, 84, 67, 72, 32, 40, 85, 73, 68, 32, 57, 32, 70, 76, 65, 71, 83], code: TakeWhile1 }) during parsing of \"* 7 FETCH\"";
+        let scrubbed = scrub_error_detail(raw);
+        assert!(scrubbed.contains("input: […]"));
+        assert!(!scrubbed.contains("42, 32, 55"));
+        assert!(scrubbed.contains("during parsing"));
+    }
+
+    #[test]
+    fn job_stamp_to_rfc3339_accepts_text_shapes() {
+        let from_space = job_stamp_to_rfc3339("2026-09-02 16:40:58.010024");
+        assert!(from_space.starts_with("2026-09-02T16:40:58"));
+        let from_rfc = job_stamp_to_rfc3339("2026-09-02T16:40:58.010024Z");
+        assert!(from_rfc.contains("2026-09-02T16:40:58"));
+    }
+
+    #[tokio::test]
+    async fn list_sync_account_errors_returns_failed_jobs() {
+        let db = test_pool().await;
+        let (user_id, account_id, _) = seed_account_with_cursor(&db).await;
+        let now = "2026-09-02T00:00:00+00:00";
+        let job_id = enqueue(
+            &db,
+            &JobPayload::SyncAccount {
+                account_id: account_id.clone(),
+                user_id: user_id.clone(),
+            },
+            now,
+        )
+        .await
+        .unwrap();
+        mark_failed(
+            &db,
+            &job_id,
+            "IMAP error",
+            Some("TLS error: unexpected EOF"),
+        )
+        .await
+        .unwrap();
+
+        let items = list_sync_account_errors(&db, &account_id, &user_id, 20)
+            .await
+            .expect("list must not fail on TEXT timestamps");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, job_id);
+        assert_eq!(items[0].category, "IMAP error");
+        assert_eq!(
+            items[0].detail.as_deref(),
+            Some("TLS error: unexpected EOF")
+        );
+        assert!(items[0].at.contains('T'), "at should be RFC3339-ish");
     }
 
     struct OkSend;

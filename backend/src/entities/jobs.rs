@@ -16,6 +16,8 @@ pub struct Model {
     pub status: String,
     pub attempts: i32,
     pub last_error: Option<String>,
+    /// Scrubbed cause chain for operator UI (never raw credentials).
+    pub last_error_detail: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

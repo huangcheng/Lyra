@@ -62,10 +62,10 @@ function SectionLabel({ children }: { children: string }) {
 }
 
 function UnreadCount({ count }: { count: number }) {
-  if (count <= 0) return null;
+  // Always reserve the badge slot so 0↔N count flips don't shift the row.
   return (
-    <span className="ml-auto shrink-0 text-[11.5px] tabular-nums text-muted-foreground">
-      {count}
+    <span className="ml-auto min-w-[1.25rem] shrink-0 text-right text-[11.5px] tabular-nums text-muted-foreground">
+      {count > 0 ? count : '\u00a0'}
     </span>
   );
 }
@@ -423,7 +423,12 @@ function SortableAccountSection({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: account.id });
+  } = useSortable({
+    id: account.id,
+    // Folder/unread refreshes change section height; default layout animation
+    // then "bounces" the whole account list. Only transform while dragging.
+    animateLayoutChanges: () => false,
+  });
   return (
     <AccountSection
       account={account}
@@ -432,7 +437,10 @@ function SortableAccountSection({
       // which would pointercancel and abort the drag (dnd-kit guidance).
       dragHandleProps={{ ...attributes, ...listeners, style: { touchAction: 'none' } }}
       headerRef={setNodeRef}
-      headerStyle={{ transform: CSS.Transform.toString(transform), transition }}
+      headerStyle={{
+        transform: CSS.Transform.toString(transform),
+        transition: isDragging ? transition : undefined,
+      }}
       // The overlay chip carries the affordance; the ghost stays faint.
       headerClassName={isDragging ? 'opacity-40' : undefined}
       activatorRef={setActivatorNodeRef}
