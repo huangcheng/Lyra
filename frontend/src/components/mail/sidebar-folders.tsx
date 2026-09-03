@@ -173,9 +173,7 @@ function AllInboxesFavorite({
   const children = accountInboxChildren(ordered, folders);
   const expanded = expandedPref ?? ordered.length >= 2;
   const parentActive =
-    selectedAccountId === ALL_ACCOUNTS &&
-    selectedFolderRole === 'inbox' &&
-    !selectedFolderId;
+    selectedAccountId === ALL_ACCOUNTS && selectedFolderRole === 'inbox' && !selectedFolderId;
 
   const { setNodeRef, rowClass } = useFolderDropTarget(
     { type: 'folder', unified: true, role: 'inbox' },
@@ -259,9 +257,7 @@ function StarredFavoriteRow({ count }: { count: number }) {
       onClick={() => selectStarred()}
       className={cn(navRowClass(active), 'h-8 gap-2 px-2.5')}
     >
-      <Star
-        className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')}
-      />
+      <Star className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')} />
       <span className="truncate">{t(locale, 'nav.starred')}</span>
       <UnreadCount count={count} />
     </button>
@@ -280,16 +276,14 @@ function FavoritesBlock({
   const folders = useMailStore((s) => s.folders);
   const messages = useMailStore((s) => s.messages);
   const inbox = unifiedFolders.find((f) => f.role === 'inbox');
-  const tail = FAVORITES_ROLE_TAIL.map((role) => unifiedFolders.find((f) => f.role === role)).filter(
-    (folder): folder is UnifiedFolder => Boolean(folder),
-  );
+  const tail = FAVORITES_ROLE_TAIL.map((role) =>
+    unifiedFolders.find((f) => f.role === role),
+  ).filter((folder): folder is UnifiedFolder => Boolean(folder));
   const stars = starredCount(messages, selectedAccountId, ALL_ACCOUNTS);
 
   return (
     <>
-      {inbox ? (
-        <AllInboxesFavorite folder={inbox} accounts={accounts} folders={folders} />
-      ) : null}
+      {inbox ? <AllInboxesFavorite folder={inbox} accounts={accounts} folders={folders} /> : null}
       <StarredFavoriteRow count={stars} />
       {tail.map((folder) => (
         <UnifiedRow
@@ -642,8 +636,14 @@ function CollapsedFolders({ unifiedFolders }: { unifiedFolders: UnifiedFolder[] 
   const selectedAccountId = useUIStore((s) => s.selectedAccountId);
   const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
 
-  const items: Array<{ key: string; title: string; Icon: LucideIcon; onClick: () => void; active: boolean; count: number }> =
-    [];
+  const items: Array<{
+    key: string;
+    title: string;
+    Icon: LucideIcon;
+    onClick: () => void;
+    active: boolean;
+    count: number;
+  }> = [];
   const inbox = unifiedFolders.find((f) => f.role === 'inbox');
   if (inbox) {
     items.push({

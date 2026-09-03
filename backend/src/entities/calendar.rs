@@ -18,6 +18,7 @@ pub struct Model {
     pub is_active: bool,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
+    pub sync_token: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

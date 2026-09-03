@@ -1199,7 +1199,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(total, 0, "future-snoozed must not count toward total");
-        assert_eq!(unread, 0, "future-snoozed must not count toward unread badge");
+        assert_eq!(
+            unread, 0,
+            "future-snoozed must not count toward unread badge"
+        );
     }
 
     fn sample_imap_message(uid: u32) -> ImapMessage {
@@ -1297,10 +1300,9 @@ mod tests {
         .await
         .unwrap();
 
-        let only_starred =
-            query_user_messages(&as_db(&pool), &user_id, None, None, Some(true))
-                .await
-                .unwrap();
+        let only_starred = query_user_messages(&as_db(&pool), &user_id, None, None, Some(true))
+            .await
+            .unwrap();
         assert_eq!(only_starred.len(), 1);
         assert!(only_starred[0].is_starred);
 

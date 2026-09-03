@@ -12,7 +12,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::{Alias, Condition, Expr, ExprTrait, Order, Query as Sq, SelectStatement};
@@ -34,6 +34,10 @@ pub fn routes() -> Router<AuthState> {
         .route(
             "/api/v1/accounts/{account_id}/contacts/sync",
             get(sync_contacts),
+        )
+        .route(
+            "/api/v1/accounts/{account_id}/pim/discover",
+            post(pim_discover),
         )
         // Calendars
         .route("/api/v1/calendars", get(list_calendars))
@@ -196,7 +200,7 @@ fn id_value(db: &DbPool, id: &str) -> Result<Value, PimError> {
 /// Timestamp-shaped bind for `dtstart` / `dtend` (WHERE and SET alike):
 /// raw text on SQLite, parsed UTC on Postgres; absent or unparseable input
 /// binds a typed NULL, which disables the filter in WHERE and stores NULL.
-fn ts_value(db: &DbPool, raw: Option<&str>) -> Value {
+pub(crate) fn ts_value(db: &DbPool, raw: Option<&str>) -> Value {
     match opt_ts_param(db, raw) {
         Some(TsParam::Text(s)) => Value::String(Some(s)),
         Some(TsParam::Utc(dt)) => Value::ChronoDateTimeUtc(Some(dt)),
@@ -605,115 +609,104 @@ async fn sync_contacts(
 
     let client = crate::dav::DavClient::new(email, password, &base_url)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
-    let hrefs = client
-        .propfind_hrefs(&base_url)
-        .await
-        .map_err(|e| PimError::SyncError(e.to_string()))?;
 
-    let conn = db.orm();
-    let mut synced = 0u32;
-    for href in hrefs {
-        if !href.to_lowercase().contains(".vcf") {
-            continue;
-        }
-        let url = crate::dav::resolve_href(&base_url, &href);
-        let Ok(vcard) = client.get_text(&url).await else {
-            continue;
-        };
-        let (display_name, emails, phones, org) = crate::dav::parse_vcard_fields(&vcard);
-        // Extract the contact photo into the blob store. A bad photo (or a
-        // failed fetch) must never fail contact sync, so errors degrade to
-        // `None` and the existing photo is left untouched.
-        let photo_path = match crate::dav::parse_vcard_photo(&vcard) {
-            Some(crate::dav::VcardPhoto::Inline(bytes)) => {
-                crate::blobs::store(&state.data_dir, &account_id, &bytes)
-                    .await
-                    .ok()
-            }
-            Some(crate::dav::VcardPhoto::Uri(url)) => {
-                match crate::media::fetch_upstream(&url).await {
-                    Ok(img) => crate::blobs::store(&state.data_dir, &account_id, &img.bytes)
-                        .await
-                        .ok(),
-                    Err(_) => None,
+    let data_dir = state.data_dir.clone();
+    let photos_account = account_id.clone();
+    let store_photo = {
+        let data_dir = std::sync::Arc::new(data_dir.clone());
+        let photos_account = std::sync::Arc::new(photos_account.clone());
+        move |photo: crate::dav::VcardPhoto| {
+            let data_dir = data_dir.clone();
+            let photos_account = photos_account.clone();
+            Box::pin(async move {
+                match photo {
+                    crate::dav::VcardPhoto::Inline(bytes) => {
+                        crate::blobs::store(&data_dir, &photos_account, &bytes)
+                            .await
+                            .ok()
+                    }
+                    crate::dav::VcardPhoto::Uri(url) => {
+                        match crate::media::fetch_upstream(&url).await {
+                            Ok(img) => crate::blobs::store(&data_dir, &photos_account, &img.bytes)
+                                .await
+                                .ok(),
+                            Err(_) => None,
+                        }
+                    }
                 }
-            }
-            None => None,
-        };
-        let emails_json = serde_json::json!(emails);
-        let phones_json = serde_json::json!(phones);
-        let external_id = href.clone();
-
-        let mut existing = Sq::select();
-        existing
-            .column(contact::Column::Id)
-            .from(contact::Entity)
-            .and_where(contact::Column::AccountId.eq(account.clone()))
-            .and_where(contact::Column::ExternalId.eq(external_id.clone()));
-        let row = conn.query_one(&existing).await.map_err(orm_err)?;
-
-        if let Some(row) = row {
-            let id = row_id(&row, "id")?;
-            let mut update = Sq::update();
-            update
-                .table(contact::Entity)
-                .value(contact::Column::VcardBlob, vcard.clone())
-                .value(contact::Column::DisplayName, display_name.clone())
-                .value(
-                    contact::Column::EmailAddresses,
-                    Expr::val(Value::Json(Some(Box::new(emails_json.clone())))),
-                )
-                .value(
-                    contact::Column::PhoneNumbers,
-                    Expr::val(Value::Json(Some(Box::new(phones_json.clone())))),
-                )
-                .value(contact::Column::Organisation, org.clone())
-                .value(contact::Column::AddressbookUrl, base_url.clone())
-                .value(contact::Column::UpdatedAt, now_value(db))
-                .and_where(contact::Column::Id.eq(id_value(db, &id)?));
-            // Only overwrite the photo when this sync produced a new one —
-            // never wipe an existing photo with NULL.
-            if let Some(photo_path) = &photo_path {
-                update.value(contact::Column::PhotoPath, photo_path.clone());
-            }
-            conn.execute(&update).await.map_err(orm_err)?;
-        } else {
-            let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-            let mut insert = Sq::insert();
-            insert
-                .into_table(contact::Entity)
-                .columns([
-                    contact::Column::Id,
-                    contact::Column::AccountId,
-                    contact::Column::ExternalId,
-                    contact::Column::VcardBlob,
-                    contact::Column::DisplayName,
-                    contact::Column::EmailAddresses,
-                    contact::Column::PhoneNumbers,
-                    contact::Column::Organisation,
-                    contact::Column::PhotoPath,
-                    contact::Column::AddressbookUrl,
-                ])
-                .values_panic([
-                    id_value(db, &id)?.into(),
-                    account.clone().into(),
-                    external_id.into(),
-                    vcard.into(),
-                    display_name.into(),
-                    Expr::val(Value::Json(Some(Box::new(emails_json)))),
-                    Expr::val(Value::Json(Some(Box::new(phones_json)))),
-                    org.into(),
-                    photo_path.into(),
-                    base_url.clone().into(),
-                ]);
-            conn.execute(&insert).await.map_err(orm_err)?;
+            })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
         }
-        synced += 1;
-    }
+    };
+
+    let outcome =
+        crate::pim_dav::sync_carddav(db, &client, &account_id, Some(&base_url), &store_photo)
+            .await
+            .map_err(|e| PimError::SyncError(e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
-        "synced": synced,
+        "synced": outcome.changed,
+        "removed": outcome.removed,
+        "collections": outcome.collections,
+    })))
+}
+
+/// POST /api/v1/accounts/{id}/pim/discover — RFC 6764 discovery for both
+/// protocols; persists the found homesets as carddav_url / caldav_url.
+async fn pim_discover(
+    State(state): State<AuthState>,
+    Path(account_id): Path<String>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<serde_json::Value>, PimError> {
+    let db = state.db();
+    let account = id_value(db, &account_id)?;
+    let user = id_value(db, &user_id)?;
+
+    let mut acct = Sq::select();
+    acct.column(mail_account::Column::EmailAddress)
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::Id.eq(account))
+        .and_where(mail_account::Column::UserId.eq(user));
+    let row = db
+        .orm()
+        .query_one(&acct)
+        .await
+        .map_err(orm_err)?
+        .ok_or(PimError::AccountNotFound)?;
+    let email: String = row.try_get("", "email_address").map_err(orm_err)?;
+
+    // Bootstrap origin from the mail domain (SRV host discovery is a
+    // follow-up; well-known on the mail host covers common providers).
+    let domain = email.rsplit('@').next().unwrap_or_default().to_string();
+    let origin = format!("https://{domain}");
+
+    let (dek, credential_json) =
+        crate::auth::AuthState::get_user_dek_and_credential(state.db(), &user_id, &account_id)
+            .await
+            .map_err(|e| PimError::SyncError(e.to_string()))?;
+    let password = crate::imap::decrypt_account_password(&credential_json, &dek)
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
+
+    let client = crate::dav::DavClient::new(email, password, &origin)
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
+    let (carddav, caldav) = crate::pim_dav::discover(&client)
+        .await
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
+
+    let mut update = Sq::update();
+    update
+        .table(mail_account::Entity)
+        .value(mail_account::Column::CarddavUrl, carddav.clone())
+        .value(mail_account::Column::CaldavUrl, caldav.clone())
+        .value(mail_account::Column::UpdatedAt, now_value(db))
+        .and_where(mail_account::Column::Id.eq(id_value(db, &account_id)?));
+    db.orm().execute(&update).await.map_err(orm_err)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "carddavUrl": carddav,
+        "caldavUrl": caldav,
     })))
 }
 
@@ -732,7 +725,7 @@ async fn sync_calendars(
     acct.column(Alias::new("caldav_url"))
         .column(mail_account::Column::EmailAddress)
         .from(mail_account::Entity)
-        .and_where(mail_account::Column::Id.eq(account.clone()))
+        .and_where(mail_account::Column::Id.eq(account))
         .and_where(mail_account::Column::UserId.eq(user));
     let row = db
         .orm()
@@ -759,145 +752,15 @@ async fn sync_calendars(
 
     let client = crate::dav::DavClient::new(email, password, &base_url)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
-    let hrefs = client
-        .propfind_hrefs(&base_url)
+    let outcome = crate::pim_dav::sync_caldav(db, &client, &account_id, Some(&base_url))
         .await
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 
-    let conn = db.orm();
-
-    // Ensure a local calendar row exists for this URL.
-    let calendar_id: String = {
-        let mut existing = Sq::select();
-        existing
-            .column(calendar::Column::Id)
-            .from(calendar::Entity)
-            .and_where(calendar::Column::AccountId.eq(account.clone()))
-            .and_where(calendar::Column::CalendarUrl.eq(base_url.clone()));
-        let row = conn.query_one(&existing).await.map_err(orm_err)?;
-        if let Some(row) = row {
-            row_id(&row, "id")?
-        } else {
-            let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-            let mut insert = Sq::insert();
-            insert
-                .into_table(calendar::Entity)
-                .columns([
-                    calendar::Column::Id,
-                    calendar::Column::AccountId,
-                    calendar::Column::Name,
-                    calendar::Column::CalendarUrl,
-                    calendar::Column::IsActive,
-                ])
-                .values_panic([
-                    id_value(db, &id)?.into(),
-                    account.clone().into(),
-                    "Calendar".into(),
-                    base_url.clone().into(),
-                    true.into(),
-                ]);
-            conn.execute(&insert).await.map_err(orm_err)?;
-            id
-        }
-    };
-    let calendar_bind = id_value(db, &calendar_id)?;
-
-    let mut synced = 0u32;
-    for href in hrefs {
-        let lower = href.to_lowercase();
-        let is_ics = std::path::Path::new(&lower)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("ics"));
-        if !(is_ics || lower.contains("vevent") || lower.contains("event")) {
-            if href.ends_with('/') {
-                continue;
-            }
-            continue;
-        }
-        let url = crate::dav::resolve_href(&base_url, &href);
-        let Ok(ical) = client.get_text(&url).await else {
-            continue;
-        };
-        if !ical.to_uppercase().contains("BEGIN:VEVENT") {
-            continue;
-        }
-        let (summary, description, dtstart, dtend, location, is_all_day) =
-            crate::dav::parse_vevent_fields(&ical);
-        let external_id = href.clone();
-
-        let mut existing = Sq::select();
-        existing
-            .column(calendar_event::Column::Id)
-            .from(calendar_event::Entity)
-            .and_where(calendar_event::Column::AccountId.eq(account.clone()))
-            .and_where(calendar_event::Column::ExternalId.eq(external_id.clone()));
-        let row = conn.query_one(&existing).await.map_err(orm_err)?;
-
-        if let Some(row) = row {
-            let id = row_id(&row, "id")?;
-            let mut update = Sq::update();
-            update
-                .table(calendar_event::Entity)
-                .value(calendar_event::Column::CalendarId, calendar_bind.clone())
-                .value(calendar_event::Column::IcalendarBlob, ical.clone())
-                .value(calendar_event::Column::Summary, summary.clone())
-                .value(calendar_event::Column::Description, description.clone())
-                .value(
-                    calendar_event::Column::Dtstart,
-                    ts_value(db, dtstart.as_deref()),
-                )
-                .value(
-                    calendar_event::Column::Dtend,
-                    ts_value(db, dtend.as_deref()),
-                )
-                .value(calendar_event::Column::Location, location.clone())
-                .value(calendar_event::Column::IsAllDay, is_all_day)
-                .value(calendar_event::Column::CalendarUrl, base_url.clone())
-                .value(calendar_event::Column::UpdatedAt, now_value(db))
-                .and_where(calendar_event::Column::Id.eq(id_value(db, &id)?));
-            conn.execute(&update).await.map_err(orm_err)?;
-        } else {
-            let id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
-            let mut insert = Sq::insert();
-            insert
-                .into_table(calendar_event::Entity)
-                .columns([
-                    calendar_event::Column::Id,
-                    calendar_event::Column::AccountId,
-                    calendar_event::Column::CalendarId,
-                    calendar_event::Column::ExternalId,
-                    calendar_event::Column::IcalendarBlob,
-                    calendar_event::Column::Summary,
-                    calendar_event::Column::Description,
-                    calendar_event::Column::Dtstart,
-                    calendar_event::Column::Dtend,
-                    calendar_event::Column::Location,
-                    calendar_event::Column::IsAllDay,
-                    calendar_event::Column::CalendarUrl,
-                ])
-                .values_panic([
-                    id_value(db, &id)?.into(),
-                    account.clone().into(),
-                    calendar_bind.clone().into(),
-                    external_id.into(),
-                    ical.into(),
-                    summary.into(),
-                    description.into(),
-                    ts_value(db, dtstart.as_deref()).into(),
-                    ts_value(db, dtend.as_deref()).into(),
-                    location.into(),
-                    is_all_day.into(),
-                    base_url.clone().into(),
-                ]);
-            conn.execute(&insert).await.map_err(orm_err)?;
-        }
-        synced += 1;
-    }
-
     Ok(Json(serde_json::json!({
         "status": "ok",
-        "synced": synced,
-        "calendarId": calendar_id,
+        "synced": outcome.changed,
+        "removed": outcome.removed,
+        "collections": outcome.collections,
     })))
 }
 

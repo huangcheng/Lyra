@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS dav_cursor;
+ALTER TABLE calendar DROP COLUMN IF EXISTS sync_token;
+ALTER TABLE calendar_event DROP COLUMN IF EXISTS etag;
+ALTER TABLE contact DROP COLUMN IF EXISTS etag;

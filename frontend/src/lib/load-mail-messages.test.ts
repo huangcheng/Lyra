@@ -14,17 +14,17 @@ describe('messagesUrlForView', () => {
     expect(
       messagesUrlForView({ accountId: ALL_ACCOUNTS, folderId: null, folderRole: 'drafts' }),
     ).toBe('/messages?role=drafts');
-    expect(
-      messagesUrlForView({ accountId: 'acc1', folderId: null, folderRole: 'sent' }),
-    ).toBe('/messages?role=sent&accountId=acc1');
+    expect(messagesUrlForView({ accountId: 'acc1', folderId: null, folderRole: 'sent' })).toBe(
+      '/messages?role=sent&accountId=acc1',
+    );
   });
 
   it('uses isStarred for Favorites Starred view', () => {
     expect(
       messagesUrlForView({ accountId: ALL_ACCOUNTS, folderId: null, folderRole: 'starred' }),
     ).toBe('/messages?isStarred=true');
-    expect(
-      messagesUrlForView({ accountId: 'acc1', folderId: null, folderRole: 'starred' }),
-    ).toBe('/messages?isStarred=true&accountId=acc1');
+    expect(messagesUrlForView({ accountId: 'acc1', folderId: null, folderRole: 'starred' })).toBe(
+      '/messages?isStarred=true&accountId=acc1',
+    );
   });
 });

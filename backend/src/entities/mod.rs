@@ -19,6 +19,7 @@ pub mod attachment;
 pub mod calendar;
 pub mod calendar_event;
 pub mod contact;
+pub mod dav_cursor;
 pub mod folder;
 pub mod jobs;
 pub mod lyra_user;

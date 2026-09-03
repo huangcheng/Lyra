@@ -1774,7 +1774,9 @@ fn folder_count_stmt(db: &DbPool, folder_bind: Value, unread_only: bool) -> Sele
         }
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => {
-            sel.and_where(Expr::cust("(snoozed_until IS NULL OR snoozed_until <= NOW())"));
+            sel.and_where(Expr::cust(
+                "(snoozed_until IS NULL OR snoozed_until <= NOW())",
+            ));
         }
     }
     if unread_only {

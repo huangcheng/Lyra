@@ -23,13 +23,15 @@ pub enum DavError {
 /// pointing at a different origin are rejected before any request is made,
 /// so a malicious server cannot exfiltrate the account password by
 /// returning `<d:href>https://evil.example/x.vcf</d:href>`.
+#[allow(dead_code)] // username/password retained: re-auth use
 pub struct DavClient {
-    http: reqwest::Client,
-    username: String,
-    password: String,
-    origin: String,
+    pub(crate) http: reqwest::Client,
+    pub(crate) username: String,
+    pub(crate) password: String,
+    pub(crate) origin: String,
 }
 
+#[allow(dead_code)] // v1 surface retained for callers + tests
 impl DavClient {
     /// Build a client with basic auth credentials pinned to `base_url`'s origin.
     pub fn new(username: String, password: String, base_url: &str) -> Result<Self, DavError> {
@@ -124,6 +126,7 @@ impl DavClient {
     }
 }
 
+#[allow(dead_code)]
 fn extract_hrefs(xml: &str) -> Vec<String> {
     let mut out = Vec::new();
     let lower = xml.to_lowercase();

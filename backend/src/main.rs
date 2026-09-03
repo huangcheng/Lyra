@@ -18,6 +18,9 @@ mod blobs;
 mod config;
 mod crypto;
 mod dav;
+mod dav_protocol;
+#[cfg(test)]
+mod dav_protocol_tests;
 mod db_row;
 mod dkim;
 mod entities;
@@ -34,6 +37,7 @@ mod opengpg;
 #[cfg(test)]
 mod pgtest;
 mod pim;
+mod pim_dav;
 mod plugins;
 mod privacy;
 mod protocol;
