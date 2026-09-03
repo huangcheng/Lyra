@@ -95,5 +95,5 @@ marker on the account row in the sidebar.
 ## Notes
 
 - zh translations required alongside en.
-- Popover and spinner consume the same `useSyncProgress` hook — one source of
-  truth, no duplicate subscriptions.
+- Popover and spinner consume the same `useSyncProgress` hook — one event
+  source (shared hot subject); each consumer derives its own map.
