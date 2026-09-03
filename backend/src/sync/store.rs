@@ -1290,6 +1290,7 @@ fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStatement {
             message::Column::IsRead,
             message::Column::IsStarred,
             message::Column::Flags,
+            message::Column::Labels,
             message::Column::SizeBytes,
             message::Column::InReplyTo,
             message::Column::ReferencesHeaders,
@@ -1313,6 +1314,14 @@ fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStatement {
             Expr::val(m.is_read),
             Expr::val(m.is_starred),
             Expr::val(opt_json_value(db, Some(m.flags_json))),
+            // Insert-time readback: server keywords (`label-*`) become
+            // labels once, at first sight; conflicts never touch the column
+            // so local edits survive later syncs.
+            Expr::val(opt_json_value(
+                db,
+                super::labels::labels_json(&super::labels::labels_from_flags_json(m.flags_json))
+                    .as_deref(),
+            )),
             Expr::val(m.size_bytes),
             Expr::val(opt_str_value(m.in_reply_to)),
             Expr::val(opt_str_value(m.references_headers)),

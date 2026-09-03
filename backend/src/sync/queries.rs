@@ -187,6 +187,7 @@ const MESSAGE_LIST_COLS: &[message::Column] = &[
     message::Column::IsStarred,
     message::Column::IsDraft,
     message::Column::HasAttachments,
+    message::Column::Labels,
 ];
 
 pub(super) fn add_message_list_columns(query: &mut SelectStatement) {
@@ -287,6 +288,7 @@ pub(super) fn message_response_from_query_row(
             stored || folder_role.as_deref() == Some("drafts")
         },
         has_attachments: row.try_get("", "has_attachments")?,
+        labels: row_json_text(row, "labels")?,
         remote_content_blocked: false,
         opengpg: None,
         attachments: None,
@@ -381,6 +383,9 @@ pub struct MessageResponse {
     pub is_starred: bool,
     pub is_draft: bool,
     pub has_attachments: bool,
+    /// Labels as JSON array text (`["work"]`); null when none. Mirrored
+    /// best-effort to IMAP keywords / JMAP keywords.
+    pub labels: Option<String>,
     /// True when remote images were replaced with placeholders in this response.
     pub remote_content_blocked: bool,
     /// OpenGPG decrypt/verify status when the message looks encrypted or signed.
@@ -593,6 +598,7 @@ pub(crate) struct MessageRow {
     pub(super) dkim_warnings: Option<String>,
     pub(super) dkim_signed_at: Option<String>,
     pub(super) dkim_expires_at: Option<String>,
+    pub(super) labels: Option<String>,
 }
 
 pub(super) fn dkim_response_from_row(row: &MessageRow) -> Option<DkimResponse> {
@@ -644,6 +650,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         is_starred: row.is_starred,
         is_draft: row.is_draft || row.folder_role.as_deref() == Some("drafts"),
         has_attachments: row.has_attachments,
+        labels: row.labels.clone(),
         remote_content_blocked: false,
         opengpg: None,
         attachments: None,
@@ -688,6 +695,7 @@ const MESSAGE_LOAD_COLS: &[message::Column] = &[
     message::Column::DkimWarnings,
     message::Column::DkimSignedAt,
     message::Column::DkimExpiresAt,
+    message::Column::Labels,
 ];
 
 pub(crate) async fn load_message_row(
@@ -756,6 +764,7 @@ pub(crate) async fn load_message_row(
         dkim_warnings: row.try_get("", "dkim_warnings").map_err(orm_err)?,
         dkim_signed_at: row_opt_ts(&row, "dkim_signed_at").map_err(orm_err)?,
         dkim_expires_at: row_opt_ts(&row, "dkim_expires_at").map_err(orm_err)?,
+        labels: row_json_text(&row, "labels").map_err(orm_err)?,
     })
 }
 

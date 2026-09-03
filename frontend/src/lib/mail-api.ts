@@ -32,6 +32,7 @@ export interface ApiMessage {
   messageIdHeader?: string;
   inReplyTo?: string;
   referencesHeaders?: string;
+  labels?: string;
   subject?: string;
   fromAddress?: string;
   toAddresses?: string;
@@ -92,7 +93,18 @@ function parseOneAddress(raw: string): MailAddress {
   return { email: raw };
 }
 
-export function parseAddresses(json?: string): MailAddress[] {
+export /** Labels arrive as a JSON array text (`[\"work\"]`); never throws. */
+function parseLabels(raw: string | undefined): string[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseAddresses(json?: string): MailAddress[] {
   if (!json) return [];
   try {
     const parsed = JSON.parse(json) as unknown;
@@ -146,6 +158,7 @@ export function mapApiMessage(msg: ApiMessage | Record<string, unknown>): MailMe
     messageIdHeader: row.messageIdHeader ?? undefined,
     inReplyTo: row.inReplyTo ?? undefined,
     referencesHeaders: row.referencesHeaders ?? undefined,
+    labels: parseLabels(row.labels),
     subject: row.subject ?? '(no subject)',
     from: parseAddress(row.fromAddress),
     to: parseAddresses(row.toAddresses),

@@ -1281,7 +1281,34 @@ impl JmapSeam {
         is_read: Option<bool>,
         is_starred: Option<bool>,
     ) -> Result<(), JmapError> {
-        let update = Self::keyword_patch(is_read, is_starred);
+        self.set_email_keywords_full(email_id, is_read, is_starred, &[], &[])
+            .await
+    }
+
+    /// [`Self::set_email_keywords`] plus label keywords: `label_add` sets
+    /// `keywords/label-<slug>`, `label_remove` nulls them (JMAP patch
+    /// semantics: null removes the keyword).
+    pub(crate) async fn set_email_keywords_full(
+        &self,
+        email_id: &str,
+        is_read: Option<bool>,
+        is_starred: Option<bool>,
+        label_add: &[String],
+        label_remove: &[String],
+    ) -> Result<(), JmapError> {
+        let mut update = Self::keyword_patch(is_read, is_starred);
+        for label in label_add {
+            update.insert(
+                format!("keywords/{}", crate::sync::labels::label_keyword(label)),
+                serde_json::json!(true),
+            );
+        }
+        for label in label_remove {
+            update.insert(
+                format!("keywords/{}", crate::sync::labels::label_keyword(label)),
+                serde_json::Value::Null,
+            );
+        }
         if update.is_empty() {
             return Ok(());
         }

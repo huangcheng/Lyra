@@ -38,6 +38,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t, type SupportedLocale } from '@/i18n';
@@ -360,7 +367,11 @@ export function MailDisplay() {
     }
   };
 
-  const handlePatch = async (body: { isRead?: boolean; isStarred?: boolean }) => {
+  const handlePatch = async (body: {
+    isRead?: boolean;
+    isStarred?: boolean;
+    labels?: string[];
+  }) => {
     if (!token || !mail) return;
     try {
       await api(`/messages/${mail.id}`, {
@@ -379,7 +390,28 @@ export function MailDisplay() {
     if (body.isStarred !== undefined) {
       toggleStar(mail.id);
     }
+    if (body.labels !== undefined) {
+      upsertMessage({ ...useMailStore.getState().messages[mail.id], labels: body.labels });
+    }
   };
+
+  const [labelsOpen, setLabelsOpen] = useState(false);
+  const [labelDraft, setLabelDraft] = useState('');
+  const mailLabels = mail?.labels ?? [];
+  const addLabel = async () => {
+    const slug = labelDraft
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-_ ]+/g, '')
+      .replace(/[ _]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    if (!slug) return;
+    const next = mailLabels.includes(slug) ? mailLabels : [...mailLabels, slug];
+    setLabelDraft('');
+    await handlePatch({ labels: next });
+  };
+  const removeLabel = (label: string) =>
+    void handlePatch({ labels: mailLabels.filter((l) => l !== label) });
 
   const accountFolders = useMemo(
     () =>
@@ -752,7 +784,9 @@ export function MailDisplay() {
                     >
                       {t(locale, 'mail.starThread')}
                     </DropdownMenuItem>
-                    <DropdownMenuItem disabled>{t(locale, 'mail.addLabel')}</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setLabelsOpen(true)}>
+                      {t(locale, 'mail.addLabel')}
+                    </DropdownMenuItem>
                     <DropdownMenuItem
                       onClick={() => {
                         toggleMuteMessage(mail.id);
@@ -820,6 +854,51 @@ export function MailDisplay() {
       ) : (
         <EmptyState icon={MailOpen} title={t(locale, 'mail.selectMessage')} quiet />
       )}
+      <Dialog open={labelsOpen && !!mail} onOpenChange={setLabelsOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t(locale, 'mail.manageLabels')}</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-wrap gap-1.5">
+            {mailLabels.length === 0 ? (
+              <p className="text-xs text-muted-foreground">{t(locale, 'mail.noLabels')}</p>
+            ) : (
+              mailLabels.map((label) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => void removeLabel(label)}
+                  className="rounded-full border border-border bg-muted/40 px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:border-destructive/40 hover:text-destructive"
+                  title={t(locale, 'mail.removeLabel')}
+                >
+                  {label} ×
+                </button>
+              ))
+            )}
+          </div>
+          <form
+            className="flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void addLabel();
+            }}
+          >
+            <input
+              value={labelDraft}
+              onChange={(e) => setLabelDraft(e.target.value)}
+              placeholder={t(locale, 'mail.labelPlaceholder')}
+              maxLength={40}
+              className="h-8 flex-1 rounded-md border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-foreground/35"
+            />
+            <Button type="submit" variant="outline" size="sm" disabled={!labelDraft.trim()}>
+              {t(locale, 'common.add')}
+            </Button>
+          </form>
+          <DialogFooter className="text-[11px] text-muted-foreground">
+            {t(locale, 'mail.labelsBestEffort')}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

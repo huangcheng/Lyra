@@ -777,6 +777,8 @@ pub(crate) async fn persist_attachments(
 pub(crate) struct PatchMessageRequest {
     is_read: Option<bool>,
     is_starred: Option<bool>,
+    /// Replace the label set (sanitized to slugs server-side; capped).
+    labels: Option<Vec<String>>,
 }
 
 /// Apply remote-image policy and optional OpenGPG decrypt at serve time.
@@ -1413,6 +1415,29 @@ async fn maybe_fill_imap_body(
 }
 
 /// PATCH /api/v1/messages/{id} — update read/starred flags (IMAP STORE / JMAP Email/set keywords).
+/// Sanitize a label patch into `(current, next)`. Server keyword push is
+/// best-effort: some servers reject custom flags, and that must never block
+/// the local update.
+fn label_patch_plan(
+    row_labels_json: Option<&str>,
+    body_labels: Option<&[String]>,
+) -> (Vec<String>, Option<Vec<String>>) {
+    let row_labels: Vec<String> = row_labels_json
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    let next_labels = body_labels.map(|raw| {
+        let sanitized = super::labels::sanitize_labels(raw);
+        if sanitized.len() != raw.len() {
+            tracing::debug!(
+                dropped = raw.len() - sanitized.len(),
+                "some labels were empty after sanitization"
+            );
+        }
+        sanitized
+    });
+    (row_labels, next_labels)
+}
+
 pub(crate) async fn patch_message(
     State(state): State<AuthState>,
     Path(message_id): Path<String>,
@@ -1423,11 +1448,13 @@ pub(crate) async fn patch_message(
     let user_id = session.user_id.clone();
     let mut row = load_message_row(db, &user_id, &message_id).await?;
 
-    if body.is_read.is_none() && body.is_starred.is_none() {
+    if body.is_read.is_none() && body.is_starred.is_none() && body.labels.is_none() {
         return Err(SyncError::InvalidInput(
-            "provide isRead and/or isStarred".into(),
+            "provide isRead, isStarred, and/or labels".into(),
         ));
     }
+
+    let (row_labels, next_labels) = label_patch_plan(row.labels.as_deref(), body.labels.as_deref());
 
     let next_read = body.is_read.unwrap_or(row.is_read);
     let next_star = body.is_starred.unwrap_or(row.is_starred);
@@ -1451,6 +1478,19 @@ pub(crate) async fn patch_message(
                 client.remove_flags(uid, &["\\Flagged"]).await?;
             }
         }
+        if let Some(next) = &next_labels {
+            let (add, remove) = super::labels::label_diff(&row_labels, next);
+            for keyword in &add {
+                if let Err(err) = client.add_flags(uid, &[keyword]).await {
+                    tracing::warn!(keyword, error = %err, "label keyword push failed (best-effort)");
+                }
+            }
+            for keyword in &remove {
+                if let Err(err) = client.remove_flags(uid, &[keyword]).await {
+                    tracing::warn!(keyword, error = %err, "label keyword removal failed (best-effort)");
+                }
+            }
+        }
     } else if row.protocol == "jmap" && (body.is_read.is_some() || body.is_starred.is_some()) {
         let email_id = row
             .external_id
@@ -1466,6 +1506,18 @@ pub(crate) async fn patch_message(
             }
             return Err(err.into());
         }
+        if let Some(next) = &next_labels {
+            let (add, remove) = super::labels::label_diff(&row_labels, next);
+            if let Err(err) = seam
+                .set_email_keywords_full(email_id, None, None, &add, &remove)
+                .await
+            {
+                if err.is_auth() {
+                    crate::sync::jmap_client::JmapSeam::evict(&row.account_id);
+                }
+                tracing::warn!(error = %err, "label keyword push failed (best-effort)");
+            }
+        }
     }
 
     let mut update = Sq::update();
@@ -1473,12 +1525,24 @@ pub(crate) async fn patch_message(
         .table(message::Entity)
         .value(message::Column::IsRead, next_read)
         .value(message::Column::IsStarred, next_star)
-        .value(message::Column::UpdatedAt, now_value(db))
-        .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
+        .value(message::Column::UpdatedAt, now_value(db));
+    if let Some(next) = &next_labels {
+        update.value(
+            message::Column::Labels,
+            Expr::val(opt_json_value(
+                db,
+                super::labels::labels_json(next).as_deref(),
+            )),
+        );
+    }
+    update.and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
     db.orm().execute(&update).await.map_err(orm_err)?;
 
     row.is_read = next_read;
     row.is_starred = next_star;
+    if let Some(next) = &next_labels {
+        row.labels = super::labels::labels_json(next);
+    }
 
     // Keep folder unread counts roughly consistent.
     update_folder_counts(db, &row.folder_id).await?;
@@ -2809,6 +2873,7 @@ mod learn_hook_tests {
             id: "00000000-0000-7000-8000-0000000000aa".into(),
             in_reply_to: None,
             references_headers: None,
+            labels: None,
             account_id: "acc".into(),
             folder_id: "fld".into(),
             folder_name: "Spam".into(),

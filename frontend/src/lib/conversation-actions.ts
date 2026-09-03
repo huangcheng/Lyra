@@ -90,10 +90,10 @@ export function actOnMessages(
   });
 }
 
-/** Patch flags (isRead / isStarred) on every message. */
+/** Patch flags (isRead / isStarred / labels) on every message. */
 export function patchMessages(
   messageIds: string[],
-  patch: { isRead?: boolean; isStarred?: boolean },
+  patch: { isRead?: boolean; isStarred?: boolean; labels?: string[] },
 ): Promise<BatchResult> {
   return runBatch(messageIds, async (id) => {
     await api(`/messages/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
@@ -106,6 +106,7 @@ export function patchMessages(
       scheduleFolderRefresh();
     }
     if (patch.isStarred !== undefined && m.isStarred !== patch.isStarred) store.toggleStar(id);
+    if (patch.labels !== undefined) store.upsertMessage({ ...m, labels: patch.labels });
   });
 }
 

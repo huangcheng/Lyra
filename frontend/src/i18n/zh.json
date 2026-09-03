@@ -155,7 +155,12 @@
     "dndGrabbed": "已拿起 {name}。用方向键移动，空格键放下。",
     "dndDropped": "已将 {name} 移动到第 {position} 位，共 {total} 个。",
     "dndCanceled": "已取消排序。",
-    "dndInstructions": "要移动账户顺序，请用 Tab 聚焦到账户标题后按空格或回车拿起，用方向键移动，再按空格放下，或按 Esc 取消。"
+    "dndInstructions": "要移动账户顺序，请用 Tab 聚焦到账户标题后按空格或回车拿起，用方向键移动，再按空格放下，或按 Esc 取消。",
+    "manageLabels": "标签",
+    "noLabels": "还没有标签。",
+    "labelPlaceholder": "添加标签（如 work、travel）",
+    "removeLabel": "移除标签",
+    "labelsBestEffort": "支持自定义关键字的服务器会同步标签；否则仅保存在本服务器。"
   },
   "auth": {
     "tagline": "自己托管的邮件。",
