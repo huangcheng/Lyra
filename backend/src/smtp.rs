@@ -14,6 +14,7 @@
 
 #![allow(clippy::doc_markdown)]
 
+use lettre::address::Envelope;
 use lettre::message::header::ContentType;
 use lettre::message::{Attachment, Mailbox, Message, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
@@ -326,6 +327,12 @@ impl SmtpAdapter {
 
     /// Send an outbound email message.
     pub async fn send(&self, msg: &OutboundMessage) -> Result<String, SmtpError> {
+        // Recipient-less messages exist only as drafts (build_message emits
+        // `To: undisclosed-recipients:;` for them); actually sending one
+        // over SMTP would self-deliver via the placeholder envelope.
+        if msg.to.is_empty() && msg.cc.is_empty() && msg.bcc.is_empty() {
+            return Err(SmtpError::Permanent("no recipients".into()));
+        }
         let message = build_message(msg)?;
 
         self.transport
@@ -442,9 +449,28 @@ fn inline_part(att: &OutboundAttachment) -> Result<SinglePart, SmtpError> {
     )
 }
 
+/// RFC 5322 empty group: a recipient-less draft's `To: undisclosed-recipients:;`.
+/// Some servers (Fastmail Email/import) reject messages with no recipient header.
+#[derive(Debug, Clone)]
+struct UndisclosedRecipients;
+
+impl lettre::message::header::Header for UndisclosedRecipients {
+    fn name() -> lettre::message::header::HeaderName {
+        lettre::message::header::HeaderName::new_from_ascii_str("To")
+    }
+    fn parse(_: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // never parsed inbound; required by the trait
+        Ok(Self)
+    }
+    fn display(&self) -> lettre::message::header::HeaderValue {
+        lettre::message::header::HeaderValue::new(Self::name(), "undisclosed-recipients:;".into())
+    }
+}
+
 /// Build a `lettre::Message` from an `OutboundMessage`.
 pub(crate) fn build_message(msg: &OutboundMessage) -> Result<Message, SmtpError> {
     let from_mailbox = Mailbox::new(msg.from_name.clone(), msg.from_email.parse()?);
+    let from_addr = from_mailbox.email.clone();
 
     let mut builder = Message::builder()
         .from(from_mailbox)
@@ -478,6 +504,16 @@ pub(crate) fn build_message(msg: &OutboundMessage) -> Result<Message, SmtpError>
     for (name, email) in &msg.bcc {
         let mailbox = Mailbox::new(name.clone(), email.parse()?);
         builder = builder.bcc(mailbox);
+    }
+
+    if msg.to.is_empty() && msg.cc.is_empty() && msg.bcc.is_empty() {
+        // lettre derives the SMTP envelope from To/Cc/Bcc and refuses an
+        // empty set (MissingTo). Self-address the envelope: it is transport
+        // metadata, never serialized, and recipient-less messages only exist
+        // as drafts (SmtpAdapter::send rejects them before building).
+        let envelope = Envelope::new(Some(from_addr.clone()), vec![from_addr])
+            .map_err(|e| SmtpError::Permanent(format!("envelope: {e}")))?;
+        builder = builder.header(UndisclosedRecipients).envelope(envelope);
     }
 
     let body_part = build_body_part(msg)?;
@@ -862,6 +898,20 @@ mod tests {
 
     fn formatted(msg: &OutboundMessage) -> String {
         String::from_utf8(build_message(msg).unwrap().formatted()).unwrap()
+    }
+
+    #[test]
+    fn recipientless_message_gets_undisclosed_to_header() {
+        let mut msg = base_msg();
+        msg.to = vec![];
+        let raw = formatted(&msg);
+        assert!(raw.contains("To: undisclosed-recipients:;"), "{raw}");
+    }
+
+    #[test]
+    fn message_with_recipients_has_no_undisclosed_marker() {
+        let raw = formatted(&base_msg());
+        assert!(!raw.contains("undisclosed-recipients"), "{raw}");
     }
 
     #[test]
