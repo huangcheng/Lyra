@@ -909,9 +909,11 @@ impl JmapSeam {
     /// `Email/set` create `#draft` + `EmailSubmission/set` with `#`
     /// back-references and an on-success patch (move to Sent, clear `$draft`).
     ///
-    /// OpenGPG MIME-wrapped outbound (`mime_body` set) goes through
-    /// `Email/import` of the uploaded RFC822 blob so the wrapper survives —
-    /// an `Email/set` create would rebuild (and destroy) the MIME structure.
+    /// OpenGPG MIME-wrapped outbound (`mime_body` set) and messages with
+    /// inline attachments go through `Email/import` of the uploaded RFC822
+    /// blob so the MIME structure survives byte-exact — an `Email/set` create
+    /// would rebuild it, and the crate's `EmailBodyPart<Set>` has no
+    /// `disposition` setter to express `Content-Disposition: inline`.
     pub(crate) async fn submit_outbound(
         &self,
         outbound: &OutboundMessage,
@@ -942,9 +944,19 @@ impl JmapSeam {
         let drafts_id = mailbox_id_for_role(&mailboxes, &Role::Drafts);
         let sent_id = mailbox_id_for_role(&mailboxes, &Role::Sent);
 
-        if let Some(mime_body) = &outbound.mime_body {
+        if needs_mime_import(outbound) {
+            let mime_body = match &outbound.mime_body {
+                // OpenGPG pre-built wrapper (legacy path).
+                Some(wrapper) => wrapper.clone(),
+                None => String::from_utf8(
+                    crate::smtp::build_message(outbound)
+                        .map_err(|e| JmapError::InvalidResponse(format!("mime build: {e}")))?
+                        .formatted(),
+                )
+                .map_err(|e| JmapError::InvalidResponse(format!("mime utf8: {e}")))?,
+            };
             return self
-                .submit_mime_wrapped(mime_body, &identity_id, drafts_id, sent_id, &mailboxes)
+                .submit_mime_wrapped(&mime_body, &identity_id, drafts_id, sent_id, &mailboxes)
                 .await;
         }
 
@@ -1002,8 +1014,9 @@ impl JmapSeam {
         Ok(submission.take_id())
     }
 
-    /// OpenGPG path: upload the RFC822 MIME blob, `Email/import` into Drafts,
-    /// submit — the signed/encrypted MIME wrapper survives.
+    /// Raw-MIME path (OpenGPG wrapper, inline attachments): upload the RFC822
+    /// MIME blob, `Email/import` into Drafts, submit — the exact MIME
+    /// structure survives.
     async fn submit_mime_wrapped(
         &self,
         mime_body: &str,
@@ -1344,6 +1357,33 @@ impl JmapSeam {
             .ok_or_else(|| {
                 JmapError::InvalidResponse("no drafts mailbox on this account".into())
             })?;
+        if !outbound.attachments.is_empty() {
+            // Email/set cannot express inline parts; import exact MIME instead.
+            let mime = String::from_utf8(
+                crate::smtp::build_message(outbound)
+                    .map_err(|e| JmapError::InvalidResponse(format!("mime build: {e}")))?
+                    .formatted(),
+            )
+            .map_err(|e| JmapError::InvalidResponse(format!("mime utf8: {e}")))?;
+            let blob_id = self
+                .client
+                .upload(None, mime.into_bytes(), Some("message/rfc822"))
+                .await?
+                .take_blob_id();
+            let mut request = self.build_request();
+            let create_id = {
+                let import_req = request.import_email();
+                let import = import_req.email(blob_id);
+                import.mailbox_ids([drafts_id.as_str()]);
+                import.keywords(["$draft"]);
+                import.create_id()
+            };
+            let mut resp = request
+                .send_single::<email::import::EmailImportResponse>()
+                .await?;
+            let mut created = resp.created(&create_id)?;
+            return Ok(created.take_id());
+        }
         let mut request = self.build_request();
         {
             let set = request.set_email();
@@ -1379,6 +1419,12 @@ fn lock_cache() -> MutexGuard<'static, HashMap<String, Arc<JmapSeam>>> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// True when the message must go through raw-MIME import instead of
+/// Email/set: inline parts need exact Content-ID/inline disposition control.
+fn needs_mime_import(outbound: &OutboundMessage) -> bool {
+    outbound.mime_body.is_some() || outbound.attachments.iter().any(|a| a.content_id.is_some())
 }
 
 // ── Crate → DTO mapping ─────────────────────────────────────────────
@@ -2497,5 +2543,67 @@ mod read_only_tests {
         assert!(!err.is_transient());
         assert!(!err.is_auth());
         assert!(!JmapError::InvalidResponse("x".into()).is_read_only());
+    }
+}
+
+#[cfg(test)]
+mod mime_import_gate_tests {
+    use super::*;
+
+    fn minimal_msg() -> OutboundMessage {
+        OutboundMessage {
+            from_email: "a@example.com".into(),
+            from_name: None,
+            to: vec![(None, "b@example.com".into())],
+            cc: vec![],
+            bcc: vec![],
+            subject: "s".into(),
+            body_text: Some("hi".into()),
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+            mime_content_type: None,
+            mime_body: None,
+            attachments: vec![],
+            message_id: None,
+        }
+    }
+
+    #[test]
+    fn plain_message_uses_email_set() {
+        assert!(!needs_mime_import(&minimal_msg()));
+    }
+
+    #[test]
+    fn opengpg_wrapper_forces_mime_import() {
+        let mut msg = minimal_msg();
+        msg.mime_content_type = Some("multipart/encrypted".into());
+        msg.mime_body = Some("wrapped".into());
+        assert!(needs_mime_import(&msg));
+    }
+
+    #[test]
+    fn inline_attachment_forces_mime_import() {
+        let mut msg = minimal_msg();
+        msg.attachments
+            .push(crate::smtp::OutboundAttachment::from_bytes_inline(
+                "a.png",
+                "image/png",
+                b"x",
+                "img1@lyra",
+            ));
+        assert!(needs_mime_import(&msg));
+    }
+
+    #[test]
+    fn regular_attachment_stays_on_email_set() {
+        let mut msg = minimal_msg();
+        msg.attachments
+            .push(crate::smtp::OutboundAttachment::from_bytes(
+                "d.pdf",
+                "application/pdf",
+                b"x",
+            ));
+        assert!(!needs_mime_import(&msg));
     }
 }
