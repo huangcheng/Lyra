@@ -161,7 +161,10 @@ export async function handleSyncEventForNotifications(ev: SyncEvent): Promise<vo
   if (ev.type !== 'sync_complete' && ev.type !== 'incremental_complete') return;
   if (!readNotificationPrefs().enabled) return;
   if (notificationPermission() !== 'granted') return;
-  if (document.visibilityState === 'visible') return;
+  // Tab visibility no longer suppresses notifications: users expect OS
+  // banners even when Lyra is the active tab (Apple Mail parity). The
+  // unread-diff already prevents re-notifying for messages the user has
+  // seen (the baseline updates on every sync).
   if (!useAuthStore.getState().token) return;
 
   const { accountId } = ev;
