@@ -110,15 +110,8 @@ pub(crate) async fn sync_carddav(
     if let Some((collection, _name)) = collections.first() {
         let prior = load_cursor(db, account_id, "carddav").await;
         let (to_fetch, removed, next_token) = delta(client, collection, prior.as_deref()).await?;
-        tracing::warn!(collection = %collection, fetch = to_fetch.len(), token = ?prior, "carddav delta result");
         let items = client.addressbook_multiget(collection, &to_fetch).await?;
-        tracing::warn!(
-            items = items.len(),
-            with_data = items.iter().filter(|i| i.data.is_some()).count(),
-            "carddav multiget result"
-        );
         for item in items {
-            tracing::warn!(href = %item.href, has_data = item.data.is_some(), "carddav: upserting");
             match upsert_contact(db, account_id, collection, &item, store_photo).await {
                 Ok(()) => outcome.changed += 1,
                 Err(e) => {
@@ -126,7 +119,6 @@ pub(crate) async fn sync_carddav(
                 }
             }
         }
-        tracing::warn!(changed = outcome.changed, "carddav: loop done");
         for href in removed {
             tombstone_contact(db, account_id, &href).await;
             outcome.removed += 1;
@@ -291,7 +283,6 @@ pub(crate) async fn sync_caldav(
     )
     .await?;
     let collections = client.list_collections(&home, "calendar").await?;
-    tracing::info!(collections = ?collections, "caldav: collections");
     let mut outcome = DavSyncOutcome {
         changed: 0,
         removed: 0,
