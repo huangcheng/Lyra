@@ -72,6 +72,8 @@ Detail lives in specs; this file stays short and accurate.
 | Remote-image proxy / anti-tracking (phased) | `docs/specs/2026-08-23-lyra-remote-image-proxy-spec.md` |
 | Other design/tech decisions | `docs/specs/YYYY-MM-DD-<topic>-spec.md` as added |
 | Product UI (redesign v2: stamp brand, folder-tree mail, standalone dashboard/settings) | `docs/superpowers/specs/2026-08-24-lyra-redesign-v2-design.md` |
+| **PIM subsystems** — Calendar/Contacts Thunderbird-style shell, then ICS subscriptions | `docs/superpowers/specs/2026-09-04-lyra-pim-subsystems-design.md` |
+| **PIM credentials** — app password for CardDAV/CalDAV (bearer mail), then calendar read-completeness | `docs/superpowers/specs/2026-09-04-lyra-pim-credentials-design.md` |
 | Mail sidebar Favorites (Apple Mail–style; local views, expandable All Inboxes + Starred) | `docs/superpowers/specs/2026-09-03-lyra-favorites-sidebar-design.md` |
 
 Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall back to **IMAP**. Honor v1 non-goals (no collaboration suite, no SaaS, no multi-user UX yet). Ship a **client-agnostic `/api/v1`**; native apps are far-horizon only.
