@@ -13,7 +13,6 @@ import {
   Flag,
   Folder,
   Inbox,
-  Loader2,
   Send,
   Star,
   Trash2,
@@ -21,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useMemo, type CSSProperties, type HTMLAttributes, type Ref } from 'react';
 import { useDndContext, useDroppable } from '@dnd-kit/core';
+import { ThinkingOrb } from 'thinking-orbs';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
@@ -34,7 +34,12 @@ import {
   type ConversationDragData,
 } from '@/lib/conversation-actions';
 import { starredCount } from '@/lib/favorites-sidebar';
-import { buildCustomFolderTree, buildRoleChildren, sortRoleFolders, type FolderTreeNode } from '@/lib/folder-tree';
+import {
+  buildCustomFolderTree,
+  buildRoleChildren,
+  sortRoleFolders,
+  type FolderTreeNode,
+} from '@/lib/folder-tree';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
 import { useSyncProgress } from '@/lib/sync-progress';
 import { avatarTone, cn } from '@/lib/utils';
@@ -432,7 +437,7 @@ function AccountSection({
               <ChevronRight className="size-3.5 shrink-0 text-ter-foreground" />
             )}
             {isSyncing ? (
-              <Loader2 className="size-3 shrink-0 animate-spin text-ter-foreground" />
+              <ThinkingOrb state="working" size={20} className="size-3 shrink-0" />
             ) : null}
             <span
               className="min-w-0 truncate text-[12.5px] font-semibold"
@@ -510,9 +515,7 @@ function SortableAccountSection({
       }}
       // Placeholder slot while the overlay chip carries the affordance.
       headerClassName={
-        isDragging
-          ? 'rounded-[7px] border border-dashed border-border/70 bg-muted/40'
-          : undefined
+        isDragging ? 'rounded-[7px] border border-dashed border-border/70 bg-muted/40' : undefined
       }
       activatorRef={setActivatorNodeRef}
     />

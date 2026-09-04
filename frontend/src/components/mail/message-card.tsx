@@ -20,6 +20,7 @@ import { t } from '@/i18n';
 import { api } from '@/lib/api-client';
 import { downloadAttachment, formatBytes, resolveInlineImages } from '@/lib/attachments';
 import { useAvatar } from '@/lib/avatar';
+import { ThinkingOrb } from 'thinking-orbs';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
@@ -350,16 +351,12 @@ export function MessageCard({
             </Button>
           </div>
         ) : bodyLoading && !mail.bodyHtml && !mail.bodyText ? (
-          <div className="space-y-3 py-1" aria-hidden>
-            <div className="h-3.5 w-2/3 animate-pulse rounded bg-muted" />
-            <div className="h-3.5 w-full animate-pulse rounded bg-muted" />
-            <div className="h-3.5 w-5/6 animate-pulse rounded bg-muted" />
+          <div className="flex items-center justify-center py-8" aria-hidden>
+            <ThinkingOrb state="searching" size={64} />
           </div>
         ) : mail.bodyHtml && !renderHtml ? (
-          <div className="space-y-3 py-1" aria-hidden>
-            <div className="h-3.5 w-2/3 animate-pulse rounded bg-muted" />
-            <div className="h-3.5 w-full animate-pulse rounded bg-muted" />
-            <div className="h-3.5 w-5/6 animate-pulse rounded bg-muted" />
+          <div className="flex items-center justify-center py-8" aria-hidden>
+            <ThinkingOrb state="composing" size={64} />
           </div>
         ) : renderHtml ? (
           <div

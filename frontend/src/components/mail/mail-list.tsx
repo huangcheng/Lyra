@@ -18,6 +18,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { t } from '@/i18n';
 import { ApiError, api } from '@/lib/api-client';
 import { useAvatar } from '@/lib/avatar';
+import { ThinkingOrb } from 'thinking-orbs';
 import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import { groupIntoConversations, type Conversation } from '@/lib/conversation';
 import type { ConversationDragData } from '@/lib/conversation-actions';
@@ -151,6 +152,7 @@ export function MailList() {
 
   const [loading, setLoading] = useState(false);
   const [searchHits, setSearchHits] = useState<MailMessage[] | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
   const [fetchError, setFetchError] = useState<{
     message: string;
     variant: ErrorBannerVariant;
@@ -209,6 +211,7 @@ export function MailList() {
     if (q.length >= 2) {
       const handle = window.setTimeout(() => {
         void (async () => {
+          setSearchLoading(true);
           try {
             const params = new URLSearchParams({ q });
             if (selectedAccountId !== ALL_ACCOUNTS) params.set('accountId', selectedAccountId);
@@ -221,6 +224,8 @@ export function MailList() {
           } catch (err) {
             setSearchHits([]);
             setFetchError(resolveFetchError(err));
+          } finally {
+            setSearchLoading(false);
           }
         })();
       }, 280);
@@ -255,6 +260,7 @@ export function MailList() {
   // Search hits only apply while a query is active — masking the stored
   // hits during render keeps the exit-from-search path effect-free.
   const searching = Boolean(token) && searchQuery.trim().length >= 2;
+  const showSearchOrb = searching && searchLoading;
   const activeHits = searching ? searchHits : null;
   const source = activeHits ?? items;
   const filtered = (listTab === 'unread' ? source.filter((item) => !item.isRead) : source).filter(
@@ -301,6 +307,12 @@ export function MailList() {
 
   return (
     <div className="flex h-full flex-col">
+      {showSearchOrb ? (
+        <div className="flex items-center justify-center gap-2 py-4 text-muted-foreground">
+          <ThinkingOrb state="searching" size={20} />
+          <span className="text-xs">{t(locale, 'common.loading')}</span>
+        </div>
+      ) : null}
       {fetchError ? (
         <ErrorBanner
           message={fetchError.message}

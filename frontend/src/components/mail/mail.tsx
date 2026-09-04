@@ -27,20 +27,31 @@ import { ALL_ACCOUNTS } from '@/lib/mail-api';
 import { useMailData } from '@/lib/use-mail-data';
 import { useMediaQuery } from '@/lib/use-media-query';
 import { useSyncingAccounts } from '@/lib/use-syncing-accounts';
+import { ThinkingOrb } from 'thinking-orbs';
 import { cn } from '@/lib/utils';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 
-/** Green sync dot; amber pulse while any account is syncing. */
+/** Green sync dot; thinking-orb constellation while any account is syncing. */
 function SyncStatusDot() {
   const locale = useUIStore((s) => s.locale);
   const syncing = useSyncingAccounts().size > 0;
 
+  if (syncing) {
+    return (
+      <ThinkingOrb
+        state="connecting"
+        size={20}
+        aria-label={t(locale, 'sync.syncing')}
+        className="ml-1 size-3.5"
+      />
+    );
+  }
   return (
     <span
-      className={cn('size-1.5 rounded-full', syncing ? 'animate-pulse bg-unread' : 'bg-ok')}
+      className="size-1.5 rounded-full bg-ok"
       role="status"
-      aria-label={t(locale, syncing ? 'sync.syncing' : 'sync.syncComplete')}
+      aria-label={t(locale, 'sync.syncComplete')}
     />
   );
 }
