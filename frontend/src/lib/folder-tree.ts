@@ -2,6 +2,7 @@
  * Build a nested folder tree for the sidebar from flat folder rows.
  */
 
+import type { StandardFolderRole } from '@/lib/mail-api';
 import type { MailFolder } from '@/types';
 
 export interface FolderTreeNode {
@@ -11,8 +12,34 @@ export interface FolderTreeNode {
   children: FolderTreeNode[];
 }
 
+/** Apple Mail per-account role folder order. */
+export const CANONICAL_ROLE_ORDER: StandardFolderRole[] = [
+  'inbox',
+  'drafts',
+  'sent',
+  'spam',
+  'trash',
+  'archive',
+];
+
 function sortFolders(a: MailFolder, b: MailFolder): number {
   return a.sortOrder - b.sortOrder || a.name.localeCompare(b.name);
+}
+
+export function effectiveFolderRole(folder: MailFolder): StandardFolderRole | undefined {
+  return (folder.roleOverride ?? folder.role) as StandardFolderRole | undefined;
+}
+
+/** Sort role folders Inbox → Drafts → Sent → Junk → Trash → Archive. */
+export function sortRoleFolders(folders: MailFolder[]): MailFolder[] {
+  return [...folders].sort((a, b) => {
+    const ar = effectiveFolderRole(a);
+    const br = effectiveFolderRole(b);
+    const ai = ar ? CANONICAL_ROLE_ORDER.indexOf(ar) : CANONICAL_ROLE_ORDER.length;
+    const bi = br ? CANONICAL_ROLE_ORDER.indexOf(br) : CANONICAL_ROLE_ORDER.length;
+    if (ai !== bi) return ai - bi;
+    return sortFolders(a, b);
+  });
 }
 
 /** Shared tree builder for one account's custom (non-role) folders. */
@@ -99,7 +126,7 @@ export function buildAccountMoveFolderEntries(
   allFolders: Record<string, MailFolder>,
 ): MoveFolderEntry[] {
   const rows: MoveFolderEntry[] = [];
-  const roleFolders = accountFolders.filter((folder) => folder.role).sort(sortFolders);
+  const roleFolders = sortRoleFolders(accountFolders.filter((folder) => folder.role));
 
   for (const role of roleFolders) {
     rows.push({

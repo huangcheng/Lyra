@@ -103,7 +103,7 @@ function DraggableConversationRow({
     } satisfies ConversationDragData,
   });
   return (
-    <div ref={setNodeRef} {...listeners} className={isDragging ? 'opacity-50' : undefined}>
+    <div ref={setNodeRef} {...listeners} className={cn(isDragging && 'opacity-40')}>
       {children}
     </div>
   );

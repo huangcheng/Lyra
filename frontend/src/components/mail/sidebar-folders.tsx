@@ -1,9 +1,8 @@
 /**
- * Mail sidebar folder sections (redesign v2 + Apple Mail Favorites).
+ * Mail sidebar folder sections (redesign v2).
  *
- * Favorites on top (All Inboxes expandable, Starred, unified Drafts/Sent/Trash),
- * then collapsible per-account folder trees. Role folders under accounts remain
- * even when they also appear in Favorites.
+ * Unified mailboxes on top (All Inboxes, Starred, All Drafts/Sent),
+ * then collapsible per-account folder trees in Apple Mail role order.
  */
 
 import {
@@ -34,14 +33,14 @@ import {
   resolveRoleFolder,
   type ConversationDragData,
 } from '@/lib/conversation-actions';
-import { accountInboxChildren, starredCount } from '@/lib/favorites-sidebar';
-import { buildCustomFolderTree, buildRoleChildren, type FolderTreeNode } from '@/lib/folder-tree';
+import { starredCount } from '@/lib/favorites-sidebar';
+import { buildCustomFolderTree, buildRoleChildren, sortRoleFolders, type FolderTreeNode } from '@/lib/folder-tree';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
 import { useSyncProgress } from '@/lib/sync-progress';
 import { avatarTone, cn } from '@/lib/utils';
 import { useMailStore, type UnifiedFolder } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
-import type { MailAccount, MailFolder } from '@/types';
+import type { MailAccount, MailFolder, SupportedLocale } from '@/types';
 
 const ROLE_ICONS: Record<StandardFolderRole, LucideIcon> = {
   inbox: Inbox,
@@ -52,8 +51,13 @@ const ROLE_ICONS: Record<StandardFolderRole, LucideIcon> = {
   archive: Archive,
 };
 
-/** Favorites role rows after All Inboxes + Starred. */
-const FAVORITES_ROLE_TAIL: StandardFolderRole[] = ['drafts', 'sent', 'trash'];
+/** Unified rows after All Inboxes + Starred (Apple Mail Favorites shape). */
+const UNIFIED_ROLE_TAIL: StandardFolderRole[] = ['drafts', 'sent'];
+
+function unifiedRowLabel(locale: SupportedLocale, role: StandardFolderRole): string {
+  // Under the Unified section tag, rows use short names (Inbox / Drafts / Sent).
+  return t(locale, `mail.folder.${role}`);
+}
 
 function SectionLabel({ children }: { children: string }) {
   return (
@@ -141,107 +145,9 @@ function UnifiedRow({ folder, active }: { folder: UnifiedFolder; active: boolean
         <Icon
           className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')}
         />
-        <span className="truncate">
-          {folder.role === 'inbox'
-            ? t(locale, 'nav.allInboxes')
-            : t(locale, `mail.folder.${folder.role}`)}
-        </span>
+        <span className="truncate">{unifiedRowLabel(locale, folder.role)}</span>
         <UnreadCount count={folder.unreadCount} />
       </button>
-    </div>
-  );
-}
-
-function AllInboxesFavorite({
-  folder,
-  accounts,
-  folders,
-}: {
-  folder: UnifiedFolder;
-  accounts: MailAccount[];
-  folders: Record<string, MailFolder>;
-}) {
-  const locale = useUIStore((s) => s.locale);
-  const selectedAccountId = useUIStore((s) => s.selectedAccountId);
-  const selectedFolderId = useUIStore((s) => s.selectedFolderId);
-  const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
-  const accountOrder = useUIStore((s) => s.accountOrder);
-  const expandedPref = useUIStore((s) => s.favoritesAllInboxesExpanded);
-  const setExpanded = useUIStore((s) => s.setFavoritesAllInboxesExpanded);
-
-  const ordered = orderAccounts(accounts, accountOrder);
-  const children = accountInboxChildren(ordered, folders);
-  const expanded = expandedPref ?? ordered.length >= 2;
-  const parentActive =
-    selectedAccountId === ALL_ACCOUNTS && selectedFolderRole === 'inbox' && !selectedFolderId;
-
-  const { setNodeRef, rowClass } = useFolderDropTarget(
-    { type: 'folder', unified: true, role: 'inbox' },
-    'drop:unified:inbox',
-  );
-
-  return (
-    <div className="min-w-0">
-      <div ref={setNodeRef} className={cn('rounded-[7px]', rowClass)}>
-        <div className={cn(navRowClass(parentActive), 'h-8')}>
-          {children.length > 0 ? (
-            <button
-              type="button"
-              className="flex size-5 shrink-0 items-center justify-center text-ter-foreground"
-              onClick={() => setExpanded(!expanded)}
-              aria-expanded={expanded}
-              aria-label={
-                expanded ? t(locale, 'mail.collapseFolder') : t(locale, 'mail.expandFolder')
-              }
-            >
-              {expanded ? (
-                <ChevronDown className="size-3.5" />
-              ) : (
-                <ChevronRight className="size-3.5" />
-              )}
-            </button>
-          ) : (
-            <span className="inline-block size-5 shrink-0" />
-          )}
-          <button
-            type="button"
-            onClick={() => selectUnifiedRole('inbox')}
-            className="flex h-8 min-w-0 flex-1 items-center gap-2 pr-2.5 text-left text-[13px]"
-          >
-            <Inbox
-              className={cn(
-                'size-4 shrink-0',
-                parentActive ? 'text-foreground' : 'text-ter-foreground',
-              )}
-            />
-            <span className="truncate">{t(locale, 'nav.allInboxes')}</span>
-            <UnreadCount count={folder.unreadCount} />
-          </button>
-        </div>
-      </div>
-      {expanded
-        ? children.map((child) => {
-            const active = selectedFolderId === child.folderId;
-            return (
-              <div key={child.folderId} className="min-w-0" style={{ paddingLeft: 16 }}>
-                <button
-                  type="button"
-                  onClick={() => selectAccountFolder(child.accountId, child.folderId)}
-                  className={cn(navRowClass(active), 'h-8 gap-2 px-2.5')}
-                >
-                  <Inbox
-                    className={cn(
-                      'size-4 shrink-0',
-                      active ? 'text-foreground' : 'text-ter-foreground',
-                    )}
-                  />
-                  <span className="truncate">{child.accountLabel}</span>
-                  <UnreadCount count={child.unreadCount} />
-                </button>
-              </div>
-            );
-          })
-        : null}
     </div>
   );
 }
@@ -264,26 +170,24 @@ function StarredFavoriteRow({ count }: { count: number }) {
   );
 }
 
-function FavoritesBlock({
-  unifiedFolders,
-  accounts,
-}: {
-  unifiedFolders: UnifiedFolder[];
-  accounts: MailAccount[];
-}) {
+function UnifiedMailboxBlock({ unifiedFolders }: { unifiedFolders: UnifiedFolder[] }) {
   const selectedAccountId = useUIStore((s) => s.selectedAccountId);
   const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
-  const folders = useMailStore((s) => s.folders);
   const messages = useMailStore((s) => s.messages);
   const inbox = unifiedFolders.find((f) => f.role === 'inbox');
-  const tail = FAVORITES_ROLE_TAIL.map((role) =>
-    unifiedFolders.find((f) => f.role === role),
-  ).filter((folder): folder is UnifiedFolder => Boolean(folder));
+  const tail = UNIFIED_ROLE_TAIL.map((role) => unifiedFolders.find((f) => f.role === role)).filter(
+    (folder): folder is UnifiedFolder => Boolean(folder),
+  );
   const stars = starredCount(messages, selectedAccountId, ALL_ACCOUNTS);
 
   return (
     <>
-      {inbox ? <AllInboxesFavorite folder={inbox} accounts={accounts} folders={folders} /> : null}
+      {inbox ? (
+        <UnifiedRow
+          folder={inbox}
+          active={selectedAccountId === ALL_ACCOUNTS && selectedFolderRole === 'inbox'}
+        />
+      ) : null}
       <StarredFavoriteRow count={stars} />
       {tail.map((folder) => (
         <UnifiedRow
@@ -463,6 +367,7 @@ function AccountSection({
   account,
   selectedFolderId,
   bare = false,
+  isDragging = false,
   dragHandleProps,
   headerRef,
   headerStyle,
@@ -473,6 +378,8 @@ function AccountSection({
   selectedFolderId: string | null;
   /** Single-account view: header omitted (the switcher already names the account). */
   bare?: boolean;
+  /** While reordering: hide the folder tree so only the header ghost shows. */
+  isDragging?: boolean;
   /** dnd-kit listeners/attributes for the account header (unified view only). */
   dragHandleProps?: HTMLAttributes<HTMLButtonElement>;
   /** Sortable node lands on a wrapper of the header row only — an expanded
@@ -496,7 +403,7 @@ function AccountSection({
   const expandedIds = useMemo(() => new Set(expansion?.folderIds ?? []), [expansion]);
 
   const accountFolders = getFoldersForAccount(account.id);
-  const roleFolders = accountFolders.filter((folder) => folder.role);
+  const roleFolders = sortRoleFolders(accountFolders.filter((folder) => folder.role));
   const customTree = buildCustomFolderTree(accountFolders, folders);
   const totalUnread = accountFolders.reduce((sum, folder) => sum + folder.unreadCount, 0);
 
@@ -513,7 +420,11 @@ function AccountSection({
             onClick={() => setAccountExpanded(account.id, !expanded)}
             aria-expanded={expanded}
             {...dragHandleProps}
-            className="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-[7px] px-2.5 hover:bg-accent/60"
+            className={cn(
+              'flex h-8 w-full min-w-0 items-center gap-1.5 rounded-[7px] px-2.5 hover:bg-accent/60',
+              dragHandleProps && 'cursor-grab active:cursor-grabbing',
+              isDragging && 'opacity-0',
+            )}
           >
             {expanded ? (
               <ChevronDown className="size-3.5 shrink-0 text-ter-foreground" />
@@ -533,7 +444,7 @@ function AccountSection({
           </button>
         </div>
       )}
-      {bare || expanded ? (
+      {bare || (expanded && !isDragging) ? (
         <div className={cn('min-w-0', bare ? undefined : 'pl-4')}>
           {roleFolders.map((folder) => (
             <RoleFolderRow
@@ -588,6 +499,7 @@ function SortableAccountSection({
     <AccountSection
       account={account}
       selectedFolderId={selectedFolderId}
+      isDragging={isDragging}
       // touch-action: none keeps the browser from hijacking vertical scroll,
       // which would pointercancel and abort the drag (dnd-kit guidance).
       dragHandleProps={{ ...attributes, ...listeners, style: { touchAction: 'none' } }}
@@ -596,8 +508,12 @@ function SortableAccountSection({
         transform: CSS.Transform.toString(transform),
         transition: isDragging ? transition : undefined,
       }}
-      // The overlay chip carries the affordance; the ghost stays faint.
-      headerClassName={isDragging ? 'opacity-40' : undefined}
+      // Placeholder slot while the overlay chip carries the affordance.
+      headerClassName={
+        isDragging
+          ? 'rounded-[7px] border border-dashed border-border/70 bg-muted/40'
+          : undefined
+      }
       activatorRef={setActivatorNodeRef}
     />
   );
@@ -630,11 +546,13 @@ function SortableAccountSections({
   );
 }
 
-/** Collapsed-pane fallback: icon-only Favorites rows with tooltips. */
+/** Collapsed-pane fallback: icon-only unified rows with tooltips. */
 function CollapsedFolders({ unifiedFolders }: { unifiedFolders: UnifiedFolder[] }) {
   const locale = useUIStore((s) => s.locale);
   const selectedAccountId = useUIStore((s) => s.selectedAccountId);
   const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
+  const messages = useMailStore((s) => s.messages);
+  const stars = starredCount(messages, selectedAccountId, ALL_ACCOUNTS);
 
   const items: Array<{
     key: string;
@@ -648,7 +566,7 @@ function CollapsedFolders({ unifiedFolders }: { unifiedFolders: UnifiedFolder[] 
   if (inbox) {
     items.push({
       key: 'inbox',
-      title: t(locale, 'nav.allInboxes'),
+      title: t(locale, 'mail.folder.inbox'),
       Icon: Inbox,
       onClick: () => selectUnifiedRole('inbox'),
       active: selectedAccountId === ALL_ACCOUNTS && selectedFolderRole === 'inbox',
@@ -661,14 +579,14 @@ function CollapsedFolders({ unifiedFolders }: { unifiedFolders: UnifiedFolder[] 
     Icon: Star,
     onClick: () => selectStarred(),
     active: selectedFolderRole === 'starred',
-    count: 0,
+    count: stars,
   });
-  for (const role of FAVORITES_ROLE_TAIL) {
+  for (const role of UNIFIED_ROLE_TAIL) {
     const folder = unifiedFolders.find((f) => f.role === role);
     if (!folder) continue;
     items.push({
       key: role,
-      title: t(locale, `mail.folder.${role}`),
+      title: unifiedRowLabel(locale, role),
       Icon: ROLE_ICONS[role],
       onClick: () => selectUnifiedRole(role),
       active: selectedAccountId === ALL_ACCOUNTS && selectedFolderRole === role,
@@ -720,8 +638,8 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
   const getUnifiedFolders = useMailStore((s) => s.getUnifiedFolders);
 
   const returned = getUnifiedFolders();
-  const favoritesRoles: StandardFolderRole[] = ['inbox', ...FAVORITES_ROLE_TAIL];
-  const unifiedFolders = favoritesRoles
+  const unifiedRoles: StandardFolderRole[] = ['inbox', ...UNIFIED_ROLE_TAIL];
+  const unifiedFolders = unifiedRoles
     .map((role) => returned.find((f) => f.role === role))
     .filter((folder): folder is UnifiedFolder => Boolean(folder));
 
@@ -729,15 +647,13 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
     return <CollapsedFolders unifiedFolders={unifiedFolders} />;
   }
 
-  // A specific account is selected in the switcher: Favorites stay global;
-  // accounts area shows only that tree.
   const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
 
   return (
     <div className="flex min-w-0 flex-col px-2 pb-2">
       <SectionLabel>{t(locale, 'mail.section.unified')}</SectionLabel>
       <div className="grid min-w-0 gap-0.5">
-        <FavoritesBlock unifiedFolders={unifiedFolders} accounts={accounts} />
+        <UnifiedMailboxBlock unifiedFolders={unifiedFolders} />
       </div>
       {selectedAccount ? (
         <div className="grid min-w-0 gap-0.5 pt-2">

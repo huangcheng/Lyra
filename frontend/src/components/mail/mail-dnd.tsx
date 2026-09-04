@@ -26,6 +26,7 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core';
 import { sortableKeyboardCoordinates } from '@dnd-kit/sortable';
+import { GripVertical } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { Badge } from '@/components/ui/badge';
@@ -37,8 +38,36 @@ import {
   type ConversationDragData,
 } from '@/lib/conversation-actions';
 import type { StandardFolderRole } from '@/lib/mail-api';
+import { cn } from '@/lib/utils';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
+
+/** Shared lift chip for DragOverlay — whisper shadow, 7px radius (redesign v2). */
+const dragChipClass =
+  'pointer-events-none cursor-grabbing rounded-[7px] border border-border bg-card shadow-whisper';
+
+function AccountDragChip({ name }: { name: string }) {
+  return (
+    <div
+      className={cn(
+        dragChipClass,
+        'flex h-8 w-[216px] max-w-[calc(100vw-2rem)] items-center gap-1.5 px-2.5',
+      )}
+    >
+      <GripVertical className="size-3.5 shrink-0 text-ter-foreground" aria-hidden />
+      <span className="min-w-0 truncate text-[12.5px] font-semibold">{name}</span>
+    </div>
+  );
+}
+
+function ConversationDragChip({ subject, count }: { subject: string; count: number }) {
+  return (
+    <div className={cn(dragChipClass, 'flex max-w-xs items-center gap-2 px-3 py-2 text-sm')}>
+      <span className="min-w-0 truncate">{subject || '—'}</span>
+      {count > 1 ? <Badge variant="secondary">{count}</Badge> : null}
+    </div>
+  );
+}
 
 /** Drop-target payload on a concrete folder row. */
 export interface FolderDropData {
@@ -220,17 +249,11 @@ export function MailDndProvider({ children }: { children: ReactNode }) {
       }}
     >
       {children}
-      <DragOverlay dropAnimation={null}>
+      <DragOverlay dropAnimation={null} zIndex={60}>
         {drag ? (
-          <div className="flex max-w-64 items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm shadow-md">
-            <span className="truncate">{drag.subject || '—'}</span>
-            {drag.count > 1 ? <Badge variant="secondary">{drag.count}</Badge> : null}
-          </div>
+          <ConversationDragChip subject={drag.subject} count={drag.count} />
         ) : accountDrag ? (
-          <div className="flex max-w-64 items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm shadow-md">
-            <span className="text-ter-foreground">⋮⋮</span>
-            <span className="truncate font-medium">{accountDrag.name}</span>
-          </div>
+          <AccountDragChip name={accountDrag.name} />
         ) : null}
       </DragOverlay>
       {progress ? (

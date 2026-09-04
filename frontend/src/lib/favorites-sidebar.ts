@@ -1,5 +1,5 @@
 /**
- * Helpers for Favorites / All Inboxes sidebar rows.
+ * Helpers for unified mailbox sidebar rows (All Inboxes, Starred, …).
  */
 
 import type { MailAccount, MailFolder } from '@/types';
@@ -11,7 +11,7 @@ export interface AccountInboxChild {
   unreadCount: number;
 }
 
-/** Per-account Inbox shortcuts under Favorites → All Inboxes. */
+/** Per-account Inbox shortcuts under All Inboxes. */
 export function accountInboxChildren(
   accounts: MailAccount[],
   folders: Record<string, MailFolder>,

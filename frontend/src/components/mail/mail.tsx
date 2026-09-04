@@ -51,7 +51,14 @@ function useFolderTitle(): string {
   const selectedFolderId = useUIStore((s) => s.selectedFolderId);
   const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
   if (selectedFolderRole) {
-    if (selectedFolderRole === 'inbox') return t(locale, 'nav.allInboxes');
+    if (selectedFolderRole === 'starred') return t(locale, 'nav.starred');
+    if (
+      selectedFolderRole === 'inbox' ||
+      selectedFolderRole === 'drafts' ||
+      selectedFolderRole === 'sent'
+    ) {
+      return t(locale, `mail.folder.${selectedFolderRole}`);
+    }
     return t(locale, `nav.${selectedFolderRole}`);
   }
   if (selectedFolderId) {

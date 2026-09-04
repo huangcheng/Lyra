@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildAccountMoveFolderEntries } from './folder-tree';
+import { buildAccountMoveFolderEntries, sortRoleFolders } from './folder-tree';
 import type { MailFolder } from '@/types';
 
 function folder(
@@ -13,6 +13,21 @@ function folder(
     ...partial,
   };
 }
+
+describe('sortRoleFolders', () => {
+  it('orders Inbox → Drafts → Sent → Junk → Trash → Archive', () => {
+    const accountId = 'acc1';
+    const folders = [
+      folder({ id: 't', name: 'Trash', accountId, role: 'trash', sortOrder: 5 }),
+      folder({ id: 's', name: 'Sent', accountId, role: 'sent', sortOrder: 3 }),
+      folder({ id: 'a', name: 'Archive', accountId, role: 'archive', sortOrder: 6 }),
+      folder({ id: 'i', name: 'Inbox', accountId, role: 'inbox', sortOrder: 1 }),
+      folder({ id: 'j', name: 'Junk', accountId, role: 'spam', sortOrder: 4 }),
+      folder({ id: 'd', name: 'Drafts', accountId, role: 'drafts', sortOrder: 2 }),
+    ];
+    expect(sortRoleFolders(folders).map((f) => f.id)).toEqual(['i', 'd', 's', 'j', 't', 'a']);
+  });
+});
 
 describe('buildAccountMoveFolderEntries', () => {
   it('nests custom folders under parents instead of flattening alphabetically', () => {

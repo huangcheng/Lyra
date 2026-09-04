@@ -5,6 +5,8 @@
   "nav": {
     "inbox": "Inbox",
     "allInboxes": "All inboxes",
+    "allDrafts": "All Drafts",
+    "allSent": "All Sent",
     "sent": "Sent",
     "drafts": "Drafts",
     "trash": "Trash",
@@ -147,7 +149,7 @@
       "archive": "Archive"
     },
     "section": {
-      "unified": "Favorites",
+      "unified": "Unified",
       "accounts": "Accounts"
     },
     "expandFolder": "Expand folder",
