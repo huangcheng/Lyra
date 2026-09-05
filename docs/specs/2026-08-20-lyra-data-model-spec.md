@@ -78,6 +78,7 @@ One row per connected mail account (e.g. alice@work.com, alice@personal.example)
 | `smtp_security` | `TEXT` | `tls`, `starttls`, `none` |
 | `smtp_auth_type` | `TEXT` | Usually matches `auth_type` |
 | `smtp_credential` | `TEXT` | Encrypted; may be same as `credential` |
+| `pim_credential` | `TEXT` | Optional encrypted CardDAV/CalDAV app password (when mail auth is bearer/token) |
 | `auto_config_source` | `TEXT` | How config was discovered: `autoconfig`, `autodiscover`, `manual` |
 | `is_active` | `BOOLEAN NOT NULL DEFAULT TRUE` | User can disable sync |
 | `sync_enabled` | `BOOLEAN NOT NULL DEFAULT TRUE` | |
@@ -229,7 +230,7 @@ The cursor value is opaque to the application — it is whatever the protocol gi
 
 ## 3. Encrypted credentials
 
-Mail-account credentials (`credential`, `smtp_credential`) are stored as **encrypted JSON blobs** using AES-256-GCM. The user's TOTP secret (`lyra_user.totp_secret`) is encrypted the same way.
+Mail-account credentials (`credential`, `smtp_credential`, `pim_credential`) are stored as **encrypted JSON blobs** using AES-256-GCM. The user's TOTP secret (`lyra_user.totp_secret`) is encrypted the same way.
 
 ### 3.1 Key hierarchy
 

@@ -2114,6 +2114,9 @@ components:
           type: boolean
         syncEnabled:
           type: boolean
+        hasPimCredential:
+          type: boolean
+          description: True when an encrypted PIM/app password is stored (secret never returned)
 
     CreateAccountRequest:
       type: object
@@ -2142,6 +2145,12 @@ components:
           type: string
         syncEnabled:
           type: boolean
+        pimPassword:
+          type: string
+          description: Write-only CardDAV/CalDAV app password
+        clearPimPassword:
+          type: boolean
+          description: When true, removes the stored PIM credential
 
     PrivacySettings:
       type: object

@@ -67,6 +67,8 @@ pub struct Account {
     /// `password` (HTTP Basic) or `bearer` (API token).
     pub auth_type: Option<String>,
     pub jmap_base_url: Option<String>,
+    /// True when an encrypted PIM / app password is stored (never the secret).
+    pub has_pim_credential: bool,
     pub is_active: bool,
     pub sync_enabled: bool,
     pub last_sync_at: Option<String>,
@@ -116,6 +118,10 @@ pub struct UpdateAccountRequest {
     pub jmap_base_url: Option<String>,
     pub is_active: Option<bool>,
     pub sync_enabled: Option<bool>,
+    /// Write-only CardDAV/CalDAV app password (encrypted as `pim_credential`).
+    pub pim_password: Option<String>,
+    /// When true, clear the stored PIM credential.
+    pub clear_pim_password: Option<bool>,
 }
 
 /// Request to probe server configuration.
@@ -267,6 +273,7 @@ fn add_account_columns(query: &mut SelectStatement) {
         mail_account::Column::Signature,
         mail_account::Column::AuthType,
         mail_account::Column::JmapBaseUrl,
+        mail_account::Column::PimCredential,
         mail_account::Column::IsActive,
         mail_account::Column::SyncEnabled,
         mail_account::Column::LastSyncAt,
@@ -295,6 +302,12 @@ fn account_from_row(row: &QueryResult) -> Result<Account, AccountError> {
         auth_type: row.try_get("", "auth_type").map_err(orm_err)?,
         jmap_base_url: row.try_get("", "jmap_base_url").map_err(orm_err)?,
         caldav_url: row.try_get("", "caldav_url").map_err(orm_err)?,
+        has_pim_credential: row
+            .try_get::<Option<String>>("", "pim_credential")
+            .ok()
+            .flatten()
+            .as_ref()
+            .is_some_and(|s| !s.is_empty()),
         is_active: row.try_get("", "is_active").map_err(orm_err)?,
         sync_enabled: row.try_get("", "sync_enabled").map_err(orm_err)?,
         last_sync_at: row_opt_ts(row, "last_sync_at")?,
@@ -533,6 +546,7 @@ async fn create_account(
             signature: None,
             auth_type: Some(auth_type),
             jmap_base_url: jmap_base_url.clone(),
+            has_pim_credential: false,
             is_active: true,
             sync_enabled: true,
             last_sync_at: None,
@@ -606,9 +620,19 @@ async fn update_account(
         || body.jmap_base_url.is_some()
         || body.smtp_host.is_some()
         || body.smtp_port.is_some()
-        || body.smtp_security.is_some();
+        || body.smtp_security.is_some()
+        || body.pim_password.is_some()
+        || body.clear_pim_password == Some(true);
     if !has_update {
         return Err(AccountError::InvalidInput("no fields to update".into()));
+    }
+
+    if let Some(p) = &body.pim_password
+        && p.is_empty()
+    {
+        return Err(AccountError::InvalidInput(
+            "pimPassword must not be empty (use clearPimPassword to remove)".into(),
+        ));
     }
 
     let credential_json = if let Some(password) = &body.password {
@@ -616,6 +640,19 @@ async fn update_account(
         let encrypted = crypto::encrypt(&dek, password.as_bytes())?;
         Some(serde_json::to_string(&encrypted).map_err(|e| {
             AccountError::InvalidInput(format!("credential serialization failed: {e}"))
+        })?)
+    } else {
+        None
+    };
+
+    let clear_pim = body.clear_pim_password == Some(true);
+    let pim_credential_set = if clear_pim {
+        None
+    } else if let Some(password) = &body.pim_password {
+        let dek = AuthState::get_user_dek(state.db(), &user_id).await?;
+        let encrypted = crypto::encrypt(&dek, password.as_bytes())?;
+        Some(serde_json::to_string(&encrypted).map_err(|e| {
+            AccountError::InvalidInput(format!("pim credential serialization failed: {e}"))
         })?)
     } else {
         None
@@ -639,6 +676,14 @@ async fn update_account(
     }
     if let Some(v) = &credential_json {
         updater = updater.col_expr(mail_account::Column::Credential, Expr::val(v.as_str()));
+    }
+    if clear_pim {
+        updater = updater.col_expr(
+            mail_account::Column::PimCredential,
+            Expr::val(Option::<String>::None),
+        );
+    } else if let Some(v) = &pim_credential_set {
+        updater = updater.col_expr(mail_account::Column::PimCredential, Expr::val(v.as_str()));
     }
     if let Some(v) = &body.imap_host {
         updater = updater.col_expr(mail_account::Column::ImapHost, Expr::val(v.as_str()));
