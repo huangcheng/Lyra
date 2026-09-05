@@ -138,7 +138,7 @@ export function eventOccursOnDay(event: EventTimeFields, day: Date): boolean {
 }
 
 export function eventsForDay<T extends EventTimeFields>(events: T[], day: Date): T[] {
-  return events.filter((e) => eventOccursOnDay(e, day));
+  return events.filter((e) => eventOverlapsLocalDay(e, day));
 }
 
 export function hourSlots(): number[] {
@@ -172,4 +172,47 @@ export function sameLocalDay(a: Date, b: Date): boolean {
     a.getMonth() === b.getMonth() &&
     a.getDate() === b.getDate()
   );
+}
+
+/**
+ * Inclusive local calendar dates the event occupies.
+ * All-day: dtend is exclusive (RFC 5545) → last day = dtend − 1 day.
+ * Timed: split by local calendar date of start/end.
+ */
+export function eventSpanDays(event: EventTimeFields): Date[] {
+  const start = event.dtstart ? new Date(event.dtstart) : null;
+  const end = event.dtend ? new Date(event.dtend) : null;
+  if (!start || isNaN(start.getTime())) return [];
+  if (!end || isNaN(end.getTime())) return [atLocalMidnight(start)];
+
+  const startDay = atLocalMidnight(start);
+  let endDay = atLocalMidnight(end);
+  if (event.isAllDay && endDay > startDay) {
+    endDay.setDate(endDay.getDate() - 1); // exclusive end
+  }
+  const days: Date[] = [];
+  const cur = new Date(startDay);
+  while (cur <= endDay) {
+    days.push(new Date(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return days;
+}
+
+/** True if the event's time interval intersects the local day [day, day+1). */
+export function eventOverlapsLocalDay(event: EventTimeFields, day: Date): boolean {
+  const start = event.dtstart ? new Date(event.dtstart) : null;
+  const end = event.dtend ? new Date(event.dtend) : null;
+  if (!start || isNaN(start.getTime())) return false;
+  const dayStart = atLocalMidnight(day);
+  const dayEnd = new Date(dayStart);
+  dayEnd.setDate(dayEnd.getDate() + 1);
+  const evStart = event.isAllDay ? atLocalMidnight(start) : start;
+  const evEnd =
+    !end || isNaN(end.getTime())
+      ? new Date(evStart.getTime() + 3600_000)
+      : event.isAllDay
+        ? atLocalMidnight(end)
+        : end;
+  return evStart < dayEnd && evEnd > dayStart;
 }

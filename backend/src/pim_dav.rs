@@ -476,9 +476,7 @@ pub fn resolve_dav_password(
         return Ok(s.to_string());
     }
     let password_auth = auth_type.is_empty() || auth_type.eq_ignore_ascii_case("password");
-    if password_auth
-        && let Some(mail) = mail_password.filter(|s| !s.is_empty())
-    {
+    if password_auth && let Some(mail) = mail_password.filter(|s| !s.is_empty()) {
         return Ok(mail.to_string());
     }
     Err(DavAuthError::PimPasswordRequired)

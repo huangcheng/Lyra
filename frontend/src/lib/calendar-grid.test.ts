@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   addViewOffset,
   eventOccursOnDay,
+  eventOverlapsLocalDay,
+  eventSpanDays,
   eventsForDay,
   hourSlots,
   monthGridDays,
@@ -109,5 +111,48 @@ describe('eventsForDay / hourSlots / viewTitle', () => {
     expect(hourSlots()).toHaveLength(24);
     expect(hourSlots()[0]).toBe(0);
     expect(viewTitle(new Date(2026, 8, 4), 'month', 'en-US')).toMatch(/2026/);
+  });
+});
+
+describe('eventSpanDays', () => {
+  it('returns single day for same-day timed event', () => {
+    const ev = { dtstart: '2026-09-15T10:00:00', dtend: '2026-09-15T11:00:00', isAllDay: false };
+    expect(eventSpanDays(ev)).toHaveLength(1);
+  });
+
+  it('spans 3 days for an all-day holiday (dtend exclusive)', () => {
+    const ev = { dtstart: '2026-09-15', dtend: '2026-09-18', isAllDay: true };
+    expect(eventSpanDays(ev)).toHaveLength(3); // 15, 16, 17
+  });
+
+  it('spans 2 days for a timed event crossing midnight', () => {
+    const ev = { dtstart: '2026-09-15T22:00:00', dtend: '2026-09-16T02:00:00', isAllDay: false };
+    const days = eventSpanDays(ev);
+    expect(days).toHaveLength(2);
+    expect(days[0].getDate()).toBe(15);
+    expect(days[1].getDate()).toBe(16);
+  });
+});
+
+describe('eventOverlapsLocalDay', () => {
+  it('matches the start day', () => {
+    const ev = { dtstart: '2026-09-15T10:00:00', dtend: '2026-09-15T11:00:00', isAllDay: false };
+    expect(eventOverlapsLocalDay(ev, new Date(2026, 8, 15))).toBe(true);
+  });
+
+  it('does not match a different day', () => {
+    const ev = { dtstart: '2026-09-15T10:00:00', dtend: '2026-09-15T11:00:00', isAllDay: false };
+    expect(eventOverlapsLocalDay(ev, new Date(2026, 8, 16))).toBe(false);
+  });
+
+  it('matches day 2 of a midnight-crossing event', () => {
+    const ev = { dtstart: '2026-09-15T22:00:00', dtend: '2026-09-16T02:00:00', isAllDay: false };
+    expect(eventOverlapsLocalDay(ev, new Date(2026, 8, 16))).toBe(true);
+  });
+
+  it('matches middle day of a 3-day all-day span', () => {
+    const ev = { dtstart: '2026-09-15', dtend: '2026-09-18', isAllDay: true };
+    expect(eventOverlapsLocalDay(ev, new Date(2026, 8, 16))).toBe(true);
+    expect(eventOverlapsLocalDay(ev, new Date(2026, 8, 18))).toBe(false); // exclusive
   });
 });

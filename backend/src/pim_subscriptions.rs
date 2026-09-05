@@ -195,7 +195,10 @@ async fn list_subscriptions(
     .and_where(calendar_subscription::Column::UserId.eq(user))
     .order_by(calendar_subscription::Column::Name, sea_orm::Order::Asc);
     let rows = db.orm().query_all(&q).await.map_err(orm_err)?;
-    rows.iter().map(subscription_from_row).collect::<Result<Vec<_>, _>>().map(Json)
+    rows.iter()
+        .map(subscription_from_row)
+        .collect::<Result<Vec<_>, _>>()
+        .map(Json)
 }
 
 async fn create_subscription(

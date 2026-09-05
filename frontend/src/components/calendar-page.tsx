@@ -25,11 +25,13 @@ import {
   weekDays,
   type CalendarView,
 } from '@/lib/calendar-grid';
+import { useNavigate } from '@tanstack/react-router';
 import { EmptyState } from './empty-state';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '../stores/ui';
+import { expandEventsForRange, type ExpandableEvent } from '@/lib/calendar-rrule';
 
 type SourceKind = 'caldav' | 'ics';
 
@@ -81,6 +83,7 @@ export function CalendarPage() {
   const [sources, setSources] = useState<CalSource[]>([]);
   const [visibleIds, setVisibleIds] = useState<Set<string>>(new Set());
   const [events, setEvents] = useState<CalEvent[]>([]);
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -187,7 +190,15 @@ export function CalendarPage() {
         }
       }),
     );
-    setEvents(chunks.flat());
+    const raw = chunks.flat();
+    // Expand simple RRULEs (DAILY/WEEKLY/MONTHLY/YEARLY) into occurrences
+    // within the visible window (±1 day padding for week spillover).
+    const { start: rangeStartIso, end: rangeEndIso } = visibleRangeIso(anchor, view);
+    const rangeStart = new Date(rangeStartIso);
+    rangeStart.setDate(rangeStart.getDate() - 1);
+    const rangeEnd = new Date(rangeEndIso);
+    rangeEnd.setDate(rangeEnd.getDate() + 1);
+    setEvents(expandEventsForRange(raw as ExpandableEvent[], rangeStart, rangeEnd) as CalEvent[]);
   }
 
   useEffect(() => {
@@ -220,14 +231,21 @@ export function CalendarPage() {
     setRefreshing(true);
     try {
       const accountIds = [
-        ...new Set(sources.filter((s) => s.kind === 'caldav').map((s) => s.accountId!).filter(Boolean)),
+        ...new Set(
+          sources
+            .filter((s) => s.kind === 'caldav')
+            .map((s) => s.accountId!)
+            .filter(Boolean),
+        ),
       ];
       await Promise.all([
         ...accountIds.map((aid) => api(`/accounts/${aid}/calendars/sync`).catch(() => undefined)),
         ...sources
           .filter((s) => s.kind === 'ics')
           .map((s) =>
-            api(`/calendar-subscriptions/${s.id}/refresh`, { method: 'POST' }).catch(() => undefined),
+            api(`/calendar-subscriptions/${s.id}/refresh`, { method: 'POST' }).catch(
+              () => undefined,
+            ),
           ),
       ]);
       const merged = await loadSources();
@@ -512,7 +530,13 @@ export function CalendarPage() {
             </Button>
           ))}
         </div>
-        <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => setAnchor(new Date())}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8"
+          onClick={() => setAnchor(new Date())}
+        >
           {t(locale, 'calendar.today')}
         </Button>
         <Button
@@ -556,14 +580,27 @@ export function CalendarPage() {
           ) : error ? (
             <div className="px-1 text-sm text-destructive">{t(locale, 'calendar.loadError')}</div>
           ) : sources.length === 0 ? (
-            <EmptyState
-              icon={CalendarIcon}
-              title={t(locale, 'calendar.empty')}
-              hint={t(locale, 'calendar.emptyHint')}
-            />
+            <div className="flex flex-col items-center">
+              <EmptyState
+                icon={CalendarIcon}
+                title={t(locale, 'calendar.empty')}
+                hint={t(locale, 'calendar.emptyHint')}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => void navigate({ to: '/settings', search: { pim: true } })}
+              >
+                {t(locale, 'calendar.connectDav')}
+              </Button>
+            </div>
           ) : (
             sources.map((src) => (
-              <div key={src.id} className="group flex items-start gap-1 rounded-md px-1 py-1 hover:bg-accent">
+              <div
+                key={src.id}
+                className="group flex items-start gap-1 rounded-md px-1 py-1 hover:bg-accent"
+              >
                 <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-0.5 text-sm">
                   <input
                     type="checkbox"
@@ -646,7 +683,9 @@ export function CalendarPage() {
                 })}
               </div>
             ) : null}
-            {selectedEvent.location ? <div className="text-sm">{selectedEvent.location}</div> : null}
+            {selectedEvent.location ? (
+              <div className="text-sm">{selectedEvent.location}</div>
+            ) : null}
             {selectedEvent.description ? (
               <div className="text-sm whitespace-pre-wrap text-muted-foreground">
                 {selectedEvent.description}
@@ -663,7 +702,9 @@ export function CalendarPage() {
             className="w-full max-w-md space-y-3 rounded-lg border bg-background p-4 shadow-lg"
           >
             <h2 className="text-base font-semibold">{t(locale, 'calendar.addSubscription')}</h2>
-            <p className="text-xs text-muted-foreground">{t(locale, 'calendar.addSubscriptionHint')}</p>
+            <p className="text-xs text-muted-foreground">
+              {t(locale, 'calendar.addSubscriptionHint')}
+            </p>
             <Input
               required
               placeholder="https://… or webcal://…"

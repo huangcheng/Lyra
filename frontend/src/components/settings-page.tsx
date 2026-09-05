@@ -112,6 +112,7 @@ interface MailAccount {
   signature?: string | null;
   isActive: boolean;
   syncEnabled: boolean;
+  hasPimCredential?: boolean;
   lastSyncAt?: string;
   createdAt: string;
   updatedAt: string;
@@ -178,6 +179,7 @@ export function SettingsPage() {
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [pimBusyId, setPimBusyId] = useState<string | null>(null);
   const [pimResult, setPimResult] = useState<Record<string, string>>({});
+  const [pimPasswordDrafts, setPimPasswordDrafts] = useState<Record<string, string>>({});
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [errorLogOpenId, setErrorLogOpenId] = useState<string | null>(null);
@@ -438,6 +440,50 @@ export function SettingsPage() {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       setPimResult((prev) => ({ ...prev, [id]: message }));
+    } finally {
+      setPimBusyId(null);
+    }
+  }
+
+  async function savePimPassword(id: string) {
+    const password = pimPasswordDrafts[id];
+    if (!password?.trim()) return;
+    try {
+      setPimBusyId(id);
+      await api(`/accounts/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ pimPassword: password.trim() }),
+      });
+      setPimResult((prev) => ({
+        ...prev,
+        [id]: t(locale, 'settings.pim.saved'),
+      }));
+      setPimPasswordDrafts((prev) => ({ ...prev, [id]: '' }));
+      await fetchAccounts();
+    } catch (err: unknown) {
+      setPimResult((prev) => ({
+        ...prev,
+        [id]: err instanceof Error ? err.message : String(err),
+      }));
+    } finally {
+      setPimBusyId(null);
+    }
+  }
+
+  async function clearPimPassword(id: string) {
+    try {
+      setPimBusyId(id);
+      await api(`/accounts/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ clearPimPassword: true }),
+      });
+      setPimResult((prev) => ({ ...prev, [id]: t(locale, 'settings.pim.cleared') }));
+      await fetchAccounts();
+    } catch (err: unknown) {
+      setPimResult((prev) => ({
+        ...prev,
+        [id]: err instanceof Error ? err.message : String(err),
+      }));
     } finally {
       setPimBusyId(null);
     }
@@ -1315,6 +1361,44 @@ export function SettingsPage() {
                                   </DropdownMenuItem>
                                 </DropdownMenuContent>
                               </DropdownMenu>
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="password"
+                                  value={pimPasswordDrafts[account.id] ?? ''}
+                                  onChange={(e) =>
+                                    setPimPasswordDrafts((prev) => ({
+                                      ...prev,
+                                      [account.id]: e.target.value,
+                                    }))
+                                  }
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') void savePimPassword(account.id);
+                                  }}
+                                  placeholder={t(locale, 'settings.pim.password')}
+                                  aria-label={t(locale, 'settings.pim.password')}
+                                  className="h-7 w-32 rounded-md border border-input bg-transparent px-2 text-[11.5px] outline-none focus-visible:border-foreground/35"
+                                />
+                                {pimPasswordDrafts[account.id]?.trim() ? (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 px-2 text-[11px]"
+                                    disabled={pimBusyId === account.id}
+                                    onClick={() => void savePimPassword(account.id)}
+                                  >
+                                    {t(locale, 'common.save')}
+                                  </Button>
+                                ) : null}
+                                {account.hasPimCredential ? (
+                                  <button
+                                    type="button"
+                                    className="text-[10.5px] text-muted-foreground underline-offset-2 hover:text-destructive hover:underline"
+                                    onClick={() => void clearPimPassword(account.id)}
+                                  >
+                                    {t(locale, 'settings.pim.configured')} ✕
+                                  </button>
+                                ) : null}
+                              </div>
                               {pimMessage ? (
                                 <span
                                   className="max-w-40 truncate text-[10.5px] text-muted-foreground"

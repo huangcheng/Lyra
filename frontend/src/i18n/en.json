@@ -471,7 +471,12 @@
       "synced": "{synced} synced, {removed} removed",
       "skipped": "Not configured — run Discover",
       "autoDiscovered": "CardDAV/CalDAV discovered for this account",
-      "autoDiscoverNone": "No CardDAV/CalDAV found (app password may be required)"
+      "autoDiscoverNone": "No CardDAV/CalDAV found (app password may be required)",
+      "password": "PIM password",
+      "passwordHelp": "Fastmail app password (separate from the mail password)",
+      "configured": "Set",
+      "cleared": "PIM password cleared",
+      "saved": "PIM password saved"
     }
   },
   "contacts": {
@@ -491,7 +496,8 @@
     "compose": "Compose",
     "call": "Call",
     "addBook": "Add address book",
-    "addBookSoon": "CardDAV sources coming soon"
+    "addBookSoon": "CardDAV sources coming soon",
+    "connectDav": "Connect CardDAV"
   },
   "calendar": {
     "title": "Calendar",
@@ -522,7 +528,8 @@
       "thu": "Thu",
       "fri": "Fri",
       "sat": "Sat"
-    }
+    },
+    "connectDav": "Connect CalDAV"
   },
   "dash": {
     "section": "Dashboard",

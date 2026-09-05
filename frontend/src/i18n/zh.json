@@ -471,7 +471,12 @@
       "synced": "同步 {synced} 条，移除 {removed} 条",
       "skipped": "未配置——请先运行自动发现",
       "autoDiscovered": "已自动发现此账户的 CardDAV/CalDAV",
-      "autoDiscoverNone": "未发现 CardDAV/CalDAV（可能需要应用专用密码）"
+      "autoDiscoverNone": "未发现 CardDAV/CalDAV（可能需要应用专用密码）",
+      "password": "PIM 密码",
+      "passwordHelp": "Fastmail 应用密码（与邮箱密码不同）",
+      "configured": "已设置",
+      "cleared": "PIM 密码已清除",
+      "saved": "PIM 密码已保存"
     }
   },
   "contacts": {
@@ -491,7 +496,8 @@
     "compose": "写信",
     "call": "呼叫",
     "addBook": "添加通讯录",
-    "addBookSoon": "即将支持添加 CardDAV 来源"
+    "addBookSoon": "即将支持添加 CardDAV 来源",
+    "connectDav": "连接 CardDAV"
   },
   "calendar": {
     "title": "日历",
@@ -522,7 +528,8 @@
       "thu": "四",
       "fri": "五",
       "sat": "六"
-    }
+    },
+    "connectDav": "连接 CalDAV"
   },
   "dash": {
     "section": "仪表盘",

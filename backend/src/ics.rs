@@ -139,15 +139,10 @@ fn parse_one_vevent(blob: &str) -> Option<ParsedIcsEvent> {
             _ => {}
         }
     }
-    let uid = uid.filter(|u| !u.is_empty()).unwrap_or_else(|| {
-        format!(
-            "lyra-ics-{}",
-            dtstart_raw.as_deref().unwrap_or("unknown")
-        )
-    });
-    let dtstart = dtstart_raw
-        .as_deref()
-        .and_then(normalize_ics_dt);
+    let uid = uid
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| format!("lyra-ics-{}", dtstart_raw.as_deref().unwrap_or("unknown")));
+    let dtstart = dtstart_raw.as_deref().and_then(normalize_ics_dt);
     let dtend = dtend_raw.as_deref().and_then(normalize_ics_dt);
     Some(ParsedIcsEvent {
         uid,
@@ -191,7 +186,9 @@ fn normalize_ics_dt(raw: &str) -> Option<String> {
 }
 
 /// Download + SSRF-guarded fetch of an ICS body.
-pub async fn fetch_ics_body(url: &str) -> Result<(String, Option<String>, Option<String>), SyncError> {
+pub async fn fetch_ics_body(
+    url: &str,
+) -> Result<(String, Option<String>, Option<String>), SyncError> {
     let url = normalize_ics_url(url).map_err(SyncError::InvalidInput)?;
     crate::media::validate_outbound_url(&url).await?;
     let client = reqwest::Client::builder()
@@ -330,10 +327,7 @@ pub async fn replace_subscription_events(
 }
 
 /// Fetch feed, update subscription metadata, replace events.
-pub async fn refresh_subscription(
-    db: &DbPool,
-    subscription_id: &str,
-) -> Result<usize, SyncError> {
+pub async fn refresh_subscription(db: &DbPool, subscription_id: &str) -> Result<usize, SyncError> {
     let sub_id = crate::sync::queries::id_value_pub(db, subscription_id)
         .map_err(|e| SyncError::Internal(e.to_string()))?;
     let mut q = Sq::select();
@@ -341,7 +335,7 @@ pub async fn refresh_subscription(
         .column(calendar_subscription::Column::Name)
         .from(calendar_subscription::Entity)
         .and_where(calendar_subscription::Column::Id.eq(sub_id.clone()));
-            let row = db
+    let row = db
         .orm()
         .query_one(&q)
         .await
@@ -367,13 +361,19 @@ pub async fn refresh_subscription(
             let mut upd = Sq::update();
             upd.table(calendar_subscription::Entity)
                 .value(calendar_subscription::Column::Name, name)
-                .value(calendar_subscription::Column::Etag, etag.unwrap_or_default())
+                .value(
+                    calendar_subscription::Column::Etag,
+                    etag.unwrap_or_default(),
+                )
                 .value(
                     calendar_subscription::Column::LastModified,
                     last_mod.unwrap_or_default(),
                 )
                 .value(calendar_subscription::Column::LastFetchedAt, now_value(db))
-                .value(calendar_subscription::Column::LastError, Value::String(None))
+                .value(
+                    calendar_subscription::Column::LastError,
+                    Value::String(None),
+                )
                 .value(calendar_subscription::Column::UpdatedAt, now_value(db))
                 .and_where(calendar_subscription::Column::Id.eq(sub_id));
             db.orm()
@@ -490,7 +490,10 @@ mod tests {
         let gz = enc.finish().unwrap();
         let text = decode_ics_bytes(&gz).unwrap();
         assert!(text.starts_with("BEGIN:VCALENDAR"));
-        assert_eq!(decode_ics_bytes(plain).unwrap(), "BEGIN:VCALENDAR\nEND:VCALENDAR\n");
+        assert_eq!(
+            decode_ics_bytes(plain).unwrap(),
+            "BEGIN:VCALENDAR\nEND:VCALENDAR\n"
+        );
     }
 }
 

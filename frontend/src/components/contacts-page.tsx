@@ -14,6 +14,7 @@ import {
   uniqueAddressbooks,
   type BookFilter,
 } from '@/lib/contacts-ui';
+import { useNavigate } from '@tanstack/react-router';
 import { EmptyState } from './empty-state';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -74,6 +75,7 @@ function ContactAvatar({
 export function ContactsPage() {
   const locale = useUIStore((s) => s.locale);
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -203,6 +205,14 @@ export function ContactsPage() {
                 title={t(locale, 'contacts.empty')}
                 hint={t(locale, 'contacts.emptyHint')}
               />
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => navigate({ to: '/settings', search: { pim: true } })}
+              >
+                {t(locale, 'contacts.connectDav')}
+              </Button>
             </div>
           ) : (
             groups.map((g) => (
