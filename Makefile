@@ -3,7 +3,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help secretscan pre-commit-install fmt fmt-check lint check frontend-fmt frontend-lint backend-fmt backend-lint
+.PHONY: help secretscan pre-commit-install fmt fmt-check lint check migration migration-check frontend-fmt frontend-lint backend-fmt backend-lint
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -11,6 +11,12 @@ help: ## Show this help
 
 secretscan: ## Run gitleaks secret scan on full repo history
 	@./scripts/secretscan.sh
+
+migration: ## Scaffold a new migration (both dialects): make migration name=add_foo
+	@bash scripts/migrate-new.sh $(name)
+
+migration-check: ## Validate migration files: pairs, numbering, dialect sync
+	@bash scripts/migrate-check.sh
 
 pre-commit-install: ## Install pre-commit hooks (gitleaks)
 	pre-commit install
@@ -40,4 +46,4 @@ test: ## Run unit tests (frontend vitest + backend sqlite suite)
 	cd frontend && npm test
 	cd backend && cargo test --bin lyra_backend
 
-check: fmt-check lint test secretscan ## Format check + lint + tests + secret scan
+check: fmt-check lint test migration-check secretscan ## Format check + lint + tests + migration validation + secret scan
