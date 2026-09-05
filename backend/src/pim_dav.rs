@@ -458,6 +458,32 @@ pub(crate) fn should_auto_discover_pim(auth_type: &str) -> bool {
     !auth_type.eq_ignore_ascii_case("bearer")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DavAuthError {
+    PimPasswordRequired,
+}
+
+/// Resolve HTTP Basic password for CardDAV/CalDAV.
+/// `pim_password`: decrypted Option from `pim_credential` column (None if column null).
+/// `mail_password`: decrypted mail `credential` when usable as a password.
+/// `auth_type`: account `auth_type` (`password` | `bearer` | …).
+pub fn resolve_dav_password(
+    pim_password: Option<&str>,
+    mail_password: Option<&str>,
+    auth_type: &str,
+) -> Result<String, DavAuthError> {
+    if let Some(s) = pim_password.filter(|s| !s.is_empty()) {
+        return Ok(s.to_string());
+    }
+    let password_auth = auth_type.is_empty() || auth_type.eq_ignore_ascii_case("password");
+    if password_auth
+        && let Some(mail) = mail_password.filter(|s| !s.is_empty())
+    {
+        return Ok(mail.to_string());
+    }
+    Err(DavAuthError::PimPasswordRequired)
+}
+
 /// RFC 6764 discovery from an email + password (no DB). Used by account
 /// create/update auto-discover and by `POST …/pim/discover`.
 pub(crate) async fn discover_homesets(
@@ -676,5 +702,29 @@ mod tests {
         assert!(boots[0].direct);
         assert!(boots[0].origin.contains("carddav.fastmail.com"));
         assert!(boots[1].origin.contains("caldav.fastmail.com"));
+    }
+
+    #[test]
+    fn dav_password_prefers_pim() {
+        assert_eq!(
+            super::resolve_dav_password(Some("app-pass"), Some("mail-pass"), "bearer").unwrap(),
+            "app-pass"
+        );
+    }
+
+    #[test]
+    fn dav_password_falls_back_for_password_auth() {
+        assert_eq!(
+            super::resolve_dav_password(None, Some("mail-pass"), "password").unwrap(),
+            "mail-pass"
+        );
+    }
+
+    #[test]
+    fn dav_password_requires_pim_for_bearer() {
+        assert!(matches!(
+            super::resolve_dav_password(None, Some("bearer-token"), "bearer"),
+            Err(super::DavAuthError::PimPasswordRequired)
+        ));
     }
 }
