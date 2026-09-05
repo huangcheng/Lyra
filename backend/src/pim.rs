@@ -143,6 +143,8 @@ pub enum PimError {
     InvalidInput(String),
     #[error("authentication required")]
     Unauthorized,
+    #[error("PIM app password required for CardDAV/CalDAV")]
+    PimPasswordRequired,
 }
 
 impl From<InvalidIdError> for PimError {
@@ -167,6 +169,11 @@ impl IntoResponse for PimError {
             PimError::InvalidInput(msg) => {
                 (StatusCode::BAD_REQUEST, msg.clone(), Some("invalid_input"))
             }
+            PimError::PimPasswordRequired => (
+                StatusCode::BAD_REQUEST,
+                self.to_string(),
+                Some("pim_password_required"),
+            ),
             PimError::Database(_) | PimError::SyncError(_) => {
                 tracing::error!(error = %self, "pim request failed");
                 (
@@ -206,6 +213,68 @@ fn id_value(db: &DbPool, id: &str) -> Result<Value, PimError> {
     Ok(match id_param(db, id)? {
         IdParam::Text(s) => Value::String(Some(s)),
         IdParam::Uuid(u) => Value::Uuid(Some(u)),
+    })
+}
+
+/// Load the HTTP Basic password for CardDAV/CalDAV using `pim_credential`
+/// when set; never treat a JMAP bearer token as a DAV password.
+async fn load_dav_basic_password(
+    db: &DbPool,
+    user_id: &str,
+    account_id: &str,
+) -> Result<String, PimError> {
+    let account = id_value(db, account_id)?;
+    let user = id_value(db, user_id)?;
+    let mut q = Sq::select();
+    q.column(mail_account::Column::Credential)
+        .column(mail_account::Column::PimCredential)
+        .column(mail_account::Column::AuthType)
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::Id.eq(account))
+        .and_where(mail_account::Column::UserId.eq(user));
+    let row = db
+        .orm()
+        .query_one(&q)
+        .await
+        .map_err(orm_err)?
+        .ok_or(PimError::AccountNotFound)?;
+
+    let credential_json: String = row.try_get("", "credential").map_err(orm_err)?;
+    let pim_json: Option<String> = row.try_get("", "pim_credential").ok().flatten();
+    let auth_type: String = row
+        .try_get::<Option<String>>("", "auth_type")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "password".into());
+
+    let dek = crate::auth::AuthState::get_user_dek(db, user_id)
+        .await
+        .map_err(|e| PimError::SyncError(e.to_string()))?;
+
+    let pim_password = match pim_json.as_deref().filter(|s| !s.is_empty()) {
+        Some(blob) => Some(
+            crate::imap::decrypt_account_password(blob, &dek)
+                .map_err(|e| PimError::SyncError(e.to_string()))?,
+        ),
+        None => None,
+    };
+
+    let mail_password = if auth_type.eq_ignore_ascii_case("bearer") {
+        None
+    } else {
+        Some(
+            crate::imap::decrypt_account_password(&credential_json, &dek)
+                .map_err(|e| PimError::SyncError(e.to_string()))?,
+        )
+    };
+
+    crate::pim_dav::resolve_dav_password(
+        pim_password.as_deref(),
+        mail_password.as_deref(),
+        &auth_type,
+    )
+    .map_err(|e| match e {
+        crate::pim_dav::DavAuthError::PimPasswordRequired => PimError::PimPasswordRequired,
     })
 }
 
@@ -606,12 +675,7 @@ async fn sync_contacts(
         })));
     };
 
-    let (dek, credential_json) =
-        crate::auth::AuthState::get_user_dek_and_credential(state.db(), &user_id, &account_id)
-            .await
-            .map_err(|e| PimError::SyncError(e.to_string()))?;
-    let password = crate::imap::decrypt_account_password(&credential_json, &dek)
-        .map_err(|e| PimError::SyncError(e.to_string()))?;
+    let password = load_dav_basic_password(db, &user_id, &account_id).await?;
 
     let client = crate::dav::DavClient::new(email, password, &base_url)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
@@ -682,12 +746,7 @@ async fn pim_discover(
         .ok_or(PimError::AccountNotFound)?;
     let email: String = row.try_get("", "email_address").map_err(orm_err)?;
 
-    let (dek, credential_json) =
-        crate::auth::AuthState::get_user_dek_and_credential(state.db(), &user_id, &account_id)
-            .await
-            .map_err(|e| PimError::SyncError(e.to_string()))?;
-    let password = crate::imap::decrypt_account_password(&credential_json, &dek)
-        .map_err(|e| PimError::SyncError(e.to_string()))?;
+    let password = load_dav_basic_password(db, &user_id, &account_id).await?;
 
     let (carddav, caldav) = crate::pim_dav::discover_homesets(&email, &password)
         .await
@@ -736,12 +795,7 @@ async fn sync_calendars(
         })));
     };
 
-    let (dek, credential_json) =
-        crate::auth::AuthState::get_user_dek_and_credential(state.db(), &user_id, &account_id)
-            .await
-            .map_err(|e| PimError::SyncError(e.to_string()))?;
-    let password = crate::imap::decrypt_account_password(&credential_json, &dek)
-        .map_err(|e| PimError::SyncError(e.to_string()))?;
+    let password = load_dav_basic_password(db, &user_id, &account_id).await?;
 
     let client = crate::dav::DavClient::new(email, password, &base_url)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
