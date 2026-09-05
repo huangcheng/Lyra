@@ -26,6 +26,8 @@ pub struct Model {
     pub smtp_security: Option<String>,
     pub smtp_auth_type: Option<String>,
     pub smtp_credential: Option<String>,
+    /// Optional DEK-encrypted PIM / app password for CardDAV/CalDAV.
+    pub pim_credential: Option<String>,
     pub auto_config_source: Option<String>,
     /// Compose signature (plain text or simple HTML).
     pub signature: Option<String>,
