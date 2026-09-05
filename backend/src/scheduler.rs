@@ -296,6 +296,15 @@ pub fn start_scheduler(db: DbPool, poll_secs: u64) {
                     tracing::error!(%error, "scheduler poll failed");
                 }
             }
+            match crate::ics::refresh_due_subscriptions(&db).await {
+                Ok(n) if n > 0 => {
+                    tracing::debug!(refreshed = n, "ICS subscriptions refreshed");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "ICS subscription refresh pass failed");
+                }
+            }
         }
     });
 }

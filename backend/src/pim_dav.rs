@@ -11,7 +11,7 @@ use sea_orm::{ColumnTrait, ConnectionTrait, Value};
 
 use crate::dav::DavClient;
 use crate::dav_protocol::DavItem;
-use crate::entities::{calendar_event, contact, dav_cursor};
+use crate::entities::{calendar_event, contact, dav_cursor, mail_account};
 use crate::storage::DbPool;
 
 pub(crate) struct DavSyncOutcome {
@@ -451,6 +451,76 @@ async fn upsert_event(
     Ok(())
 }
 
+/// Whether account create/update should attempt CardDAV/CalDAV discovery.
+/// Bearer (API-token) accounts skip DAV — providers expect an app password
+/// on Basic auth for CardDAV/CalDAV (e.g. Fastmail).
+pub(crate) fn should_auto_discover_pim(auth_type: &str) -> bool {
+    !auth_type.eq_ignore_ascii_case("bearer")
+}
+
+/// RFC 6764 discovery from an email + password (no DB). Used by account
+/// create/update auto-discover and by `POST …/pim/discover`.
+pub(crate) async fn discover_homesets(
+    email: &str,
+    password: &str,
+) -> Result<(String, String), crate::dav::DavError> {
+    let domain = email.rsplit('@').next().unwrap_or_default();
+    let bootstraps = bootstrap_origins(domain, email, password);
+    if bootstraps.len() < 2 {
+        return Err(crate::dav::DavError::Protocol(
+            "could not build DAV clients".into(),
+        ));
+    }
+    discover(&bootstraps).await
+}
+
+/// Persist discovered homesets on the mail account row.
+pub(crate) async fn persist_dav_urls(
+    db: &DbPool,
+    account_id: &str,
+    carddav: &str,
+    caldav: &str,
+) -> Result<(), sea_orm::DbErr> {
+    let id = crate::sync::queries::id_value_pub(db, account_id)?;
+    let mut update = Sq::update();
+    update
+        .table(mail_account::Entity)
+        .value(mail_account::Column::CarddavUrl, carddav.to_string())
+        .value(mail_account::Column::CaldavUrl, caldav.to_string())
+        .value(mail_account::Column::UpdatedAt, Expr::current_timestamp())
+        .and_where(mail_account::Column::Id.eq(id));
+    db.orm().execute(&update).await?;
+    Ok(())
+}
+
+/// Best-effort discover + persist. Returns URLs on success; `None` when
+/// skipped or discovery fails (never fails the caller).
+pub(crate) async fn try_auto_discover_pim(
+    db: &crate::storage::DbPool,
+    account_id: &str,
+    email: &str,
+    password: &str,
+    auth_type: &str,
+) -> Option<(String, String)> {
+    if !should_auto_discover_pim(auth_type) {
+        return None;
+    }
+    match discover_homesets(email, password).await {
+        Ok((carddav, caldav)) => {
+            if let Err(error) = persist_dav_urls(db, account_id, &carddav, &caldav).await {
+                tracing::warn!(%error, account_id, "failed to persist DAV URLs after discover");
+                return None;
+            }
+            tracing::info!(account_id, %carddav, %caldav, "auto-discovered CardDAV/CalDAV");
+            Some((carddav, caldav))
+        }
+        Err(error) => {
+            tracing::info!(%error, account_id, "PIM auto-discover skipped");
+            None
+        }
+    }
+}
+
 /// RFC 6764 discovery for both protocols; returns discovered URLs.
 /// Bootstrap origins for RFC 6764 discovery. Provider hints cover servers
 /// that publish neither well-known nor SRV (Fastmail documents fixed DAV
@@ -590,5 +660,21 @@ mod tests {
         // The cursor kinds are the dav_cursor PK; changing them orphans
         // stored tokens.
         assert_eq!(["carddav", "caldav"].len(), 2);
+    }
+
+    #[test]
+    fn auto_discover_skips_bearer_auth() {
+        assert!(super::should_auto_discover_pim("password"));
+        assert!(!super::should_auto_discover_pim("bearer"));
+        assert!(!super::should_auto_discover_pim("Bearer"));
+    }
+
+    #[test]
+    fn fastmail_bootstrap_is_direct_dav_root() {
+        let boots = super::bootstrap_origins("fastmail.com", "user@fastmail.com", "app-password");
+        assert_eq!(boots.len(), 2);
+        assert!(boots[0].direct);
+        assert!(boots[0].origin.contains("carddav.fastmail.com"));
+        assert!(boots[1].origin.contains("caldav.fastmail.com"));
     }
 }

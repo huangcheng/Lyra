@@ -469,7 +469,9 @@
       "syncCalendars": "同步日历",
       "discovered": "CardDAV {carddav} · CalDAV {caldav}",
       "synced": "同步 {synced} 条，移除 {removed} 条",
-      "skipped": "未配置——请先运行自动发现"
+      "skipped": "未配置——请先运行自动发现",
+      "autoDiscovered": "已自动发现此账户的 CardDAV/CalDAV",
+      "autoDiscoverNone": "未发现 CardDAV/CalDAV（可能需要应用专用密码）"
     }
   },
   "contacts": {
@@ -481,18 +483,37 @@
     "email": "邮箱",
     "phone": "电话",
     "organisation": "组织",
-    "selectContact": "选择联系人查看详情"
+    "selectContact": "选择联系人查看详情",
+    "all": "全部联系人",
+    "addressBooks": "通讯录",
+    "personal": "个人",
+    "shared": "共享",
+    "compose": "写信",
+    "call": "呼叫",
+    "addBook": "添加通讯录",
+    "addBookSoon": "即将支持添加 CardDAV 来源"
   },
   "calendar": {
     "title": "日历",
     "calendars": "日历列表",
+    "sources": "来源",
     "today": "今天",
     "allDay": "全天",
     "noTitle": "无标题",
     "empty": "暂无日历",
-    "emptyHint": "同步后，账户中的日历会显示在这里。",
+    "emptyHint": "在设置中同步邮件账户的日历，然后在此刷新。",
     "loadError": "无法加载日历。",
     "moreEvents": "还有 {{count}} 项",
+    "refresh": "刷新",
+    "addSubscription": "添加订阅",
+    "addSubscriptionSoon": "ICS 订阅即将支持",
+    "addSubscriptionHint": "粘贴公开的 https:// 或 webcal:// ICS 日历地址。",
+    "subscriptionName": "名称（可选）",
+    "view": {
+      "day": "天",
+      "week": "周",
+      "month": "月"
+    },
     "days": {
       "sun": "日",
       "mon": "一",

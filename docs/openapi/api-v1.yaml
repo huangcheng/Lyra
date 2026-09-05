@@ -1027,6 +1027,11 @@ paths:
           description: Only contacts from this mail account
           schema:
             type: string
+        - name: addressbookUrl
+          in: query
+          description: Exact CardDAV collection href (Personal / Shared books)
+          schema:
+            type: string
         - name: q
           in: query
           description: Substring match on display name or email addresses
@@ -1239,6 +1244,172 @@ paths:
                     type: string
         "404":
           description: Account not found or not accessible
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/calendar-subscriptions:
+    get:
+      tags: [pim]
+      summary: List ICS / webcal calendar subscriptions
+      responses:
+        "200":
+          description: Subscription list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CalendarSubscription"
+    post:
+      tags: [pim]
+      summary: Add an ICS / webcal subscription
+      description: |
+        Accepts public `https://` or `webcal://` (rewritten to https) feed URLs.
+        Authenticated feeds are not supported. Fetches and caches events on create.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                name:
+                  type: string
+                color:
+                  type: string
+      responses:
+        "201":
+          description: Created subscription
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarSubscription"
+        "400":
+          description: Invalid URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/calendar-subscriptions/{id}:
+    patch:
+      tags: [pim]
+      summary: Update a calendar subscription
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                color:
+                  type: string
+                isActive:
+                  type: boolean
+      responses:
+        "200":
+          description: Updated subscription
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarSubscription"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    delete:
+      tags: [pim]
+      summary: Delete a calendar subscription and its cached events
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/calendar-subscriptions/{id}/refresh:
+    post:
+      tags: [pim]
+      summary: Refresh an ICS subscription now
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Refresh result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  synced:
+                    type: integer
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/calendar-subscriptions/{id}/events:
+    get:
+      tags: [pim]
+      summary: List cached events for an ICS subscription
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: start
+          in: query
+          schema:
+            type: string
+        - name: end
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Event list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SubscriptionEvent"
+        "404":
+          description: Subscription not found
           content:
             application/json:
               schema:
@@ -2058,6 +2229,10 @@ components:
         photoPath:
           nullable: true
           type: string
+        addressbookUrl:
+          nullable: true
+          type: string
+          description: CardDAV collection href this contact was synced from
         createdAt:
           type: string
         updatedAt:
@@ -2122,6 +2297,62 @@ components:
         createdAt:
           type: string
         updatedAt:
+          type: string
+
+    CalendarSubscription:
+      type: object
+      properties:
+        id:
+          type: string
+        url:
+          type: string
+        name:
+          type: string
+        color:
+          nullable: true
+          type: string
+        isActive:
+          type: boolean
+        lastFetchedAt:
+          nullable: true
+          type: string
+        lastError:
+          nullable: true
+          type: string
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    SubscriptionEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        subscriptionId:
+          type: string
+        summary:
+          nullable: true
+          type: string
+        description:
+          nullable: true
+          type: string
+        dtstart:
+          nullable: true
+          type: string
+        dtend:
+          nullable: true
+          type: string
+        location:
+          nullable: true
+          type: string
+        isAllDay:
+          type: boolean
+        recurrenceRule:
+          nullable: true
+          type: string
+        status:
+          nullable: true
           type: string
 
     RecipientKeyLookup:

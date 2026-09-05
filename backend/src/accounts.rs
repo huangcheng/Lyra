@@ -500,6 +500,21 @@ async fn create_account(
         tracing::warn!(%error, account_id = %id, "failed to enqueue sync after create");
     }
 
+    // Thunderbird-style: discover CardDAV/CalDAV while adding the account.
+    // Best-effort — mail create must not fail if the provider has no DAV.
+    let (carddav_url, caldav_url) = match crate::pim_dav::try_auto_discover_pim(
+        db,
+        &id,
+        &body.email_address,
+        &body.password,
+        &auth_type,
+    )
+    .await
+    {
+        Some((c, l)) => (Some(c), Some(l)),
+        None => (None, None),
+    };
+
     Ok((
         StatusCode::CREATED,
         Json(Account {
@@ -513,8 +528,8 @@ async fn create_account(
             smtp_host: body.smtp_host,
             smtp_port: body.smtp_port,
             smtp_security,
-            carddav_url: None,
-            caldav_url: None,
+            carddav_url,
+            caldav_url,
             signature: None,
             auth_type: Some(auth_type),
             jmap_base_url: jmap_base_url.clone(),
@@ -697,7 +712,32 @@ async fn update_account(
         crate::sync::jmap_client::JmapSeam::evict(&id);
     }
 
-    let account = find_account(db, id_bind, user_bind).await?;
+    let mut account = find_account(db, id_bind, user_bind).await?;
+
+    // Re-run DAV discovery when the password is refreshed and the account
+    // still has no homesets (and the caller did not set them explicitly).
+    if body.password.is_some()
+        && body.carddav_url.is_none()
+        && body.caldav_url.is_none()
+        && account.carddav_url.as_deref().unwrap_or("").is_empty()
+        && account.caldav_url.as_deref().unwrap_or("").is_empty()
+    {
+        let auth = account.auth_type.as_deref().unwrap_or("password");
+        if let Some(password) = &body.password
+            && let Some((c, l)) = crate::pim_dav::try_auto_discover_pim(
+                db,
+                &id,
+                &account.email_address,
+                password,
+                auth,
+            )
+            .await
+        {
+            account.carddav_url = Some(c);
+            account.caldav_url = Some(l);
+        }
+    }
+
     Ok(Json(account))
 }
 

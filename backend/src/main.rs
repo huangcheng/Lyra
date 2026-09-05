@@ -38,6 +38,8 @@ mod opengpg;
 mod pgtest;
 mod pim;
 mod pim_dav;
+mod pim_subscriptions;
+mod ics;
 mod plugins;
 mod privacy;
 mod protocol;
@@ -157,6 +159,7 @@ fn api_router(auth_state: auth::AuthState) -> Router {
         .route("/version", axum::routing::get(version))
         .merge(accounts::routes())
         .merge(pim::routes())
+        .merge(pim_subscriptions::routes())
         .merge(sync::routes())
         .merge(stats::routes())
         .merge(privacy::routes())

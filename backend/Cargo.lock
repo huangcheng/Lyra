@@ -928,6 +928,7 @@ checksum = "ce2548391e9c1929c21bf6aa2680af86fe4c1b33e6cea9ac1cfeec0bd11218cf"
 dependencies = [
  "compression-core",
  "flate2",
+ "memchr",
 ]
 
 [[package]]
@@ -2741,6 +2742,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "encoding_rs",
+ "flate2",
  "futures-util",
  "hkdf 0.12.4",
  "hmac 0.12.1",
@@ -5425,6 +5427,7 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
+ "async-compression",
  "bitflags",
  "bytes",
  "futures-core",

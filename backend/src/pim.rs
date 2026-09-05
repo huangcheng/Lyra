@@ -61,6 +61,9 @@ pub struct Contact {
     pub phone_numbers: Vec<String>,
     pub organisation: Option<String>,
     pub photo_path: Option<String>,
+    /// CardDAV collection href this contact was synced from (when known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addressbook_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -101,7 +104,11 @@ pub struct CalendarEvent {
 /// Query parameters for listing contacts.
 #[derive(Debug, Deserialize)]
 pub struct ListContactsQuery {
+    #[serde(alias = "accountId")]
     pub account_id: Option<String>,
+    /// Exact CardDAV collection href filter (Personal / Shared books).
+    #[serde(alias = "addressbookUrl")]
+    pub addressbook_url: Option<String>,
     pub q: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -132,6 +139,8 @@ pub enum PimError {
     AccountNotFound,
     #[error("sync error: {0}")]
     SyncError(String),
+    #[error("{0}")]
+    InvalidInput(String),
     #[error("authentication required")]
     Unauthorized,
 }
@@ -155,6 +164,9 @@ impl IntoResponse for PimError {
                 self.to_string(),
                 Some("unauthorized"),
             ),
+            PimError::InvalidInput(msg) => {
+                (StatusCode::BAD_REQUEST, msg.clone(), Some("invalid_input"))
+            }
             PimError::Database(_) | PimError::SyncError(_) => {
                 tracing::error!(error = %self, "pim request failed");
                 (
@@ -212,18 +224,6 @@ pub(crate) fn ts_value(db: &DbPool, raw: Option<&str>) -> Value {
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => Value::ChronoDateTimeUtc(None),
         },
-    }
-}
-
-/// `updated_at` write, shaped like the legacy `datetime('now')` / `NOW()`
-/// defaults so sqlite rows keep their `YYYY-MM-DD HH:MM:SS` text format.
-fn now_value(db: &DbPool) -> Value {
-    match db {
-        DbPool::Sqlite(_) => {
-            Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
-        }
-        #[cfg(feature = "postgres")]
-        DbPool::Postgres(_) => Value::ChronoDateTimeUtc(Some(Utc::now())),
     }
 }
 
@@ -289,6 +289,7 @@ fn contact_from_row(row: &QueryResult) -> Result<Contact, PimError> {
         phone_numbers: json_array(row, "phone_numbers"),
         organisation: row.try_get("", "organisation").map_err(orm_err)?,
         photo_path: row.try_get("", "photo_path").map_err(orm_err)?,
+        addressbook_url: row.try_get("", "addressbook_url").ok().flatten(),
         created_at: row_ts(row, "created_at")?,
         updated_at: row_ts(row, "updated_at")?,
     })
@@ -334,6 +335,7 @@ fn add_contact_columns(query: &mut SelectStatement) {
         .column(contact::Column::PhoneNumbers)
         .column(contact::Column::Organisation)
         .column(contact::Column::PhotoPath)
+        .column(contact::Column::AddressbookUrl)
         .column(contact::Column::CreatedAt)
         .column(contact::Column::UpdatedAt);
 }
@@ -386,7 +388,11 @@ async fn list_contacts(
 
     if let Some(account_id) = &query.account_id {
         stmt.and_where(contact::Column::AccountId.eq(id_value(db, account_id)?));
-    } else if let Some(search) = &query.q {
+    }
+    if let Some(book) = &query.addressbook_url {
+        stmt.and_where(contact::Column::AddressbookUrl.eq(book.as_str()));
+    }
+    if let Some(search) = &query.q {
         use sea_orm::sea_query::extension::postgres::PgExpr as _;
         // Postgres needs a JSONB text cast for the address search; SQLite's
         // LIKE is already ASCII case-insensitive like ILIKE. Match operators
@@ -676,9 +682,6 @@ async fn pim_discover(
         .ok_or(PimError::AccountNotFound)?;
     let email: String = row.try_get("", "email_address").map_err(orm_err)?;
 
-    // Bootstrap origin from the mail domain (SRV host discovery is a
-    // follow-up; well-known on the mail host covers common providers).
-    let domain = email.rsplit('@').next().unwrap_or_default().to_string();
     let (dek, credential_json) =
         crate::auth::AuthState::get_user_dek_and_credential(state.db(), &user_id, &account_id)
             .await
@@ -686,22 +689,12 @@ async fn pim_discover(
     let password = crate::imap::decrypt_account_password(&credential_json, &dek)
         .map_err(|e| PimError::SyncError(e.to_string()))?;
 
-    let bootstraps = crate::pim_dav::bootstrap_origins(&domain, &email, &password);
-    if bootstraps.len() < 2 {
-        return Err(PimError::SyncError("could not build DAV clients".into()));
-    }
-    let (carddav, caldav) = crate::pim_dav::discover(&bootstraps)
+    let (carddav, caldav) = crate::pim_dav::discover_homesets(&email, &password)
         .await
         .map_err(|e| PimError::SyncError(e.to_string()))?;
-
-    let mut update = Sq::update();
-    update
-        .table(mail_account::Entity)
-        .value(mail_account::Column::CarddavUrl, carddav.clone())
-        .value(mail_account::Column::CaldavUrl, caldav.clone())
-        .value(mail_account::Column::UpdatedAt, now_value(db))
-        .and_where(mail_account::Column::Id.eq(id_value(db, &account_id)?));
-    db.orm().execute(&update).await.map_err(orm_err)?;
+    crate::pim_dav::persist_dav_urls(db, &account_id, &carddav, &caldav)
+        .await
+        .map_err(orm_err)?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",

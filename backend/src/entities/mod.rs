@@ -18,6 +18,7 @@
 pub mod attachment;
 pub mod calendar;
 pub mod calendar_event;
+pub mod calendar_subscription;
 pub mod contact;
 pub mod dav_cursor;
 pub mod folder;
@@ -26,6 +27,7 @@ pub mod lyra_user;
 pub mod mail_account;
 pub mod message;
 pub mod opengpg_key;
+pub mod subscription_event;
 pub mod sync_cursor;
 pub mod thread;
 

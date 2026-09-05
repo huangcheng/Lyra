@@ -36,6 +36,9 @@ batched multiget, delete reconciliation, and two-way writes.
 
 1. Resolve base: stored `carddav_url`/`caldav_url` if set, else RFC 6764
    discovery from the account's mail domain (stored on success).
+   **Account create / password update** (password auth only, not bearer)
+   runs the same discovery best-effort and persists homesets — Thunderbird-
+   style autoconfig. Failures do not block mail account creation.
 2. Discover homeset → collections (addressbooks; calendars).
 3. Per collection: if we hold a sync-token → `sync-collection` REPORT
    (limit 500; loop while `sync-token` element lacks `valid` attr i.e.

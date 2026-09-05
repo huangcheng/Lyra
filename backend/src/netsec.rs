@@ -167,7 +167,7 @@ pub fn validate_server_url(url: &str) -> Result<(), String> {
 ///
 /// Only literal IPs (checked by range) and `localhost` names qualify; DNS
 /// names are treated as public because we do not resolve at config-entry time.
-fn host_is_local(host: &str) -> bool {
+pub fn host_is_local(host: &str) -> bool {
     let bare = host.trim_matches(['[', ']']);
     if bare.eq_ignore_ascii_case("localhost") || bare.to_ascii_lowercase().ends_with(".localhost") {
         return true;

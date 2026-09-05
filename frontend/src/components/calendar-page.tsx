@@ -1,10 +1,17 @@
 /**
- * Calendar subsystem — Notion/Thunderbird-style shell over CalDAV data.
+ * Calendar subsystem — CalDAV sources + ICS / webcal subscriptions.
  */
 
-import { useState, useEffect, useMemo, type CSSProperties } from 'react';
+import { useState, useEffect, useMemo, type CSSProperties, type FormEvent } from 'react';
 import { Link } from '@tanstack/react-router';
-import { Calendar as CalendarIcon, ChevronLeft, ChevronRight, RefreshCw, X } from 'lucide-react';
+import {
+  Calendar as CalendarIcon,
+  ChevronLeft,
+  ChevronRight,
+  RefreshCw,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { t } from '../i18n';
 import { api } from '../lib/api-client';
 import {
@@ -20,10 +27,45 @@ import {
 } from '@/lib/calendar-grid';
 import { EmptyState } from './empty-state';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '../stores/ui';
 
+type SourceKind = 'caldav' | 'ics';
+
 interface CalSource {
+  kind: SourceKind;
+  id: string;
+  /** Present for CalDAV only. */
+  accountId?: string;
+  name: string;
+  color?: string;
+  url?: string;
+  lastError?: string | null;
+}
+
+interface CalEvent {
+  id: string;
+  summary?: string;
+  description?: string;
+  dtstart?: string;
+  dtend?: string;
+  location?: string;
+  isAllDay: boolean;
+  _sourceId?: string;
+  _color?: string;
+}
+
+interface SubApi {
+  id: string;
+  url: string;
+  name: string;
+  color?: string;
+  isActive: boolean;
+  lastError?: string | null;
+}
+
+interface CalApi {
   id: string;
   accountId: string;
   name: string;
@@ -31,28 +73,12 @@ interface CalSource {
   isActive: boolean;
 }
 
-interface CalEvent {
-  id: string;
-  calendarId?: string;
-  summary?: string;
-  description?: string;
-  dtstart?: string;
-  dtend?: string;
-  location?: string;
-  isAllDay: boolean;
-  status?: string;
-  recurrenceRule?: string;
-  /** Set client-side when merging multi-calendar fetches. */
-  _calendarId?: string;
-  _color?: string;
-}
-
 const WEEKDAY_ORDER = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
 
 export function CalendarPage() {
   const locale = useUIStore((s) => s.locale);
   const locTag = locale === 'zh' ? 'zh-CN' : 'en-US';
-  const [calendars, setCalendars] = useState<CalSource[]>([]);
+  const [sources, setSources] = useState<CalSource[]>([]);
   const [visibleIds, setVisibleIds] = useState<Set<string>>(new Set());
   const [events, setEvents] = useState<CalEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -62,11 +88,42 @@ export function CalendarPage() {
   const [anchor, setAnchor] = useState(() => new Date());
   const [selectedEvent, setSelectedEvent] = useState<CalEvent | null>(null);
   const [now, setNow] = useState(() => new Date());
+  const [addOpen, setAddOpen] = useState(false);
+  const [addUrl, setAddUrl] = useState('');
+  const [addName, setAddName] = useState('');
+  const [addBusy, setAddBusy] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 60_000);
     return () => window.clearInterval(id);
   }, []);
+
+  async function loadSources(): Promise<CalSource[]> {
+    const [cals, subs] = await Promise.all([
+      api<CalApi[]>('/calendars'),
+      api<SubApi[]>('/calendar-subscriptions').catch(() => [] as SubApi[]),
+    ]);
+    const merged: CalSource[] = [
+      ...cals.map((c) => ({
+        kind: 'caldav' as const,
+        id: c.id,
+        accountId: c.accountId,
+        name: c.name,
+        color: c.color,
+      })),
+      ...subs.map((s) => ({
+        kind: 'ics' as const,
+        id: s.id,
+        name: s.name,
+        color: s.color,
+        url: s.url,
+        lastError: s.lastError,
+      })),
+    ];
+    setSources(merged);
+    return merged;
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -74,10 +131,9 @@ export function CalendarPage() {
       try {
         setLoading(true);
         setError(null);
-        const data = await api<CalSource[]>('/calendars');
+        const merged = await loadSources();
         if (cancelled) return;
-        setCalendars(data);
-        setVisibleIds(new Set(data.map((c) => c.id)));
+        setVisibleIds(new Set(merged.map((c) => c.id)));
       } catch (err: unknown) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : String(err));
@@ -93,11 +149,17 @@ export function CalendarPage() {
 
   const colorById = useMemo(() => {
     const m = new Map<string, string>();
-    for (const c of calendars) {
+    for (const c of sources) {
       m.set(c.id, c.color || 'var(--unread)');
     }
     return m;
-  }, [calendars]);
+  }, [sources]);
+
+  const kindById = useMemo(() => {
+    const m = new Map<string, SourceKind>();
+    for (const c of sources) m.set(c.id, c.kind);
+    return m;
+  }, [sources]);
 
   async function loadEvents(ids: Set<string>, when: Date, v: CalendarView) {
     if (ids.size === 0) {
@@ -108,11 +170,16 @@ export function CalendarPage() {
     const q = `start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
     const chunks = await Promise.all(
       [...ids].map(async (id) => {
+        const kind = kindById.get(id) ?? 'caldav';
+        const path =
+          kind === 'ics'
+            ? `/calendar-subscriptions/${id}/events?${q}`
+            : `/calendars/${id}/events?${q}`;
         try {
-          const rows = await api<CalEvent[]>(`/calendars/${id}/events?${q}`);
+          const rows = await api<CalEvent[]>(path);
           return rows.map((e) => ({
             ...e,
-            _calendarId: id,
+            _sourceId: id,
             _color: colorById.get(id) || 'var(--unread)',
           }));
         } catch {
@@ -137,11 +204,10 @@ export function CalendarPage() {
     return () => {
       cancelled = true;
     };
-    // colorById identity changes with calendars; visibleIds/anchor/view drive fetch
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional
-  }, [loading, visibleIds, anchor, view, calendars]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch drivers
+  }, [loading, visibleIds, anchor, view, sources]);
 
-  function toggleCalendar(id: string) {
+  function toggleSource(id: string) {
     setVisibleIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -153,31 +219,66 @@ export function CalendarPage() {
   async function refresh() {
     setRefreshing(true);
     try {
-      // Re-sync CalDAV for each distinct account, then reload events
-      const accountIds = [...new Set(calendars.map((c) => c.accountId))];
-      await Promise.all(
-        accountIds.map((aid) => api(`/accounts/${aid}/calendars/sync`).catch(() => undefined)),
-      );
-      const data = await api<CalSource[]>('/calendars');
-      setCalendars(data);
-      setVisibleIds((prev) => {
-        const next = new Set<string>();
-        for (const c of data) {
-          if (prev.has(c.id) || prev.size === 0) next.add(c.id);
-        }
-        if (next.size === 0) data.forEach((c) => next.add(c.id));
-        return next;
-      });
-      await loadEvents(
-        new Set(data.filter((c) => visibleIds.has(c.id) || visibleIds.size === 0).map((c) => c.id)),
-        anchor,
-        view,
-      );
+      const accountIds = [
+        ...new Set(sources.filter((s) => s.kind === 'caldav').map((s) => s.accountId!).filter(Boolean)),
+      ];
+      await Promise.all([
+        ...accountIds.map((aid) => api(`/accounts/${aid}/calendars/sync`).catch(() => undefined)),
+        ...sources
+          .filter((s) => s.kind === 'ics')
+          .map((s) =>
+            api(`/calendar-subscriptions/${s.id}/refresh`, { method: 'POST' }).catch(() => undefined),
+          ),
+      ]);
+      const merged = await loadSources();
+      const nextVisible = new Set<string>();
+      for (const s of merged) {
+        if (visibleIds.has(s.id) || visibleIds.size === 0) nextVisible.add(s.id);
+      }
+      if (nextVisible.size === 0) merged.forEach((s) => nextVisible.add(s.id));
+      setVisibleIds(nextVisible);
+      await loadEvents(nextVisible, anchor, view);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRefreshing(false);
     }
+  }
+
+  async function submitAdd(e: FormEvent) {
+    e.preventDefault();
+    setAddBusy(true);
+    setAddError(null);
+    try {
+      const created = await api<SubApi>('/calendar-subscriptions', {
+        method: 'POST',
+        body: JSON.stringify({
+          url: addUrl.trim(),
+          name: addName.trim() || undefined,
+        }),
+      });
+      setAddOpen(false);
+      setAddUrl('');
+      setAddName('');
+      const merged = await loadSources();
+      setVisibleIds((prev) => new Set([...prev, created.id]));
+      await loadEvents(new Set([...visibleIds, created.id]), anchor, view);
+      void merged;
+    } catch (err: unknown) {
+      setAddError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAddBusy(false);
+    }
+  }
+
+  async function removeSub(id: string) {
+    await api(`/calendar-subscriptions/${id}`, { method: 'DELETE' });
+    setVisibleIds((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+    await loadSources();
   }
 
   function formatEventTime(event: CalEvent): string {
@@ -297,8 +398,6 @@ export function CalendarPage() {
             );
           })}
         </div>
-
-        {/* All-day band */}
         <div
           className="grid shrink-0 border-b bg-background"
           style={{ gridTemplateColumns: `3.5rem repeat(${days.length}, minmax(0, 1fr))` }}
@@ -328,7 +427,6 @@ export function CalendarPage() {
             );
           })}
         </div>
-
         <div className="relative min-h-0 flex-1 overflow-y-auto">
           <div
             className="grid"
@@ -414,13 +512,7 @@ export function CalendarPage() {
             </Button>
           ))}
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-8"
-          onClick={() => setAnchor(new Date())}
-        >
+        <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => setAnchor(new Date())}>
           {t(locale, 'calendar.today')}
         </Button>
         <Button
@@ -455,7 +547,7 @@ export function CalendarPage() {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-52 shrink-0 flex-col gap-1 overflow-y-auto border-r bg-muted/15 p-3">
+        <aside className="flex w-56 shrink-0 flex-col gap-1 overflow-y-auto border-r bg-muted/15 p-3">
           <p className="px-1 text-[10.5px] font-medium tracking-wide text-muted-foreground uppercase">
             {t(locale, 'calendar.sources')}
           </p>
@@ -463,39 +555,59 @@ export function CalendarPage() {
             <div className="px-1 text-sm text-muted-foreground">{t(locale, 'common.loading')}</div>
           ) : error ? (
             <div className="px-1 text-sm text-destructive">{t(locale, 'calendar.loadError')}</div>
-          ) : calendars.length === 0 ? (
+          ) : sources.length === 0 ? (
             <EmptyState
               icon={CalendarIcon}
               title={t(locale, 'calendar.empty')}
               hint={t(locale, 'calendar.emptyHint')}
             />
           ) : (
-            calendars.map((cal) => (
-              <label
-                key={cal.id}
-                className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1.5 text-sm hover:bg-accent"
-              >
-                <input
-                  type="checkbox"
-                  className="size-3.5 accent-[var(--unread)]"
-                  checked={visibleIds.has(cal.id)}
-                  onChange={() => toggleCalendar(cal.id)}
-                />
-                <span
-                  className="h-2.5 w-2.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: cal.color || 'var(--unread)' }}
-                />
-                <span className="truncate">{cal.name}</span>
-              </label>
+            sources.map((src) => (
+              <div key={src.id} className="group flex items-start gap-1 rounded-md px-1 py-1 hover:bg-accent">
+                <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-0.5 text-sm">
+                  <input
+                    type="checkbox"
+                    className="size-3.5 accent-[var(--unread)]"
+                    checked={visibleIds.has(src.id)}
+                    onChange={() => toggleSource(src.id)}
+                  />
+                  <span
+                    className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: src.color || 'var(--unread)' }}
+                  />
+                  <span className="min-w-0 truncate">
+                    {src.name}
+                    {src.kind === 'ics' ? (
+                      <span className="ml-1 text-[10px] text-muted-foreground">ICS</span>
+                    ) : null}
+                  </span>
+                </label>
+                {src.kind === 'ics' ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6 opacity-0 group-hover:opacity-100"
+                    aria-label={t(locale, 'common.delete')}
+                    onClick={() => void removeSub(src.id)}
+                  >
+                    <Trash2 className="size-3" />
+                  </Button>
+                ) : null}
+              </div>
             ))
           )}
+          {sources.some((s) => s.lastError) ? (
+            <p className="px-1 text-[10px] text-destructive">
+              {sources.find((s) => s.lastError)?.lastError}
+            </p>
+          ) : null}
           <Button
             type="button"
             variant="outline"
             size="sm"
             className="mt-auto h-8 justify-start text-xs"
-            disabled
-            title={t(locale, 'calendar.addSubscriptionSoon')}
+            onClick={() => setAddOpen(true)}
           >
             + {t(locale, 'calendar.addSubscription')}
           </Button>
@@ -534,9 +646,7 @@ export function CalendarPage() {
                 })}
               </div>
             ) : null}
-            {selectedEvent.location ? (
-              <div className="text-sm">{selectedEvent.location}</div>
-            ) : null}
+            {selectedEvent.location ? <div className="text-sm">{selectedEvent.location}</div> : null}
             {selectedEvent.description ? (
               <div className="text-sm whitespace-pre-wrap text-muted-foreground">
                 {selectedEvent.description}
@@ -545,6 +655,39 @@ export function CalendarPage() {
           </aside>
         ) : null}
       </div>
+
+      {addOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <form
+            onSubmit={(e) => void submitAdd(e)}
+            className="w-full max-w-md space-y-3 rounded-lg border bg-background p-4 shadow-lg"
+          >
+            <h2 className="text-base font-semibold">{t(locale, 'calendar.addSubscription')}</h2>
+            <p className="text-xs text-muted-foreground">{t(locale, 'calendar.addSubscriptionHint')}</p>
+            <Input
+              required
+              placeholder="https://… or webcal://…"
+              value={addUrl}
+              onChange={(e) => setAddUrl(e.target.value)}
+              autoFocus
+            />
+            <Input
+              placeholder={t(locale, 'calendar.subscriptionName')}
+              value={addName}
+              onChange={(e) => setAddName(e.target.value)}
+            />
+            {addError ? <p className="text-sm text-destructive">{addError}</p> : null}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="ghost" onClick={() => setAddOpen(false)}>
+                {t(locale, 'common.cancel')}
+              </Button>
+              <Button type="submit" disabled={addBusy || !addUrl.trim()}>
+                {t(locale, 'common.add')}
+              </Button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </div>
   );
 }

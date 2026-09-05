@@ -636,6 +636,7 @@ export function SettingsPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const wasEditing = !!editingAccount;
     try {
       const url = editingAccount ? `/accounts/${editingAccount.id}` : '/accounts';
       const method = editingAccount ? 'PUT' : 'POST';
@@ -661,14 +662,34 @@ export function SettingsPage() {
         body.authType = isJmap ? formData.authType : undefined;
         body.jmapBaseUrl = isJmap && formData.jmapBaseUrl ? formData.jmapBaseUrl : null;
       }
-      await api(url, {
+      const saved = await api<{
+        id: string;
+        carddavUrl?: string | null;
+        caldavUrl?: string | null;
+      }>(url, {
         method,
         body: JSON.stringify(body),
       });
       setShowAddForm(false);
       setEditingAccount(null);
       resetForm();
-      fetchAccounts();
+      await fetchAccounts();
+      if (!wasEditing) {
+        const found = !!(saved.carddavUrl || saved.caldavUrl);
+        setPimResult((prev) => ({
+          ...prev,
+          [saved.id]: found
+            ? t(locale, 'settings.pim.autoDiscovered')
+            : t(locale, 'settings.pim.autoDiscoverNone'),
+        }));
+      }
+      // After discover (create or password refresh), pull PIM so Contacts/Calendar fill in.
+      if (saved.carddavUrl) {
+        void runPim(saved.id, 'contacts');
+      }
+      if (saved.caldavUrl) {
+        void runPim(saved.id, 'calendars');
+      }
     } catch (err: any) {
       setError(err.message);
     }
