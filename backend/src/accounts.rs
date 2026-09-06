@@ -598,12 +598,10 @@ async fn update_account(
         .map(|s| crate::netsec::normalize_security_mode(s).map(str::to_string))
         .transpose()
         .map_err(AccountError::InvalidInput)?;
-    if let Some(url) = &body.carddav_url {
-        crate::netsec::validate_server_url(url).map_err(AccountError::InvalidInput)?;
-    }
-    if let Some(url) = &body.caldav_url {
-        crate::netsec::validate_server_url(url).map_err(AccountError::InvalidInput)?;
-    }
+    let carddav_url = normalize_optional_dav_url(body.carddav_url.as_deref())
+        .map_err(AccountError::InvalidInput)?;
+    let caldav_url = normalize_optional_dav_url(body.caldav_url.as_deref())
+        .map_err(AccountError::InvalidInput)?;
 
     let has_update = body.display_name.is_some()
         || body.email_address.is_some()
@@ -694,11 +692,29 @@ async fn update_account(
     if let Some(v) = &imap_security {
         updater = updater.col_expr(mail_account::Column::ImapSecurity, Expr::val(v.as_str()));
     }
-    if let Some(v) = &body.carddav_url {
-        updater = updater.col_expr(mail_account::Column::CarddavUrl, Expr::val(v.as_str()));
+    match carddav_url {
+        DavUrlUpdate::Set(v) => {
+            updater = updater.col_expr(mail_account::Column::CarddavUrl, Expr::val(v));
+        }
+        DavUrlUpdate::Clear => {
+            updater = updater.col_expr(
+                mail_account::Column::CarddavUrl,
+                Expr::val(Option::<String>::None),
+            );
+        }
+        DavUrlUpdate::Unchanged => {}
     }
-    if let Some(v) = &body.caldav_url {
-        updater = updater.col_expr(mail_account::Column::CaldavUrl, Expr::val(v.as_str()));
+    match caldav_url {
+        DavUrlUpdate::Set(v) => {
+            updater = updater.col_expr(mail_account::Column::CaldavUrl, Expr::val(v));
+        }
+        DavUrlUpdate::Clear => {
+            updater = updater.col_expr(
+                mail_account::Column::CaldavUrl,
+                Expr::val(Option::<String>::None),
+            );
+        }
+        DavUrlUpdate::Unchanged => {}
     }
     if let Some(v) = &body.signature {
         updater = updater.col_expr(mail_account::Column::Signature, Expr::val(v.as_str()));
@@ -784,6 +800,31 @@ async fn update_account(
     }
 
     Ok(Json(account))
+}
+
+/// What a CardDAV/CalDAV URL field in an update body means.
+#[derive(Debug, PartialEq, Eq)]
+enum DavUrlUpdate {
+    /// Field absent — leave the stored URL alone.
+    Unchanged,
+    /// Empty string — clear the stored URL (PIM disconnect).
+    Clear,
+    /// A trimmed, netsec-validated URL.
+    Set(String),
+}
+
+/// Normalize an optional CardDAV/CalDAV URL from an update body. Trailing '/'
+/// is preserved — DAV homeset URLs conventionally end with one.
+fn normalize_optional_dav_url(url: Option<&str>) -> Result<DavUrlUpdate, String> {
+    let Some(v) = url else {
+        return Ok(DavUrlUpdate::Unchanged);
+    };
+    let trimmed = v.trim();
+    if trimmed.is_empty() {
+        return Ok(DavUrlUpdate::Clear);
+    }
+    crate::netsec::validate_server_url(trimmed)?;
+    Ok(DavUrlUpdate::Set(trimmed.to_string()))
 }
 
 /// Delete a mail account.
@@ -1447,6 +1488,36 @@ mod tests {
         assert!(validate_imap_host("").is_err());
         assert!(validate_imap_host("127.0.0.1").is_err());
         assert!(validate_imap_host("not a host").is_err());
+    }
+
+    #[test]
+    fn dav_url_update_normalizes_and_clears() {
+        // Absent field → no change.
+        assert_eq!(
+            normalize_optional_dav_url(None),
+            Ok(DavUrlUpdate::Unchanged)
+        );
+        // Empty/whitespace → clear the stored URL (disconnect flow).
+        assert_eq!(
+            normalize_optional_dav_url(Some("")),
+            Ok(DavUrlUpdate::Clear)
+        );
+        assert_eq!(
+            normalize_optional_dav_url(Some("   ")),
+            Ok(DavUrlUpdate::Clear)
+        );
+        // Valid URLs pass through trimmed; trailing '/' is preserved
+        // (DAV homesets conventionally end with one).
+        assert_eq!(
+            normalize_optional_dav_url(Some("  https://dav.example.com/dav/ ")),
+            Ok(DavUrlUpdate::Set("https://dav.example.com/dav/".into()))
+        );
+        // Local http is allowed (self-hosted DAV on LAN).
+        assert!(normalize_optional_dav_url(Some("http://localhost:8080/remote.php/dav/")).is_ok());
+        // Public http, non-http schemes, and junk are rejected.
+        assert!(normalize_optional_dav_url(Some("http://dav.example.com/")).is_err());
+        assert!(normalize_optional_dav_url(Some("ftp://dav.example.com/")).is_err());
+        assert!(normalize_optional_dav_url(Some("not a url")).is_err());
     }
 
     #[test]

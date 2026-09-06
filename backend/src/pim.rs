@@ -748,12 +748,15 @@ async fn pim_discover(
 
     let password = load_dav_basic_password(db, &user_id, &account_id).await?;
 
-    let (carddav, caldav) = crate::pim_dav::discover_homesets(&email, &password)
-        .await
-        .map_err(|e| PimError::SyncError(e.to_string()))?;
-    crate::pim_dav::persist_dav_urls(db, &account_id, &carddav, &caldav)
-        .await
-        .map_err(orm_err)?;
+    let (carddav, caldav) =
+        discovery_outcome(crate::pim_dav::discover_homesets(&email, &password).await);
+    // Persist only a full success — a failed discovery must not wipe
+    // previously discovered homesets.
+    if !carddav.is_empty() && !caldav.is_empty() {
+        crate::pim_dav::persist_dav_urls(db, &account_id, &carddav, &caldav)
+            .await
+            .map_err(orm_err)?;
+    }
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -811,9 +814,42 @@ async fn sync_calendars(
     })))
 }
 
+/// Discovery outcome for the HTTP endpoint. DAV-level failures mean "no
+/// server found" — providers without CardDAV/CalDAV answer 404s or redirect
+/// loops on `/.well-known/*`, which is a normal result, not an error.
+/// Mirrors how `try_auto_discover_pim` already treats them.
+fn discovery_outcome(result: Result<(String, String), crate::dav::DavError>) -> (String, String) {
+    match result {
+        Ok(urls) => urls,
+        Err(error) => {
+            tracing::info!(%error, "PIM discover found no DAV server");
+            (String::new(), String::new())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_failures_resolve_to_empty_not_error() {
+        // thundermail.com redirect-loops on /.well-known/carddav — the
+        // endpoint must answer "nothing found", not a masked internal error.
+        let (c, l) = discovery_outcome(Err(crate::dav::DavError::Protocol(
+            "PROPFIND https://thundermail.com/.well-known/carddav: too many redirects".into(),
+        )));
+        assert_eq!((c.as_str(), l.as_str()), ("", ""));
+
+        let (c, l) = discovery_outcome(Ok((
+            "https://dav.example/".into(),
+            "https://cal.example/".into(),
+        )));
+        assert_eq!(
+            (c.as_str(), l.as_str()),
+            ("https://dav.example/", "https://cal.example/")
+        );
+    }
 
     #[tokio::test]
     async fn internal_pim_errors_are_masked() {

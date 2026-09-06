@@ -8,8 +8,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import {
-  CalendarDays,
-  Contact,
   Flag,
   KeyRound,
   Pencil,
@@ -24,14 +22,9 @@ import {
   X,
 } from 'lucide-react';
 
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { t } from '../i18n';
 import { SlimPageNav, type SlimNavItem } from '@/components/slim-page-nav';
+import { PimDialog } from './pim-dialog';
 import { FolderRoleMapping } from './folder-role-mapping';
 import { EncryptionSettings } from './encryption-settings';
 import { NotificationSettings } from './notification-settings';
@@ -113,6 +106,8 @@ interface MailAccount {
   isActive: boolean;
   syncEnabled: boolean;
   hasPimCredential?: boolean;
+  carddavUrl?: string | null;
+  caldavUrl?: string | null;
   lastSyncAt?: string;
   createdAt: string;
   updatedAt: string;
@@ -179,7 +174,7 @@ export function SettingsPage() {
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [pimBusyId, setPimBusyId] = useState<string | null>(null);
   const [pimResult, setPimResult] = useState<Record<string, string>>({});
-  const [pimPasswordDrafts, setPimPasswordDrafts] = useState<Record<string, string>>({});
+  const [pimDialogId, setPimDialogId] = useState<string | null>(null);
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [errorLogOpenId, setErrorLogOpenId] = useState<string | null>(null);
@@ -403,87 +398,29 @@ export function SettingsPage() {
     }
   }
 
-  /** PIM actions: RFC 6764 discovery + CardDAV/CalDAV sync (account-scoped). */
-  async function runPim(id: string, action: 'discover' | 'contacts' | 'calendars') {
+  /** Background PIM sync after account create/repair (dialog handles the
+   * interactive discovery + connect flow). */
+  async function runPim(id: string, action: 'contacts' | 'calendars') {
     try {
       setPimBusyId(id);
       setPimResult((prev) => ({ ...prev, [id]: '' }));
-      if (action === 'discover') {
-        const res = await api<{ carddavUrl?: string; caldavUrl?: string }>(
-          `/accounts/${id}/pim/discover`,
-          { method: 'POST' },
-        );
-        setPimResult((prev) => ({
-          ...prev,
-          [id]: t(locale, 'settings.pim.discovered', {
-            carddav: res.carddavUrl ? '✓' : '—',
-            caldav: res.caldavUrl ? '✓' : '—',
-          }),
-        }));
-        await fetchAccounts();
-      } else {
-        const path = action === 'contacts' ? 'contacts/sync' : 'calendars/sync';
-        const res = await api<{ status?: string; synced?: number; removed?: number }>(
-          `/accounts/${id}/${path}`,
-        );
-        setPimResult((prev) => ({
-          ...prev,
-          [id]:
-            res.status === 'skipped'
-              ? t(locale, 'settings.pim.skipped')
-              : t(locale, 'settings.pim.synced', {
-                  synced: res.synced ?? 0,
-                  removed: res.removed ?? 0,
-                }),
-        }));
-      }
+      const path = action === 'contacts' ? 'contacts/sync' : 'calendars/sync';
+      const res = await api<{ status?: string; synced?: number; removed?: number }>(
+        `/accounts/${id}/${path}`,
+      );
+      setPimResult((prev) => ({
+        ...prev,
+        [id]:
+          res.status === 'skipped'
+            ? t(locale, 'settings.pim.skipped')
+            : t(locale, 'settings.pim.synced', {
+                synced: res.synced ?? 0,
+                removed: res.removed ?? 0,
+              }),
+      }));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       setPimResult((prev) => ({ ...prev, [id]: message }));
-    } finally {
-      setPimBusyId(null);
-    }
-  }
-
-  async function savePimPassword(id: string) {
-    const password = pimPasswordDrafts[id];
-    if (!password?.trim()) return;
-    try {
-      setPimBusyId(id);
-      await api(`/accounts/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ pimPassword: password.trim() }),
-      });
-      setPimResult((prev) => ({
-        ...prev,
-        [id]: t(locale, 'settings.pim.saved'),
-      }));
-      setPimPasswordDrafts((prev) => ({ ...prev, [id]: '' }));
-      await fetchAccounts();
-    } catch (err: unknown) {
-      setPimResult((prev) => ({
-        ...prev,
-        [id]: err instanceof Error ? err.message : String(err),
-      }));
-    } finally {
-      setPimBusyId(null);
-    }
-  }
-
-  async function clearPimPassword(id: string) {
-    try {
-      setPimBusyId(id);
-      await api(`/accounts/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ clearPimPassword: true }),
-      });
-      setPimResult((prev) => ({ ...prev, [id]: t(locale, 'settings.pim.cleared') }));
-      await fetchAccounts();
-    } catch (err: unknown) {
-      setPimResult((prev) => ({
-        ...prev,
-        [id]: err instanceof Error ? err.message : String(err),
-      }));
     } finally {
       setPimBusyId(null);
     }
@@ -1324,13 +1261,14 @@ export function SettingsPage() {
                                 </TooltipTrigger>
                                 <TooltipContent>{syncLabel}</TooltipContent>
                               </Tooltip>
-                              <DropdownMenu>
-                                <DropdownMenuTrigger asChild>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
                                   <Button
                                     variant="ghost"
                                     size="icon-sm"
                                     aria-label={t(locale, 'settings.pim.menu')}
                                     disabled={pimBusyId === account.id}
+                                    onClick={() => setPimDialogId(account.id)}
                                   >
                                     <Radar
                                       className={cn(
@@ -1339,66 +1277,11 @@ export function SettingsPage() {
                                       )}
                                     />
                                   </Button>
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent align="end">
-                                  <DropdownMenuItem
-                                    onClick={() => void runPim(account.id, 'discover')}
-                                  >
-                                    <Radar className="size-3.5" />
-                                    {t(locale, 'settings.pim.discover')}
-                                  </DropdownMenuItem>
-                                  <DropdownMenuItem
-                                    onClick={() => void runPim(account.id, 'contacts')}
-                                  >
-                                    <Contact className="size-3.5" />
-                                    {t(locale, 'settings.pim.syncContacts')}
-                                  </DropdownMenuItem>
-                                  <DropdownMenuItem
-                                    onClick={() => void runPim(account.id, 'calendars')}
-                                  >
-                                    <CalendarDays className="size-3.5" />
-                                    {t(locale, 'settings.pim.syncCalendars')}
-                                  </DropdownMenuItem>
-                                </DropdownMenuContent>
-                              </DropdownMenu>
-                              <div className="flex items-center gap-1">
-                                <input
-                                  type="password"
-                                  value={pimPasswordDrafts[account.id] ?? ''}
-                                  onChange={(e) =>
-                                    setPimPasswordDrafts((prev) => ({
-                                      ...prev,
-                                      [account.id]: e.target.value,
-                                    }))
-                                  }
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') void savePimPassword(account.id);
-                                  }}
-                                  placeholder={t(locale, 'settings.pim.password')}
-                                  aria-label={t(locale, 'settings.pim.password')}
-                                  className="h-7 w-32 rounded-md border border-input bg-transparent px-2 text-[11.5px] outline-none focus-visible:border-foreground/35"
-                                />
-                                {pimPasswordDrafts[account.id]?.trim() ? (
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-7 px-2 text-[11px]"
-                                    disabled={pimBusyId === account.id}
-                                    onClick={() => void savePimPassword(account.id)}
-                                  >
-                                    {t(locale, 'common.save')}
-                                  </Button>
-                                ) : null}
-                                {account.hasPimCredential ? (
-                                  <button
-                                    type="button"
-                                    className="text-[10.5px] text-muted-foreground underline-offset-2 hover:text-destructive hover:underline"
-                                    onClick={() => void clearPimPassword(account.id)}
-                                  >
-                                    {t(locale, 'settings.pim.configured')} ✕
-                                  </button>
-                                ) : null}
-                              </div>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  {t(locale, 'settings.pim.menu')}
+                                </TooltipContent>
+                              </Tooltip>
                               {pimMessage ? (
                                 <span
                                   className="max-w-40 truncate text-[10.5px] text-muted-foreground"
@@ -2250,6 +2133,15 @@ export function SettingsPage() {
             </form>
           </DialogContent>
         </Dialog>
+
+        <PimDialog
+          account={accounts.find((a) => a.id === pimDialogId) ?? null}
+          open={pimDialogId !== null}
+          onOpenChange={(open) => {
+            if (!open) setPimDialogId(null);
+          }}
+          onChanged={() => void fetchAccounts()}
+        />
       </main>
     </div>
   );

@@ -2145,6 +2145,16 @@ components:
           type: string
         syncEnabled:
           type: boolean
+        carddavUrl:
+          type: string
+          description: >-
+            Manual CardDAV homeset override. Empty string clears it (disconnect);
+            non-empty values must be http(s) URLs (https for public hosts).
+        caldavUrl:
+          type: string
+          description: >-
+            Manual CalDAV homeset override. Empty string clears it (disconnect);
+            non-empty values must be http(s) URLs (https for public hosts).
         pimPassword:
           type: string
           description: Write-only CardDAV/CalDAV app password
