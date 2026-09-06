@@ -1121,7 +1121,8 @@ pub(crate) async fn reconcile_folder_deletions(
     sel.expr_as(
         // Read the id as text: the column is UUID on PostgreSQL, where
         // decoding it as String (like the bind fix, 19b9141) type-errors.
-        Expr::col((message::Entity, message::Column::Id)).cast_as(Alias::new(crate::db_row::text_cast_name(db))),
+        Expr::col((message::Entity, message::Column::Id))
+            .cast_as(Alias::new(crate::db_row::text_cast_name(db))),
         Alias::new("id"),
     )
     .column(message::Column::ExternalId)
