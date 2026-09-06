@@ -22,6 +22,7 @@ import { ConfirmDialogHost } from './components/confirm-dialog-host';
 import { useAuthStore } from './stores/auth';
 import { useSyncEventSource } from './lib/use-sync-event-source';
 import { useMailNotifications } from '@/lib/use-mail-notifications';
+import { useEventNotifications } from '@/lib/use-event-notifications';
 
 // ── Routes ─────────────────────────────────────────────────────
 
@@ -32,6 +33,7 @@ const rootRoute = createRootRoute({
 function RootLayout() {
   useSyncEventSource();
   useMailNotifications();
+  useEventNotifications();
   return (
     <div className="app-root">
       <Outlet />

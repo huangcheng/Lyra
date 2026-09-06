@@ -7,7 +7,7 @@
  */
 
 import { useState, useEffect, useMemo, type ReactNode } from 'react';
-import { BookUser, Mail, Phone, Plus, Search, UserRound } from 'lucide-react';
+import { BookUser, Mail, Phone, Search, UserRound } from 'lucide-react';
 import { t } from '../i18n';
 import { api } from '../lib/api-client';
 import { useAvatar } from '@/lib/avatar';
@@ -107,6 +107,7 @@ export function ContactsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [bookFilter, setBookFilter] = useState<BookFilter>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [accountLabels, setAccountLabels] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -131,12 +132,49 @@ export function ContactsPage() {
     };
   }, []);
 
+  // Account email per book owner — the rail groups address books under
+  // their account, which is the context a bare "Personal" label lacks.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const accounts = await api<{ id: string; emailAddress: string }[]>('/accounts');
+        if (!cancelled) {
+          setAccountLabels(Object.fromEntries(accounts.map((a) => [a.id, a.emailAddress])));
+        }
+      } catch {
+        // rail falls back to book names without account headers
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const books = useMemo(() => uniqueAddressbooks(contacts), [contacts]);
   const visible = useMemo(
     () => filterContacts(contacts, bookFilter, searchQuery),
     [contacts, bookFilter, searchQuery],
   );
   const groups = useMemo(() => groupContactsByLetter(visible), [visible]);
+  const booksByAccount = useMemo(() => {
+    const m = new Map<string, typeof books>();
+    for (const b of books) {
+      const list = m.get(b.accountId) ?? [];
+      list.push(b);
+      m.set(b.accountId, list);
+    }
+    return [...m.entries()];
+  }, [books]);
+  const countByBook = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of contacts) {
+      if (!c.addressbookUrl) continue;
+      const key = `${c.accountId}\0${c.addressbookUrl}`;
+      m.set(key, (m.get(key) ?? 0) + 1);
+    }
+    return m;
+  }, [contacts]);
   const selected = contacts.find((c) => c.id === selectedId) ?? null;
 
   return (
@@ -187,22 +225,26 @@ export function ContactsPage() {
                 </span>
               ) : null}
             </button>
-            {books.length > 0 ? (
-              <div className="mt-2 space-y-0.5">
-                <p className="px-2.5 pb-1 text-[10.5px] font-medium tracking-wide text-muted-foreground uppercase">
-                  {t(locale, 'contacts.addressBooks')}
+            {booksByAccount.map(([accountId, accountBooks]) => (
+              <div key={accountId} className="mt-3 space-y-0.5">
+                <p
+                  className="truncate px-2.5 pb-1 text-[10.5px] font-medium tracking-wide text-muted-foreground/80"
+                  title={accountLabels[accountId] ?? accountId}
+                >
+                  {accountLabels[accountId] ?? accountId}
                 </p>
-                {books.map((b) => {
+                {accountBooks.map((b) => {
                   const active =
                     bookFilter !== 'all' &&
                     bookFilter.accountId === b.accountId &&
                     bookFilter.addressbookUrl === b.addressbookUrl;
+                  const count = countByBook.get(`${b.accountId}\0${b.addressbookUrl}`) ?? 0;
                   return (
                     <button
                       key={`${b.accountId}:${b.addressbookUrl}`}
                       type="button"
                       className={cn(
-                        'w-full rounded-[7px] px-2.5 py-1.5 text-left text-[13px] transition-colors hover:bg-accent',
+                        'flex w-full items-center justify-between gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[13px] transition-colors hover:bg-accent',
                         active && 'bg-accent font-medium',
                       )}
                       onClick={() =>
@@ -212,27 +254,21 @@ export function ContactsPage() {
                         })
                       }
                     >
-                      {b.label === 'Personal'
-                        ? t(locale, 'contacts.personal')
-                        : b.label === 'Shared'
-                          ? t(locale, 'contacts.shared')
-                          : b.label}
+                      <span className="min-w-0 truncate">
+                        {b.label === 'Personal'
+                          ? t(locale, 'contacts.personal')
+                          : b.label === 'Shared'
+                            ? t(locale, 'contacts.shared')
+                            : b.label}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                        {count}
+                      </span>
                     </button>
                   );
                 })}
               </div>
-            ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="mt-auto justify-start text-muted-foreground"
-              disabled
-              title={t(locale, 'contacts.addBookSoon')}
-            >
-              <Plus className="size-3.5" />
-              {t(locale, 'contacts.addBook')}
-            </Button>
+            ))}
           </aside>
 
           {/* A–Z list */}

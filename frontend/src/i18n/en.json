@@ -453,7 +453,8 @@
       "test": "Send test notification",
       "denied": "Notifications are blocked for this site in your browser settings. Unblock Lyra there, then toggle again.",
       "unsupported": "This browser does not support web notifications.",
-      "runningNote": "Delivery needs Lyra to be running (open tab or installed app); push for closed apps comes later."
+      "runningNote": "Delivery needs Lyra to be running (open tab or installed app); push for closed apps comes later.",
+      "eventTitle": "Upcoming event"
     },
     "install": {
       "title": "Install Lyra",

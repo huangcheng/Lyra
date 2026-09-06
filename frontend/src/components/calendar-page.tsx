@@ -391,17 +391,13 @@ export function CalendarPage() {
           </div>
         ))}
         {days.map((day, i) => {
-          const dayEvents = eventsForDay(events, day);
           const inMonth = day.getMonth() === month;
+          // Adjacent-month spillover stays empty: those events belong to
+          // their own month's grid; a gray wash + full chips read as noise.
+          const dayEvents = inMonth ? eventsForDay(events, day) : [];
           const isToday = sameLocalDay(day, now);
           return (
-            <div
-              key={i}
-              className={cn(
-                'flex min-h-20 flex-col gap-1 bg-background p-1.5',
-                !inMonth && 'bg-muted/25',
-              )}
-            >
+            <div key={i} className="flex min-h-20 flex-col gap-1 bg-background p-1.5">
               <span
                 className={cn(
                   'flex h-6 w-6 shrink-0 items-center justify-center self-end text-xs',
@@ -409,7 +405,7 @@ export function CalendarPage() {
                     ? 'rounded-full bg-[var(--unread)] font-semibold text-[#1a1b1f]'
                     : inMonth
                       ? 'text-foreground/75'
-                      : 'text-muted-foreground/50',
+                      : 'text-muted-foreground/35',
                 )}
               >
                 {day.getDate()}

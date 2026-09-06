@@ -209,3 +209,15 @@ export async function sendTestNotification(locale: 'en' | 'zh'): Promise<boolean
   );
   return true;
 }
+
+/**
+ * Calendar event reminder. Click-through focuses Lyra (the mail home);
+ * deep-linking to the event is future work alongside event detail routes.
+ */
+export async function showEventNotification(
+  title: string,
+  body: string,
+  tag: string,
+): Promise<void> {
+  await showNotification(title, body, tag, '');
+}
