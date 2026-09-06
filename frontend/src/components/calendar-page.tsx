@@ -159,6 +159,38 @@ export function CalendarPage() {
     return () => window.clearInterval(id);
   }, []);
 
+  // Register this page's commands for the ⌘K palette.
+  useEffect(() => {
+    const setPageCommands = useUIStore.getState().setPageCommands;
+    setPageCommands([
+      {
+        id: 'new-event',
+        label: t(useUIStore.getState().locale, 'calendar.newEvent'),
+        icon: 'PlusIcon',
+        keywords: ['new event', 'event', '新建日程', '日程'],
+        onSelect: () => setEventDialogOpen(true),
+      },
+      {
+        id: 'cal-today',
+        label: t(useUIStore.getState().locale, 'calendar.today'),
+        icon: 'HomeIcon',
+        keywords: ['today', '今天'],
+        onSelect: () => {
+          setAnchor(new Date());
+          if (view === 'month') scrollToMonth(new Date());
+        },
+      },
+      ...VIEW_ORDER.map((v) => ({
+        id: `cal-view-${v}`,
+        label: t(useUIStore.getState().locale, `calendar.view.${v}`),
+        icon: 'CalendarIcon' as const,
+        keywords: ['view', '视图', v],
+        onSelect: () => setView(v),
+      })),
+    ]);
+    return () => setPageCommands([]);
+  }, [view]);
+
   async function loadSources(): Promise<CalSource[]> {
     const [cals, subs] = await Promise.all([
       api<CalApi[]>('/calendars'),

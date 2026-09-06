@@ -120,6 +120,21 @@ export function ContactsPage() {
   const [carddavAccountIds, setCarddavAccountIds] = useState<string[]>([]);
   const [addOpen, setAddOpen] = useState(false);
 
+  // Register this page's commands for the ⌘K palette.
+  useEffect(() => {
+    const setPageCommands = useUIStore.getState().setPageCommands;
+    setPageCommands([
+      {
+        id: 'new-contact',
+        label: t(useUIStore.getState().locale, 'contacts.new'),
+        icon: 'UserPlusIcon',
+        keywords: ['new contact', 'contact', '新建联系人'],
+        onSelect: () => setAddOpen(true),
+      },
+    ]);
+    return () => setPageCommands([]);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {

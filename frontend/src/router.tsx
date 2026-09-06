@@ -23,6 +23,9 @@ import { useAuthStore } from './stores/auth';
 import { useSyncEventSource } from './lib/use-sync-event-source';
 import { useMailNotifications } from '@/lib/use-mail-notifications';
 import { useEventNotifications } from '@/lib/use-event-notifications';
+import { useGlobalShortcuts } from '@/lib/use-global-shortcuts';
+import { CommandPaletteRoot } from '@/components/command-palette';
+import { ShortcutHelp } from '@/components/shortcut-help';
 
 // ── Routes ─────────────────────────────────────────────────────
 
@@ -34,10 +37,13 @@ function RootLayout() {
   useSyncEventSource();
   useMailNotifications();
   useEventNotifications();
+  useGlobalShortcuts();
   return (
     <div className="app-root">
       <Outlet />
       <ConfirmDialogHost />
+      <CommandPaletteRoot />
+      <ShortcutHelp />
     </div>
   );
 }

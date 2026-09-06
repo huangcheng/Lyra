@@ -616,5 +616,45 @@
     "add": "Add",
     "search": "Search",
     "soon": "Soon"
+  },
+  "palette": {
+    "placeholder": "Type a command or search messages…",
+    "open": "Command palette",
+    "group": {
+      "search": "Messages",
+      "page": "This page",
+      "navigation": "Go to",
+      "actions": "Actions"
+    },
+    "nav": {
+      "mail": "Go to Mail",
+      "calendar": "Go to Calendar",
+      "contacts": "Go to Contacts",
+      "dashboard": "Go to Dashboard",
+      "settings": "Go to Settings"
+    },
+    "action": {
+      "compose": "Compose message",
+      "sync": "Sync all accounts",
+      "theme": "Theme: {{mode}}",
+      "language": "Switch language",
+      "shortcuts": "Keyboard shortcuts",
+      "open": "Open command palette"
+    },
+    "theme": {
+      "light": "Light",
+      "dark": "Dark",
+      "system": "System"
+    }
+  },
+  "shortcuts": {
+    "title": "Keyboard shortcuts",
+    "subtitle": "Global shortcuts work everywhere; list shortcuts work in Mail.",
+    "search": "Search messages",
+    "compose": "Compose message",
+    "nextPrev": "Next / previous message",
+    "open": "Open selected message",
+    "back": "Back to list",
+    "help": "This help"
   }
 }

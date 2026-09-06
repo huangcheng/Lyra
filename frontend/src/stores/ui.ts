@@ -7,6 +7,7 @@ import { create } from 'zustand';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
 import { applyTheme, getStoredTheme, storeTheme, type ThemeMode } from '@/lib/theme';
 import type { MarkReadPolicy, SupportedLocale } from '@/types';
+import type { CommandDef } from '@/lib/commands';
 
 export interface ComposeDraft {
   to: string;
@@ -62,11 +63,22 @@ interface UIState {
   locale: SupportedLocale;
   markReadPolicy: MarkReadPolicy;
   theme: ThemeMode;
+  /** Command palette (⌘K): open flag + seeded query ('/' seeds search). */
+  paletteOpen: boolean;
+  paletteSearch: string;
+  /** Shortcut-help dialog (?) */
+  shortcutHelpOpen: boolean;
+  /** Commands the active page registered for the palette. */
+  pageCommands: CommandDef[];
 
   setSelectedAccount: (id: string) => void;
   setSelectedFolder: (id: string | null) => void;
   setSelectedFolderRole: (role: string | null) => void;
   setSelectedMessage: (id: string | null) => void;
+  setPaletteOpen: (open: boolean, seed?: string) => void;
+  setPaletteSearch: (search: string) => void;
+  setShortcutHelpOpen: (open: boolean) => void;
+  setPageCommands: (commands: CommandDef[]) => void;
   setSearchQuery: (query: string) => void;
   setListTab: (tab: 'all' | 'unread') => void;
   setComposeOpen: (open: boolean) => void;
@@ -95,6 +107,10 @@ export const useUIStore = create<UIState>((set) => ({
   composeOpen: false,
   composeDraft: null,
   mutedMessageIds: [],
+  paletteOpen: false,
+  paletteSearch: '',
+  shortcutHelpOpen: false,
+  pageCommands: [],
   folderExpansion: {},
   accountOrder: [],
   defaultAccountId: null,
@@ -120,6 +136,11 @@ export const useUIStore = create<UIState>((set) => ({
   setSelectedMessage: (id) => set({ selectedMessageId: id }),
 
   setSearchQuery: (query) => set({ searchQuery: query }),
+  setPaletteOpen: (open, seed) =>
+    set((s) => ({ paletteOpen: open, paletteSearch: open ? (seed ?? s.paletteSearch) : '' })),
+  setPaletteSearch: (search) => set({ paletteSearch: search }),
+  setShortcutHelpOpen: (open) => set({ shortcutHelpOpen: open }),
+  setPageCommands: (commands) => set({ pageCommands: commands }),
 
   setListTab: (tab) => set({ listTab: tab }),
 

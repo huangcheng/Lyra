@@ -8,6 +8,7 @@ import { formatDistanceToNow, isSameDay, isSameMonth, subDays } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { Archive, CornerUpLeft, Inbox, Paperclip, SearchX, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { matchMailListShortcut } from '@/lib/keyboard';
 
 import { EmptyState } from '@/components/empty-state';
 import { ErrorBanner, type ErrorBannerVariant } from '@/components/error-banner';
@@ -268,6 +269,39 @@ export function MailList() {
   );
   // One row per conversation; the latest message drives the row.
   const conversations = useMemo(() => groupIntoConversations(filtered), [filtered]);
+
+  // Gmail-style list navigation: j/k move selection between conversations
+  // (their latest message), o/Enter keeps it open, u/Esc clears it.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const action = matchMailListShortcut(e, e.target);
+      if (!action || conversations.length === 0) return;
+      const latestIds = conversations.map((c) => c.messages[0]?.id ?? '');
+      const currentIdx = Math.max(0, latestIds.indexOf(selectedMessageId ?? ''));
+      if (action === 'next') {
+        e.preventDefault();
+        const next = latestIds[Math.min(currentIdx + 1, latestIds.length - 1)];
+        if (next) setSelectedMessage(next);
+      } else if (action === 'prev') {
+        e.preventDefault();
+        const prev = latestIds[Math.max(currentIdx - 1, 0)];
+        if (prev) setSelectedMessage(prev);
+      } else if (action === 'open') {
+        const current = latestIds[currentIdx];
+        if (current && selectedMessageId !== current) {
+          e.preventDefault();
+          setSelectedMessage(current);
+        }
+      } else if (action === 'back') {
+        if (selectedMessageId) {
+          e.preventDefault();
+          setSelectedMessage(null);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [conversations, selectedMessageId, setSelectedMessage]);
 
   // Interleave sticky day-group headers (Today / Yesterday / This week …).
   const listRows = useMemo(() => {

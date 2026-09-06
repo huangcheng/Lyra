@@ -1,0 +1,59 @@
+/*
+ * Re-skin react-cmdk with Lyra design tokens.
+ *
+ * The library themes via `prefers-color-scheme` media queries, but Lyra's
+ * theme is a manual toggle (light/dark/system) — these overrides route the
+ * palette through the app's CSS variables so it always matches the active
+ * theme and brand.
+ */
+
+.lyra-cmdk .command-palette-content {
+  background-color: var(--background) !important;
+  color: var(--foreground);
+  border: 1px solid var(--border);
+  box-shadow: 0 16px 48px rgb(0 0 0 / 0.16);
+}
+
+/* search input */
+.lyra-cmdk .command-palette-content input {
+  color: var(--foreground) !important;
+  caret-color: var(--foreground);
+}
+.lyra-cmdk .command-palette-content input::placeholder {
+  color: var(--muted-foreground);
+}
+
+/* list headings */
+.lyra-cmdk .command-palette-content .px-3\\.5 {
+  color: var(--muted-foreground);
+}
+
+/* items: base text + hover/selected wash */
+.lyra-cmdk .command-palette-list-item {
+  color: var(--foreground) !important;
+}
+.lyra-cmdk .command-palette-list-item:hover,
+.lyra-cmdk .command-palette-list-item.bg-gray-200\\/50 {
+  background-color: var(--accent) !important;
+}
+.lyra-cmdk .command-palette-list-item span,
+.lyra-cmdk .command-palette-list-item svg {
+  color: var(--muted-foreground);
+}
+.lyra-cmdk .command-palette-list-item span:first-of-type,
+.lyra-cmdk .command-palette-list-item .truncate {
+  color: var(--foreground);
+}
+
+/* secondary line inside a hit (sender) */
+.lyra-cmdk .cmdk-hit-secondary {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+/* search-prefix chips + footer */
+.lyra-cmdk .command-palette-content footer,
+.lyra-cmdk .command-palette-content kbd {
+  color: var(--muted-foreground);
+}

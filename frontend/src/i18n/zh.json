@@ -616,5 +616,45 @@
     "add": "添加",
     "search": "搜索",
     "soon": "即将推出"
+  },
+  "palette": {
+    "placeholder": "输入命令或搜索邮件…",
+    "open": "命令面板",
+    "group": {
+      "search": "邮件",
+      "page": "当前页面",
+      "navigation": "前往",
+      "actions": "操作"
+    },
+    "nav": {
+      "mail": "前往邮件",
+      "calendar": "前往日历",
+      "contacts": "前往通讯录",
+      "dashboard": "前往仪表盘",
+      "settings": "前往设置"
+    },
+    "action": {
+      "compose": "写邮件",
+      "sync": "同步全部账户",
+      "theme": "主题：{{mode}}",
+      "language": "切换语言",
+      "shortcuts": "键盘快捷键",
+      "open": "打开命令面板"
+    },
+    "theme": {
+      "light": "浅色",
+      "dark": "深色",
+      "system": "跟随系统"
+    }
+  },
+  "shortcuts": {
+    "title": "键盘快捷键",
+    "subtitle": "全局快捷键处处可用；列表快捷键在邮件页生效。",
+    "search": "搜索邮件",
+    "compose": "写邮件",
+    "nextPrev": "下一条 / 上一封邮件",
+    "open": "打开选中的邮件",
+    "back": "返回列表",
+    "help": "本帮助"
   }
 }
