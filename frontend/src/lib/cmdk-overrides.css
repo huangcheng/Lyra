@@ -24,7 +24,7 @@
 }
 
 /* list headings */
-.lyra-cmdk .command-palette-content .px-3\\.5 {
+.lyra-cmdk .command-palette-content [class*='px-3.5'] {
   color: var(--muted-foreground);
 }
 
@@ -33,7 +33,7 @@
   color: var(--foreground) !important;
 }
 .lyra-cmdk .command-palette-list-item:hover,
-.lyra-cmdk .command-palette-list-item.bg-gray-200\\/50 {
+.lyra-cmdk .command-palette-list-item[class*='bg-gray-200'] {
   background-color: var(--accent) !important;
 }
 .lyra-cmdk .command-palette-list-item span,
