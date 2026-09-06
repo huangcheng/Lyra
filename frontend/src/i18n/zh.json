@@ -525,7 +525,18 @@
     "call": "呼叫",
     "addBook": "添加通讯录",
     "addBookSoon": "即将支持添加 CardDAV 来源",
-    "connectDav": "连接 CardDAV"
+    "connectDav": "连接 CardDAV",
+    "new": "新建联系人",
+    "newTitle": "新建联系人",
+    "newHint": "将通过 CardDAV 保存到 {{book}}。",
+    "newNoAccount": "请先在设置中连接带 CardDAV 的账户（日历与联系人）。",
+    "name": "姓名",
+    "namePlaceholder": "姓名",
+    "org": "组织",
+    "orgPlaceholder": "公司（可选）",
+    "create": "添加联系人",
+    "creating": "正在添加…",
+    "created": "联系人已添加"
   },
   "calendar": {
     "title": "日历",
@@ -561,7 +572,18 @@
     "connectDav": "连接 CalDAV",
     "tasks": "任务",
     "when": "时间",
-    "where": "地点"
+    "where": "地点",
+    "newEvent": "新建日程",
+    "newEventTitle": "新建日程",
+    "newEventHint": "将通过 CalDAV 保存到 {{cal}}。",
+    "noWritableCalendar": "请先连接 CalDAV 日历（ICS 订阅为只读）。",
+    "eventTitle2": "标题",
+    "eventDate": "日期",
+    "startTime": "开始",
+    "endTime": "结束",
+    "create": "创建",
+    "creating": "正在创建…",
+    "eventCreated": "日程已创建"
   },
   "dash": {
     "section": "仪表盘",

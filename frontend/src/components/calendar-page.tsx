@@ -11,6 +11,7 @@ import {
   useState,
   useEffect,
   useMemo,
+  useRef,
   type CSSProperties,
   type FormEvent,
   type ReactNode,
@@ -37,6 +38,7 @@ import {
   monthGridDays,
   sameLocalDay,
   spansMultipleDays,
+  startOfWeekMonday,
   viewTitle,
   visibleRangeIso,
   weekDays,
@@ -47,6 +49,17 @@ import { useNavigate } from '@tanstack/react-router';
 import { EmptyState } from './empty-state';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
 import { SlimPanelHeader } from '@/components/slim-page-nav';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '../stores/ui';
@@ -138,6 +151,8 @@ export function CalendarPage() {
   const [addName, setAddName] = useState('');
   const [addBusy, setAddBusy] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  const [eventDialogOpen, setEventDialogOpen] = useState(false);
+  const stripRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 60_000);
@@ -199,6 +214,8 @@ export function CalendarPage() {
     }
     return m;
   }, [sources]);
+
+  const writableSources = useMemo(() => sources.filter((s) => s.kind === 'caldav'), [sources]);
 
   const kindById = useMemo(() => {
     const m = new Map<string, SourceKind>();
@@ -368,6 +385,28 @@ export function CalendarPage() {
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const nowTop = (nowMinutes / (24 * 60)) * 100;
 
+  /** Scroll the month strip by one viewport (dida prev/next). */
+  function scrollMonthPage(dir: 1 | -1) {
+    stripRef.current?.scrollBy({
+      top: dir * (stripRef.current?.clientHeight ?? 0),
+      behavior: 'smooth',
+    });
+  }
+
+  /** Instantly bring `d`'s month into view (mount / today jumps). */
+  function scrollToMonth(d: Date, smooth = true) {
+    const el = stripRef.current;
+    if (!el) return;
+    const weekIso = startOfWeekMonday(new Date(d.getFullYear(), d.getMonth(), 1)).toISOString();
+    const row = el.querySelector(`[data-week="${weekIso}"]`) as HTMLElement | null;
+    if (row) {
+      el.scrollTo({
+        top: Math.max(0, row.offsetTop - row.offsetHeight),
+        behavior: smooth ? 'smooth' : 'auto',
+      });
+    }
+  }
+
   /** Quiet event chip: source-colored dot on a tinted background. */
   function EventChip({
     event,
@@ -435,54 +474,123 @@ export function CalendarPage() {
     );
   }
 
+  /** dida-style month view: a viewport-filling, continuously scrollable
+   * strip of week rows. Toolbar arrows scroll a page; the title tracks the
+   * month under the top of the viewport. */
   function renderMonth() {
-    const year = anchor.getFullYear();
-    const month = anchor.getMonth();
-    const days = monthGridDays(year, month);
+    const from = new Date(anchor.getFullYear(), anchor.getMonth() - 2, 1);
+    const to = new Date(anchor.getFullYear(), anchor.getMonth() + 9, 1);
+    const weeks: Date[][] = [];
+    for (const cur = startOfWeekMonday(from); cur < to; cur.setDate(cur.getDate() + 7)) {
+      weeks.push(
+        Array.from({ length: 7 }, (_, i) => {
+          const d = new Date(cur);
+          d.setDate(d.getDate() + i);
+          return d;
+        }),
+      );
+    }
+    const rowH = 'calc((100dvh - 8.75rem) / 6)';
+
+    const onScroll = () => {
+      const el = stripRef.current;
+      if (!el) return;
+      const rowHeight = el.clientHeight / 6;
+      const idx = Math.min(weeks.length - 1, Math.max(0, Math.floor(el.scrollTop / rowHeight)));
+      const week = weeks[idx];
+      if (!week) return;
+      // Title month: whichever month owns the most days of the top row.
+      const counts = new Map<string, number>();
+      for (const d of week) {
+        const key = `${d.getFullYear()}-${d.getMonth()}`;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]![0].split('-');
+      const y = Number(top[0]);
+      const m = Number(top[1]);
+      if (y !== anchor.getFullYear() || m !== anchor.getMonth()) {
+        setAnchor(new Date(y, m, 1));
+      }
+    };
+
     return (
-      <div className="grid min-h-0 flex-1 grid-cols-7 grid-rows-[auto_repeat(6,minmax(0,1fr))] gap-px overflow-hidden bg-border/70">
-        {WEEKDAY_ORDER.map((day) => (
-          <div
-            key={day}
-            className="bg-background px-2.5 py-2 text-center text-[11px] font-medium text-muted-foreground"
-          >
-            {t(locale, `calendar.days.${day}`)}
-          </div>
-        ))}
-        {days.map((day, i) => {
-          const inMonth = day.getMonth() === month;
-          // Adjacent-month spillover stays empty; multi-day events anchor
-          // their chip on the first covered day (with →) instead of
-          // repeating on every day of the span.
-          const dayEvents = inMonth ? eventsStartingOnDay(events, day) : [];
-          const isToday = sameLocalDay(day, now);
-          return (
-            <div key={i} className="flex min-h-20 flex-col gap-1 bg-background p-1.5">
-              <span
-                className={cn(
-                  'flex h-6 w-6 shrink-0 items-center justify-center self-end text-xs',
-                  isToday
-                    ? 'rounded-full bg-[var(--unread)] font-semibold text-[#1a1b1f]'
-                    : inMonth
-                      ? 'text-foreground/75'
-                      : 'text-muted-foreground/35',
-                )}
-              >
-                {day.getDate()}
-              </span>
-              <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-hidden">
-                {dayEvents.slice(0, 3).map((event) => (
-                  <EventChip key={event.id} event={event} continued={spansMultipleDays(event)} />
-                ))}
-                {dayEvents.length > 3 ? (
-                  <span className="px-1.5 text-[10px] text-muted-foreground">
-                    {t(locale, 'calendar.moreEvents', { count: dayEvents.length - 3 })}
-                  </span>
-                ) : null}
-              </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="grid shrink-0 grid-cols-7 border-b bg-background">
+          {WEEKDAY_ORDER.map((day) => (
+            <div
+              key={day}
+              className="px-2.5 py-2 text-center text-[11px] font-medium text-muted-foreground"
+            >
+              {t(locale, `calendar.days.${day}`)}
             </div>
-          );
-        })}
+          ))}
+        </div>
+        <div ref={stripRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
+          {weeks.map((week) => {
+            const monthStart = week.find((d) => d.getDate() === 1);
+            return (
+              <div key={week[0]!.toISOString()}>
+                {monthStart ? (
+                  <button
+                    type="button"
+                    className="sticky top-0 z-10 flex w-full items-center gap-2 bg-background/95 py-1 pr-2 pl-2.5 backdrop-blur"
+                    onClick={() => setView('year')}
+                  >
+                    <span className="text-[11px] font-medium text-muted-foreground">
+                      {monthStart.toLocaleDateString(locTag, { month: 'long', year: 'numeric' })}
+                    </span>
+                    <span className="h-px flex-1 bg-border/70" />
+                  </button>
+                ) : null}
+                <div
+                  data-week={week[0]!.toISOString()}
+                  className="grid grid-cols-7 border-b border-border/50"
+                >
+                  {week.map((day) => {
+                    const inMonth = day.getMonth() === anchor.getMonth();
+                    const isToday = sameLocalDay(day, now);
+                    const dayEvents = eventsStartingOnDay(events, day);
+                    return (
+                      <div
+                        key={day.toISOString()}
+                        className={cn(
+                          'flex flex-col gap-1 border-r border-border/50 p-1.5 last:border-r-0',
+                          !inMonth && 'opacity-45',
+                        )}
+                        style={{ height: rowH }}
+                      >
+                        <span
+                          className={cn(
+                            'flex h-6 w-6 shrink-0 items-center justify-center self-end text-xs',
+                            isToday
+                              ? 'rounded-full bg-[var(--unread)] font-semibold text-[#1a1b1f]'
+                              : 'text-foreground/75',
+                          )}
+                        >
+                          {day.getDate()}
+                        </span>
+                        <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-hidden">
+                          {dayEvents.slice(0, 3).map((event) => (
+                            <EventChip
+                              key={event.id}
+                              event={event}
+                              continued={spansMultipleDays(event)}
+                            />
+                          ))}
+                          {dayEvents.length > 3 ? (
+                            <span className="px-1.5 text-[10px] text-muted-foreground">
+                              {t(locale, 'calendar.moreEvents', { count: dayEvents.length - 3 })}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     );
   }
@@ -816,7 +924,26 @@ export function CalendarPage() {
               variant="outline"
               size="sm"
               className="h-8"
-              onClick={() => setAnchor(new Date())}
+              disabled={writableSources.length === 0}
+              title={
+                writableSources.length === 0
+                  ? t(locale, 'calendar.noWritableCalendar')
+                  : t(locale, 'calendar.newEvent')
+              }
+              onClick={() => setEventDialogOpen(true)}
+            >
+              <Plus className="size-3.5" />
+              {t(locale, 'calendar.newEvent')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8"
+              onClick={() => {
+                setAnchor(new Date());
+                if (view === 'month') scrollToMonth(new Date());
+              }}
             >
               {t(locale, 'calendar.today')}
             </Button>
@@ -827,7 +954,10 @@ export function CalendarPage() {
                 size="icon"
                 className="h-8 w-8"
                 aria-label="Previous"
-                onClick={() => setAnchor((a) => addViewOffset(a, view, -1))}
+                onClick={() => {
+                  if (view === 'month') scrollMonthPage(-1);
+                  else setAnchor((a) => addViewOffset(a, view, -1));
+                }}
               >
                 <ChevronLeft className="size-4" />
               </Button>
@@ -837,7 +967,10 @@ export function CalendarPage() {
                 size="icon"
                 className="h-8 w-8"
                 aria-label="Next"
-                onClick={() => setAnchor((a) => addViewOffset(a, view, 1))}
+                onClick={() => {
+                  if (view === 'month') scrollMonthPage(1);
+                  else setAnchor((a) => addViewOffset(a, view, 1));
+                }}
               >
                 <ChevronRight className="size-4" />
               </Button>
@@ -908,6 +1041,13 @@ export function CalendarPage() {
         </div>
       </main>
 
+      <AddEventDialog
+        open={eventDialogOpen}
+        onOpenChange={setEventDialogOpen}
+        sources={writableSources}
+        onCreated={() => void loadEvents(visibleIds, anchor, view)}
+      />
+
       {addOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <form
@@ -943,5 +1083,194 @@ export function CalendarPage() {
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** Create-dialog: quick VEVENT saved to a CalDAV calendar via PUT. */
+function AddEventDialog({
+  open,
+  onOpenChange,
+  sources,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  sources: CalSource[];
+  onCreated: () => void;
+}) {
+  const locale = useUIStore((s) => s.locale);
+  const today = new Date().toISOString().slice(0, 10);
+  const [sourceId, setSourceId] = useState(sources[0]?.id ?? '');
+  const [summary, setSummary] = useState('');
+  const [date, setDate] = useState(today);
+  const [allDay, setAllDay] = useState(false);
+  const [start, setStart] = useState('09:00');
+  const [end, setEnd] = useState('10:00');
+  const [location, setLocation] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setSourceId(sources[0]?.id ?? '');
+      setSummary('');
+      setDate(new Date().toISOString().slice(0, 10));
+      setAllDay(false);
+      setStart('09:00');
+      setEnd('10:00');
+      setLocation('');
+      setError(null);
+      setBusy(false);
+    }
+  }, [open, sources]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!sourceId || !summary.trim() || !date) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // timed: local date+time → UTC RFC3339; all-day: bare date.
+      const dtstart = allDay ? date : new Date(`${date}T${start}:00`).toISOString();
+      const dtend = allDay ? undefined : new Date(`${date}T${end}:00`).toISOString();
+      await api(`/calendars/${sourceId}/events`, {
+        method: 'POST',
+        body: JSON.stringify({
+          summary: summary.trim(),
+          dtstart,
+          dtend,
+          isAllDay: allDay,
+          location: location.trim() || undefined,
+        }),
+      });
+      onOpenChange(false);
+      onCreated();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const sourceName = sources.find((x) => x.id === sourceId)?.name ?? '';
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{t(locale, 'calendar.newEventTitle')}</DialogTitle>
+          <DialogDescription>
+            {t(locale, 'calendar.newEventHint', { cal: displayName(locale, sourceName) })}
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={(e) => void submit(e)}>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="new-event-title">
+                {t(locale, 'calendar.eventTitleField')}
+              </FieldLabel>
+              <Input
+                id="new-event-title"
+                value={summary}
+                onChange={(e) => setSummary(e.target.value)}
+                autoFocus
+                required
+              />
+            </Field>
+            {sources.length > 1 ? (
+              <Field>
+                <FieldLabel htmlFor="new-event-calendar">
+                  {t(locale, 'calendar.calendars')}
+                </FieldLabel>
+                <select
+                  id="new-event-calendar"
+                  className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-foreground/35"
+                  value={sourceId}
+                  onChange={(e) => setSourceId(e.target.value)}
+                >
+                  {sources.map((src) => (
+                    <option key={src.id} value={src.id}>
+                      {displayName(locale, src.name)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            ) : null}
+            <Field>
+              <FieldLabel htmlFor="new-event-date">{t(locale, 'calendar.eventDate')}</FieldLabel>
+              <Input
+                id="new-event-date"
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                required
+              />
+            </Field>
+            <Field>
+              <Label
+                htmlFor="new-event-all-day"
+                className="flex cursor-pointer items-center gap-2 text-sm font-normal"
+              >
+                <Switch
+                  id="new-event-all-day"
+                  checked={allDay}
+                  onCheckedChange={(c) => setAllDay(c)}
+                />
+                {t(locale, 'calendar.allDay')}
+              </Label>
+            </Field>
+            {!allDay ? (
+              <Field orientation="horizontal">
+                <div className="grid flex-1 grid-cols-2 gap-2">
+                  <div>
+                    <FieldLabel htmlFor="new-event-start" className="text-[12.5px]">
+                      {t(locale, 'calendar.startTime')}
+                    </FieldLabel>
+                    <Input
+                      id="new-event-start"
+                      type="time"
+                      value={start}
+                      onChange={(e) => setStart(e.target.value)}
+                      className="mt-1"
+                    />
+                  </div>
+                  <div>
+                    <FieldLabel htmlFor="new-event-end" className="text-[12.5px]">
+                      {t(locale, 'calendar.endTime')}
+                    </FieldLabel>
+                    <Input
+                      id="new-event-end"
+                      type="time"
+                      value={end}
+                      onChange={(e) => setEnd(e.target.value)}
+                      className="mt-1"
+                    />
+                  </div>
+                </div>
+              </Field>
+            ) : null}
+            <Field>
+              <FieldLabel htmlFor="new-event-location" className="text-[12.5px]">
+                {t(locale, 'calendar.where')}
+              </FieldLabel>
+              <Input
+                id="new-event-location"
+                value={location}
+                onChange={(e) => setLocation(e.target.value)}
+              />
+            </Field>
+            {error ? <p className="text-[12.5px] text-destructive">{error}</p> : null}
+          </FieldGroup>
+          <DialogFooter className="mt-4">
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+              {t(locale, 'common.cancel')}
+            </Button>
+            <Button type="submit" disabled={busy || !summary.trim() || !sourceId}>
+              {t(locale, 'calendar.create')}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -40,6 +40,7 @@ mod pgtest;
 mod pim;
 mod pim_dav;
 mod pim_subscriptions;
+mod pim_write;
 mod plugins;
 mod privacy;
 mod protocol;

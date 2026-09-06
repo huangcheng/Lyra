@@ -525,7 +525,18 @@
     "call": "Call",
     "addBook": "Add address book",
     "addBookSoon": "CardDAV sources coming soon",
-    "connectDav": "Connect CardDAV"
+    "connectDav": "Connect CardDAV",
+    "new": "New contact",
+    "newTitle": "New contact",
+    "newHint": "Saved to {{book}} via CardDAV.",
+    "newNoAccount": "Connect an account with CardDAV first (Settings → Calendar & contacts).",
+    "name": "Name",
+    "namePlaceholder": "Full name",
+    "org": "Organisation",
+    "orgPlaceholder": "Company (optional)",
+    "create": "Add contact",
+    "creating": "Adding…",
+    "created": "Contact added"
   },
   "calendar": {
     "title": "Calendar",
@@ -561,7 +572,18 @@
     "connectDav": "Connect CalDAV",
     "tasks": "Tasks",
     "when": "Time",
-    "where": "Location"
+    "where": "Location",
+    "newEvent": "New event",
+    "newEventTitle": "New event",
+    "newEventHint": "Saved to {{cal}} via CalDAV.",
+    "noWritableCalendar": "Connect a CalDAV calendar first (ICS subscriptions are read-only).",
+    "eventTitle2": "Title",
+    "eventDate": "Date",
+    "startTime": "Start",
+    "endTime": "End",
+    "create": "Create",
+    "creating": "Creating…",
+    "eventCreated": "Event created"
   },
   "dash": {
     "section": "Dashboard",

@@ -6,8 +6,8 @@
  * else stays cool gray.
  */
 
-import { useState, useEffect, useMemo, type ReactNode } from 'react';
-import { BookUser, Mail, Phone, Search, UserRound } from 'lucide-react';
+import { useState, useEffect, useMemo, type FormEvent, type ReactNode } from 'react';
+import { BookUser, Mail, Phone, Plus, Search, UserRound } from 'lucide-react';
 import { t } from '../i18n';
 import { api } from '../lib/api-client';
 import { useAvatar } from '@/lib/avatar';
@@ -21,6 +21,15 @@ import { useNavigate } from '@tanstack/react-router';
 import { EmptyState } from './empty-state';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { SlimPanelHeader } from '@/components/slim-page-nav';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '../stores/ui';
@@ -108,6 +117,8 @@ export function ContactsPage() {
   const [bookFilter, setBookFilter] = useState<BookFilter>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [accountLabels, setAccountLabels] = useState<Record<string, string>>({});
+  const [carddavAccountIds, setCarddavAccountIds] = useState<string[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -138,9 +149,13 @@ export function ContactsPage() {
     let cancelled = false;
     void (async () => {
       try {
-        const accounts = await api<{ id: string; emailAddress: string }[]>('/accounts');
+        const accounts =
+          await api<{ id: string; emailAddress: string; carddavUrl?: string | null }[]>(
+            '/accounts',
+          );
         if (!cancelled) {
           setAccountLabels(Object.fromEntries(accounts.map((a) => [a.id, a.emailAddress])));
+          setCarddavAccountIds(accounts.filter((a) => a.carddavUrl).map((a) => a.id));
         }
       } catch {
         // rail falls back to book names without account headers
@@ -240,7 +255,38 @@ export function ContactsPage() {
             })}
           </div>
         ))}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="mt-auto justify-start text-muted-foreground"
+          disabled={carddavAccountIds.length === 0}
+          title={
+            carddavAccountIds.length === 0
+              ? t(locale, 'contacts.newNoAccount')
+              : t(locale, 'contacts.new')
+          }
+          onClick={() => setAddOpen(true)}
+        >
+          <Plus className="size-3.5" />
+          {t(locale, 'contacts.new')}
+        </Button>
       </aside>
+
+      <AddContactDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        accountIds={carddavAccountIds}
+        accountLabels={accountLabels}
+        defaultAccountId={booksByAccount[0]?.[0] ?? carddavAccountIds[0]}
+        onCreated={(id) => {
+          void (async () => {
+            const data = await api<Contact[]>('/contacts?limit=500');
+            setContacts(data);
+            setSelectedId(id);
+          })();
+        }}
+      />
 
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b px-5">
@@ -407,5 +453,155 @@ export function ContactsPage() {
         </div>
       </main>
     </div>
+  );
+}
+
+/** Fastmail-style create dialog: VCARD fields, saved via CardDAV PUT. */
+function AddContactDialog({
+  open,
+  onOpenChange,
+  accountIds,
+  accountLabels,
+  defaultAccountId,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  accountIds: string[];
+  accountLabels: Record<string, string>;
+  defaultAccountId?: string;
+  onCreated: (newId: string) => void;
+}) {
+  const locale = useUIStore((s) => s.locale);
+  const [accountId, setAccountId] = useState(defaultAccountId ?? accountIds[0] ?? '');
+  const [displayName, setDisplayName] = useState('');
+  const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [organisation, setOrganisation] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setAccountId(defaultAccountId ?? accountIds[0] ?? '');
+      setDisplayName('');
+      setEmail('');
+      setPhone('');
+      setOrganisation('');
+      setError(null);
+      setBusy(false);
+    }
+  }, [open, defaultAccountId, accountIds]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!accountId || !displayName.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await api<Contact>('/contacts', {
+        method: 'POST',
+        body: JSON.stringify({
+          accountId,
+          displayName: displayName.trim(),
+          email: email.trim() || undefined,
+          phone: phone.trim() || undefined,
+          organisation: organisation.trim() || undefined,
+        }),
+      });
+      onOpenChange(false);
+      onCreated(created.id);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{t(locale, 'contacts.newTitle')}</DialogTitle>
+          <DialogDescription>
+            {t(locale, 'contacts.newHint', {
+              book: accountLabels[accountId] ?? '',
+            })}
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={(e) => void submit(e)}>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="new-contact-name">{t(locale, 'contacts.name')}</FieldLabel>
+              <Input
+                id="new-contact-name"
+                value={displayName}
+                placeholder={t(locale, 'contacts.namePlaceholder')}
+                onChange={(e) => setDisplayName(e.target.value)}
+                autoFocus
+                required
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="new-contact-email">{t(locale, 'contacts.email')}</FieldLabel>
+              <Input
+                id="new-contact-email"
+                type="email"
+                value={email}
+                placeholder="name@example.com"
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="new-contact-phone">{t(locale, 'contacts.phone')}</FieldLabel>
+              <Input
+                id="new-contact-phone"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="new-contact-org">{t(locale, 'contacts.org')}</FieldLabel>
+              <Input
+                id="new-contact-org"
+                value={organisation}
+                placeholder={t(locale, 'contacts.orgPlaceholder')}
+                onChange={(e) => setOrganisation(e.target.value)}
+              />
+            </Field>
+            {accountIds.length > 1 ? (
+              <Field>
+                <FieldLabel htmlFor="new-contact-account">
+                  {t(locale, 'settings.accounts.title')}
+                </FieldLabel>
+                <select
+                  id="new-contact-account"
+                  className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-foreground/35"
+                  value={accountId}
+                  onChange={(e) => setAccountId(e.target.value)}
+                >
+                  {accountIds.map((id) => (
+                    <option key={id} value={id}>
+                      {accountLabels[id] ?? id}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            ) : null}
+            {error ? (
+              <FieldDescription className="text-destructive">{error}</FieldDescription>
+            ) : null}
+          </FieldGroup>
+          <DialogFooter className="mt-4">
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+              {t(locale, 'common.cancel')}
+            </Button>
+            <Button type="submit" disabled={busy || !displayName.trim() || !accountId}>
+              {t(locale, 'contacts.create')}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

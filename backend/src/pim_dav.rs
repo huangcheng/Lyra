@@ -273,6 +273,118 @@ async fn tombstone_contact(db: &DbPool, account_id: &str, href: &str) {
     let _ = db.orm().execute(&del).await;
 }
 
+// ── DAV writes (create contact / event) ───────────────────────────────
+
+/// Server-root path of a full item URL — the href form DAV sync reports
+/// use (and what `external_id` stores), so a created item dedupes against
+/// its server-synced copy instead of duplicating.
+fn href_path(full_url: &str) -> String {
+    full_url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/').map(|(_, path)| format!("/{path}")))
+        .unwrap_or_else(|| full_url.to_string())
+}
+
+/// The account's first synced address book (the collection new contacts
+/// belong in), falling back to the stored homeset root.
+async fn first_addressbook_url(db: &DbPool, account_id: &str) -> Option<String> {
+    let Ok(account) = crate::sync::queries::id_value_pub(db, account_id) else {
+        return None;
+    };
+    let mut q = Sq::select();
+    q.column(contact::Column::AddressbookUrl)
+        .from(contact::Entity)
+        .and_where(contact::Column::AccountId.eq(account))
+        .limit(1);
+    let row = db.orm().query_one(&q).await.ok()??;
+    row.try_get::<String>("", "addressbook_url").ok()
+}
+
+fn with_trailing_slash(url: &str) -> String {
+    if url.ends_with('/') {
+        url.to_string()
+    } else {
+        format!("{url}/")
+    }
+}
+
+/// Create a contact via CardDAV PUT and mirror it locally. Returns the
+/// new item's server href (path form) for the caller to re-read.
+pub(crate) async fn create_dav_contact(
+    db: &DbPool,
+    account_id: &str,
+    carddav_url: &str,
+    email: &str,
+    password: &str,
+    fields: &crate::pim_write::NewContact,
+) -> Result<String, crate::dav::DavError> {
+    let client = DavClient::new(email.to_string(), password.to_string(), carddav_url)?;
+    let collection = with_trailing_slash(
+        &first_addressbook_url(db, account_id)
+            .await
+            .unwrap_or_else(|| carddav_url.to_string()),
+    );
+    let uid = uuid::Uuid::new_v4().to_string();
+    let vcard = crate::pim_write::build_vcard(&uid, fields);
+    let full = format!("{collection}{uid}.vcf");
+    let etag = client
+        .put_new(&full, &vcard, "text/vcard; charset=utf-8")
+        .await?;
+    let path = href_path(&full);
+    let no_photo: &PhotoStore = &|_photo| Box::pin(std::future::ready(None));
+    upsert_contact(
+        db,
+        account_id,
+        &collection,
+        &crate::dav_protocol::DavItem {
+            href: path.clone(),
+            etag: Some(etag),
+            data: Some(vcard),
+        },
+        no_photo,
+    )
+    .await
+    .map_err(|e| crate::dav::DavError::Protocol(format!("contact row insert failed: {e}")))?;
+    Ok(path)
+}
+
+/// Create an event via CalDAV PUT into `calendar_url` and mirror it
+/// locally. Returns the new item's server href (path form).
+pub(crate) async fn create_dav_event(
+    db: &DbPool,
+    account_id: &str,
+    calendar_id: &str,
+    calendar_url: &str,
+    email: &str,
+    password: &str,
+    fields: &crate::pim_write::NewEvent,
+) -> Result<String, crate::dav::DavError> {
+    let client = DavClient::new(email.to_string(), password.to_string(), calendar_url)?;
+    let collection = with_trailing_slash(calendar_url);
+    let uid = uuid::Uuid::new_v4().to_string();
+    let ical =
+        crate::pim_write::build_vevent(&uid, fields).map_err(crate::dav::DavError::Protocol)?;
+    let full = format!("{collection}{uid}.ics");
+    let etag = client
+        .put_new(&full, &ical, "text/calendar; charset=utf-8")
+        .await?;
+    let path = href_path(&full);
+    upsert_event(
+        db,
+        account_id,
+        calendar_id,
+        &collection,
+        &crate::dav_protocol::DavItem {
+            href: path.clone(),
+            etag: Some(etag),
+            data: Some(ical),
+        },
+    )
+    .await
+    .map_err(|e| crate::dav::DavError::Protocol(format!("event row insert failed: {e}")))?;
+    Ok(path)
+}
+
 // ── calendar sync ─────────────────────────────────────────────────────
 
 pub(crate) async fn sync_caldav(

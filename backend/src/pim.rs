@@ -29,7 +29,7 @@ use crate::storage::DbPool;
 pub fn routes() -> Router<AuthState> {
     Router::new()
         // Contacts
-        .route("/api/v1/contacts", get(list_contacts))
+        .route("/api/v1/contacts", get(list_contacts).post(create_contact))
         .route("/api/v1/contacts/{id}", get(get_contact))
         .route(
             "/api/v1/accounts/{account_id}/contacts/sync",
@@ -42,7 +42,10 @@ pub fn routes() -> Router<AuthState> {
         // Calendars
         .route("/api/v1/calendars", get(list_calendars))
         .route("/api/v1/calendars/{id}", get(get_calendar))
-        .route("/api/v1/calendars/{id}/events", get(list_events))
+        .route(
+            "/api/v1/calendars/{id}/events",
+            get(list_events).post(create_event),
+        )
         .route("/api/v1/events/{id}", get(get_event))
         .route(
             "/api/v1/accounts/{account_id}/calendars/sync",
@@ -647,6 +650,180 @@ async fn get_event(
         .transpose()?
         .ok_or(PimError::NotFound)?;
     Ok(Json(event))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateContactRequest {
+    pub account_id: String,
+    pub display_name: String,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub organisation: Option<String>,
+}
+
+/// POST /api/v1/contacts — create a contact in the account's first synced
+/// address book via CardDAV PUT and mirror the row locally.
+async fn create_contact(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<CreateContactRequest>,
+) -> Result<Json<Contact>, PimError> {
+    let db = state.db();
+    if body.display_name.trim().is_empty() {
+        return Err(PimError::InvalidInput(
+            "displayName must not be empty".into(),
+        ));
+    }
+    let account = id_value(db, &body.account_id)?;
+    let user = id_value(db, &user_id)?;
+
+    let mut acct = Sq::select();
+    acct.column(mail_account::Column::EmailAddress)
+        .column(Alias::new("carddav_url"))
+        .from(mail_account::Entity)
+        .and_where(mail_account::Column::Id.eq(account))
+        .and_where(mail_account::Column::UserId.eq(user));
+    let row = db
+        .orm()
+        .query_one(&acct)
+        .await
+        .map_err(orm_err)?
+        .ok_or(PimError::AccountNotFound)?;
+    let email: String = row.try_get("", "email_address").map_err(orm_err)?;
+    let carddav = row
+        .try_get::<Option<String>>("", "carddav_url")
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            PimError::InvalidInput(
+                "Connect Calendar & contacts (CardDAV) for this account first".into(),
+            )
+        })?;
+
+    let password = load_dav_basic_password(db, &user_id, &body.account_id).await?;
+    let fields = crate::pim_write::NewContact {
+        display_name: body.display_name.trim().to_string(),
+        email: body.email.clone(),
+        phone: body.phone.clone(),
+        organisation: body.organisation.clone(),
+    };
+    let href = crate::pim_dav::create_dav_contact(
+        db,
+        &body.account_id,
+        &carddav,
+        &email,
+        &password,
+        &fields,
+    )
+    .await
+    .map_err(|e| PimError::SyncError(e.to_string()))?;
+
+    let account_bind = id_value(db, &body.account_id)?;
+    let mut stmt = Sq::select();
+    add_contact_columns(&mut stmt);
+    stmt.from(contact::Entity)
+        .and_where(contact::Column::AccountId.eq(account_bind))
+        .and_where(contact::Column::ExternalId.eq(href))
+        .limit(1);
+    let row = db
+        .orm()
+        .query_one(&stmt)
+        .await
+        .map_err(orm_err)?
+        .ok_or(PimError::NotFound)?;
+    Ok(Json(contact_from_row(&row)?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateEventRequest {
+    pub summary: String,
+    pub dtstart: String,
+    pub dtend: Option<String>,
+    pub is_all_day: bool,
+    pub location: Option<String>,
+    pub description: Option<String>,
+}
+
+/// POST /api/v1/calendars/{id}/events — create an event in a CalDAV
+/// calendar via PUT and mirror the row locally. ICS subscriptions are
+/// read-only sources.
+async fn create_event(
+    State(state): State<AuthState>,
+    Path(id): Path<String>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<CreateEventRequest>,
+) -> Result<Json<CalendarEvent>, PimError> {
+    let db = state.db();
+    let cal = id_value(db, &id)?;
+    let user = id_value(db, &user_id)?;
+
+    // The calendar must hang off one of the user's mail accounts.
+    let mut q = Sq::select();
+    q.column(calendar::Column::CalendarUrl)
+        .column(calendar::Column::AccountId)
+        .expr(
+            Expr::col((mail_account::Entity, mail_account::Column::Id)).cast_as(Alias::new("text")),
+        )
+        .column(mail_account::Column::EmailAddress)
+        .from(calendar::Entity)
+        .inner_join(
+            mail_account::Entity,
+            Expr::col((calendar::Entity, calendar::Column::AccountId))
+                .equals((mail_account::Entity, mail_account::Column::Id)),
+        )
+        .and_where(calendar::Column::Id.eq(cal))
+        .and_where(mail_account::Column::UserId.eq(user));
+    let row = db
+        .orm()
+        .query_one(&q)
+        .await
+        .map_err(orm_err)?
+        .ok_or(PimError::NotFound)?;
+    let calendar_url: String = row.try_get("", "calendar_url").map_err(orm_err)?;
+    let account_id: String = row
+        .try_get::<String>("", "id")
+        .or_else(|_| row.try_get::<String>("", "account_id"))
+        .map_err(orm_err)?;
+    let email: String = row.try_get("", "email_address").map_err(orm_err)?;
+
+    let password = load_dav_basic_password(db, &user_id, &account_id).await?;
+    let fields = crate::pim_write::NewEvent {
+        summary: body.summary.clone(),
+        dtstart: body.dtstart.clone(),
+        dtend: body.dtend.clone(),
+        is_all_day: body.is_all_day,
+        location: body.location.clone(),
+        description: body.description.clone(),
+    };
+    let href = crate::pim_dav::create_dav_event(
+        db,
+        &account_id,
+        &id,
+        &calendar_url,
+        &email,
+        &password,
+        &fields,
+    )
+    .await
+    .map_err(|e| PimError::SyncError(e.to_string()))?;
+
+    let cal_bind = id_value(db, &id)?;
+    let mut stmt = Sq::select();
+    add_event_columns(&mut stmt);
+    stmt.from(calendar_event::Entity)
+        .and_where(calendar_event::Column::ExternalId.eq(href))
+        .and_where(calendar_event::Column::CalendarId.eq(cal_bind))
+        .limit(1);
+    let row = db
+        .orm()
+        .query_one(&stmt)
+        .await
+        .map_err(orm_err)?
+        .ok_or(PimError::NotFound)?;
+    Ok(Json(event_from_row(&row)?))
 }
 
 /// Sync contacts for an account via CardDAV (when `carddav_url` is set).
