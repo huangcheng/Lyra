@@ -599,7 +599,14 @@ async fn list_events(
         stmt.and_where(calendar_event::Column::Dtstart.gte(ts_value(db, query.start.as_deref())));
     }
     if query.end.is_some() {
-        stmt.and_where(calendar_event::Column::Dtend.lte(ts_value(db, query.end.as_deref())));
+        // Events without DTEND (point events) must still match the window
+        // by their start — `dtend <= end` alone drops NULL rows on both
+        // dialects.
+        stmt.cond_where(
+            Condition::any()
+                .add(calendar_event::Column::Dtend.lte(ts_value(db, query.end.as_deref())))
+                .add(calendar_event::Column::Dtend.is_null()),
+        );
     }
     stmt.order_by(calendar_event::Column::Dtstart, Order::Asc);
 

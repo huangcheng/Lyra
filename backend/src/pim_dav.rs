@@ -7,7 +7,7 @@
 //! fall back to etag-diff. Writes go through etag-guarded PUT/DELETE.
 
 use sea_orm::sea_query::{Expr, OnConflict, Query as Sq};
-use sea_orm::{ColumnTrait, ConnectionTrait, Value};
+use sea_orm::{ColumnTrait, ConnectionTrait, ExprTrait, Value};
 
 use crate::dav::DavClient;
 use crate::dav_protocol::DavItem;
@@ -29,10 +29,14 @@ pub(crate) type PhotoStore = dyn Fn(
 // ── cursors ───────────────────────────────────────────────────────────
 
 async fn load_cursor(db: &DbPool, account_id: &str, kind: &str) -> Option<String> {
+    // Typed UUID bind — raw text params fail `uuid = text` on PostgreSQL.
+    let Ok(acct) = crate::sync::queries::id_value_pub(db, account_id) else {
+        return None;
+    };
     let mut q = Sq::select();
     q.column(dav_cursor::Column::Token)
         .from(dav_cursor::Entity)
-        .and_where(dav_cursor::Column::AccountId.eq(account_id))
+        .and_where(dav_cursor::Column::AccountId.eq(acct))
         .and_where(dav_cursor::Column::Kind.eq(kind));
     let row = db.orm().query_one(&q).await.ok()??;
     row.try_get::<Option<String>>("", "token").ok().flatten()
@@ -45,6 +49,9 @@ async fn save_cursor(db: &DbPool, account_id: &str, kind: &str, token: Option<&s
         Some(t) => Value::String(Some(t.to_string())),
         None => Value::String(None),
     };
+    let Ok(acct) = crate::sync::queries::id_value_pub(db, account_id) else {
+        return;
+    };
     // Upsert by PK; dialect-safe via raw column values.
     let mut ins = Sq::insert();
     ins.into_table(dav_cursor::Entity)
@@ -53,11 +60,7 @@ async fn save_cursor(db: &DbPool, account_id: &str, kind: &str, token: Option<&s
             dav_cursor::Column::Kind,
             dav_cursor::Column::Token,
         ])
-        .values_panic([
-            Expr::val(account_id),
-            Expr::val(kind),
-            Expr::val(value.clone()),
-        ])
+        .values_panic([Expr::val(acct), Expr::val(kind), Expr::val(value.clone())])
         .on_conflict(
             OnConflict::columns([dav_cursor::Column::AccountId, dav_cursor::Column::Kind])
                 .update_column(dav_cursor::Column::Token)
@@ -178,7 +181,10 @@ async fn upsert_contact(
 
     let mut existing = Sq::select();
     existing
-        .column(contact::Column::Id)
+        .expr(
+            Expr::col((contact::Entity, contact::Column::Id))
+                .cast_as(sea_orm::sea_query::Alias::new("text")),
+        )
         .column(contact::Column::Etag)
         .from(contact::Entity)
         .and_where(contact::Column::AccountId.eq(account.clone()))
@@ -214,7 +220,7 @@ async fn upsert_contact(
             .value(contact::Column::AddressbookUrl, collection.to_string())
             .value(contact::Column::Etag, item.etag.clone().unwrap_or_default())
             .value(contact::Column::UpdatedAt, Expr::current_timestamp())
-            .and_where(contact::Column::Id.eq(id.clone()));
+            .and_where(contact::Column::Id.eq(crate::sync::queries::id_value_pub(db, &id)?));
         if let Some(photo_path) = photo_path {
             update.value(contact::Column::PhotoPath, photo_path);
         }
@@ -290,11 +296,11 @@ pub(crate) async fn sync_caldav(
     };
     for (collection, name) in &collections {
         let calendar_id = ensure_calendar(db, account_id, collection, name).await;
-        let prior = load_calendar_token(db, calendar_id).await;
+        let prior = load_calendar_token(db, calendar_id.clone()).await;
         let (to_fetch, removed, _next) = delta(client, collection, prior.as_deref()).await?;
         let items = client.calendar_multiget(collection, &to_fetch).await?;
         for item in items {
-            if upsert_event(db, account_id, collection, &item)
+            if upsert_event(db, account_id, &calendar_id, collection, &item)
                 .await
                 .is_ok()
             {
@@ -317,11 +323,23 @@ pub(crate) async fn sync_caldav(
 }
 
 async fn ensure_calendar(db: &DbPool, account_id: &str, collection: &str, name: &str) -> String {
+    // account_id must bind as a typed UUID on PostgreSQL — a raw text bind
+    // silently fails both the lookup and the insert there.
+    let Ok(acct) = crate::sync::queries::id_value_pub(db, account_id) else {
+        return String::new();
+    };
     let mut q = Sq::select();
-    q.column(crate::entities::calendar::Column::Id)
-        .from(crate::entities::calendar::Entity)
-        .and_where(crate::entities::calendar::Column::AccountId.eq(account_id))
-        .and_where(crate::entities::calendar::Column::CalendarUrl.eq(collection));
+    // UUID ids must project as text to decode on PostgreSQL.
+    q.expr(
+        Expr::col((
+            crate::entities::calendar::Entity,
+            crate::entities::calendar::Column::Id,
+        ))
+        .cast_as(sea_orm::sea_query::Alias::new("text")),
+    )
+    .from(crate::entities::calendar::Entity)
+    .and_where(crate::entities::calendar::Column::AccountId.eq(acct.clone()))
+    .and_where(crate::entities::calendar::Column::CalendarUrl.eq(collection));
     if let Ok(Some(row)) = db.orm().query_one(&q).await
         && let Ok(id) = row.try_get::<String>("", "id")
     {
@@ -340,19 +358,22 @@ async fn ensure_calendar(db: &DbPool, account_id: &str, collection: &str, name: 
         ])
         .values_panic([
             Expr::val(id.clone()),
-            Expr::val(account_id),
+            Expr::val(acct),
             Expr::val(collection),
             Expr::val(name),
         ]);
-    let _ = db.orm().execute(&ins).await;
+    if let Err(error) = db.orm().execute(&ins).await {
+        tracing::warn!(%error, account_id, collection, "calendar row insert failed");
+    }
     raw_id
 }
 
 async fn load_calendar_token(db: &DbPool, calendar_id: String) -> Option<String> {
+    let id = crate::sync::queries::id_value_pub(db, &calendar_id).ok()?;
     let mut q = Sq::select();
     q.column(crate::entities::calendar::Column::SyncToken)
         .from(crate::entities::calendar::Entity)
-        .and_where(crate::entities::calendar::Column::Id.eq(calendar_id.clone()));
+        .and_where(crate::entities::calendar::Column::Id.eq(id));
     let row = db.orm().query_one(&q).await.ok()??;
     row.try_get::<Option<String>>("", "sync_token")
         .ok()
@@ -362,6 +383,7 @@ async fn load_calendar_token(db: &DbPool, calendar_id: String) -> Option<String>
 async fn upsert_event(
     db: &DbPool,
     account_id: &str,
+    calendar_id: &str,
     collection: &str,
     item: &DavItem,
 ) -> Result<(), sea_orm::DbErr> {
@@ -369,11 +391,15 @@ async fn upsert_event(
         return Ok(());
     };
     let account = crate::sync::queries::id_value_pub(db, account_id)?;
+    let calendar = crate::sync::queries::id_value_pub(db, calendar_id)?;
     let (summary, description, dtstart, dtend, location, _is_all_day) =
         crate::dav::parse_vevent_fields(ical);
     let mut existing = Sq::select();
     existing
-        .column(calendar_event::Column::Id)
+        .expr(
+            Expr::col((calendar_event::Entity, calendar_event::Column::Id))
+                .cast_as(sea_orm::sea_query::Alias::new("text")),
+        )
         .column(calendar_event::Column::Etag)
         .from(calendar_event::Entity)
         .and_where(calendar_event::Column::AccountId.eq(account.clone()))
@@ -405,12 +431,13 @@ async fn upsert_event(
             .value(calendar_event::Column::Location, location.clone())
             .value(calendar_event::Column::RecurrenceRule, Value::String(None))
             .value(calendar_event::Column::CalendarUrl, collection.to_string())
+            .value(calendar_event::Column::CalendarId, calendar.clone())
             .value(
                 calendar_event::Column::Etag,
                 item.etag.clone().unwrap_or_default(),
             )
             .value(calendar_event::Column::UpdatedAt, Expr::current_timestamp())
-            .and_where(calendar_event::Column::Id.eq(id.clone()));
+            .and_where(calendar_event::Column::Id.eq(crate::sync::queries::id_value_pub(db, &id)?));
         db.orm().execute(&update).await?;
     } else {
         let raw_id = uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
@@ -421,6 +448,7 @@ async fn upsert_event(
             .columns([
                 calendar_event::Column::Id,
                 calendar_event::Column::AccountId,
+                calendar_event::Column::CalendarId,
                 calendar_event::Column::ExternalId,
                 calendar_event::Column::IcalendarBlob,
                 calendar_event::Column::Summary,
@@ -435,6 +463,7 @@ async fn upsert_event(
             .values_panic([
                 Expr::val(id),
                 Expr::val(account.clone()),
+                Expr::val(calendar.clone()),
                 Expr::val(item.href.clone()),
                 Expr::val(ical.to_string()),
                 Expr::val(summary.clone()),
@@ -670,6 +699,151 @@ fn parse_ical_dt(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(raw)
         .ok()
         .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+/// Live roundtrip for the calendar row seam: `ensure_calendar` must bind
+/// `account_id` as a typed UUID on PostgreSQL (raw text binds made the
+/// insert fail silently, leaving the calendar rail permanently empty).
+#[cfg(test)]
+mod postgres_live {
+    use super::*;
+    use crate::pgtest::support;
+
+    #[test]
+    #[ignore = "needs postgres"]
+    fn ensure_calendar_creates_and_reuses_rows() {
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_account(&db, &user_id, "cal@example.com").await;
+
+            let id = ensure_calendar(
+                &db,
+                &account_id,
+                "https://dav.example/cal/personal/",
+                "Personal",
+            )
+            .await;
+            assert!(!id.is_empty());
+
+            let mut q = Sq::select();
+            q.column(crate::entities::calendar::Column::Id)
+                .from(crate::entities::calendar::Entity)
+                .and_where(
+                    crate::entities::calendar::Column::CalendarUrl
+                        .eq("https://dav.example/cal/personal/".to_string()),
+                );
+            let rows = db.orm().query_all(&q).await.unwrap();
+            assert_eq!(rows.len(), 1, "calendar row must exist after ensure");
+
+            // Second call returns the SAME calendar (no duplicate rows).
+            let id2 = ensure_calendar(
+                &db,
+                &account_id,
+                "https://dav.example/cal/personal/",
+                "Personal",
+            )
+            .await;
+            assert_eq!(id, id2, "ensure_calendar must be idempotent per URL");
+            let rows = db.orm().query_all(&q).await.unwrap();
+            assert_eq!(rows.len(), 1, "second ensure must not insert again");
+        });
+    }
+
+    const VEVENT: &str = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:pgtest-1\r\n\
+SUMMARY:Red test\r\nDTSTART:20260907T090000Z\r\nDTEND:20260907T100000Z\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    /// Events must carry `calendar_id` (the list API filters on it) and the
+    /// etag-change UPDATE path must work: both broke on PostgreSQL via raw
+    /// text/UUID id handling.
+    #[test]
+    #[ignore = "needs postgres"]
+    fn event_upsert_links_calendar_and_updates() {
+        use sea_orm::QueryResult;
+
+        async fn read_event(db: &DbPool) -> QueryResult {
+            let mut q = Sq::select();
+            q.column(calendar_event::Column::CalendarId)
+                .column(calendar_event::Column::Summary)
+                .from(calendar_event::Entity)
+                .and_where(calendar_event::Column::ExternalId.eq("/pgtest-1.ics".to_string()));
+            db.orm().query_one(&q).await.unwrap().expect("event row")
+        }
+
+        support::rt().block_on(async {
+            let (db, user_id) = support::setup().await;
+            let account_id = support::seed_account(&db, &user_id, "cal2@example.com").await;
+            // Distinct from the other test's URL: tests run in parallel
+            // against the shared database.
+            let calendar_id = ensure_calendar(
+                &db,
+                &account_id,
+                "https://dav.example/cal/events-b/",
+                "Personal",
+            )
+            .await;
+
+            upsert_event(
+                &db,
+                &account_id,
+                &calendar_id,
+                "https://dav.example/cal/personal/",
+                &crate::dav_protocol::DavItem {
+                    href: "/pgtest-1.ics".into(),
+                    etag: Some("\"v1\"".into()),
+                    data: Some(VEVENT.into()),
+                },
+            )
+            .await
+            .unwrap();
+
+            let row = read_event(&db).await;
+            let linked: Option<String> = row
+                .try_get::<Option<uuid::Uuid>>("", "calendar_id")
+                .ok()
+                .flatten()
+                .map(|u| u.to_string());
+            assert_eq!(
+                linked.as_deref(),
+                Some(calendar_id.as_str()),
+                "event must link to its calendar"
+            );
+            assert_eq!(
+                row.try_get::<String>("", "summary").unwrap(),
+                "Red test",
+                "summary parsed from VEVENT"
+            );
+
+            // Different etag → UPDATE path (raw-UUID id decode broke it).
+            upsert_event(
+                &db,
+                &account_id,
+                &calendar_id,
+                "https://dav.example/cal/personal/",
+                &crate::dav_protocol::DavItem {
+                    href: "/pgtest-1.ics".into(),
+                    etag: Some("\"v2\"".into()),
+                    data: Some(VEVENT.replace("Red test", "Green test")),
+                },
+            )
+            .await
+            .unwrap();
+
+            let mut count = Sq::select();
+            count
+                .column(calendar_event::Column::Id)
+                .from(calendar_event::Entity)
+                .and_where(calendar_event::Column::ExternalId.eq("/pgtest-1.ics".to_string()));
+            let rows = db.orm().query_all(&count).await.unwrap();
+            assert_eq!(rows.len(), 1, "etag change updates, never duplicates");
+            let row = read_event(&db).await;
+            assert_eq!(
+                row.try_get::<String>("", "summary").unwrap(),
+                "Green test",
+                "update path applied new data"
+            );
+        });
+    }
 }
 
 #[cfg(test)]

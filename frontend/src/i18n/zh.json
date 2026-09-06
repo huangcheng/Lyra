@@ -556,7 +556,10 @@
       "fri": "五",
       "sat": "六"
     },
-    "connectDav": "连接 CalDAV"
+    "connectDav": "连接 CalDAV",
+    "tasks": "任务",
+    "when": "时间",
+    "where": "地点"
   },
   "dash": {
     "section": "仪表盘",

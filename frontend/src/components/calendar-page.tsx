@@ -1,18 +1,33 @@
 /**
  * Calendar subsystem — CalDAV sources + ICS / webcal subscriptions.
+ *
+ * Peer destination to Mail: slim-nav shell, own source rail, quiet
+ * hairline grid. Amber is reserved for "today"; events wear their
+ * source color as a tinted chip, never as a solid block.
  */
 
-import { useState, useEffect, useMemo, type CSSProperties, type FormEvent } from 'react';
-import { Link } from '@tanstack/react-router';
+import {
+  useState,
+  useEffect,
+  useMemo,
+  type CSSProperties,
+  type FormEvent,
+  type ReactNode,
+} from 'react';
 import {
   Calendar as CalendarIcon,
+  CalendarDays,
   ChevronLeft,
   ChevronRight,
+  Clock,
+  MapPin,
+  Plus,
   RefreshCw,
   Trash2,
   X,
 } from 'lucide-react';
 import { t } from '../i18n';
+import type { SupportedLocale } from '../types';
 import { api } from '../lib/api-client';
 import {
   addViewOffset,
@@ -29,6 +44,7 @@ import { useNavigate } from '@tanstack/react-router';
 import { EmptyState } from './empty-state';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { SlimPageNav } from '@/components/slim-page-nav';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '../stores/ui';
 import { expandEventsForRange, type ExpandableEvent } from '@/lib/calendar-rrule';
@@ -76,6 +92,20 @@ interface CalApi {
 }
 
 const WEEKDAY_ORDER = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
+
+/** Fastmail's tasks collection leaks this server-side constant as its
+ * display name; show it as what it is instead. */
+const TASKS_CALENDAR_NAME = 'DEFAULT_TASK_CALENDAR_NAME';
+
+function displayName(locale: SupportedLocale, name: string): string {
+  return name === TASKS_CALENDAR_NAME ? t(locale, 'calendar.tasks') : name;
+}
+
+/** Tinted chip background from a source color (quiet, never solid). */
+function tint(color: string | undefined, strength: number): string {
+  const c = color || 'var(--unread)';
+  return `color-mix(in srgb, ${c} ${strength}%, transparent)`;
+}
 
 export function CalendarPage() {
   const locale = useUIStore((s) => s.locale);
@@ -278,10 +308,9 @@ export function CalendarPage() {
       setAddOpen(false);
       setAddUrl('');
       setAddName('');
-      const merged = await loadSources();
+      await loadSources();
       setVisibleIds((prev) => new Set([...prev, created.id]));
       await loadEvents(new Set([...visibleIds, created.id]), anchor, view);
-      void merged;
     } catch (err: unknown) {
       setAddError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -319,23 +348,44 @@ export function CalendarPage() {
     return {
       top: `${top}%`,
       height: `${Math.max(height, 2)}%`,
-      backgroundColor: event._color || 'var(--unread)',
+      backgroundColor: tint(event._color, 12),
+      borderLeft: `2px solid ${event._color || 'var(--unread)'}`,
     };
   }
 
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const nowTop = (nowMinutes / (24 * 60)) * 100;
 
+  /** Quiet event chip: source-colored dot on a tinted background. */
+  function EventChip({ event, className }: { event: CalEvent; className?: string }) {
+    const c = event._color || 'var(--unread)';
+    return (
+      <button
+        key={event.id}
+        type="button"
+        className={cn(
+          'flex w-full items-center gap-1.5 overflow-hidden rounded-[4px] px-1.5 py-[2px] text-left text-[10.5px] leading-tight text-foreground transition-colors hover:brightness-95 dark:hover:brightness-110',
+          className,
+        )}
+        style={{ backgroundColor: tint(c, 14) }}
+        onClick={() => setSelectedEvent(event)}
+      >
+        <span className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: c }} />
+        <span className="truncate">{event.summary || t(locale, 'calendar.noTitle')}</span>
+      </button>
+    );
+  }
+
   function renderMonth() {
     const year = anchor.getFullYear();
     const month = anchor.getMonth();
     const days = monthGridDays(year, month);
     return (
-      <div className="grid min-h-0 flex-1 grid-cols-7 grid-rows-[auto_repeat(6,minmax(0,1fr))] gap-px overflow-hidden border bg-border">
+      <div className="grid min-h-0 flex-1 grid-cols-7 grid-rows-[auto_repeat(6,minmax(0,1fr))] gap-px overflow-hidden bg-border/70">
         {WEEKDAY_ORDER.map((day) => (
           <div
             key={day}
-            className="bg-muted/60 px-2 py-1.5 text-center text-[11px] font-medium text-muted-foreground"
+            className="bg-background px-2.5 py-2 text-center text-[11px] font-medium text-muted-foreground"
           >
             {t(locale, `calendar.days.${day}`)}
           </div>
@@ -348,34 +398,30 @@ export function CalendarPage() {
             <div
               key={i}
               className={cn(
-                'flex min-h-20 flex-col bg-background p-1',
-                !inMonth && 'bg-muted/30 text-muted-foreground',
+                'flex min-h-20 flex-col gap-1 bg-background p-1.5',
+                !inMonth && 'bg-muted/25',
               )}
             >
-              <div
+              <span
                 className={cn(
-                  'mb-0.5 flex h-6 w-6 items-center justify-center self-end rounded-full text-xs',
-                  isToday && 'bg-[var(--unread)] font-semibold text-[#1a1b1f]',
+                  'flex h-6 w-6 shrink-0 items-center justify-center self-end text-xs',
+                  isToday
+                    ? 'rounded-full bg-[var(--unread)] font-semibold text-[#1a1b1f]'
+                    : inMonth
+                      ? 'text-foreground/75'
+                      : 'text-muted-foreground/50',
                 )}
               >
                 {day.getDate()}
-              </div>
-              <div className="min-h-0 flex-1 space-y-0.5 overflow-hidden">
+              </span>
+              <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-hidden">
                 {dayEvents.slice(0, 3).map((event) => (
-                  <button
-                    key={event.id}
-                    type="button"
-                    className="block w-full truncate rounded-sm px-1 py-0.5 text-left text-[10.5px] leading-tight text-[#1a1b1f]"
-                    style={{ backgroundColor: event._color || 'var(--unread)' }}
-                    onClick={() => setSelectedEvent(event)}
-                  >
-                    {event.summary || t(locale, 'calendar.noTitle')}
-                  </button>
+                  <EventChip key={event.id} event={event} />
                 ))}
                 {dayEvents.length > 3 ? (
-                  <div className="px-1 text-[10px] text-muted-foreground">
+                  <span className="px-1.5 text-[10px] text-muted-foreground">
                     {t(locale, 'calendar.moreEvents', { count: dayEvents.length - 3 })}
-                  </div>
+                  </span>
                 ) : null}
               </div>
             </div>
@@ -388,26 +434,25 @@ export function CalendarPage() {
   function renderTimeGrid(days: Date[]) {
     const hours = hourSlots();
     return (
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden border">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-border/70">
         <div
-          className="grid shrink-0 border-b bg-muted/40"
+          className="grid shrink-0 gap-px border-b border-border bg-border/70"
           style={{ gridTemplateColumns: `3.5rem repeat(${days.length}, minmax(0, 1fr))` }}
         >
-          <div className="border-r" />
+          <div className="bg-background" />
           {days.map((day) => {
             const isToday = sameLocalDay(day, now);
             return (
-              <div
-                key={day.toISOString()}
-                className="border-r px-2 py-2 text-center text-xs last:border-r-0"
-              >
-                <div className="text-muted-foreground">
+              <div key={day.toISOString()} className="bg-background px-2 py-2 text-center">
+                <div className="text-[11px] text-muted-foreground">
                   {day.toLocaleDateString(locTag, { weekday: 'short' })}
                 </div>
                 <div
                   className={cn(
-                    'mx-auto mt-0.5 flex h-7 w-7 items-center justify-center rounded-full text-sm font-medium',
-                    isToday && 'bg-[var(--unread)] text-[#1a1b1f]',
+                    'mx-auto mt-1 flex h-7 w-7 items-center justify-center rounded-full text-sm',
+                    isToday
+                      ? 'bg-[var(--unread)] font-semibold text-[#1a1b1f]'
+                      : 'font-medium text-foreground',
                   )}
                 >
                   {day.getDate()}
@@ -417,10 +462,10 @@ export function CalendarPage() {
           })}
         </div>
         <div
-          className="grid shrink-0 border-b bg-background"
+          className="grid shrink-0 gap-px border-b border-border bg-border/70"
           style={{ gridTemplateColumns: `3.5rem repeat(${days.length}, minmax(0, 1fr))` }}
         >
-          <div className="border-r px-1 py-1 text-[10px] text-muted-foreground">
+          <div className="bg-background px-1.5 py-1.5 text-[10px] text-muted-foreground">
             {t(locale, 'calendar.allDay')}
           </div>
           {days.map((day) => {
@@ -428,24 +473,16 @@ export function CalendarPage() {
             return (
               <div
                 key={day.toISOString()}
-                className="min-h-8 space-y-0.5 border-r p-0.5 last:border-r-0"
+                className="flex min-h-9 flex-col gap-0.5 bg-background p-1"
               >
                 {allDay.map((event) => (
-                  <button
-                    key={event.id}
-                    type="button"
-                    className="block w-full truncate rounded-sm px-1 text-left text-[10px] text-[#1a1b1f]"
-                    style={{ backgroundColor: event._color || 'var(--unread)' }}
-                    onClick={() => setSelectedEvent(event)}
-                  >
-                    {event.summary || t(locale, 'calendar.noTitle')}
-                  </button>
+                  <EventChip key={event.id} event={event} />
                 ))}
               </div>
             );
           })}
         </div>
-        <div className="relative min-h-0 flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto bg-background">
           <div
             className="grid"
             style={{
@@ -453,26 +490,29 @@ export function CalendarPage() {
               height: '48rem',
             }}
           >
-            <div className="relative border-r">
+            <div className="relative border-r border-border/70">
               {hours.map((h) => (
-                <div
+                <span
                   key={h}
-                  className="absolute right-1 text-[10px] text-muted-foreground"
+                  className="absolute right-1.5 text-[10px] tabular-nums text-muted-foreground"
                   style={{ top: `${(h / 24) * 100}%`, transform: 'translateY(-50%)' }}
                 >
                   {String(h).padStart(2, '0')}:00
-                </div>
+                </span>
               ))}
             </div>
             {days.map((day) => {
               const timed = eventsForDay(events, day).filter((e) => !e.isAllDay);
               const showNow = sameLocalDay(day, now);
               return (
-                <div key={day.toISOString()} className="relative border-r last:border-r-0">
+                <div
+                  key={day.toISOString()}
+                  className="relative border-r border-border/70 last:border-r-0"
+                >
                   {hours.map((h) => (
                     <div
                       key={h}
-                      className="absolute inset-x-0 border-t border-border/60"
+                      className="absolute inset-x-0 border-t border-border/50"
                       style={{ top: `${(h / 24) * 100}%` }}
                     />
                   ))}
@@ -480,20 +520,24 @@ export function CalendarPage() {
                     <button
                       key={event.id}
                       type="button"
-                      className="absolute right-0.5 left-0.5 overflow-hidden rounded-sm px-1 text-left text-[10px] leading-tight text-[#1a1b1f]"
+                      className="absolute right-1 left-1 overflow-hidden rounded-[4px] px-1.5 py-0.5 text-left text-[10.5px] leading-tight text-foreground"
                       style={timedBlockStyle(event)}
                       onClick={() => setSelectedEvent(event)}
                     >
+                      <span className="mr-1 text-muted-foreground">{formatEventTime(event)}</span>
                       {event.summary || t(locale, 'calendar.noTitle')}
                     </button>
                   ))}
                   {showNow ? (
                     <div
-                      className="pointer-events-none absolute right-0 left-0 z-10 border-t-2 border-[var(--unread)]"
+                      className="pointer-events-none absolute right-0 left-0 z-10 border-t border-[var(--unread)]"
                       style={{ top: `${nowTop}%` }}
                     >
-                      <span className="absolute -top-2.5 -left-0 rounded bg-[var(--unread)] px-1 text-[9px] font-medium text-[#1a1b1f]">
-                        {now.toLocaleTimeString(locTag, { hour: '2-digit', minute: '2-digit' })}
+                      <span className="absolute top-0 left-0 -translate-y-1/2 rounded-full bg-[var(--unread)] px-1 text-[9px] font-medium text-[#1a1b1f] tabular-nums">
+                        {now.toLocaleTimeString(locTag, {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
                       </span>
                     </div>
                   ) : null}
@@ -506,200 +550,242 @@ export function CalendarPage() {
     );
   }
 
-  return (
-    <div className="flex h-svh flex-col bg-background">
-      <header className="flex h-14 shrink-0 items-center gap-2 border-b px-3">
-        <Button variant="ghost" size="sm" asChild>
-          <Link to="/">{t(locale, 'common.back')}</Link>
-        </Button>
-        <h1 className="hidden text-lg font-semibold sm:block">{t(locale, 'calendar.title')}</h1>
-        <div className="mx-2 min-w-0 flex-1 truncate text-center text-sm font-semibold sm:text-base">
-          {viewTitle(anchor, view, locTag)}
-        </div>
-        <div className="flex items-center gap-1 rounded-md border p-0.5">
-          {(['day', 'week', 'month'] as CalendarView[]).map((v) => (
-            <Button
-              key={v}
-              type="button"
-              variant={view === v ? 'secondary' : 'ghost'}
-              size="sm"
-              className="h-7 px-2 text-xs"
-              onClick={() => setView(v)}
-            >
-              {t(locale, `calendar.view.${v}`)}
-            </Button>
-          ))}
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-8"
-          onClick={() => setAnchor(new Date())}
-        >
-          {t(locale, 'calendar.today')}
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          className="h-8 w-8"
-          onClick={() => setAnchor((a) => addViewOffset(a, view, -1))}
-        >
-          <ChevronLeft className="size-4" />
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          className="h-8 w-8"
-          onClick={() => setAnchor((a) => addViewOffset(a, view, 1))}
-        >
-          <ChevronRight className="size-4" />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8"
-          disabled={refreshing}
-          onClick={() => void refresh()}
-          aria-label={t(locale, 'calendar.refresh')}
-        >
-          <RefreshCw className={cn('size-4', refreshing && 'animate-spin')} />
-        </Button>
-      </header>
-
-      <div className="flex min-h-0 flex-1">
-        <aside className="flex w-56 shrink-0 flex-col gap-1 overflow-y-auto border-r bg-muted/15 p-3">
-          <p className="px-1 text-[10.5px] font-medium tracking-wide text-muted-foreground uppercase">
-            {t(locale, 'calendar.sources')}
+  function DetailRow({
+    icon: Icon,
+    label,
+    children,
+  }: {
+    icon: typeof Clock;
+    label: string;
+    children: ReactNode;
+  }) {
+    return (
+      <div className="flex gap-3">
+        <Icon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+        <div className="min-w-0">
+          <p className="text-[10.5px] font-medium tracking-wide text-muted-foreground uppercase">
+            {label}
           </p>
-          {loading ? (
-            <div className="px-1 text-sm text-muted-foreground">{t(locale, 'common.loading')}</div>
-          ) : error ? (
-            <div className="px-1 text-sm text-destructive">{t(locale, 'calendar.loadError')}</div>
-          ) : sources.length === 0 ? (
-            <div className="flex flex-col items-center">
-              <EmptyState
-                icon={CalendarIcon}
-                title={t(locale, 'calendar.empty')}
-                hint={t(locale, 'calendar.emptyHint')}
-              />
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-3"
-                onClick={() => void navigate({ to: '/settings', search: { pim: true } })}
-              >
-                {t(locale, 'calendar.connectDav')}
-              </Button>
+          <div className="mt-0.5 text-[13px] text-foreground">{children}</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-svh">
+      <SlimPageNav
+        section={t(locale, 'calendar.title')}
+        items={[
+          { key: 'calendar', label: t(locale, 'nav.calendar'), icon: CalendarDays, active: true },
+        ]}
+      />
+      <main className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-14 shrink-0 items-center gap-3 border-b px-5">
+          <h1 className="font-display truncate text-xl font-medium">
+            {viewTitle(anchor, view, locTag)}
+          </h1>
+          <div className="ml-auto flex items-center gap-1.5">
+            <div className="flex items-center rounded-md border border-border p-0.5">
+              {(['day', 'week', 'month'] as CalendarView[]).map((v) => (
+                <Button
+                  key={v}
+                  type="button"
+                  variant={view === v ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-7 px-2.5 text-xs"
+                  onClick={() => setView(v)}
+                >
+                  {t(locale, `calendar.view.${v}`)}
+                </Button>
+              ))}
             </div>
-          ) : (
-            sources.map((src) => (
-              <div
-                key={src.id}
-                className="group flex items-start gap-1 rounded-md px-1 py-1 hover:bg-accent"
-              >
-                <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-0.5 text-sm">
-                  <input
-                    type="checkbox"
-                    className="size-3.5 accent-[var(--unread)]"
-                    checked={visibleIds.has(src.id)}
-                    onChange={() => toggleSource(src.id)}
-                  />
-                  <span
-                    className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full"
-                    style={{ backgroundColor: src.color || 'var(--unread)' }}
-                  />
-                  <span className="min-w-0 truncate">
-                    {src.name}
-                    {src.kind === 'ics' ? (
-                      <span className="ml-1 text-[10px] text-muted-foreground">ICS</span>
-                    ) : null}
-                  </span>
-                </label>
-                {src.kind === 'ics' ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6 opacity-0 group-hover:opacity-100"
-                    aria-label={t(locale, 'common.delete')}
-                    onClick={() => void removeSub(src.id)}
-                  >
-                    <Trash2 className="size-3" />
-                  </Button>
-                ) : null}
-              </div>
-            ))
-          )}
-          {sources.some((s) => s.lastError) ? (
-            <p className="px-1 text-[10px] text-destructive">
-              {sources.find((s) => s.lastError)?.lastError}
-            </p>
-          ) : null}
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="mt-auto h-8 justify-start text-xs"
-            onClick={() => setAddOpen(true)}
-          >
-            + {t(locale, 'calendar.addSubscription')}
-          </Button>
-        </aside>
-
-        <section className="flex min-w-0 flex-1 flex-col p-3">
-          {view === 'month'
-            ? renderMonth()
-            : renderTimeGrid(view === 'week' ? weekDays(anchor) : [anchor])}
-        </section>
-
-        {selectedEvent ? (
-          <aside className="w-72 shrink-0 space-y-3 overflow-y-auto border-l p-4">
-            <div className="flex items-start justify-between gap-2">
-              <h3 className="text-sm font-semibold">
-                {selectedEvent.summary || t(locale, 'calendar.noTitle')}
-              </h3>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8"
+              onClick={() => setAnchor(new Date())}
+            >
+              {t(locale, 'calendar.today')}
+            </Button>
+            <div className="flex items-center">
               <Button
+                type="button"
                 variant="ghost"
                 size="icon"
-                className="h-6 w-6"
-                onClick={() => setSelectedEvent(null)}
+                className="h-8 w-8"
+                aria-label="Previous"
+                onClick={() => setAnchor((a) => addViewOffset(a, view, -1))}
               >
-                <X className="h-4 w-4" />
+                <ChevronLeft className="size-4" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                aria-label="Next"
+                onClick={() => setAnchor((a) => addViewOffset(a, view, 1))}
+              >
+                <ChevronRight className="size-4" />
               </Button>
             </div>
-            <div className="text-sm text-muted-foreground">{formatEventTime(selectedEvent)}</div>
-            {selectedEvent.dtstart ? (
-              <div className="text-sm">
-                {new Date(selectedEvent.dtstart).toLocaleString(locTag, {
-                  weekday: 'short',
-                  month: 'short',
-                  day: 'numeric',
-                  hour: selectedEvent.isAllDay ? undefined : '2-digit',
-                  minute: selectedEvent.isAllDay ? undefined : '2-digit',
-                })}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              disabled={refreshing}
+              onClick={() => void refresh()}
+              aria-label={t(locale, 'calendar.refresh')}
+            >
+              <RefreshCw className={cn('size-4', refreshing && 'animate-spin')} />
+            </Button>
+          </div>
+        </header>
+
+        <div className="flex min-h-0 flex-1">
+          <aside className="flex w-60 shrink-0 flex-col gap-1 overflow-y-auto border-r p-3">
+            <p className="px-1.5 pb-1 text-[10.5px] font-medium tracking-wide text-muted-foreground uppercase">
+              {t(locale, 'calendar.sources')}
+            </p>
+            {loading ? (
+              <div className="px-1.5 text-sm text-muted-foreground">
+                {t(locale, 'common.loading')}
               </div>
-            ) : null}
-            {selectedEvent.location ? (
-              <div className="text-sm">{selectedEvent.location}</div>
-            ) : null}
-            {selectedEvent.description ? (
-              <div className="text-sm whitespace-pre-wrap text-muted-foreground">
-                {selectedEvent.description}
+            ) : error ? (
+              <div className="px-1.5 text-sm text-destructive">
+                {t(locale, 'calendar.loadError')}
               </div>
+            ) : sources.length === 0 ? (
+              <div className="flex flex-col items-center pt-6">
+                <EmptyState
+                  icon={CalendarIcon}
+                  title={t(locale, 'calendar.empty')}
+                  hint={t(locale, 'calendar.emptyHint')}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => void navigate({ to: '/settings', search: { pim: true } })}
+                >
+                  {t(locale, 'calendar.connectDav')}
+                </Button>
+              </div>
+            ) : (
+              sources.map((src) => (
+                <div
+                  key={src.id}
+                  className="group flex items-center gap-2 rounded-[7px] px-1.5 py-1.5 hover:bg-accent"
+                >
+                  <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5">
+                    <input
+                      type="checkbox"
+                      className="size-3.5 shrink-0 accent-[var(--unread)]"
+                      checked={visibleIds.has(src.id)}
+                      onChange={() => toggleSource(src.id)}
+                    />
+                    <span
+                      className="size-2 shrink-0 rounded-full"
+                      style={{ backgroundColor: src.color || 'var(--unread)' }}
+                    />
+                    <span className="min-w-0 truncate text-[13px]" title={src.name}>
+                      {displayName(locale, src.name)}
+                    </span>
+                    {src.kind === 'ics' ? (
+                      <span className="ml-auto shrink-0 rounded bg-muted px-1 py-px text-[9.5px] font-medium text-muted-foreground">
+                        ICS
+                      </span>
+                    ) : null}
+                  </label>
+                  {src.kind === 'ics' ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100"
+                      aria-label={t(locale, 'common.delete')}
+                      onClick={() => void removeSub(src.id)}
+                    >
+                      <Trash2 className="size-3" />
+                    </Button>
+                  ) : null}
+                </div>
+              ))
+            )}
+            {sources.some((s) => s.lastError) ? (
+              <p className="px-1.5 text-[10px] text-destructive">
+                {sources.find((s) => s.lastError)?.lastError}
+              </p>
             ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="mt-auto justify-start text-muted-foreground"
+              onClick={() => setAddOpen(true)}
+            >
+              <Plus className="size-3.5" />
+              {t(locale, 'calendar.addSubscription')}
+            </Button>
           </aside>
-        ) : null}
-      </div>
+
+          <section className="flex min-w-0 flex-1 flex-col">
+            {view === 'month'
+              ? renderMonth()
+              : renderTimeGrid(view === 'week' ? weekDays(anchor) : [anchor])}
+          </section>
+
+          {selectedEvent ? (
+            <aside className="w-80 shrink-0 space-y-5 overflow-y-auto border-l p-5">
+              <div className="flex items-start justify-between gap-2">
+                <h2 className="font-display text-lg leading-snug font-medium">
+                  {selectedEvent.summary || t(locale, 'calendar.noTitle')}
+                </h2>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 shrink-0"
+                  aria-label="Close"
+                  onClick={() => setSelectedEvent(null)}
+                >
+                  <X className="size-4" />
+                </Button>
+              </div>
+              <DetailRow icon={Clock} label={t(locale, 'calendar.when')}>
+                {selectedEvent.dtstart
+                  ? new Date(selectedEvent.dtstart).toLocaleString(locTag, {
+                      weekday: 'short',
+                      month: 'short',
+                      day: 'numeric',
+                      hour: selectedEvent.isAllDay ? undefined : '2-digit',
+                      minute: selectedEvent.isAllDay ? undefined : '2-digit',
+                    })
+                  : formatEventTime(selectedEvent)}
+                {selectedEvent.isAllDay ? ` · ${t(locale, 'calendar.allDay')}` : ''}
+              </DetailRow>
+              {selectedEvent.location ? (
+                <DetailRow icon={MapPin} label={t(locale, 'calendar.where')}>
+                  {selectedEvent.location}
+                </DetailRow>
+              ) : null}
+              {selectedEvent.description ? (
+                <div className="border-t pt-4 text-[13px] whitespace-pre-wrap text-muted-foreground">
+                  {selectedEvent.description}
+                </div>
+              ) : null}
+            </aside>
+          ) : null}
+        </div>
+      </main>
 
       {addOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <form
             onSubmit={(e) => void submitAdd(e)}
-            className="w-full max-w-md space-y-3 rounded-lg border bg-background p-4 shadow-lg"
+            className="w-full max-w-md space-y-3 rounded-lg border bg-background p-5 shadow-lg"
           >
             <h2 className="text-base font-semibold">{t(locale, 'calendar.addSubscription')}</h2>
             <p className="text-xs text-muted-foreground">

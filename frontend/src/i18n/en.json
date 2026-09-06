@@ -556,7 +556,10 @@
       "fri": "Fri",
       "sat": "Sat"
     },
-    "connectDav": "Connect CalDAV"
+    "connectDav": "Connect CalDAV",
+    "tasks": "Tasks",
+    "when": "Time",
+    "where": "Location"
   },
   "dash": {
     "section": "Dashboard",
