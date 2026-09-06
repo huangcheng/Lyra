@@ -6,7 +6,7 @@
  * else stays cool gray.
  */
 
-import { useState, useEffect, useMemo, type FormEvent, type ReactNode } from 'react';
+import { useState, useEffect, useMemo, useRef, type FormEvent, type ReactNode } from 'react';
 import { BookUser, Mail, Phone, Plus, Search, UserRound } from 'lucide-react';
 import { t } from '../i18n';
 import { api } from '../lib/api-client';
@@ -14,6 +14,7 @@ import { useAvatar } from '@/lib/avatar';
 import {
   filterContacts,
   groupContactsByLetter,
+  indexLettersFromGroups,
   uniqueAddressbooks,
   type BookFilter,
 } from '@/lib/contacts-ui';
@@ -187,6 +188,31 @@ export function ContactsPage() {
     [contacts, bookFilter, searchQuery],
   );
   const groups = useMemo(() => groupContactsByLetter(visible), [visible]);
+  const indexLetters = useMemo(() => indexLettersFromGroups(groups), [groups]);
+  const listScrollRef = useRef<HTMLDivElement>(null);
+
+  const jumpToLetter = (letter: string) => {
+    const el = listScrollRef.current?.querySelector(`[data-letter="${CSS.escape(letter)}"]`);
+    el?.scrollIntoView({ block: 'start' });
+  };
+
+  const letterFromPointer = (clientY: number, nav: HTMLElement): string | null => {
+    const buttons = [...nav.querySelectorAll<HTMLElement>('[data-index-letter]')];
+    if (buttons.length === 0) return null;
+    for (const btn of buttons) {
+      const r = btn.getBoundingClientRect();
+      if (clientY >= r.top && clientY <= r.bottom) {
+        return btn.dataset.indexLetter ?? null;
+      }
+    }
+    // Clamp to nearest end when dragging past the rail.
+    const first = buttons[0]!.getBoundingClientRect();
+    const last = buttons[buttons.length - 1]!.getBoundingClientRect();
+    if (clientY < first.top) return buttons[0]!.dataset.indexLetter ?? null;
+    if (clientY > last.bottom) return buttons[buttons.length - 1]!.dataset.indexLetter ?? null;
+    return null;
+  };
+
   const booksByAccount = useMemo(() => {
     const m = new Map<string, typeof books>();
     for (const b of books) {
@@ -326,71 +352,103 @@ export function ContactsPage() {
         </header>
 
         <div className="flex min-h-0 flex-1">
-          {/* A–Z list */}
-          <section className="flex w-80 shrink-0 flex-col overflow-y-auto border-r">
-            {loading ? (
-              <div className="p-4 text-sm text-muted-foreground">{t(locale, 'common.loading')}</div>
-            ) : error ? (
-              <div className="p-4 text-sm text-destructive">{error}</div>
-            ) : visible.length === 0 ? (
-              <div className="p-4">
-                <EmptyState
-                  icon={BookUser}
-                  title={t(locale, 'contacts.empty')}
-                  hint={t(locale, 'contacts.emptyHint')}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="mt-3"
-                  onClick={() => navigate({ to: '/settings', search: { pim: true } })}
-                >
-                  {t(locale, 'contacts.connectDav')}
-                </Button>
-              </div>
-            ) : (
-              groups.map((g) => (
-                <div key={g.letter}>
-                  <div className="sticky top-0 z-10 border-b border-border/60 bg-background/95 px-4 py-1 text-[10.5px] font-medium text-muted-foreground backdrop-blur">
-                    {g.letter}
-                  </div>
-                  {g.contacts.map((contact) => (
-                    <button
-                      key={contact.id}
-                      type="button"
-                      className={cn(
-                        'flex w-full items-center gap-3 px-4 py-2 text-left transition-colors hover:bg-accent',
-                        selectedId === contact.id && 'bg-accent',
-                      )}
-                      onClick={() => setSelectedId(contact.id)}
-                    >
-                      <ContactAvatar
-                        email={contact.emailAddresses[0]}
-                        name={contact.displayName}
-                        className="size-9 shrink-0 text-[13px]"
-                      />
-                      <span className="min-w-0">
-                        <span
-                          className={cn(
-                            'block truncate text-[13.5px]',
-                            selectedId === contact.id
-                              ? 'font-medium'
-                              : 'font-normal text-foreground',
-                          )}
-                        >
-                          {contact.displayName || t(locale, 'contacts.noName')}
-                        </span>
-                        {contact.emailAddresses[0] ? (
-                          <span className="block truncate text-[11.5px] text-muted-foreground">
-                            {contact.emailAddresses[0]}
-                          </span>
-                        ) : null}
-                      </span>
-                    </button>
-                  ))}
+          {/* A–Z list + Apple-style index rail */}
+          <section className="relative flex w-80 shrink-0 flex-col border-r">
+            <div ref={listScrollRef} className="min-h-0 flex-1 overflow-y-auto">
+              {loading ? (
+                <div className="p-4 text-sm text-muted-foreground">
+                  {t(locale, 'common.loading')}
                 </div>
-              ))
-            )}
+              ) : error ? (
+                <div className="p-4 text-sm text-destructive">{error}</div>
+              ) : visible.length === 0 ? (
+                <div className="p-4">
+                  <EmptyState
+                    icon={BookUser}
+                    title={t(locale, 'contacts.empty')}
+                    hint={t(locale, 'contacts.emptyHint')}
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-3"
+                    onClick={() => navigate({ to: '/settings', search: { pim: true } })}
+                  >
+                    {t(locale, 'contacts.connectDav')}
+                  </Button>
+                </div>
+              ) : (
+                groups.map((g) => (
+                  <div key={g.letter} data-letter={g.letter}>
+                    <div className="sticky top-0 z-10 border-b border-border/60 bg-background/95 px-4 py-1 pr-7 text-[10.5px] font-medium text-muted-foreground backdrop-blur">
+                      {g.letter}
+                    </div>
+                    {g.contacts.map((contact) => (
+                      <button
+                        key={contact.id}
+                        type="button"
+                        className={cn(
+                          'flex w-full items-center gap-3 px-4 py-2 pr-7 text-left transition-colors hover:bg-accent',
+                          selectedId === contact.id && 'bg-accent',
+                        )}
+                        onClick={() => setSelectedId(contact.id)}
+                      >
+                        <ContactAvatar
+                          email={contact.emailAddresses[0]}
+                          name={contact.displayName}
+                          className="size-9 shrink-0 text-[13px]"
+                        />
+                        <span className="min-w-0">
+                          <span
+                            className={cn(
+                              'block truncate text-[13.5px]',
+                              selectedId === contact.id
+                                ? 'font-medium'
+                                : 'font-normal text-foreground',
+                            )}
+                          >
+                            {contact.displayName || t(locale, 'contacts.noName')}
+                          </span>
+                          {contact.emailAddresses[0] ? (
+                            <span className="block truncate text-[11.5px] text-muted-foreground">
+                              {contact.emailAddresses[0]}
+                            </span>
+                          ) : null}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ))
+              )}
+            </div>
+            {indexLetters.length > 1 ? (
+              <nav
+                aria-label={t(locale, 'contacts.alphabetIndex')}
+                className="absolute top-1/2 right-0 z-20 flex max-h-[calc(100%-0.5rem)] -translate-y-1/2 flex-col items-center justify-center px-0.5 py-1 select-none"
+                onPointerDown={(e) => {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  const letter = letterFromPointer(e.clientY, e.currentTarget);
+                  if (letter) jumpToLetter(letter);
+                }}
+                onPointerMove={(e) => {
+                  if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+                  const letter = letterFromPointer(e.clientY, e.currentTarget);
+                  if (letter) jumpToLetter(letter);
+                }}
+              >
+                {indexLetters.map((letter) => (
+                  <button
+                    key={letter}
+                    type="button"
+                    data-index-letter={letter}
+                    className="flex h-[1.05em] w-4 items-center justify-center text-[9px] leading-none font-medium text-muted-foreground hover:text-foreground"
+                    onClick={() => jumpToLetter(letter)}
+                  >
+                    {letter}
+                  </button>
+                ))}
+              </nav>
+            ) : null}
           </section>
 
           {/* Detail */}

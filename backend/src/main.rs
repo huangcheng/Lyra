@@ -363,6 +363,7 @@ mod tests {
             master_key: auth::TEST_MASTER_KEY.to_vec(),
             ms_oauth: None,
             yandex_oauth: None,
+            captcha: config::CaptchaConfig::None,
         };
         let state = auth::AuthState::new(
             db.clone(),

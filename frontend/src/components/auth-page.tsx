@@ -63,8 +63,8 @@ export function AuthPage() {
     }
   }, [state]);
 
-  const handleLogin = (username: string, password: string) => {
-    send({ type: 'LOGIN', username, password });
+  const handleLogin = (username: string, password: string, captchaToken?: string | null) => {
+    send({ type: 'LOGIN', username, password, captchaToken });
   };
 
   const handleBootstrap = (
@@ -72,8 +72,9 @@ export function AuthPage() {
     password: string,
     displayName?: string,
     locale?: string,
+    captchaToken?: string | null,
   ) => {
-    send({ type: 'BOOTSTRAP', username, password, displayName, locale });
+    send({ type: 'BOOTSTRAP', username, password, displayName, locale, captchaToken });
   };
 
   const handleTotpVerify = (code: string) => {
@@ -109,6 +110,7 @@ export function AuthPage() {
                 : true
           }
           requiresTotp={state.matches('totpChallenge') || state.matches('verifyingTotp')}
+          captcha={state.context.captcha}
         />
       </div>
     </div>

@@ -172,6 +172,7 @@ fn test_config() -> crate::config::Config {
         master_key: TEST_MASTER_KEY.to_vec(),
         ms_oauth: None,
         yandex_oauth: None,
+        captcha: crate::config::CaptchaConfig::None,
     }
 }
 
@@ -224,6 +225,7 @@ async fn bootstrap_creates_and_persists_encrypted_dek() {
             password: "Str0ngPass1".into(),
             display_name: None,
             locale: None,
+            captcha_token: None,
         }),
     )
     .await
@@ -291,6 +293,7 @@ async fn bootstrap_rejects_second_user_with_conflict() {
             password: "Str0ngPass1".into(),
             display_name: None,
             locale: None,
+            captcha_token: None,
         }),
     )
     .await
@@ -408,6 +411,7 @@ async fn totp_secret_is_encrypted_at_rest() {
             password: "Str0ngPass1".into(),
             display_name: None,
             locale: None,
+            captcha_token: None,
         }),
     )
     .await
@@ -514,6 +518,7 @@ async fn bootstrap_alice(state: &AuthState) -> String {
             password: "Str0ngPass1".into(),
             display_name: None,
             locale: None,
+            captcha_token: None,
         }),
     )
     .await
@@ -596,6 +601,7 @@ async fn login_rate_limited_after_five_failures() {
     let bad_login = |password: &str| LoginRequest {
         username: "alice".into(),
         password: password.into(),
+        captcha_token: None,
     };
     for _ in 0..RATE_LIMIT_MAX_ATTEMPTS {
         let err = auth_login(State(state.clone()), Json(bad_login("Wr0ngPass1")))
@@ -630,6 +636,7 @@ async fn successful_login_resets_rate_limit() {
                 Json(LoginRequest {
                     username: "alice".into(),
                     password,
+                    captcha_token: None,
                 }),
             )
             .await
@@ -658,6 +665,7 @@ async fn totp_verify_rate_limited_after_five_failures() {
         Json(LoginRequest {
             username: "alice".into(),
             password: "Str0ngPass1".into(),
+            captcha_token: None,
         }),
     )
     .await
@@ -700,6 +708,7 @@ async fn change_password_kicks_all_sessions() {
         Json(LoginRequest {
             username: "alice".into(),
             password: "Str0ngPass1".into(),
+            captcha_token: None,
         }),
     )
     .await
@@ -729,6 +738,7 @@ async fn change_password_kicks_all_sessions() {
         Json(LoginRequest {
             username: "alice".into(),
             password: "Str0ngPass1".into(),
+            captcha_token: None,
         }),
     )
     .await;
@@ -738,6 +748,7 @@ async fn change_password_kicks_all_sessions() {
         Json(LoginRequest {
             username: "alice".into(),
             password: "N3wPassword!x".into(),
+            captcha_token: None,
         }),
     )
     .await;
@@ -770,6 +781,7 @@ async fn change_password_wrong_current_password_rejected() {
             Json(LoginRequest {
                 username: "alice".into(),
                 password: "Str0ngPass1".into(),
+                captcha_token: None,
             }),
         )
         .await
@@ -864,6 +876,7 @@ async fn totp_code_cannot_be_replayed() {
     let login = || LoginRequest {
         username: "alice".into(),
         password: "Str0ngPass1".into(),
+        captcha_token: None,
     };
     let first = auth_login(State(state.clone()), Json(login()))
         .await
@@ -904,6 +917,7 @@ async fn totp_rate_limit_survives_fresh_pending_token() {
     let login = || LoginRequest {
         username: "alice".into(),
         password: "Str0ngPass1".into(),
+        captcha_token: None,
     };
     // Burn the 5 attempts on pending token A.
     let first = auth_login(State(state.clone()), Json(login()))
@@ -1012,6 +1026,7 @@ async fn change_password_clears_login_rate_limit() {
             Json(LoginRequest {
                 username: "alice".into(),
                 password: "Wr0ngPass1".into(),
+                captcha_token: None,
             }),
         )
         .await
@@ -1038,6 +1053,7 @@ async fn change_password_clears_login_rate_limit() {
         Json(LoginRequest {
             username: "alice".into(),
             password: "N3wPassword!x".into(),
+            captcha_token: None,
         }),
     )
     .await;
@@ -1225,4 +1241,98 @@ async fn patch_preferences_rejects_oversized_ui_state() {
     .await
     .expect_err("oversized uiState must fail");
     assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+}
+
+fn turnstile_state(db: DbPool) -> AuthState {
+    let mut config = test_config();
+    config.captcha = crate::config::CaptchaConfig::Turnstile {
+        site_key: "site-key".into(),
+        secret: "secret".into(),
+    };
+    AuthState::new(
+        db,
+        &config,
+        Arc::new(crate::kernel::App::new()),
+        Arc::new(MemoryKv::new()),
+    )
+    .unwrap()
+}
+
+async fn mock_turnstile_server(success: bool) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::{Json, Router, routing::post};
+
+    let app = Router::new().route(
+        "/siteverify",
+        post(move || async move { Json(serde_json::json!({ "success": success })) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}/siteverify"), handle)
+}
+
+#[tokio::test]
+async fn auth_status_exposes_turnstile_public_config() {
+    let db = test_pool().await;
+    let state = turnstile_state(db);
+    let status = super::handlers::auth_status(State(state)).await.0;
+    let captcha = status.captcha.expect("captcha config");
+    assert_eq!(captcha.provider, "turnstile");
+    assert_eq!(captcha.site_key, "site-key");
+}
+
+#[tokio::test]
+async fn login_requires_captcha_when_turnstile_enabled() {
+    let db = test_pool().await;
+    bootstrap_alice(&test_state(db.clone())).await;
+
+    let err = auth_login(
+        State(turnstile_state(db)),
+        Json(LoginRequest {
+            username: "alice".into(),
+            password: "Str0ngPass1".into(),
+            captcha_token: None,
+        }),
+    )
+    .await
+    .expect_err("missing captcha");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert!(err.to_string().contains("Captcha verification required"));
+}
+
+#[tokio::test]
+async fn login_accepts_valid_turnstile_token() {
+    let db = test_pool().await;
+    bootstrap_alice(&test_state(db.clone())).await;
+    let (url, handle) = mock_turnstile_server(true).await;
+    super::captcha::set_test_siteverify_url(Some(url));
+
+    let result = auth_login(
+        State(turnstile_state(db)),
+        Json(LoginRequest {
+            username: "alice".into(),
+            password: "Str0ngPass1".into(),
+            captcha_token: Some("token-ok".into()),
+        }),
+    )
+    .await;
+
+    super::captcha::set_test_siteverify_url(None);
+    handle.abort();
+
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn turnstile_verify_rejects_invalid_token_from_mock() {
+    let (url, handle) = mock_turnstile_server(false).await;
+    super::captcha::set_test_siteverify_url(Some(url));
+    let err = super::captcha::verify_turnstile("secret", "bad-token")
+        .await
+        .expect_err("invalid token");
+    super::captcha::set_test_siteverify_url(None);
+    handle.abort();
+    assert!(matches!(err, super::captcha::TurnstileError::Invalid));
 }

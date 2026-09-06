@@ -5,6 +5,7 @@ import {
   contactLetter,
   filterContacts,
   groupContactsByLetter,
+  indexLettersFromGroups,
   uniqueAddressbooks,
 } from './contacts-ui';
 
@@ -59,6 +60,12 @@ describe('groupContactsByLetter', () => {
     const groups = groupContactsByLetter(sample);
     expect(groups.map((g) => g.letter)).toEqual(['#', 'A', 'B', 'C']);
     expect(groups.find((g) => g.letter === 'A')?.contacts.map((c) => c.id)).toEqual(['1']);
+  });
+});
+
+describe('indexLettersFromGroups', () => {
+  it('lists only letters that have contacts (no empty A–Z fillers)', () => {
+    expect(indexLettersFromGroups(groupContactsByLetter(sample))).toEqual(['#', 'A', 'B', 'C']);
   });
 });
 

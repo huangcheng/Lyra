@@ -1,8 +1,8 @@
 /**
  * Mail sidebar folder sections (redesign v2).
  *
- * Unified mailboxes on top (All Inboxes, Starred, All Drafts/Sent),
- * then collapsible per-account folder trees in Apple Mail role order.
+ * In All-accounts view: Unified/Favorites on top, then per-account trees.
+ * In single-account view: that account’s folders only (no Unified strip).
  */
 
 import {
@@ -646,11 +646,24 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
     .map((role) => returned.find((f) => f.role === role))
     .filter((folder): folder is UnifiedFolder => Boolean(folder));
 
+  const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
+  const showUnified = selectedAccountId === ALL_ACCOUNTS;
+
   if (isCollapsed) {
+    // Single-account: no unified icon rail (expanded pane shows that account’s tree).
+    if (!showUnified) return null;
     return <CollapsedFolders unifiedFolders={unifiedFolders} />;
   }
 
-  const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
+  if (selectedAccount) {
+    return (
+      <div className="flex min-w-0 flex-col px-2 pb-2">
+        <div className="grid min-w-0 gap-0.5">
+          <AccountSection account={selectedAccount} selectedFolderId={selectedFolderId} bare />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-w-0 flex-col px-2 pb-2">
@@ -658,16 +671,8 @@ export function SidebarFolders({ isCollapsed }: { isCollapsed: boolean }) {
       <div className="grid min-w-0 gap-0.5">
         <UnifiedMailboxBlock unifiedFolders={unifiedFolders} />
       </div>
-      {selectedAccount ? (
-        <div className="grid min-w-0 gap-0.5 pt-2">
-          <AccountSection account={selectedAccount} selectedFolderId={selectedFolderId} bare />
-        </div>
-      ) : (
-        <>
-          <SectionLabel>{t(locale, 'mail.section.accounts')}</SectionLabel>
-          <SortableAccountSections accounts={accounts} selectedFolderId={selectedFolderId} />
-        </>
-      )}
+      <SectionLabel>{t(locale, 'mail.section.accounts')}</SectionLabel>
+      <SortableAccountSections accounts={accounts} selectedFolderId={selectedFolderId} />
     </div>
   );
 }

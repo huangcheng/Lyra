@@ -192,7 +192,9 @@
     "totpEnabled": "Two-factor authentication is enabled",
     "totpDisabled": "Two-factor authentication is disabled",
     "backToLogin": "Back to login",
-    "statusCheckError": "Couldn't reach the Lyra server. Make sure the backend is running."
+    "statusCheckError": "Couldn't reach the Lyra server. Make sure the backend is running.",
+    "captchaRequired": "Complete the captcha to continue.",
+    "captchaHint": "Requires internet access to Cloudflare Turnstile."
   },
   "sync": {
     "syncing": "Syncing…",
@@ -536,7 +538,8 @@
     "orgPlaceholder": "Company (optional)",
     "create": "Add contact",
     "creating": "Adding…",
-    "created": "Contact added"
+    "created": "Contact added",
+    "alphabetIndex": "Jump to letter"
   },
   "calendar": {
     "title": "Calendar",

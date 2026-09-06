@@ -11,9 +11,18 @@ import { setup, assign, fromPromise } from 'xstate';
 import { api } from '../lib/api-client';
 import type { User } from '../stores/auth';
 
+export type CaptchaPublic = {
+  provider: string;
+  siteKey: string;
+};
+
 interface AuthContext {
   username: string;
   password: string;
+  displayName: string;
+  locale: string | undefined;
+  captchaToken: string | null;
+  captcha: CaptchaPublic | null;
   totpCode: string;
   pendingToken: string | null;
   token: string | null;
@@ -21,12 +30,20 @@ interface AuthContext {
 }
 
 type AuthEvent =
-  | { type: 'LOGIN'; username: string; password: string }
+  | { type: 'LOGIN'; username: string; password: string; captchaToken?: string | null }
   | { type: 'TOTP_SUBMIT'; code: string }
-  | { type: 'BOOTSTRAP'; username: string; password: string; displayName?: string; locale?: string }
+  | {
+      type: 'BOOTSTRAP';
+      username: string;
+      password: string;
+      displayName?: string;
+      locale?: string;
+      captchaToken?: string | null;
+    }
   | { type: 'LOGOUT' }
   | { type: 'RESET' }
-  | { type: 'RETRY' };
+  | { type: 'RETRY' }
+  | { type: 'CAPTCHA_TOKEN'; token: string | null };
 
 interface LoginResponse {
   token: string;
@@ -37,21 +54,36 @@ interface LoginResponse {
 interface StatusResponse {
   has_user: boolean;
   totp_enabled: boolean;
+  captcha?: { provider: string; siteKey: string } | null;
 }
 
 function persistToken(token: string) {
   localStorage.setItem('lyra_token', token);
 }
 
+function captchaFromStatus(status: StatusResponse): CaptchaPublic | null {
+  const c = status.captcha;
+  if (!c || c.provider !== 'turnstile' || !c.siteKey) return null;
+  return { provider: c.provider, siteKey: c.siteKey };
+}
+
 async function fetchStatus(): Promise<StatusResponse> {
   return api<StatusResponse>('/auth/status', { auth: false });
 }
 
-async function login(username: string, password: string): Promise<LoginResponse> {
+async function login(
+  username: string,
+  password: string,
+  captchaToken?: string | null,
+): Promise<LoginResponse> {
   return api<LoginResponse>('/auth/login', {
     method: 'POST',
     auth: false,
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({
+      username,
+      password,
+      ...(captchaToken ? { captchaToken } : {}),
+    }),
   });
 }
 
@@ -60,11 +92,18 @@ async function bootstrap(
   password: string,
   displayName?: string,
   locale?: string,
+  captchaToken?: string | null,
 ): Promise<LoginResponse> {
   return api<LoginResponse>('/auth/bootstrap', {
     method: 'POST',
     auth: false,
-    body: JSON.stringify({ username, password, display_name: displayName, locale }),
+    body: JSON.stringify({
+      username,
+      password,
+      display_name: displayName,
+      locale,
+      ...(captchaToken ? { captchaToken } : {}),
+    }),
   });
 }
 
@@ -83,15 +122,32 @@ export const authMachine = setup({
   },
   actors: {
     checkStatus: fromPromise(async () => fetchStatus()),
-    loginUser: fromPromise(async ({ input }: { input: { username: string; password: string } }) =>
-      login(input.username, input.password),
+    loginUser: fromPromise(
+      async ({
+        input,
+      }: {
+        input: { username: string; password: string; captchaToken: string | null };
+      }) => login(input.username, input.password, input.captchaToken),
     ),
     bootstrapUser: fromPromise(
       async ({
         input,
       }: {
-        input: { username: string; password: string; displayName?: string; locale?: string };
-      }) => bootstrap(input.username, input.password, input.displayName, input.locale),
+        input: {
+          username: string;
+          password: string;
+          displayName?: string;
+          locale?: string;
+          captchaToken: string | null;
+        };
+      }) =>
+        bootstrap(
+          input.username,
+          input.password,
+          input.displayName,
+          input.locale,
+          input.captchaToken,
+        ),
     ),
     verifyTotpCode: fromPromise(
       async ({ input }: { input: { pendingToken: string; code: string } }) =>
@@ -104,6 +160,7 @@ export const authMachine = setup({
       return {
         username: event.username,
         password: event.password,
+        captchaToken: event.captchaToken ?? null,
         error: null,
       };
     }),
@@ -112,8 +169,19 @@ export const authMachine = setup({
       return {
         username: event.username,
         password: event.password,
+        displayName: event.displayName ?? '',
+        locale: event.locale,
+        captchaToken: event.captchaToken ?? null,
         error: null,
       };
+    }),
+    setStatusCaptcha: assign(({ event }) => {
+      if (!('output' in event) || !event.output) return {};
+      return { captcha: captchaFromStatus(event.output as StatusResponse) };
+    }),
+    setCaptchaToken: assign(({ event }) => {
+      if (event.type !== 'CAPTCHA_TOKEN') return {};
+      return { captchaToken: event.token };
     }),
     setTotpCode: assign(({ event }) => {
       if (event.type !== 'TOTP_SUBMIT') return {};
@@ -123,6 +191,9 @@ export const authMachine = setup({
     clearSession: assign({
       username: '',
       password: '',
+      displayName: '',
+      locale: undefined,
+      captchaToken: null,
       totpCode: '',
       pendingToken: null,
       token: null,
@@ -137,6 +208,7 @@ export const authMachine = setup({
         username: output.user.username,
         // Drop secrets from context once authentication succeeds.
         password: '',
+        captchaToken: null,
         totpCode: '',
       };
     }),
@@ -148,18 +220,19 @@ export const authMachine = setup({
         token: output.token,
         // Drop secrets from context once authentication succeeds.
         password: '',
+        captchaToken: null,
         totpCode: '',
       };
     }),
     setPendingToken: assign(({ event }) => {
       if (!('output' in event) || !event.output) return {};
       const output = event.output as LoginResponse;
-      return { pendingToken: output.token };
+      return { pendingToken: output.token, captchaToken: null };
     }),
     setLoginError: assign(({ event }) => {
       if (!('error' in event) || !event.error) return {};
       const error = event.error as Error;
-      return { error: error.message || 'Authentication failed' };
+      return { error: error.message || 'Authentication failed', captchaToken: null };
     }),
     setGenericError: assign(() => ({
       error: 'An unexpected error occurred',
@@ -188,6 +261,10 @@ export const authMachine = setup({
   context: {
     username: '',
     password: '',
+    displayName: '',
+    locale: undefined,
+    captchaToken: null,
+    captcha: null,
     totpCode: '',
     pendingToken: null,
     token: null,
@@ -201,10 +278,12 @@ export const authMachine = setup({
           {
             guard: 'noUserExists',
             target: 'bootstrap',
+            actions: 'setStatusCaptcha',
           },
           {
             guard: 'userExists',
             target: 'idle',
+            actions: 'setStatusCaptcha',
           },
         ],
         onError: {
@@ -219,6 +298,9 @@ export const authMachine = setup({
           target: 'authenticating',
           actions: 'setCredentials',
         },
+        CAPTCHA_TOKEN: {
+          actions: 'setCaptchaToken',
+        },
       },
     },
     authenticating: {
@@ -227,6 +309,7 @@ export const authMachine = setup({
         input: ({ context }) => ({
           username: context.username,
           password: context.password,
+          captchaToken: context.captchaToken,
         }),
         onDone: [
           {
@@ -288,6 +371,9 @@ export const authMachine = setup({
           target: 'bootstrapping',
           actions: 'setBootstrapCredentials',
         },
+        CAPTCHA_TOKEN: {
+          actions: 'setCaptchaToken',
+        },
       },
     },
     bootstrapping: {
@@ -296,6 +382,9 @@ export const authMachine = setup({
         input: ({ context }) => ({
           username: context.username,
           password: context.password,
+          displayName: context.displayName || undefined,
+          locale: context.locale,
+          captchaToken: context.captchaToken,
         }),
         onDone: {
           target: 'authenticated',

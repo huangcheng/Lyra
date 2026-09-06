@@ -24,7 +24,7 @@ Lyra cannot pull every account instantly like Apple Mail. Favorites are **views 
 | Smart Mailboxes / Today | Out of scope |
 | User-reorder Favorites | Out of scope |
 | All Junk in Favorites | Out of scope this pass |
-| When account switcher selects one account | Favorites section still visible at top (Apple Mail), then that account’s tree (or all accounts trees — see below) |
+| When account switcher selects one account | Hide Favorites/Unified; show that account’s folder tree only. Favorites appear only in All-accounts view (product: CHE-141) |
 
 ## Current state
 
@@ -53,7 +53,7 @@ Accounts                     ← existing section (when showing all accounts)
   …
 ```
 
-When the switcher selects a **single** account: keep **Favorites** at top (same rows; All Inboxes children may still list all accounts’ inboxes as shortcuts, or only the selected account’s child — prefer **all accounts’ inbox children** so Favorites stay global like Apple Mail). Below Favorites, show that account’s tree only (current single-account sidebar behavior for the accounts area).
+When the switcher selects a **single** account: **do not** show Favorites/Unified — only that account’s bare folder tree (header omitted; the switcher already names the account). Favorites return when the switcher is All inboxes.
 
 ### Row behavior
 
@@ -97,14 +97,15 @@ Update redesign v2 prose mentally: UNIFIED → Favorites; no need to rewrite the
 ### Implementation sketch (for planning)
 
 1. Rename section + i18n.
-2. Always render Favorites when mail sidebar is shown; gate only the Accounts multi-tree vs single tree on switcher.
+2. Render Favorites only when switcher is All accounts; single-account mode shows that account’s tree only.
 3. All Inboxes expandable row + children from each account’s inbox folder.
 4. Starred: `isStarred` list query (local DB) + UI store selection + list/store filter.
 5. Tests for expansion helpers / starred filter / query if logic is extracted to `src/lib/` or backend query tests.
 
 ## Acceptance
 
-- Sidebar shows **Favorites** above account trees; label not “Unified”.
+- In All-accounts view, sidebar shows **Favorites** above account trees; label not “Unified”.
+- In single-account view, Favorites/Unified is hidden.
 - All Inboxes expands to per-account Inbox shortcuts; parent and children navigate correctly.
 - Starred opens a starred message list from local data.
 - Account sections still list canonical folders (duplicates OK).

@@ -34,6 +34,36 @@ pub struct Config {
     pub ms_oauth: Option<crate::oauth::MsOAuthConfig>,
     /// Optional Yandex mail OAuth (IMAP/SMTP XOAUTH2).
     pub yandex_oauth: Option<crate::oauth::YandexOAuthConfig>,
+    /// Optional login/bootstrap captcha (off by default).
+    pub captcha: CaptchaConfig,
+}
+
+/// Captcha provider configuration (`LYRA_CAPTCHA_*` env vars).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptchaConfig {
+    None,
+    Turnstile { site_key: String, secret: String },
+}
+
+impl CaptchaConfig {
+    /// Public site-facing slice (never includes the secret).
+    pub fn public(&self) -> Option<CaptchaPublicConfig> {
+        match self {
+            Self::None => None,
+            Self::Turnstile { site_key, .. } => Some(CaptchaPublicConfig {
+                provider: "turnstile".to_string(),
+                site_key: site_key.clone(),
+            }),
+        }
+    }
+}
+
+/// Captcha settings exposed on `GET /api/v1/auth/status`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptchaPublicConfig {
+    pub provider: String,
+    pub site_key: String,
 }
 
 /// Configuration error; boot fails closed on any variant.
@@ -60,6 +90,16 @@ pub enum ConfigError {
     PublicUrlInvalid(String),
     #[error("mail OAuth provider config is invalid: {0}")]
     OauthConfig(String),
+    #[error("LYRA_CAPTCHA_PROVIDER must be \"none\" or \"turnstile\" (got {0:?})")]
+    CaptchaProviderUnknown(String),
+    #[error(
+        "LYRA_CAPTCHA_PROVIDER=turnstile requires LYRA_CAPTCHA_SITE_KEY and LYRA_CAPTCHA_SECRET"
+    )]
+    CaptchaTurnstileIncomplete,
+    #[error(
+        "unused captcha env vars detected ({0}); Lyra v1 supports turnstile only via LYRA_CAPTCHA_*"
+    )]
+    CaptchaMisconfigured(String),
 }
 
 fn normalize_public_url(raw: &str) -> Result<String, ConfigError> {
@@ -71,6 +111,37 @@ fn normalize_public_url(raw: &str) -> Result<String, ConfigError> {
         return Err(ConfigError::PublicUrlInvalid(trimmed.to_string()));
     }
     Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+fn captcha_from_env() -> Result<CaptchaConfig, ConfigError> {
+    for prefix in ["LYRA_HCAPTCHA_", "LYRA_RECAPTCHA_"] {
+        if env::vars().any(|(k, v)| k.starts_with(prefix) && !v.is_empty()) {
+            return Err(ConfigError::CaptchaMisconfigured(
+                prefix.trim_end_matches('_').to_string(),
+            ));
+        }
+    }
+
+    let raw = env::var("LYRA_CAPTCHA_PROVIDER").unwrap_or_default();
+    let provider = raw.trim();
+    if provider.is_empty() || provider.eq_ignore_ascii_case("none") {
+        return Ok(CaptchaConfig::None);
+    }
+    if provider.eq_ignore_ascii_case("turnstile") {
+        let site_key = env::var("LYRA_CAPTCHA_SITE_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(ConfigError::CaptchaTurnstileIncomplete)?;
+        let secret = env::var("LYRA_CAPTCHA_SECRET")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(ConfigError::CaptchaTurnstileIncomplete)?;
+        return Ok(CaptchaConfig::Turnstile {
+            site_key: site_key.trim().to_string(),
+            secret: secret.trim().to_string(),
+        });
+    }
+    Err(ConfigError::CaptchaProviderUnknown(provider.to_string()))
 }
 
 /// Load and validate the master key from `LYRA_MASTER_KEY`.
@@ -150,6 +221,7 @@ impl Config {
             })?;
         let ms_oauth = oauth_registry.microsoft().cloned();
         let yandex_oauth = oauth_registry.yandex().cloned();
+        let captcha = captcha_from_env()?;
 
         Ok(Self {
             listen_addr,
@@ -163,6 +235,7 @@ impl Config {
             master_key,
             ms_oauth,
             yandex_oauth,
+            captcha,
         })
     }
 }
@@ -190,11 +263,15 @@ mod tests {
             env::remove_var("SYNC_POLL_SECS");
             env::remove_var("REDIS_URL");
             env::remove_var("LYRA_PUBLIC_URL");
+            env::remove_var("LYRA_CAPTCHA_PROVIDER");
+            env::remove_var("LYRA_CAPTCHA_SITE_KEY");
+            env::remove_var("LYRA_CAPTCHA_SECRET");
             env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
             env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
         }
 
         let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.captcha, CaptchaConfig::None);
         assert_eq!(cfg.listen_addr, "0.0.0.0:3000");
         assert!(cfg.database_url.contains("sqlite"));
         assert_eq!(cfg.data_dir, "./data");
@@ -273,6 +350,106 @@ mod tests {
         unsafe {
             env::remove_var("LYRA_MASTER_KEY");
             env::remove_var("LYRA_PUBLIC_URL");
+            env::remove_var("LYRA_CAPTCHA_PROVIDER");
+        }
+    }
+
+    #[test]
+    fn captcha_defaults_to_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
+            env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
+            env::remove_var("LYRA_CAPTCHA_PROVIDER");
+            env::remove_var("LYRA_CAPTCHA_SITE_KEY");
+            env::remove_var("LYRA_CAPTCHA_SECRET");
+        }
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.captcha, CaptchaConfig::None);
+        unsafe {
+            env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
+        }
+    }
+
+    #[test]
+    fn captcha_turnstile_requires_keys() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
+            env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
+            env::set_var("LYRA_CAPTCHA_PROVIDER", "turnstile");
+            env::remove_var("LYRA_CAPTCHA_SITE_KEY");
+            env::remove_var("LYRA_CAPTCHA_SECRET");
+        }
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::CaptchaTurnstileIncomplete));
+        unsafe {
+            env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
+            env::remove_var("LYRA_CAPTCHA_PROVIDER");
+        }
+    }
+
+    #[test]
+    fn captcha_turnstile_loads_when_complete() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
+            env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
+            env::set_var("LYRA_CAPTCHA_PROVIDER", "turnstile");
+            env::set_var("LYRA_CAPTCHA_SITE_KEY", "site-key-test");
+            env::set_var("LYRA_CAPTCHA_SECRET", "secret-test");
+        }
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.captcha,
+            CaptchaConfig::Turnstile {
+                site_key: "site-key-test".into(),
+                secret: "secret-test".into(),
+            }
+        );
+        unsafe {
+            env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
+            env::remove_var("LYRA_CAPTCHA_PROVIDER");
+            env::remove_var("LYRA_CAPTCHA_SITE_KEY");
+            env::remove_var("LYRA_CAPTCHA_SECRET");
+        }
+    }
+
+    #[test]
+    fn captcha_rejects_unknown_provider() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
+            env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
+            env::set_var("LYRA_CAPTCHA_PROVIDER", "hcaptcha");
+        }
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::CaptchaProviderUnknown(_)));
+        unsafe {
+            env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
+            env::remove_var("LYRA_CAPTCHA_PROVIDER");
+        }
+    }
+
+    #[test]
+    fn captcha_rejects_legacy_provider_env_vars() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
+            env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
+            env::remove_var("LYRA_CAPTCHA_PROVIDER");
+            env::set_var("LYRA_HCAPTCHA_SECRET", "oops");
+        }
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::CaptchaMisconfigured(_)));
+        unsafe {
+            env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
+            env::remove_var("LYRA_HCAPTCHA_SECRET");
         }
     }
 }
