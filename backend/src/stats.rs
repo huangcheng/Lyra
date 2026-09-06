@@ -114,6 +114,11 @@ fn id_value(db: &DbPool, id: &str) -> Result<Value, SyncError> {
 /// compares TIMESTAMPTZ natively.
 fn cutoff_value(db: &DbPool, cutoff: chrono::DateTime<chrono::Utc>) -> Value {
     match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => {
+            Value::String(Some(cutoff.format("%Y-%m-%d %H:%M:%S").to_string()))
+        }
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => Value::String(Some(cutoff.format("%Y-%m-%d %H:%M:%S").to_string())),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => Value::ChronoDateTimeUtc(Some(cutoff)),
@@ -221,6 +226,13 @@ async fn query_top_senders(
     // present; lowercase. The JSON/text accessor spelling is the one
     // genuine dialect branch (SQLite TEXT vs Postgres JSONB).
     let s = match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) => {
+            // MySQL's JSON_EXTRACT returns quoted JSON scalars — UNQUOTE
+            // matches the sqlite accessor's plain-text result.
+            "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.from_address, '$.raw')), \
+             JSON_UNQUOTE(JSON_EXTRACT(m.from_address, '$.email')), m.from_address)"
+        }
         DbPool::Sqlite(_) => {
             "COALESCE(json_extract(m.from_address, '$.raw'), \
              json_extract(m.from_address, '$.email'), m.from_address)"
@@ -231,7 +243,9 @@ async fn query_top_senders(
         }
     };
     let (email_expr, name_expr) = match db {
-        DbPool::Sqlite(_) => (
+        // INSTR/SUBSTR/LOWER all exist on MySQL with the same shapes.
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => (
             format!(
                 "LOWER(CASE WHEN instr({s}, '<') > 0 AND instr({s}, '>') > instr({s}, '<') \
                  THEN substr({s}, instr({s}, '<') + 1, instr({s}, '>') - instr({s}, '<') - 1) \
@@ -343,6 +357,10 @@ async fn query_totals(db: &DbPool, user: &Value, cutoff: &Value) -> Result<Stats
         DbPool::Sqlite(_) => "datetime('now')",
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => "NOW()",
+        // Sessions are pinned to UTC; MySQL coerces the TEXT column for
+        // the comparison.
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) => "NOW()",
     };
     let unread = count_rows(db, |query| {
         add_message_joins(query);

@@ -160,7 +160,7 @@ async fn delta(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn upsert_contact(
+pub(crate) async fn upsert_contact(
     db: &DbPool,
     account_id: &str,
     collection: &str,
@@ -181,10 +181,9 @@ async fn upsert_contact(
 
     let mut existing = Sq::select();
     existing
-        .expr(
-            Expr::col((contact::Entity, contact::Column::Id))
-                .cast_as(sea_orm::sea_query::Alias::new("text")),
-        )
+        .expr(Expr::col((contact::Entity, contact::Column::Id)).cast_as(
+            sea_orm::sea_query::Alias::new(crate::db_row::text_cast_name(db)),
+        ))
         .column(contact::Column::Etag)
         .from(contact::Entity)
         .and_where(contact::Column::AccountId.eq(account.clone()))
@@ -192,6 +191,9 @@ async fn upsert_contact(
     let row = db.orm().query_one(&existing).await?;
 
     let json_val = |v: serde_json::Value| match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => Value::String(Some(v.to_string())),
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => Value::String(Some(v.to_string())),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => Value::Json(Some(Box::new(v))),
@@ -434,20 +436,27 @@ pub(crate) async fn sync_caldav(
     Ok(outcome)
 }
 
-async fn ensure_calendar(db: &DbPool, account_id: &str, collection: &str, name: &str) -> String {
+pub(crate) async fn ensure_calendar(
+    db: &DbPool,
+    account_id: &str,
+    collection: &str,
+    name: &str,
+) -> String {
     // account_id must bind as a typed UUID on PostgreSQL — a raw text bind
     // silently fails both the lookup and the insert there.
     let Ok(acct) = crate::sync::queries::id_value_pub(db, account_id) else {
         return String::new();
     };
     let mut q = Sq::select();
-    // UUID ids must project as text to decode on PostgreSQL.
+    // UUID ids must project as text to decode on PostgreSQL (CHAR on MySQL).
     q.expr(
         Expr::col((
             crate::entities::calendar::Entity,
             crate::entities::calendar::Column::Id,
         ))
-        .cast_as(sea_orm::sea_query::Alias::new("text")),
+        .cast_as(sea_orm::sea_query::Alias::new(
+            crate::db_row::text_cast_name(db),
+        )),
     )
     .from(crate::entities::calendar::Entity)
     .and_where(crate::entities::calendar::Column::AccountId.eq(acct.clone()))
@@ -509,8 +518,9 @@ async fn upsert_event(
     let mut existing = Sq::select();
     existing
         .expr(
-            Expr::col((calendar_event::Entity, calendar_event::Column::Id))
-                .cast_as(sea_orm::sea_query::Alias::new("text")),
+            Expr::col((calendar_event::Entity, calendar_event::Column::Id)).cast_as(
+                sea_orm::sea_query::Alias::new(crate::db_row::text_cast_name(db)),
+            ),
         )
         .column(calendar_event::Column::Etag)
         .from(calendar_event::Entity)

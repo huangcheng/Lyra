@@ -1,0 +1,9 @@
+ALTER TABLE message DROP COLUMN dkim_status;
+ALTER TABLE message DROP COLUMN dkim_sdid;
+ALTER TABLE message DROP COLUMN dkim_auid;
+ALTER TABLE message DROP COLUMN dkim_selector;
+ALTER TABLE message DROP COLUMN dkim_algorithm;
+ALTER TABLE message DROP COLUMN dkim_signed_headers;
+ALTER TABLE message DROP COLUMN dkim_warnings;
+ALTER TABLE message DROP COLUMN dkim_signed_at;
+ALTER TABLE message DROP COLUMN dkim_expires_at;

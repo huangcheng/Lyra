@@ -72,6 +72,15 @@ DATABASE_URL=sqlite::memory:
 DATABASE_URL=postgres://user:password@localhost:5432/lyra
 ```
 
+**MySQL (8.0.13+, tested on 8.4):**
+```bash
+DATABASE_URL=mysql://user:password@localhost:3306/lyra
+```
+
+MySQL mirrors the SQLite dialect shapes — TEXT timestamps and JSON,
+VARCHAR(36) ids, and FULLTEXT (ngram parser) for CJK-aware search instead
+of FTS5/tsvector.
+
 ## Database & Migrations
 
 ### Migration structure
@@ -83,7 +92,10 @@ backend/migrations/
 ├── sqlite/
 │   ├── 0001_init.up.sql
 │   └── 0001_init.down.sql
-└── postgres/
+├── postgres/
+│   ├── 0001_init.up.sql
+│   └── 0001_init.down.sql
+└── mysql/          ← generated: python scripts/port-mysql-migrations.py
     ├── 0001_init.up.sql
     └── 0001_init.down.sql
 ```

@@ -27,6 +27,8 @@ pub enum DbPool {
     Sqlite(Pool<Sqlite>),
     #[cfg(feature = "postgres")]
     Postgres(Pool<sqlx::Postgres>),
+    #[cfg(feature = "mysql")]
+    Mysql(Pool<sqlx::MySql>),
 }
 
 impl DbPool {
@@ -36,6 +38,8 @@ impl DbPool {
             DbPool::Sqlite(_) => "sqlite",
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => "postgres",
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) => "mysql",
         }
     }
 
@@ -51,6 +55,8 @@ impl DbPool {
             Self::Sqlite(pool) => Ok(DbTxn::Sqlite(pool.begin().await?)),
             #[cfg(feature = "postgres")]
             Self::Postgres(pool) => Ok(DbTxn::Postgres(pool.begin().await?)),
+            #[cfg(feature = "mysql")]
+            Self::Mysql(pool) => Ok(DbTxn::Mysql(pool.begin().await?)),
         }
     }
 
@@ -65,6 +71,8 @@ impl DbPool {
             Self::Sqlite(pool) => sea_orm::DatabaseConnection::from(pool.clone()),
             #[cfg(feature = "postgres")]
             Self::Postgres(pool) => sea_orm::DatabaseConnection::from(pool.clone()),
+            #[cfg(feature = "mysql")]
+            Self::Mysql(pool) => sea_orm::DatabaseConnection::from(pool.clone()),
         }
     }
 
@@ -76,6 +84,8 @@ impl DbPool {
             Self::Sqlite(_) => sea_orm::DbBackend::Sqlite,
             #[cfg(feature = "postgres")]
             Self::Postgres(_) => sea_orm::DbBackend::Postgres,
+            #[cfg(feature = "mysql")]
+            Self::Mysql(_) => sea_orm::DbBackend::MySql,
         }
     }
 }
@@ -85,6 +95,8 @@ pub enum DbTxn {
     Sqlite(sqlx::Transaction<'static, Sqlite>),
     #[cfg(feature = "postgres")]
     Postgres(sqlx::Transaction<'static, sqlx::Postgres>),
+    #[cfg(feature = "mysql")]
+    Mysql(sqlx::Transaction<'static, sqlx::MySql>),
 }
 
 impl DbTxn {
@@ -94,6 +106,8 @@ impl DbTxn {
             Self::Sqlite(tx) => tx.commit().await,
             #[cfg(feature = "postgres")]
             Self::Postgres(tx) => tx.commit().await,
+            #[cfg(feature = "mysql")]
+            Self::Mysql(tx) => tx.commit().await,
         }
     }
 
@@ -104,6 +118,8 @@ impl DbTxn {
             Self::Sqlite(tx) => tx.rollback().await,
             #[cfg(feature = "postgres")]
             Self::Postgres(tx) => tx.rollback().await,
+            #[cfg(feature = "mysql")]
+            Self::Mysql(tx) => tx.rollback().await,
         }
     }
 }
@@ -188,8 +204,36 @@ impl Storage {
                      Rebuild with --features postgres."
                 );
             }
+        } else if database_url.starts_with("mysql://") || database_url.starts_with("mariadb://") {
+            #[cfg(feature = "mysql")]
+            {
+                // Pin every session to UTC (mirrors the Postgres pool): dates
+                // are normalized to UTC at ingest and stats bucketing must
+                // match the other engines. MySQL DATETIME has no zone, so
+                // this only affects NOW()/CURRENT_TIMESTAMP defaults.
+                let pool = sqlx::mysql::MySqlPoolOptions::new()
+                    .max_connections(10)
+                    .after_connect(|conn, _meta| {
+                        Box::pin(async move {
+                            use sqlx::Executor as _;
+                            conn.execute("SET time_zone = '+00:00'").await?;
+                            Ok(())
+                        })
+                    })
+                    .connect(database_url)
+                    .await?;
+                DbPool::Mysql(pool)
+            }
+            #[cfg(not(feature = "mysql"))]
+            {
+                anyhow::bail!(
+                    "MySQL support requires the 'mysql' feature. Rebuild with --features mysql."
+                );
+            }
         } else {
-            anyhow::bail!("Unsupported DATABASE_URL scheme. Use 'sqlite:' or 'postgres://'.");
+            anyhow::bail!(
+                "Unsupported DATABASE_URL scheme. Use 'sqlite:', 'postgres://', or 'mysql://'."
+            );
         };
 
         tracing::info!("Database pool created for {}", pool.engine_name());
@@ -220,6 +264,10 @@ impl Storage {
             DbPool::Postgres(pool) => {
                 run_postgres_migrations(pool, &migrations_dir).await?;
             }
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(pool) => {
+                run_mysql_migrations(pool, &migrations_dir).await?;
+            }
         }
 
         tracing::info!("Migrations complete");
@@ -232,6 +280,8 @@ impl Storage {
             DbPool::Sqlite(_) => "sqlite",
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => "postgres",
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) => "mysql",
         };
 
         // Prefer runtime override (Docker / packaged installs), then compile-time
@@ -243,7 +293,10 @@ impl Storage {
         ];
 
         for base in candidates.into_iter().flatten() {
-            let dir = if base.ends_with("sqlite") || base.ends_with("postgres") {
+            let dir = if base.ends_with("sqlite")
+                || base.ends_with("postgres")
+                || base.ends_with("mysql")
+            {
                 base
             } else {
                 base.join(subdir)
@@ -369,6 +422,55 @@ async fn run_postgres_migrations(
 
         // Record migration
         sqlx::query("INSERT INTO schema_migrations (version) VALUES ($1)")
+            .bind(version)
+            .execute(pool)
+            .await?;
+
+        tracing::info!("Migration {version} applied successfully");
+    }
+
+    Ok(())
+}
+
+/// Run `MySQL` migrations (multi-statement like Postgres).
+#[cfg(feature = "mysql")]
+async fn run_mysql_migrations(
+    pool: &Pool<sqlx::MySql>,
+    migrations_dir: &PathBuf,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // MySQL INTEGER decodes as i32-ish across drivers; CAST keeps the i64
+    // read stable (same lesson as the Postgres BIGINT cast).
+    let applied: Vec<i64> = sqlx::query_scalar(
+        "SELECT CAST(version AS SIGNED) FROM schema_migrations ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut migrations = collect_migration_files(migrations_dir, "up")?;
+    migrations.sort_by_key(|(v, _)| *v);
+
+    for (version, path) in migrations {
+        if applied.contains(&version) {
+            tracing::debug!("Migration {version} already applied, skipping");
+            continue;
+        }
+
+        tracing::info!("Applying migration {version}: {}", path.display());
+
+        let sql = std::fs::read_to_string(&path)?;
+        sqlx::raw_sql(audited_sql(sql.as_str()))
+            .execute(pool)
+            .await?;
+        sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
             .bind(version)
             .execute(pool)
             .await?;
@@ -645,6 +747,8 @@ INSERT INTO message_fts (subject) VALUES ('x');
         )
         .fetch_one(match storage.pool() {
             DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) => panic!("expected sqlite"),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("Expected SQLite"),
         })
@@ -661,6 +765,8 @@ INSERT INTO message_fts (subject) VALUES ('x');
 
         let pool = match storage.pool() {
             DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) => panic!("expected sqlite"),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("Expected SQLite"),
         };
@@ -678,6 +784,8 @@ INSERT INTO message_fts (subject) VALUES ('x');
 
         let pool = match storage.pool() {
             DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) => panic!("expected sqlite"),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("Expected SQLite"),
         };

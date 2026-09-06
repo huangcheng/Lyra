@@ -74,6 +74,9 @@ pub(crate) fn user_info_from(user: &UserData) -> UserInfo {
 /// Bind an id for a UUID-typed entity column.
 pub(crate) fn id_bind_value(db: &DbPool, id: &str) -> Result<Value, InvalidIdError> {
     match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => Ok(Value::String(Some(id.to_owned()))),
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => Ok(Value::String(Some(id.to_owned()))),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => Ok(Value::Uuid(Some(

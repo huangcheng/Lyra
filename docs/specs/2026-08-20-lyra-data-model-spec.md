@@ -1,6 +1,6 @@
-# Lyra — Data Model Spec (Dual-DB)
+# Lyra — Data Model Spec (Tri-DB: SQLite / PostgreSQL / MySQL)
 
-> **Data access:** all queries go through SeaORM 2.0 entities (`backend/src/entities/`) over one runtime pool selected by `DATABASE_URL` (SQLite or PostgreSQL; both compile in). Ids are app-generated UUIDv7 stored as TEXT on SQLite and native UUID on PostgreSQL; dialect differences bind in one seam. FTS (migration 0009) stays engine-specific raw SQL by design.
+> **Data access:** all queries go through SeaORM 2.0 entities (`backend/src/entities/`) over one runtime pool selected by `DATABASE_URL` (SQLite, PostgreSQL, or MySQL; all compile in). Ids are app-generated UUIDv7 stored as TEXT on SQLite, native UUID on PostgreSQL, and VARCHAR(36) on MySQL; dialect differences bind in one seam (`db_row::text_cast_name` etc.). FTS (migration 0009) stays engine-specific raw SQL by design: FTS5 on SQLite, tsvector on PostgreSQL, FULLTEXT with the ngram parser on MySQL. The MySQL schema mirrors the SQLite dialect shapes (TEXT timestamps and JSON) so the sqlite bind/decode arms carry over; `migrations/mysql/` is generated via `scripts/port-mysql-migrations.py` with hand-written forms for the FTS and self-referencing data migrations.
 
 
 **Date:** 2026-08-20  

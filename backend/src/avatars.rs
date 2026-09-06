@@ -782,6 +782,8 @@ mod tests {
         storage.run_migrations().await.unwrap();
         match storage.pool().clone() {
             DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) => panic!("expected sqlite"),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("expected sqlite"),
         }
@@ -833,6 +835,8 @@ mod tests {
     fn sqlite_pool(state: &AuthState) -> &sqlx::SqlitePool {
         match state.db() {
             DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) => panic!("expected sqlite"),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("expected sqlite"),
         }

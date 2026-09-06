@@ -63,6 +63,9 @@ impl IdParam {
     /// Dialect-aware bind value. SQLite accepts any text (tests use `"user-1"`).
     pub fn for_db(db: &DbPool, id: &str) -> Result<Self, InvalidIdError> {
         match db {
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) | DbPool::Sqlite(_) => Ok(Self::Text(id.to_owned())),
+            #[cfg(not(feature = "mysql"))]
             DbPool::Sqlite(_) => Ok(Self::Text(id.to_owned())),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => Self::parse_uuid(id).map(Self::Uuid),
@@ -91,6 +94,24 @@ impl<'q> Encode<'q, sqlx::Sqlite> for IdParam {
             Self::Uuid(u) => u.to_string(),
         };
         <String as Encode<'q, sqlx::Sqlite>>::encode(text, buf)
+    }
+}
+
+#[cfg(feature = "mysql")]
+impl Type<sqlx::MySql> for IdParam {
+    fn type_info() -> sqlx::mysql::MySqlTypeInfo {
+        <String as Type<sqlx::MySql>>::type_info()
+    }
+}
+
+#[cfg(feature = "mysql")]
+impl<'q> Encode<'q, sqlx::MySql> for IdParam {
+    fn encode_by_ref(&self, buf: &mut Vec<u8>) -> Result<IsNull, BoxDynError> {
+        let text = match self {
+            Self::Text(s) => s.clone(),
+            Self::Uuid(u) => u.to_string(),
+        };
+        <String as Encode<'q, sqlx::MySql>>::encode_by_ref(&text, buf)
     }
 }
 
@@ -128,6 +149,9 @@ impl TsParam {
     /// Parse common ISO / RFC3339 / iCal text for a Postgres bind.
     pub fn for_db(db: &DbPool, raw: &str) -> Result<Self, InvalidTsError> {
         match db {
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) | DbPool::Sqlite(_) => Ok(Self::Text(raw.to_owned())),
+            #[cfg(not(feature = "mysql"))]
             DbPool::Sqlite(_) => Ok(Self::Text(raw.to_owned())),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => parse_ts(raw).map(Self::Utc).ok_or(InvalidTsError),
@@ -153,6 +177,9 @@ pub fn opt_ts_param(db: &DbPool, raw: Option<&str>) -> Option<TsParam> {
     match TsParam::for_db(db, raw) {
         Ok(p) => Some(p),
         Err(_) => match db {
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) | DbPool::Sqlite(_) => Some(TsParam::Text(raw.to_owned())),
+            #[cfg(not(feature = "mysql"))]
             DbPool::Sqlite(_) => Some(TsParam::Text(raw.to_owned())),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => None,
@@ -193,6 +220,16 @@ pub fn parse_ts(raw: &str) -> Option<DateTime<Utc>> {
         return d.and_hms_opt(0, 0, 0).map(|ndt| ndt.and_utc());
     }
     None
+}
+
+/// Dialect text-cast target for `CAST(x AS <t>)`: `text` everywhere
+/// except MySQL, whose cast grammar only accepts `CHAR`.
+pub fn text_cast_name(db: &DbPool) -> &'static str {
+    match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) => "char",
+        _ => "text",
+    }
 }
 
 /// SQLite `DATETIME`-column literal: `UTC` seconds precision, matching how

@@ -22,6 +22,8 @@ use crate::sanitize::persist_body_html;
 use crate::storage::{DbPool, DbTxn};
 
 #[cfg(feature = "postgres")]
+#[cfg(feature = "mysql")]
+use sea_orm::sea_query::MysqlQueryBuilder;
 use sea_orm::sea_query::PostgresQueryBuilder;
 use sea_orm::sea_query::{
     Alias, DeleteStatement, Expr, Func, InsertStatement, OnConflict, Query as Sq, SelectStatement,
@@ -201,6 +203,8 @@ trait TxSql {
     fn render_sqlite(&self) -> RenderedTxSql;
     #[cfg(feature = "postgres")]
     fn render_postgres(&self) -> RenderedTxSql;
+    #[cfg(feature = "mysql")]
+    fn render_mysql(&self) -> RenderedTxSql;
 }
 
 macro_rules! tx_sql_render {
@@ -216,6 +220,12 @@ macro_rules! tx_sql_render {
                 let (sql, values) = <$ty>::build(self, PostgresQueryBuilder);
                 (sql, values.0)
             }
+
+            #[cfg(feature = "mysql")]
+            fn render_mysql(&self) -> RenderedTxSql {
+                let (sql, values) = <$ty>::build(self, MysqlQueryBuilder);
+                (sql, values.0)
+            }
         }
     };
 }
@@ -228,6 +238,8 @@ tx_sql_render!(DeleteStatement);
 type SqliteArgs = sqlx::sqlite::SqliteArguments;
 #[cfg(feature = "postgres")]
 type PgArgs = sqlx::postgres::PgArguments;
+#[cfg(feature = "mysql")]
+type MySqlArgs = sqlx::mysql::MySqlArguments;
 
 /// Add one rendered value to the SQLite argument list. Timestamps encode like
 /// the legacy `TsParam`; ids/text stay TEXT (this schema stores TEXT ids).
@@ -293,6 +305,39 @@ fn postgres_args(values: Vec<Value>) -> Result<PgArgs, sqlx::Error> {
     Ok(args)
 }
 
+/// Add one rendered value to the MySQL argument list — TEXT ids and TEXT
+/// timestamps, exactly the sqlite shapes (the MySQL schema mirrors them).
+#[cfg(feature = "mysql")]
+fn push_mysql_arg(args: &mut MySqlArgs, value: Value) -> Result<(), sqlx::Error> {
+    let added = match value {
+        Value::Bool(v) => args.add(v),
+        Value::Int(v) => args.add(v),
+        Value::BigInt(v) => args.add(v),
+        Value::String(v) => args.add(v),
+        Value::Uuid(v) => args.add(v.map(|u| u.to_string())),
+        Value::ChronoDateTimeUtc(v) => {
+            args.add(v.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()))
+        }
+        // JSON columns are TEXT on MySQL (the sqlite semantics).
+        Value::Json(v) => args.add(v.map(|boxed| boxed.to_string())),
+        other => {
+            return Err(sqlx::Error::Protocol(format!(
+                "unsupported mysql txn bind: {other:?}"
+            )));
+        }
+    };
+    added.map_err(|e| sqlx::Error::Protocol(e.to_string()))
+}
+
+#[cfg(feature = "mysql")]
+fn mysql_args(values: Vec<Value>) -> Result<MySqlArgs, sqlx::Error> {
+    let mut args = MySqlArgs::default();
+    for value in values {
+        push_mysql_arg(&mut args, value)?;
+    }
+    Ok(args)
+}
+
 /// Execute an entity-built statement on the open sqlx transaction.
 ///
 /// The statement text is produced solely by sea_query from entity column
@@ -309,6 +354,12 @@ async fn tx_execute<S: TxSql>(tx: &mut DbTxn, stmt: &S) -> Result<(), SyncError>
         DbTxn::Postgres(t) => {
             let (sql, values) = stmt.render_postgres();
             let query = sqlx::query_with(sqlx::AssertSqlSafe(sql), postgres_args(values)?);
+            query.execute(&mut **t).await?;
+        }
+        #[cfg(feature = "mysql")]
+        DbTxn::Mysql(t) => {
+            let (sql, values) = stmt.render_mysql();
+            let query = sqlx::query_with(sqlx::AssertSqlSafe(sql), mysql_args(values)?);
             query.execute(&mut **t).await?;
         }
     }
@@ -331,6 +382,14 @@ async fn tx_fetch_id<S: TxSql>(tx: &mut DbTxn, stmt: &S) -> Result<Option<String
                 .fetch_optional(&mut **t)
                 .await?
                 .map(|u| u.to_string())
+        }
+        // MySQL ids are CHAR(36) text — same decode as the sqlite arm.
+        #[cfg(feature = "mysql")]
+        DbTxn::Mysql(t) => {
+            let (sql, values) = stmt.render_mysql();
+            sqlx::query_scalar_with::<_, String, _>(sqlx::AssertSqlSafe(sql), mysql_args(values)?)
+                .fetch_optional(&mut **t)
+                .await?
         }
     })
 }
@@ -358,6 +417,15 @@ async fn tx_fetch_count<S: TxSql>(tx: &mut DbTxn, stmt: &S) -> Result<i64, SyncE
             )
             .fetch_one(&mut **t)
             .await?)
+        }
+        #[cfg(feature = "mysql")]
+        DbTxn::Mysql(t) => {
+            let (sql, values) = stmt.render_mysql();
+            Ok(
+                sqlx::query_scalar_with::<_, i64, _>(sqlx::AssertSqlSafe(sql), mysql_args(values)?)
+                    .fetch_one(&mut **t)
+                    .await?,
+            )
         }
     }
 }
@@ -946,11 +1014,11 @@ pub(crate) async fn persist_imap_folder_batch(
 
 /// Text-cast projection of a message column — address columns are JSONB on
 /// PostgreSQL and cannot feed text operators (`LIKE`, `=`) directly.
-fn as_text_col(col: message::Column) -> Expr {
+fn as_text_col(db: &DbPool, col: message::Column) -> Expr {
     // Table-qualified so the expression also embeds cleanly in
     // `ON CONFLICT DO UPDATE` bodies, where bare refs are ambiguous on
-    // PostgreSQL.
-    Expr::col((message::Entity, col)).cast_as(Alias::new("text"))
+    // PostgreSQL. MySQL's cast grammar only accepts CHAR.
+    Expr::col((message::Entity, col)).cast_as(Alias::new(crate::db_row::text_cast_name(db)))
 }
 
 /// IMAP UIDs of up to `limit` messages in a folder whose stored subject,
@@ -967,13 +1035,13 @@ pub(crate) async fn mojibake_message_uids(
         .from(message::Entity)
         .and_where(message::Column::FolderId.eq(id_value(db, folder_id)?))
         .and_where(
-            as_text_col(message::Column::Subject)
+            as_text_col(db, message::Column::Subject)
                 .like("%\u{FFFD}%")
-                .or(as_text_col(message::Column::Snippet).like("%\u{FFFD}%"))
-                .or(as_text_col(message::Column::FromAddress).like("%\u{FFFD}%"))
-                .or(as_text_col(message::Column::ToAddresses).like("%\u{FFFD}%"))
-                .or(as_text_col(message::Column::BodyText).like("%\u{FFFD}%"))
-                .or(as_text_col(message::Column::BodyHtml).like("%\u{FFFD}%")),
+                .or(as_text_col(db, message::Column::Snippet).like("%\u{FFFD}%"))
+                .or(as_text_col(db, message::Column::FromAddress).like("%\u{FFFD}%"))
+                .or(as_text_col(db, message::Column::ToAddresses).like("%\u{FFFD}%"))
+                .or(as_text_col(db, message::Column::BodyText).like("%\u{FFFD}%"))
+                .or(as_text_col(db, message::Column::BodyHtml).like("%\u{FFFD}%")),
         )
         .limit(limit);
     let rows = db.orm().query_all(&sel).await.map_err(orm_err)?;
@@ -1053,7 +1121,7 @@ pub(crate) async fn reconcile_folder_deletions(
     sel.expr_as(
         // Read the id as text: the column is UUID on PostgreSQL, where
         // decoding it as String (like the bind fix, 19b9141) type-errors.
-        Expr::col((message::Entity, message::Column::Id)).cast_as(Alias::new("text")),
+        Expr::col((message::Entity, message::Column::Id)).cast_as(Alias::new(crate::db_row::text_cast_name(db))),
         Alias::new("id"),
     )
     .column(message::Column::ExternalId)
@@ -1208,9 +1276,22 @@ fn cur_row_col(col: message::Column) -> Expr {
     Expr::col((message::Entity, col))
 }
 
-/// Incoming candidate row within `DO UPDATE SET` (`excluded."col"`).
-fn excluded_col(col: message::Column) -> Expr {
-    Expr::col((Alias::new("excluded"), col))
+/// Incoming candidate row within the upsert UPDATE body: `excluded."col"`
+/// on SQLite/Postgres, `VALUES(col)` on MySQL. The name comes from a column
+/// enum constant, never user input.
+fn excluded_col(db: &DbPool, col: message::Column) -> Expr {
+    match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) => {
+            let mut q = Sq::select();
+            q.expr(Expr::col((message::Entity, col)));
+            let (rendered, _) = q.build(MysqlQueryBuilder);
+            // rendered: SELECT `col` — take the single projection verbatim
+            let name = rendered.trim_start_matches("SELECT ").trim().to_string();
+            Expr::cust(format!("VALUES({name})"))
+        }
+        _ => Expr::col((Alias::new("excluded"), col)),
+    }
 }
 
 /// Refresh-only-if-stale guard used for subject/snippet fill-in: replace the
@@ -1220,8 +1301,8 @@ fn excluded_col(col: message::Column) -> Expr {
 /// The column is compared as text: address columns are JSONB on PostgreSQL,
 /// where `jsonb LIKE text` and `jsonb = text` have no operator. `CAST(x AS
 /// text)` is a no-op for the TEXT columns and for every SQLite type.
-fn stale_text(col: message::Column) -> Expr {
-    let cast = || as_text_col(col);
+fn stale_text(db: &DbPool, col: message::Column) -> Expr {
+    let cast = || as_text_col(db, col);
     cast()
         .is_null()
         .or(cast().eq(""))
@@ -1392,39 +1473,42 @@ pub(crate) async fn update_dkim_verdict(
 /// off RFC-2047-encoded placeholders or U+FFFD mojibake and date/header
 /// columns only fill previously-absent values — the legacy ON CONFLICT
 /// clauses, extended so charset-mangled sender names heal on re-sync.
-fn apply_fill_in_on_conflict(mut insert: InsertStatement) -> InsertStatement {
+fn apply_fill_in_on_conflict(db: &DbPool, mut insert: InsertStatement) -> InsertStatement {
     let conflict = OnConflict::columns([message::Column::AccountId, message::Column::ExternalId])
         .update_columns([message::Column::IsRead, message::Column::IsStarred])
-        .value(message::Column::Flags, excluded_col(message::Column::Flags))
+        .value(
+            message::Column::Flags,
+            excluded_col(db, message::Column::Flags),
+        )
         .value(
             message::Column::Subject,
             Expr::case(
-                stale_text(message::Column::Subject),
-                excluded_col(message::Column::Subject),
+                stale_text(db, message::Column::Subject),
+                excluded_col(db, message::Column::Subject),
             )
             .finally(cur_row_col(message::Column::Subject)),
         )
         .value(
             message::Column::FromAddress,
             Expr::case(
-                stale_text(message::Column::FromAddress),
-                excluded_col(message::Column::FromAddress),
+                stale_text(db, message::Column::FromAddress),
+                excluded_col(db, message::Column::FromAddress),
             )
             .finally(cur_row_col(message::Column::FromAddress)),
         )
         .value(
             message::Column::ToAddresses,
             Expr::case(
-                stale_text(message::Column::ToAddresses),
-                excluded_col(message::Column::ToAddresses),
+                stale_text(db, message::Column::ToAddresses),
+                excluded_col(db, message::Column::ToAddresses),
             )
             .finally(cur_row_col(message::Column::ToAddresses)),
         )
         .value(
             message::Column::CcAddresses,
             Expr::case(
-                stale_text(message::Column::CcAddresses),
-                excluded_col(message::Column::CcAddresses),
+                stale_text(db, message::Column::CcAddresses),
+                excluded_col(db, message::Column::CcAddresses),
             )
             .finally(cur_row_col(message::Column::CcAddresses)),
         )
@@ -1432,14 +1516,14 @@ fn apply_fill_in_on_conflict(mut insert: InsertStatement) -> InsertStatement {
             message::Column::Date,
             Func::coalesce([
                 cur_row_col(message::Column::Date),
-                excluded_col(message::Column::Date),
+                excluded_col(db, message::Column::Date),
             ]),
         )
         .value(
             message::Column::Snippet,
             Expr::case(
-                stale_text(message::Column::Snippet),
-                excluded_col(message::Column::Snippet),
+                stale_text(db, message::Column::Snippet),
+                excluded_col(db, message::Column::Snippet),
             )
             .finally(cur_row_col(message::Column::Snippet)),
         )
@@ -1447,7 +1531,7 @@ fn apply_fill_in_on_conflict(mut insert: InsertStatement) -> InsertStatement {
             message::Column::MessageIdHeader,
             Func::coalesce([
                 cur_row_col(message::Column::MessageIdHeader),
-                excluded_col(message::Column::MessageIdHeader),
+                excluded_col(db, message::Column::MessageIdHeader),
             ]),
         )
         .value(message::Column::UpdatedAt, Expr::current_timestamp())
@@ -1490,32 +1574,35 @@ pub(crate) async fn upsert_message_in_tx(
     let was_new = existing.is_none();
 
     let body_html = persist_body_html(msg.body_html.as_deref());
-    let insert = apply_fill_in_on_conflict(message_insert(
+    let insert = apply_fill_in_on_conflict(
         db,
-        MessageInsert {
-            id_bind: id_value(db, &new_uuid_text())?,
-            account_bind: id_value(db, account_id)?,
-            folder_bind: id_value(db, folder_id)?,
-            external_id: &external_id,
-            message_id_header: msg.message_id.as_deref(),
-            subject: msg.subject.as_deref(),
-            from_json: from_json.as_deref(),
-            to_json: to_json.as_deref(),
-            cc_json: msg.cc.as_deref(),
-            date: msg.date.as_deref(),
-            is_read,
-            is_starred,
-            flags_json: &flags_json,
-            size_bytes: msg.size.and_then(|s| i32::try_from(s).ok()),
-            in_reply_to: msg.in_reply_to.as_deref(),
-            references_headers: msg.references.as_deref(),
-            snippet: snippet.as_deref(),
-            has_attachments: msg.has_attachments,
-            body_text: msg.body_text.as_deref(),
-            body_html: body_html.as_deref(),
-            jmap_thread_id: None,
-        },
-    ));
+        message_insert(
+            db,
+            MessageInsert {
+                id_bind: id_value(db, &new_uuid_text())?,
+                account_bind: id_value(db, account_id)?,
+                folder_bind: id_value(db, folder_id)?,
+                external_id: &external_id,
+                message_id_header: msg.message_id.as_deref(),
+                subject: msg.subject.as_deref(),
+                from_json: from_json.as_deref(),
+                to_json: to_json.as_deref(),
+                cc_json: msg.cc.as_deref(),
+                date: msg.date.as_deref(),
+                is_read,
+                is_starred,
+                flags_json: &flags_json,
+                size_bytes: msg.size.and_then(|s| i32::try_from(s).ok()),
+                in_reply_to: msg.in_reply_to.as_deref(),
+                references_headers: msg.references.as_deref(),
+                snippet: snippet.as_deref(),
+                has_attachments: msg.has_attachments,
+                body_text: msg.body_text.as_deref(),
+                body_html: body_html.as_deref(),
+                jmap_thread_id: None,
+            },
+        ),
+    );
     tx_execute(tx, &insert).await?;
 
     Ok(was_new)
@@ -1778,6 +1865,12 @@ fn folder_count_stmt(db: &DbPool, folder_bind: Value, unread_only: bool) -> Sele
                 "(snoozed_until IS NULL OR snoozed_until <= NOW())",
             ));
         }
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) => {
+            sel.and_where(Expr::cust(
+                "(snoozed_until IS NULL OR snoozed_until <= NOW())",
+            ));
+        }
     }
     if unread_only {
         sel.and_where(message::Column::IsRead.eq(false));
@@ -1856,12 +1949,21 @@ mod jsonb_text_cast_tests {
     /// table-qualified or Postgres rejects them as ambiguous vs `excluded`.
     #[test]
     fn stale_text_casts_and_qualifies_for_postgres() {
+        use crate::storage::DbPool;
+        // connect_lazy needs a tokio context; these are plain #[test]s
+        let db = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                DbPool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap())
+            });
         for col in [
             message::Column::FromAddress,
             message::Column::ToAddresses,
             message::Column::CcAddresses,
         ] {
-            let sql = where_sql(stale_text(col));
+            let sql = where_sql(stale_text(&db, col));
             let name = col.to_string().to_lowercase();
             assert!(
                 sql.contains(&format!(r#"CAST("message"."{name}" AS text) LIKE"#)),
@@ -1876,9 +1978,18 @@ mod jsonb_text_cast_tests {
 
     #[test]
     fn mojibake_scan_casts_address_columns() {
-        let cond = as_text_col(message::Column::FromAddress)
+        use crate::storage::DbPool;
+        // connect_lazy needs a tokio context; these are plain #[test]s
+        let db = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                DbPool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap())
+            });
+        let cond = as_text_col(&db, message::Column::FromAddress)
             .like("%\u{FFFD}%")
-            .or(as_text_col(message::Column::ToAddresses).like("%\u{FFFD}%"));
+            .or(as_text_col(&db, message::Column::ToAddresses).like("%\u{FFFD}%"));
         let sql = where_sql(cond);
         assert!(
             sql.contains(r#"CAST("message"."from_address" AS text) LIKE"#),

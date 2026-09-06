@@ -252,6 +252,11 @@ fn decode_ics_bytes(bytes: &[u8]) -> Result<String, SyncError> {
 
 fn now_value(db: &DbPool) -> Value {
     match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => {
+            Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+        }
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => {
             Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
         }
@@ -262,6 +267,9 @@ fn now_value(db: &DbPool) -> Value {
 
 fn ts_bind(db: &DbPool, rfc3339: Option<&str>) -> Value {
     match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => Value::String(rfc3339.map(str::to_string)),
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => Value::String(rfc3339.map(str::to_string)),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => match rfc3339.and_then(|s| {

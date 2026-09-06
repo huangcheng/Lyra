@@ -184,6 +184,8 @@ mod tests {
         storage.run_migrations().await.unwrap();
         match storage.pool().clone() {
             DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) => panic!("expected sqlite"),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("expected sqlite"),
         }

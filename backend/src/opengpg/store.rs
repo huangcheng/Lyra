@@ -91,6 +91,11 @@ fn id_value(db: &DbPool, id: &str, what: &str) -> Result<Value, OpengpgError> {
 /// defaults so sqlite rows keep their `YYYY-MM-DD HH:MM:SS` text format.
 fn now_value(db: &DbPool) -> Value {
     match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => {
+            Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+        }
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => {
             Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
         }

@@ -325,6 +325,8 @@ mod tests {
     fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
         match db {
             DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) => panic!("expected sqlite"),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("expected sqlite"),
         }

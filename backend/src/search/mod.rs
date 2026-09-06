@@ -131,6 +131,8 @@ pub fn search_index_for(db: &DbPool) -> Arc<dyn SearchIndex> {
         DbPool::Sqlite(_) => Arc::new(SqliteSearchIndex { db: db.clone() }),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => Arc::new(PostgresSearchIndex { db: db.clone() }),
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) => Arc::new(MysqlSearchIndex { db: db.clone() }),
     }
 }
 
@@ -146,6 +148,9 @@ const FTS_AVAILABLE_SQL_POSTGRES: &str = r"
                   AND column_name = 'search_vector'
                 ";
 
+#[cfg(feature = "mysql")]
+const FTS_AVAILABLE_SQL_MYSQL: &str = "SELECT COUNT(*) AS c FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'message' AND index_name = 'message_fts_all'";
+
 /// Whether migration 0009 has been applied (FTS table / tsvector column present).
 pub async fn fts_available(db: &DbPool) -> Result<bool, sqlx::Error> {
     let stmt = match db.backend() {
@@ -154,6 +159,8 @@ pub async fn fts_available(db: &DbPool) -> Result<bool, sqlx::Error> {
         DbBackend::Postgres => {
             Statement::from_string(DbBackend::Postgres, FTS_AVAILABLE_SQL_POSTGRES)
         }
+        #[cfg(feature = "mysql")]
+        DbBackend::MySql => Statement::from_string(DbBackend::MySql, FTS_AVAILABLE_SQL_MYSQL),
         other => {
             return Err(sqlx::Error::Protocol(format!(
                 "fts availability probe: unsupported backend {other:?}"
@@ -191,6 +198,10 @@ pub async fn search_message_ids(
         #[cfg(feature = "postgres")]
         DbBackend::Postgres => {
             postgres_search_message_ids(db, query, &user, &account, &folder, limit).await?
+        }
+        #[cfg(feature = "mysql")]
+        DbBackend::MySql => {
+            mysql_search_message_ids(db, query, &user, &account, &folder, limit).await?
         }
         other => {
             return Err(SearchError::from(sqlx::Error::Protocol(format!(
@@ -277,6 +288,109 @@ async fn postgres_search_message_ids(
     );
     let rows = db.orm().query_all_raw(stmt).await.map_err(orm_err)?;
     rows.iter().map(hit_from_row).collect()
+}
+
+/// MySQL: the FULLTEXT index is maintained by the base table itself
+/// (migration 0009 creates one multi-column ngram index), so the index
+/// seam is read-only — no trigger-style writes needed.
+#[cfg(feature = "mysql")]
+#[allow(clippy::ref_option)]
+async fn mysql_search_message_ids(
+    db: &DbPool,
+    query: &str,
+    user: &Value,
+    account: &Option<Value>,
+    folder: &Option<Value>,
+    limit: i64,
+) -> Result<Vec<SearchHit>, SearchError> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Err(SearchError::InvalidQuery);
+    }
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::MySql,
+        r"
+        SELECT m.id AS message_id,
+               MATCH(m.subject, m.body_text, m.from_address)
+                 AGAINST (? IN NATURAL LANGUAGE MODE) AS rank
+        FROM message m
+        JOIN mail_account a ON m.account_id = a.id
+        WHERE a.user_id = ?
+          AND m.is_deleted = FALSE
+          AND MATCH(m.subject, m.body_text, m.from_address)
+                AGAINST (? IN NATURAL LANGUAGE MODE)
+          AND (? IS NULL OR m.account_id = ?)
+          AND (? IS NULL OR m.folder_id = ?)
+        ORDER BY rank DESC
+        LIMIT ?
+        ",
+        [
+            Value::from(trimmed),
+            user.clone(),
+            Value::from(trimmed),
+            value_or_null(account.as_ref()),
+            value_or_null(account.as_ref()),
+            value_or_null(folder.as_ref()),
+            value_or_null(folder.as_ref()),
+            Value::from(limit),
+        ],
+    );
+    let rows = db.orm().query_all_raw(stmt).await.map_err(orm_err)?;
+    rows.iter().map(hit_from_row).collect()
+}
+
+#[cfg(feature = "mysql")]
+struct MysqlSearchIndex {
+    db: DbPool,
+}
+
+#[cfg(feature = "mysql")]
+#[async_trait]
+impl SearchIndex for MysqlSearchIndex {
+    /// No-op: MySQL maintains the FULLTEXT index from `message` writes.
+    async fn index_message(&self, _msg: &MessageSearchDoc) -> Result<(), SearchError> {
+        Ok(())
+    }
+
+    /// No-op: MySQL maintains the FULLTEXT index from `message` writes.
+    async fn remove_message(&self, _id: &str) -> Result<(), SearchError> {
+        Ok(())
+    }
+
+    async fn search(
+        &self,
+        query: &str,
+        account_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, SearchError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Err(SearchError::InvalidQuery);
+        }
+        let account = id_value(&self.db, account_id)?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::MySql,
+            r"
+            SELECT m.id AS message_id,
+                   MATCH(m.subject, m.body_text, m.from_address)
+                     AGAINST (? IN NATURAL LANGUAGE MODE) AS rank
+            FROM message m
+            WHERE MATCH(m.subject, m.body_text, m.from_address)
+                    AGAINST (? IN NATURAL LANGUAGE MODE)
+              AND m.account_id = ?
+            ORDER BY rank DESC
+            LIMIT ?
+            ",
+            [
+                Value::from(trimmed),
+                Value::from(trimmed),
+                account,
+                Value::from(i64::try_from(limit).unwrap_or(50)),
+            ],
+        );
+        let rows = self.db.orm().query_all_raw(stmt).await.map_err(orm_err)?;
+        rows.iter().map(hit_from_row).collect()
+    }
 }
 
 struct SqliteSearchIndex {
@@ -537,6 +651,8 @@ mod tests {
     ) -> String {
         let pool = match db {
             DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) => panic!("expected sqlite"),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("seed_message test requires sqlite pool"),
         };

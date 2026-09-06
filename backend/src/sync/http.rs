@@ -1151,8 +1151,8 @@ fn coalesce_existing(column: message::Column, val: Value) -> sea_orm::sea_query:
 /// The stale checks run against `CAST(col AS text)`: on Postgres the address
 /// columns are JSONB, so a bare `col = ''` / `col LIKE …` raises
 /// `operator does not exist: jsonb = text`. The cast is a no-op on SQLite.
-fn refresh_if_stale(column: message::Column, replacement: Value) -> Expr {
-    let as_text = Expr::col(column).cast_as(Alias::new("text"));
+fn refresh_if_stale(db: &DbPool, column: message::Column, replacement: Value) -> Expr {
+    let as_text = Expr::col(column).cast_as(Alias::new(crate::db_row::text_cast_name(db)));
     let stale = Condition::any()
         .add(Expr::col(column).is_null())
         .add(as_text.clone().eq(""))
@@ -1292,11 +1292,12 @@ async fn maybe_fill_imap_body(
         .value(message::Column::HasAttachments, fetched.has_attachments)
         .value(
             message::Column::Snippet,
-            refresh_if_stale(message::Column::Snippet, owned_text_value(snippet.clone())),
+            refresh_if_stale(db, message::Column::Snippet, owned_text_value(snippet.clone())),
         )
         .value(
             message::Column::Subject,
             refresh_if_stale(
+                db,
                 message::Column::Subject,
                 text_value(fetched.subject.as_deref()),
             ),
@@ -1308,6 +1309,7 @@ async fn maybe_fill_imap_body(
         update.value(
             message::Column::FromAddress,
             refresh_if_stale(
+                db,
                 message::Column::FromAddress,
                 opt_json_value(db, from_json.as_deref()),
             ),
@@ -1325,6 +1327,7 @@ async fn maybe_fill_imap_body(
         update.value(
             message::Column::ToAddresses,
             refresh_if_stale(
+                db,
                 message::Column::ToAddresses,
                 opt_json_value(db, to_json.as_deref()),
             ),
@@ -2837,10 +2840,19 @@ mod lazy_fill_sql_tests {
     /// must run against `CAST(col AS text)` on both backends.
     #[test]
     fn stale_refresh_casts_jsonb_columns_to_text() {
+        use crate::storage::DbPool;
+        let db = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                DbPool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap())
+            });
         let mut update = Sq::update();
         update.table(message::Entity).value(
             message::Column::FromAddress,
             refresh_if_stale(
+                &db,
                 message::Column::FromAddress,
                 owned_text_value(Some("{\"raw\":\"a@b\"}".into())),
             ),

@@ -123,6 +123,9 @@ fn decrypt_password(credential_json: &str, dek: &[u8]) -> Result<Zeroizing<Strin
 /// `db_row::id_param` makes for the macro layer.
 pub(super) fn account_id_value(db: &DbPool, id: &str) -> Result<Value, InvalidIdError> {
     match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => Ok(Value::String(Some(id.to_owned()))),
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => Ok(Value::String(Some(id.to_owned()))),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => Ok(Value::Uuid(Some(

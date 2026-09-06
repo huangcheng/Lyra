@@ -150,6 +150,8 @@ async fn seed_user(db: &DbPool, id: &str) {
                 .await
                 .unwrap();
         }
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) => panic!("expected sqlite"),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => panic!("expected sqlite in tests"),
     }
@@ -186,6 +188,8 @@ fn test_state(db: DbPool) -> AuthState {
 fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
     match db {
         DbPool::Sqlite(pool) => pool,
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) => panic!("expected sqlite"),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => panic!("expected sqlite in tests"),
     }

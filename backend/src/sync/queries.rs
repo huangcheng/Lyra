@@ -73,6 +73,9 @@ pub(super) fn owned_text_value(raw: Option<String>) -> Value {
 /// Typed JSON NULL matching the dialect (TEXT vs JSONB).
 pub(super) fn json_null_value(db: &DbPool) -> Value {
     match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => Value::String(None),
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => Value::String(None),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => Value::Json(None),
@@ -87,6 +90,9 @@ pub(super) fn opt_json_value(db: &DbPool, raw: Option<&str>) -> Value {
         return json_null_value(db);
     };
     match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => Value::String(Some(raw.to_owned())),
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => Value::String(Some(raw.to_owned())),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => Value::Json(Some(Box::new(
@@ -99,6 +105,11 @@ pub(super) fn opt_json_value(db: &DbPool, raw: Option<&str>) -> Value {
 /// shaped like the legacy `datetime()` writers.
 pub(super) fn ts_value(db: &DbPool, dt: Option<DateTime<Utc>>) -> Value {
     match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => {
+            Value::String(dt.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string()))
+        }
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => Value::String(dt.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => Value::ChronoDateTimeUtc(dt),
@@ -109,6 +120,11 @@ pub(super) fn ts_value(db: &DbPool, dt: Option<DateTime<Utc>>) -> Value {
 /// defaults so sqlite rows keep their `YYYY-MM-DD HH:MM:SS` text format.
 pub(super) fn now_value(db: &DbPool) -> Value {
     match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => {
+            Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+        }
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => {
             Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
         }
@@ -249,11 +265,17 @@ const SNOOZE_VISIBLE_SQLITE: &str =
 #[cfg(feature = "postgres")]
 const SNOOZE_VISIBLE_POSTGRES: &str = "(m.snoozed_until IS NULL OR m.snoozed_until <= NOW())";
 
+const SNOOZE_VISIBLE_MYSQL: &str = "(m.snoozed_until IS NULL OR m.snoozed_until <= NOW())";
+
 pub(super) fn snooze_visible_clause(db: &DbPool) -> Expr {
     match db {
         DbPool::Sqlite(_) => Expr::cust(SNOOZE_VISIBLE_SQLITE),
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => Expr::cust(SNOOZE_VISIBLE_POSTGRES),
+        // MySQL coerces the UTC text column to DATETIME for the comparison
+        // (sessions are pinned to UTC, so NOW() is UTC).
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) => Expr::cust(SNOOZE_VISIBLE_MYSQL),
     }
 }
 

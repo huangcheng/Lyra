@@ -114,6 +114,7 @@ Lyra/
     migrations/
       sqlite/                   ← SQLite migration SQL files
       postgres/                 ← PostgreSQL migration SQL files
+      mysql/                    ← MySQL migration SQL files (via scripts/port-mysql-migrations.py)
   deploy/                       ← Docker Compose / HTTPS / install script notes
   scripts/
     secretscan.sh               ← gitleaks scanner
@@ -137,6 +138,7 @@ Lyra/
 | `make test` | vitest (frontend) + `cargo test` SQLite suite (backend) |
 | `make check` | format check + lint + tests + secret scan |
 | `cargo test --bin lyra_backend -- postgres_live --ignored` | live-PostgreSQL seam roundtrips (needs `LYRA_TEST_DATABASE_URL`; CI runs them) |
+| `cargo test --bin lyra_backend -- mysql_live --ignored` | live-MySQL seam roundtrips (needs `LYRA_TEST_MYSQL_URL`; CI runs them) |
 | `cd frontend && npm run check` | frontend only |
 | `cd backend && cargo clippy --all-targets --all-features -- -D warnings` | backend only |
 | `cd backend && cargo test --bin lyra_backend` | backend unit tests |
@@ -152,7 +154,7 @@ Lyra/
 | Client state | Zustand (data) · XState (flows) · RxJS (async / recovery) |
 | Backend | Rust + Axum |
 | JMAP client | `jmap-client` 0.4.2 (Stalwart Labs; `async` + `aws_lc_rs` features, WebSocket off — brings reqwest 0.13 alongside 0.12) |
-| DB | SQLite **and** PostgreSQL |
+| DB | SQLite, PostgreSQL, **and** MySQL (8.0.13+ / 8.4) — MySQL mirrors the SQLite dialect shapes (TEXT timestamps/JSON, VARCHAR(36) ids, FULLTEXT ngram search) |
 | Auth | Username/password + optional TOTP |
 | Deploy | Docker Compose (recommended) + install script |
 

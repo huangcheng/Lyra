@@ -110,6 +110,11 @@ fn id_value(db: &DbPool, id: &str) -> Result<Value, PimError> {
 
 fn now_value(db: &DbPool) -> Value {
     match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => {
+            Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+        }
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => {
             Value::String(Some(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
         }

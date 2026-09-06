@@ -100,3 +100,36 @@ jobs:
         # --ignored also sweeps kv::redis's live Redis roundtrip, which has
         # no service container here.
         run: "cargo test --bin lyra_backend -- postgres_live --ignored"
+
+  test-mysql:
+    name: backend tests (mysql)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: rootpw
+          MYSQL_USER: lyra
+          MYSQL_PASSWORD: lyra
+          MYSQL_DATABASE: lyra_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -plyra"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      LYRA_TEST_MYSQL_URL: mysql://lyra:lyra@localhost:3306/lyra_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo test (ignored mysql tests)
+        working-directory: backend
+        # Mirrors the postgres job: the mysql_live family (migrations,
+        # message upsert, spam, pim seams) runs against the service
+        # container. MySQL is the third dialect — its loose spots (CAST AS
+        # CHAR, ON DUPLICATE KEY, FULLTEXT) differ from both others.
+        run: "cargo test --bin lyra_backend -- mysql_live --ignored"

@@ -91,6 +91,9 @@ fn claimed_from_row(row: &sea_orm::QueryResult) -> Result<ClaimedJob, sqlx::Erro
 /// ::TEXT` shape (micro precision) on Postgres.
 fn updated_at_value(db: &DbPool) -> Value {
     let fmt = match db {
+        #[cfg(feature = "mysql")]
+        DbPool::Mysql(_) | DbPool::Sqlite(_) => "%Y-%m-%d %H:%M:%S",
+        #[cfg(not(feature = "mysql"))]
         DbPool::Sqlite(_) => "%Y-%m-%d %H:%M:%S",
         #[cfg(feature = "postgres")]
         DbPool::Postgres(_) => "%Y-%m-%d %H:%M:%S%.6f",
@@ -730,6 +733,8 @@ mod tests {
     fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
         match db {
             DbPool::Sqlite(pool) => pool,
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) => panic!("expected sqlite"),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => panic!("expected sqlite"),
         }

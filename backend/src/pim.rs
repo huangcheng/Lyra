@@ -292,6 +292,9 @@ pub(crate) fn ts_value(db: &DbPool, raw: Option<&str>) -> Value {
         // is), so this arm is the dialect-correct typed NULL for Postgres —
         // and the plain NULL for a missing SQLite value.
         None => match db {
+            #[cfg(feature = "mysql")]
+            DbPool::Mysql(_) | DbPool::Sqlite(_) => Value::String(None),
+            #[cfg(not(feature = "mysql"))]
             DbPool::Sqlite(_) => Value::String(None),
             #[cfg(feature = "postgres")]
             DbPool::Postgres(_) => Value::ChronoDateTimeUtc(None),
@@ -765,7 +768,8 @@ async fn create_event(
     q.column(calendar::Column::CalendarUrl)
         .column(calendar::Column::AccountId)
         .expr(
-            Expr::col((mail_account::Entity, mail_account::Column::Id)).cast_as(Alias::new("text")),
+            Expr::col((mail_account::Entity, mail_account::Column::Id))
+                .cast_as(Alias::new(crate::db_row::text_cast_name(db))),
         )
         .column(mail_account::Column::EmailAddress)
         .from(calendar::Entity)

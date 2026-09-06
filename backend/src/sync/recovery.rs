@@ -65,6 +65,11 @@ fn row_opt_json_text(row: &QueryResult, col: &str) -> Result<Option<String>, Syn
 /// (`JsonParam::lenient` semantics so non-JSON strings still bind).
 fn json_value(db: &DbPool, raw: &str) -> Value {
     match db {
+        #[cfg(feature = "mysql")]
+        crate::storage::DbPool::Mysql(_) | crate::storage::DbPool::Sqlite(_) => {
+            Value::String(Some(raw.to_owned()))
+        }
+        #[cfg(not(feature = "mysql"))]
         crate::storage::DbPool::Sqlite(_) => Value::String(Some(raw.to_owned())),
         #[cfg(feature = "postgres")]
         crate::storage::DbPool::Postgres(_) => {
