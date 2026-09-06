@@ -1,9 +1,10 @@
 /**
  * Calendar subsystem — CalDAV sources + ICS / webcal subscriptions.
  *
- * Peer destination to Mail: slim-nav shell, own source rail, quiet
- * hairline grid. Amber is reserved for "today"; events wear their
- * source color as a tinted chip, never as a solid block.
+ * Peer destination to Mail. One left panel (brand header + mini month +
+ * sources, dida/Notion pattern), main area with day/week/month/year views.
+ * Amber is reserved for "today"; events wear their source color as a
+ * tinted chip, never as a solid block.
  */
 
 import {
@@ -16,7 +17,6 @@ import {
 } from 'react';
 import {
   Calendar as CalendarIcon,
-  CalendarDays,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -32,19 +32,22 @@ import { api } from '../lib/api-client';
 import {
   addViewOffset,
   eventsForDay,
+  eventsStartingOnDay,
   hourSlots,
   monthGridDays,
   sameLocalDay,
+  spansMultipleDays,
   viewTitle,
   visibleRangeIso,
   weekDays,
+  yearMonths,
   type CalendarView,
 } from '@/lib/calendar-grid';
 import { useNavigate } from '@tanstack/react-router';
 import { EmptyState } from './empty-state';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { SlimPageNav } from '@/components/slim-page-nav';
+import { SlimPanelHeader } from '@/components/slim-page-nav';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '../stores/ui';
 import { expandEventsForRange, type ExpandableEvent } from '@/lib/calendar-rrule';
@@ -92,6 +95,7 @@ interface CalApi {
 }
 
 const WEEKDAY_ORDER = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
+const VIEW_ORDER: CalendarView[] = ['day', 'week', 'month', 'year'];
 
 /** Fastmail's tasks collection leaks this server-side constant as its
  * display name; show it as what it is instead. */
@@ -105,6 +109,14 @@ function displayName(locale: SupportedLocale, name: string): string {
 function tint(color: string | undefined, strength: number): string {
   const c = color || 'var(--unread)';
   return `color-mix(in srgb, ${c} ${strength}%, transparent)`;
+}
+
+/** Narrow weekday initials (一二三四五六日 / MTWTFSS). */
+function weekdayInitials(locTag: string): string[] {
+  // 2023-05-01 was a Monday.
+  return Array.from({ length: 7 }, (_, i) =>
+    new Date(2023, 4, i + 1).toLocaleDateString(locTag, { weekday: 'narrow' }),
+  );
 }
 
 export function CalendarPage() {
@@ -357,7 +369,15 @@ export function CalendarPage() {
   const nowTop = (nowMinutes / (24 * 60)) * 100;
 
   /** Quiet event chip: source-colored dot on a tinted background. */
-  function EventChip({ event, className }: { event: CalEvent; className?: string }) {
+  function EventChip({
+    event,
+    continued,
+    className,
+  }: {
+    event: CalEvent;
+    continued?: boolean;
+    className?: string;
+  }) {
     const c = event._color || 'var(--unread)';
     return (
       <button
@@ -372,7 +392,46 @@ export function CalendarPage() {
       >
         <span className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: c }} />
         <span className="truncate">{event.summary || t(locale, 'calendar.noTitle')}</span>
+        {continued ? <span className="shrink-0 text-muted-foreground">→</span> : null}
       </button>
+    );
+  }
+
+  /** Compact month navigator for the left panel (dida/Notion pattern):
+   * today in amber, click a day to jump the anchor there. */
+  function MiniMonth() {
+    const year = anchor.getFullYear();
+    const month = anchor.getMonth();
+    const days = monthGridDays(year, month);
+    return (
+      <div className="mb-3 px-2.5">
+        <div className="grid grid-cols-7">
+          {weekdayInitials(locTag).map((w, i) => (
+            <span key={i} className="pb-1 text-center text-[9.5px] text-muted-foreground/70">
+              {w}
+            </span>
+          ))}
+          {days.map((day, i) => {
+            const inMonth = day.getMonth() === month;
+            const isToday = sameLocalDay(day, now);
+            return (
+              <button
+                key={i}
+                type="button"
+                className={cn(
+                  'flex h-6 w-6 items-center justify-center justify-self-center rounded-full text-[10.5px] transition-colors hover:bg-accent',
+                  !inMonth && 'invisible',
+                  isToday && 'bg-[var(--unread)] font-semibold text-[#1a1b1f]',
+                )}
+                onClick={() => setAnchor(day)}
+                aria-label={day.toLocaleDateString(locTag)}
+              >
+                {day.getDate()}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     );
   }
 
@@ -392,9 +451,10 @@ export function CalendarPage() {
         ))}
         {days.map((day, i) => {
           const inMonth = day.getMonth() === month;
-          // Adjacent-month spillover stays empty: those events belong to
-          // their own month's grid; a gray wash + full chips read as noise.
-          const dayEvents = inMonth ? eventsForDay(events, day) : [];
+          // Adjacent-month spillover stays empty; multi-day events anchor
+          // their chip on the first covered day (with →) instead of
+          // repeating on every day of the span.
+          const dayEvents = inMonth ? eventsStartingOnDay(events, day) : [];
           const isToday = sameLocalDay(day, now);
           return (
             <div key={i} className="flex min-h-20 flex-col gap-1 bg-background p-1.5">
@@ -412,13 +472,89 @@ export function CalendarPage() {
               </span>
               <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-hidden">
                 {dayEvents.slice(0, 3).map((event) => (
-                  <EventChip key={event.id} event={event} />
+                  <EventChip key={event.id} event={event} continued={spansMultipleDays(event)} />
                 ))}
                 {dayEvents.length > 3 ? (
                   <span className="px-1.5 text-[10px] text-muted-foreground">
                     {t(locale, 'calendar.moreEvents', { count: dayEvents.length - 3 })}
                   </span>
                 ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  /** Twelve mini months with per-day event dots; click a day → day view,
+   * click a month label → month view (dida year-view pattern). */
+  function renderYear() {
+    const months = yearMonths(anchor);
+    return (
+      <div className="grid min-h-0 flex-1 auto-rows-min content-start gap-x-6 gap-y-5 overflow-y-auto p-5 lg:grid-cols-2 2xl:grid-cols-3">
+        {months.map((m) => {
+          const days = monthGridDays(m.getFullYear(), m.getMonth());
+          return (
+            <div key={m.getMonth()} className="flex flex-col gap-1.5">
+              <button
+                type="button"
+                className="self-start rounded-[5px] px-1.5 py-0.5 text-left text-[12.5px] font-medium hover:bg-accent"
+                onClick={() => {
+                  setAnchor(m);
+                  setView('month');
+                }}
+              >
+                {m.toLocaleDateString(locTag, { month: 'long' })}
+              </button>
+              <div className="grid grid-cols-7">
+                {weekdayInitials(locTag).map((w, i) => (
+                  <span key={i} className="text-center text-[9.5px] text-muted-foreground/70">
+                    {w}
+                  </span>
+                ))}
+                {days.map((day, i) => {
+                  const inMonth = day.getMonth() === m.getMonth();
+                  const isToday = sameLocalDay(day, now);
+                  const dots = eventsForDay(events, day)
+                    .slice(0, 3)
+                    .map((e) => e._color || 'var(--unread)');
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      className={cn(
+                        'flex h-9 flex-col items-center justify-start gap-0.5 rounded-[5px] pt-0.5 hover:bg-accent',
+                        !inMonth && 'opacity-25',
+                      )}
+                      onClick={() => {
+                        setAnchor(day);
+                        setView('day');
+                      }}
+                      aria-label={day.toLocaleDateString(locTag)}
+                    >
+                      <span
+                        className={cn(
+                          'flex h-5 w-5 items-center justify-center rounded-full text-[11px]',
+                          isToday
+                            ? 'bg-[var(--unread)] font-semibold text-[#1a1b1f]'
+                            : 'text-foreground/80',
+                        )}
+                      >
+                        {day.getDate()}
+                      </span>
+                      <span className="flex h-1 items-center gap-0.5">
+                        {dots.map((c, j) => (
+                          <span
+                            key={j}
+                            className="size-1 rounded-full"
+                            style={{ backgroundColor: c }}
+                          />
+                        ))}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           );
@@ -570,12 +706,91 @@ export function CalendarPage() {
 
   return (
     <div className="flex h-svh">
-      <SlimPageNav
-        section={t(locale, 'calendar.title')}
-        items={[
-          { key: 'calendar', label: t(locale, 'nav.calendar'), icon: CalendarDays, active: true },
-        ]}
-      />
+      {/* Left panel: brand header + mini month + calendar sources */}
+      <aside className="flex w-[232px] shrink-0 flex-col overflow-y-auto border-r bg-secondary px-2 py-3">
+        <SlimPanelHeader />
+        <MiniMonth />
+        <p className="px-2.5 pb-1 text-[10.5px] font-medium tracking-wide text-muted-foreground uppercase">
+          {t(locale, 'calendar.sources')}
+        </p>
+        {loading ? (
+          <div className="px-2.5 text-sm text-muted-foreground">{t(locale, 'common.loading')}</div>
+        ) : error ? (
+          <div className="px-2.5 text-sm text-destructive">{t(locale, 'calendar.loadError')}</div>
+        ) : sources.length === 0 ? (
+          <div className="flex flex-col items-center pt-6">
+            <EmptyState
+              icon={CalendarIcon}
+              title={t(locale, 'calendar.empty')}
+              hint={t(locale, 'calendar.emptyHint')}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-3"
+              onClick={() => void navigate({ to: '/settings', search: { pim: true } })}
+            >
+              {t(locale, 'calendar.connectDav')}
+            </Button>
+          </div>
+        ) : (
+          sources.map((src) => (
+            <div
+              key={src.id}
+              className="group flex items-center gap-2 rounded-[7px] px-2.5 py-1.5 hover:bg-accent"
+            >
+              <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5">
+                <input
+                  type="checkbox"
+                  className="size-3.5 shrink-0 accent-[var(--unread)]"
+                  checked={visibleIds.has(src.id)}
+                  onChange={() => toggleSource(src.id)}
+                />
+                <span
+                  className="size-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: src.color || 'var(--unread)' }}
+                />
+                <span className="min-w-0 truncate text-[13px]" title={src.name}>
+                  {displayName(locale, src.name)}
+                </span>
+                {src.kind === 'ics' ? (
+                  <span className="ml-auto shrink-0 rounded bg-muted px-1 py-px text-[9.5px] font-medium text-muted-foreground">
+                    ICS
+                  </span>
+                ) : null}
+              </label>
+              {src.kind === 'ics' ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100"
+                  aria-label={t(locale, 'common.delete')}
+                  onClick={() => void removeSub(src.id)}
+                >
+                  <Trash2 className="size-3" />
+                </Button>
+              ) : null}
+            </div>
+          ))
+        )}
+        {sources.some((s) => s.lastError) ? (
+          <p className="px-2.5 text-[10px] text-destructive">
+            {sources.find((s) => s.lastError)?.lastError}
+          </p>
+        ) : null}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="mt-auto justify-start text-muted-foreground"
+          onClick={() => setAddOpen(true)}
+        >
+          <Plus className="size-3.5" />
+          {t(locale, 'calendar.addSubscription')}
+        </Button>
+      </aside>
+
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b px-5">
           <h1 className="font-display truncate text-xl font-medium">
@@ -583,7 +798,7 @@ export function CalendarPage() {
           </h1>
           <div className="ml-auto flex items-center gap-1.5">
             <div className="flex items-center rounded-md border border-border p-0.5">
-              {(['day', 'week', 'month'] as CalendarView[]).map((v) => (
+              {VIEW_ORDER.map((v) => (
                 <Button
                   key={v}
                   type="button"
@@ -642,96 +857,12 @@ export function CalendarPage() {
         </header>
 
         <div className="flex min-h-0 flex-1">
-          <aside className="flex w-60 shrink-0 flex-col gap-1 overflow-y-auto border-r p-3">
-            <p className="px-1.5 pb-1 text-[10.5px] font-medium tracking-wide text-muted-foreground uppercase">
-              {t(locale, 'calendar.sources')}
-            </p>
-            {loading ? (
-              <div className="px-1.5 text-sm text-muted-foreground">
-                {t(locale, 'common.loading')}
-              </div>
-            ) : error ? (
-              <div className="px-1.5 text-sm text-destructive">
-                {t(locale, 'calendar.loadError')}
-              </div>
-            ) : sources.length === 0 ? (
-              <div className="flex flex-col items-center pt-6">
-                <EmptyState
-                  icon={CalendarIcon}
-                  title={t(locale, 'calendar.empty')}
-                  hint={t(locale, 'calendar.emptyHint')}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="mt-3"
-                  onClick={() => void navigate({ to: '/settings', search: { pim: true } })}
-                >
-                  {t(locale, 'calendar.connectDav')}
-                </Button>
-              </div>
-            ) : (
-              sources.map((src) => (
-                <div
-                  key={src.id}
-                  className="group flex items-center gap-2 rounded-[7px] px-1.5 py-1.5 hover:bg-accent"
-                >
-                  <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5">
-                    <input
-                      type="checkbox"
-                      className="size-3.5 shrink-0 accent-[var(--unread)]"
-                      checked={visibleIds.has(src.id)}
-                      onChange={() => toggleSource(src.id)}
-                    />
-                    <span
-                      className="size-2 shrink-0 rounded-full"
-                      style={{ backgroundColor: src.color || 'var(--unread)' }}
-                    />
-                    <span className="min-w-0 truncate text-[13px]" title={src.name}>
-                      {displayName(locale, src.name)}
-                    </span>
-                    {src.kind === 'ics' ? (
-                      <span className="ml-auto shrink-0 rounded bg-muted px-1 py-px text-[9.5px] font-medium text-muted-foreground">
-                        ICS
-                      </span>
-                    ) : null}
-                  </label>
-                  {src.kind === 'ics' ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100"
-                      aria-label={t(locale, 'common.delete')}
-                      onClick={() => void removeSub(src.id)}
-                    >
-                      <Trash2 className="size-3" />
-                    </Button>
-                  ) : null}
-                </div>
-              ))
-            )}
-            {sources.some((s) => s.lastError) ? (
-              <p className="px-1.5 text-[10px] text-destructive">
-                {sources.find((s) => s.lastError)?.lastError}
-              </p>
-            ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="mt-auto justify-start text-muted-foreground"
-              onClick={() => setAddOpen(true)}
-            >
-              <Plus className="size-3.5" />
-              {t(locale, 'calendar.addSubscription')}
-            </Button>
-          </aside>
-
           <section className="flex min-w-0 flex-1 flex-col">
             {view === 'month'
               ? renderMonth()
-              : renderTimeGrid(view === 'week' ? weekDays(anchor) : [anchor])}
+              : view === 'year'
+                ? renderYear()
+                : renderTimeGrid(view === 'week' ? weekDays(anchor) : [anchor])}
           </section>
 
           {selectedEvent ? (

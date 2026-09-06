@@ -546,7 +546,8 @@
     "view": {
       "day": "Day",
       "week": "Week",
-      "month": "Month"
+      "month": "Month",
+      "year": "Year"
     },
     "days": {
       "sun": "Sun",

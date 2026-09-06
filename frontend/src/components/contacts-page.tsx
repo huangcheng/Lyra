@@ -21,7 +21,7 @@ import { useNavigate } from '@tanstack/react-router';
 import { EmptyState } from './empty-state';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { SlimPageNav } from '@/components/slim-page-nav';
+import { SlimPanelHeader } from '@/components/slim-page-nav';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '../stores/ui';
 
@@ -179,12 +179,69 @@ export function ContactsPage() {
 
   return (
     <div className="flex h-svh">
-      <SlimPageNav
-        section={t(locale, 'contacts.title')}
-        items={[
-          { key: 'contacts', label: t(locale, 'nav.contacts'), icon: BookUser, active: true },
-        ]}
-      />
+      <aside className="flex w-[232px] shrink-0 flex-col overflow-y-auto border-r bg-secondary px-2 py-3">
+        <SlimPanelHeader />
+        <button
+          type="button"
+          className={cn(
+            'mt-2 flex items-center justify-between rounded-[7px] px-2.5 py-1.5 text-left text-[13px] transition-colors hover:bg-accent',
+            bookFilter === 'all' && 'bg-accent font-medium',
+          )}
+          onClick={() => setBookFilter('all')}
+        >
+          {t(locale, 'contacts.all')}
+          {bookFilter === 'all' && contacts.length > 0 ? (
+            <span className="text-[11px] text-muted-foreground tabular-nums">
+              {contacts.length}
+            </span>
+          ) : null}
+        </button>
+        {booksByAccount.map(([accountId, accountBooks]) => (
+          <div key={accountId} className="mt-3 space-y-0.5">
+            <p
+              className="truncate px-2.5 pb-1 text-[10.5px] font-medium tracking-wide text-muted-foreground/80"
+              title={accountLabels[accountId] ?? accountId}
+            >
+              {accountLabels[accountId] ?? accountId}
+            </p>
+            {accountBooks.map((b) => {
+              const active =
+                bookFilter !== 'all' &&
+                bookFilter.accountId === b.accountId &&
+                bookFilter.addressbookUrl === b.addressbookUrl;
+              const count = countByBook.get(`${b.accountId}\0${b.addressbookUrl}`) ?? 0;
+              return (
+                <button
+                  key={`${b.accountId}:${b.addressbookUrl}`}
+                  type="button"
+                  className={cn(
+                    'flex w-full items-center justify-between gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[13px] transition-colors hover:bg-accent',
+                    active && 'bg-accent font-medium',
+                  )}
+                  onClick={() =>
+                    setBookFilter({
+                      accountId: b.accountId,
+                      addressbookUrl: b.addressbookUrl,
+                    })
+                  }
+                >
+                  <span className="min-w-0 truncate">
+                    {b.label === 'Personal'
+                      ? t(locale, 'contacts.personal')
+                      : b.label === 'Shared'
+                        ? t(locale, 'contacts.shared')
+                        : b.label}
+                  </span>
+                  <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ))}
+      </aside>
+
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b px-5">
           <h1 className="font-display truncate text-xl font-medium">
@@ -208,69 +265,6 @@ export function ContactsPage() {
         </header>
 
         <div className="flex min-h-0 flex-1">
-          {/* Books rail */}
-          <aside className="flex w-60 shrink-0 flex-col gap-1 overflow-y-auto border-r p-3">
-            <button
-              type="button"
-              className={cn(
-                'flex items-center justify-between rounded-[7px] px-2.5 py-1.5 text-left text-[13px] transition-colors hover:bg-accent',
-                bookFilter === 'all' && 'bg-accent font-medium',
-              )}
-              onClick={() => setBookFilter('all')}
-            >
-              {t(locale, 'contacts.all')}
-              {bookFilter === 'all' && contacts.length > 0 ? (
-                <span className="text-[11px] text-muted-foreground tabular-nums">
-                  {contacts.length}
-                </span>
-              ) : null}
-            </button>
-            {booksByAccount.map(([accountId, accountBooks]) => (
-              <div key={accountId} className="mt-3 space-y-0.5">
-                <p
-                  className="truncate px-2.5 pb-1 text-[10.5px] font-medium tracking-wide text-muted-foreground/80"
-                  title={accountLabels[accountId] ?? accountId}
-                >
-                  {accountLabels[accountId] ?? accountId}
-                </p>
-                {accountBooks.map((b) => {
-                  const active =
-                    bookFilter !== 'all' &&
-                    bookFilter.accountId === b.accountId &&
-                    bookFilter.addressbookUrl === b.addressbookUrl;
-                  const count = countByBook.get(`${b.accountId}\0${b.addressbookUrl}`) ?? 0;
-                  return (
-                    <button
-                      key={`${b.accountId}:${b.addressbookUrl}`}
-                      type="button"
-                      className={cn(
-                        'flex w-full items-center justify-between gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[13px] transition-colors hover:bg-accent',
-                        active && 'bg-accent font-medium',
-                      )}
-                      onClick={() =>
-                        setBookFilter({
-                          accountId: b.accountId,
-                          addressbookUrl: b.addressbookUrl,
-                        })
-                      }
-                    >
-                      <span className="min-w-0 truncate">
-                        {b.label === 'Personal'
-                          ? t(locale, 'contacts.personal')
-                          : b.label === 'Shared'
-                            ? t(locale, 'contacts.shared')
-                            : b.label}
-                      </span>
-                      <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-                        {count}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
-          </aside>
-
           {/* A–Z list */}
           <section className="flex w-80 shrink-0 flex-col overflow-y-auto border-r">
             {loading ? (

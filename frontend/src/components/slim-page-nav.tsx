@@ -13,6 +13,27 @@ export type SlimNavItem = {
   onClick?: () => void;
 };
 
+/** Logo + back-to-mail link — the shared top of every standalone page's
+ * left panel. Lets subsystem pages (Calendar, Contacts) put their own
+ * source lists directly under it instead of carrying a separate nav rail. */
+export function SlimPanelHeader() {
+  const locale = useUIStore((s) => s.locale);
+  return (
+    <>
+      <div className="flex items-center gap-2.5 px-2.5 pb-3 pt-1">
+        <StampLogo size={28} />
+        <span className="font-brand text-lg text-foreground">Lyra</span>
+      </div>
+      <Link
+        to="/"
+        className="mb-1 flex items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-[13px] text-muted-foreground hover:bg-accent"
+      >
+        <ArrowLeft size={16} /> {t(locale, 'nav.mail')}
+      </Link>
+    </>
+  );
+}
+
 export function SlimPageNav({ section, items }: { section: string; items: SlimNavItem[] }) {
   const locale = useUIStore((s) => s.locale);
   return (

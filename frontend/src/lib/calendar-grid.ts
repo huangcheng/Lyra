@@ -2,7 +2,7 @@
  * Calendar grid date helpers (Monday-start weeks; local timezone).
  */
 
-export type CalendarView = 'month' | 'week' | 'day';
+export type CalendarView = 'day' | 'week' | 'month' | 'year';
 
 export type EventTimeFields = {
   dtstart?: string | null;
@@ -59,13 +59,27 @@ export function addViewOffset(anchor: Date, view: CalendarView, delta: number): 
     next.setMonth(next.getMonth() + delta);
   } else if (view === 'week') {
     next.setDate(next.getDate() + delta * 7);
+  } else if (view === 'year') {
+    next.setFullYear(next.getFullYear() + delta);
   } else {
     next.setDate(next.getDate() + delta);
   }
   return next;
 }
 
+/** First-of-month anchors for the 12 months of the anchor's year. */
+export function yearMonths(anchor: Date): Date[] {
+  const out: Date[] = [];
+  for (let m = 0; m < 12; m++) {
+    out.push(new Date(anchor.getFullYear(), m, 1));
+  }
+  return out;
+}
+
 export function viewTitle(anchor: Date, view: CalendarView, locale: string): string {
+  if (view === 'year') {
+    return anchor.toLocaleDateString(locale, { year: 'numeric' });
+  }
   if (view === 'month') {
     return anchor.toLocaleDateString(locale, { month: 'long', year: 'numeric' });
   }
@@ -147,6 +161,11 @@ export function hourSlots(): number[] {
 
 /** Visible range ISO bounds for event fetch (local → UTC ISO). */
 export function visibleRangeIso(anchor: Date, view: CalendarView): { start: string; end: string } {
+  if (view === 'year') {
+    const start = new Date(anchor.getFullYear(), 0, 1);
+    const end = new Date(anchor.getFullYear() + 1, 0, 1);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
   if (view === 'month') {
     const days = monthGridDays(anchor.getFullYear(), anchor.getMonth());
     const start = days[0]!;
@@ -197,6 +216,23 @@ export function eventSpanDays(event: EventTimeFields): Date[] {
     cur.setDate(cur.getDate() + 1);
   }
   return days;
+}
+
+/** True when the event occupies more than one local calendar day. */
+export function spansMultipleDays(event: EventTimeFields): boolean {
+  return eventSpanDays(event).length > 1;
+}
+
+/**
+ * Events whose FIRST occupied local day is `day` — the month view anchors
+ * a multi-day event's chip here instead of repeating it on every covered
+ * day (a Sep 1 → Oct 2 range task must not chip all of September).
+ */
+export function eventsStartingOnDay<T extends EventTimeFields>(events: T[], day: Date): T[] {
+  return events.filter((e) => {
+    const days = eventSpanDays(e);
+    return days.length > 0 && sameLocalDay(days[0]!, day);
+  });
 }
 
 /** True if the event's time interval intersects the local day [day, day+1). */

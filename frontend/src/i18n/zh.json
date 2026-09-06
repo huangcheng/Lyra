@@ -546,7 +546,8 @@
     "view": {
       "day": "天",
       "week": "周",
-      "month": "月"
+      "month": "月",
+      "year": "年"
     },
     "days": {
       "sun": "日",
