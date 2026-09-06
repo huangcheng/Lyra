@@ -1292,7 +1292,11 @@ async fn maybe_fill_imap_body(
         .value(message::Column::HasAttachments, fetched.has_attachments)
         .value(
             message::Column::Snippet,
-            refresh_if_stale(db, message::Column::Snippet, owned_text_value(snippet.clone())),
+            refresh_if_stale(
+                db,
+                message::Column::Snippet,
+                owned_text_value(snippet.clone()),
+            ),
         )
         .value(
             message::Column::Subject,
