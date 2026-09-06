@@ -169,7 +169,11 @@ describe('multi-day span anchoring', () => {
     dtend: '2026-10-02 00:00:00+00',
     isAllDay: false,
   };
-  const single = { dtstart: '2026-09-08 09:00:00+00', dtend: '2026-09-08 10:00:00+00', isAllDay: false };
+  const single = {
+    dtstart: '2026-09-08 09:00:00+00',
+    dtend: '2026-09-08 10:00:00+00',
+    isAllDay: false,
+  };
 
   it('flags only spans crossing a local midnight', () => {
     expect(spansMultipleDays(span)).toBe(true);

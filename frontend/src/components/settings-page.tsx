@@ -1278,9 +1278,7 @@ export function SettingsPage() {
                                     />
                                   </Button>
                                 </TooltipTrigger>
-                                <TooltipContent>
-                                  {t(locale, 'settings.pim.menu')}
-                                </TooltipContent>
+                                <TooltipContent>{t(locale, 'settings.pim.menu')}</TooltipContent>
                               </Tooltip>
                               {pimMessage ? (
                                 <span
