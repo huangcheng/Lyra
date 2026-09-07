@@ -9,6 +9,11 @@
 #[allow(dead_code)]
 mod store;
 
+// Diff is exercised by tests now and by the fan-out task in a later plan
+// task; allow until that consumer lands.
+#[allow(dead_code)]
+mod diff;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -126,5 +131,105 @@ mod tests {
         };
         save_prefs(&kv, "u1", &prefs).await.unwrap();
         assert_eq!(load_prefs(&kv, "u1").await.unwrap(), prefs);
+    }
+
+    fn msg(
+        id: &str,
+        message_id: Option<&str>,
+        role: Option<&str>,
+        thread: Option<&str>,
+    ) -> crate::sync::queries::MessageResponse {
+        crate::sync::queries::MessageResponse {
+            id: id.into(),
+            account_id: "acc".into(),
+            folder_id: format!("folder-{id}"),
+            folder_role: role.map(str::to_string),
+            thread_id: thread.map(str::to_string),
+            message_id_header: message_id.map(str::to_string),
+            in_reply_to: None,
+            references_headers: None,
+            subject: Some(format!("Subject {id}")),
+            from_address: Some(r#"[{"name":"Alice","email":"alice@example.com"}]"#.into()),
+            to_addresses: None,
+            cc_addresses: None,
+            date: None,
+            snippet: None,
+            body_text: None,
+            body_html: None,
+            is_read: false,
+            is_starred: false,
+            is_draft: false,
+            has_attachments: false,
+            labels: None,
+            remote_content_blocked: false,
+            opengpg: None,
+            attachments: None,
+            dkim: None,
+        }
+    }
+
+    #[test]
+    fn diff_seeds_silently_then_notifies_only_new() {
+        use super::diff::diff_new_messages;
+        let messages = vec![msg("m1", Some("<a@x>"), Some("inbox"), None)];
+        let first = diff_new_messages(&messages, &[], &[], &[]);
+        assert!(first.seeded);
+        assert!(first.fresh.is_empty());
+        assert_eq!(first.new_baseline, vec!["<a@x>"]);
+
+        // Same state again: nothing new.
+        let again = diff_new_messages(&messages, &first.new_baseline, &[], &[]);
+        assert!(!again.seeded);
+        assert!(again.fresh.is_empty());
+
+        // New message arrives (newest first).
+        let messages = vec![
+            msg("m2", Some("<b@x>"), Some("inbox"), None),
+            msg("m1", Some("<a@x>"), Some("inbox"), None),
+        ];
+        let out = diff_new_messages(&messages, &first.new_baseline, &[], &[]);
+        assert_eq!(out.fresh.len(), 1);
+        assert_eq!(out.fresh[0].identity, "<b@x>");
+        assert_eq!(out.fresh[0].title, "Alice");
+        assert_eq!(out.fresh[0].body, "Subject m2");
+    }
+
+    #[test]
+    fn diff_incoming_roles_and_identity_fallback() {
+        use super::diff::diff_new_messages;
+        let messages = vec![
+            msg("sent1", Some("<s@x>"), Some("sent"), None),
+            msg("arch1", Some("<ar@x>"), Some("archive"), None),
+            msg("custom1", Some("<c@x>"), None, None),
+            msg("norole", None, Some("inbox"), None), // identity falls back to row id
+        ];
+        let seeded = diff_new_messages(&messages, &[], &[], &[]);
+        assert_eq!(seeded.new_baseline, vec!["<ar@x>", "<c@x>", "norole"]);
+
+        let baseline = vec!["<c@x>".to_string()];
+        let out = diff_new_messages(&messages, &baseline, &[], &[]);
+        let ids: Vec<&str> = out.fresh.iter().map(|c| c.identity.as_str()).collect();
+        assert_eq!(ids, vec!["<ar@x>", "norole"]);
+    }
+
+    #[test]
+    fn diff_mutes_gate_sends_but_not_baseline() {
+        use super::diff::diff_new_messages;
+        let messages = vec![
+            msg("m1", Some("<a@x>"), Some("inbox"), None),
+            msg("m2", Some("<b@x>"), Some("inbox"), Some("thread-9")),
+        ];
+        let out = diff_new_messages(
+            &messages,
+            &["<old@x>".to_string()],
+            &["folder-m1".to_string()],
+            &["thread-9".to_string()],
+        );
+        assert!(out.fresh.is_empty(), "both muted");
+        assert_eq!(
+            out.new_baseline,
+            vec!["<a@x>", "<b@x>"],
+            "mutes never touch the baseline"
+        );
     }
 }
