@@ -86,20 +86,30 @@ fn vapid_key() -> Result<[u8; 32], crate::crypto::CryptoError> {
 pub(crate) async fn load_or_generate_vapid(
     kv: &Arc<dyn KvStore>,
 ) -> Result<VapidIdentity, KvError> {
-    if let Some(raw) = kv.get(VAPID_KEY).await?
-        && let Ok(stored) = serde_json::from_str::<StoredVapid>(&raw)
-    {
-        let pem_bytes = crate::crypto::decrypt(
-            &vapid_key().map_err(|e| KvError::Internal(e.to_string()))?,
-            &stored.private_pem_encrypted,
-        )
-        .map_err(|e| KvError::Internal(e.to_string()))?;
-        let private_pem =
-            String::from_utf8(pem_bytes).map_err(|e| KvError::Internal(e.to_string()))?;
-        return Ok(VapidIdentity {
-            private_pem,
-            public_key_b64: stored.public_key_b64,
-        });
+    if let Some(raw) = kv.get(VAPID_KEY).await? {
+        match serde_json::from_str::<StoredVapid>(&raw) {
+            Ok(stored) => {
+                let pem_bytes = crate::crypto::decrypt(
+                    &vapid_key().map_err(|e| KvError::Internal(e.to_string()))?,
+                    &stored.private_pem_encrypted,
+                )
+                .map_err(|e| KvError::Internal(e.to_string()))?;
+                let private_pem =
+                    String::from_utf8(pem_bytes).map_err(|e| KvError::Internal(e.to_string()))?;
+                return Ok(VapidIdentity {
+                    private_pem,
+                    public_key_b64: stored.public_key_b64,
+                });
+            }
+            // Unparseable blob: regenerating invalidates every existing push
+            // subscription, so make it visible. Never log the blob itself.
+            Err(e) => {
+                tracing::warn!(
+                    "stored VAPID identity is unparseable ({e}); regenerating, \
+                     existing push subscriptions are invalidated"
+                );
+            }
+        }
     }
     // Missing or corrupted blob: fall through and (re)generate.
 
@@ -146,7 +156,13 @@ pub(crate) async fn load_subscriptions(
     user_id: &str,
 ) -> Result<Vec<StoredSubscription>, KvError> {
     match kv.get(&subs_key(user_id)).await? {
-        Some(raw) => Ok(serde_json::from_str(&raw).unwrap_or_default()),
+        // Fail-open on corrupt JSON, but make it visible.
+        Some(raw) => Ok(serde_json::from_str(&raw).unwrap_or_else(|e| {
+            tracing::warn!(
+                "corrupt push subscriptions blob for user {user_id} ({e}); treating as empty"
+            );
+            Vec::new()
+        })),
         None => Ok(Vec::new()),
     }
 }
@@ -161,6 +177,9 @@ async fn save_subscriptions(
 }
 
 /// Upsert by endpoint; oldest entries drop off past the cap.
+///
+/// Read-modify-write is non-atomic (the kv seam has no CAS); acceptable for
+/// single-user v1 where concurrent writers are unlikely.
 pub(crate) async fn upsert_subscription(
     kv: &Arc<dyn KvStore>,
     user_id: &str,
@@ -197,7 +216,13 @@ pub(crate) async fn load_baseline(
     account_id: &str,
 ) -> Result<Vec<String>, KvError> {
     match kv.get(&baseline_key(account_id)).await? {
-        Some(raw) => Ok(serde_json::from_str(&raw).unwrap_or_default()),
+        // Fail-open on corrupt JSON, but make it visible.
+        Some(raw) => Ok(serde_json::from_str(&raw).unwrap_or_else(|e| {
+            tracing::warn!(
+                "corrupt push baseline blob for account {account_id} ({e}); treating as empty"
+            );
+            Vec::new()
+        })),
         None => Ok(Vec::new()),
     }
 }
@@ -217,7 +242,11 @@ pub(crate) async fn load_prefs(
     user_id: &str,
 ) -> Result<StoredPrefs, KvError> {
     match kv.get(&prefs_key(user_id)).await? {
-        Some(raw) => Ok(serde_json::from_str(&raw).unwrap_or_default()),
+        // Fail-open on corrupt JSON, but make it visible.
+        Some(raw) => Ok(serde_json::from_str(&raw).unwrap_or_else(|e| {
+            tracing::warn!("corrupt push prefs blob for user {user_id} ({e}); treating as default");
+            StoredPrefs::default()
+        })),
         None => Ok(StoredPrefs::default()),
     }
 }
