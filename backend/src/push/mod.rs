@@ -6,10 +6,12 @@
 
 mod diff;
 mod fanout;
+mod http;
 mod send;
 mod store;
 
 pub(crate) use fanout::spawn_fanout;
+pub(crate) use http::routes;
 
 #[cfg(test)]
 mod tests {
@@ -563,5 +565,125 @@ mod tests {
             load_baseline(&kv, &account_id).await.unwrap(),
             vec!["<2@x>", "<1@x>"]
         );
+    }
+
+    fn push_test_config() -> crate::config::Config {
+        crate::config::Config {
+            listen_addr: "127.0.0.1:0".into(),
+            database_url: "sqlite::memory:".into(),
+            data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            min_password_length: 8,
+            sync_max_concurrent: 3,
+            sync_poll_secs: 300,
+            max_attachment_bytes: 25 * 1024 * 1024,
+            redis_url: None,
+            master_key: crate::auth::TEST_MASTER_KEY.to_vec(),
+            ms_oauth: None,
+            yandex_oauth: None,
+            captcha: crate::config::CaptchaConfig::None,
+            vapid_subject: "mailto:test@example.com".into(),
+        }
+    }
+
+    fn push_state(db: crate::storage::DbPool, kv: Arc<dyn KvStore>) -> crate::auth::AuthState {
+        install_test_master_key();
+        crate::auth::AuthState::new(
+            db,
+            &push_test_config(),
+            Arc::new(crate::kernel::App::new()),
+            kv,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn vapid_key_endpoint_returns_public_key() {
+        let kv: Arc<dyn KvStore> = Arc::new(MemoryKv::new());
+        let storage = crate::storage::Storage::new("sqlite::memory:")
+            .await
+            .unwrap();
+        storage.run_migrations().await.unwrap();
+        let state = push_state(storage.pool().clone(), kv);
+
+        let axum::Json(body) = super::http::get_vapid_key(
+            axum::extract::State(state),
+            crate::auth::AuthUser("alice".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(body.public_key.len(), 87);
+    }
+
+    #[tokio::test]
+    async fn subscription_put_and_delete() {
+        let kv: Arc<dyn KvStore> = Arc::new(MemoryKv::new());
+        let storage = crate::storage::Storage::new("sqlite::memory:")
+            .await
+            .unwrap();
+        storage.run_migrations().await.unwrap();
+        let state = push_state(storage.pool().clone(), kv.clone());
+
+        super::http::put_subscription(
+            axum::extract::State(state.clone()),
+            crate::auth::AuthUser("alice".into()),
+            axum::Json(super::http::PutSubscription {
+                endpoint: "https://push.example/abc".into(),
+                keys: super::store::StoredKeys {
+                    p256dh: "p".into(),
+                    auth: "a".into(),
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            super::store::load_subscriptions(&kv, "alice")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        super::http::delete_subscription(
+            axum::extract::State(state),
+            crate::auth::AuthUser("alice".into()),
+            axum::Json(super::http::DeleteSubscription {
+                endpoint: "https://push.example/abc".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            super::store::load_subscriptions(&kv, "alice")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn put_subscription_rejects_non_https_endpoint() {
+        let kv: Arc<dyn KvStore> = Arc::new(MemoryKv::new());
+        let storage = crate::storage::Storage::new("sqlite::memory:")
+            .await
+            .unwrap();
+        storage.run_migrations().await.unwrap();
+        let state = push_state(storage.pool().clone(), kv);
+
+        let err = super::http::put_subscription(
+            axum::extract::State(state),
+            crate::auth::AuthUser("alice".into()),
+            axum::Json(super::http::PutSubscription {
+                endpoint: "ftp://evil.example/x".into(),
+                keys: super::store::StoredKeys {
+                    p256dh: "p".into(),
+                    auth: "a".into(),
+                },
+            }),
+        )
+        .await
+        .unwrap_err();
+        // 400
+        assert!(matches!(err, super::http::PushHttpError::BadRequest(_)));
     }
 }

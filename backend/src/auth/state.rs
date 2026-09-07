@@ -34,6 +34,8 @@ pub struct AuthState {
     pub yandex_oauth: Option<crate::oauth::YandexOAuthConfig>,
     /// Login/bootstrap captcha (off when [`CaptchaConfig::None`]).
     pub captcha: CaptchaConfig,
+    /// VAPID contact claim for Web Push.
+    pub vapid_subject: String,
 }
 
 impl AuthState {
@@ -56,6 +58,7 @@ impl AuthState {
             ms_oauth: config.ms_oauth.clone(),
             yandex_oauth: config.yandex_oauth.clone(),
             captcha: config.captcha.clone(),
+            vapid_subject: config.vapid_subject.clone(),
         })
     }
 
