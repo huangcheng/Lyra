@@ -37,6 +37,8 @@ tags:
     description: Remote-image proxy (anti-tracking)
   - name: stats
     description: Read-only message analytics
+  - name: push
+    description: Web Push subscriptions, mute prefs, test delivery
 
 paths:
   /health:
@@ -2004,6 +2006,158 @@ paths:
         "302":
           description: Redirect to settings (default browser flow)
         "400":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/push/vapid-key:
+    get:
+      tags: [push]
+      summary: VAPID public key for pushManager.subscribe
+      description: |
+        Base64url-encoded uncompressed P-256 point (RFC 8292 application
+        server key). Pass as `applicationServerKey` to
+        `pushManager.subscribe`. The keypair is generated on first use and
+        persists across restarts.
+      responses:
+        "200":
+          description: VAPID public key
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [publicKey]
+                properties:
+                  publicKey:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/push/status:
+    get:
+      tags: [push]
+      summary: Number of registered push devices
+      responses:
+        "200":
+          description: Registered device count for the current user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/push/subscription:
+    put:
+      tags: [push]
+      summary: Register (upsert) a Web Push subscription
+      description: |
+        `endpoint` must be an `https:` push service URL; `http:` loopback
+        hosts (127.0.0.1, localhost, [::1]) are accepted for local dev.
+        Both subscription keys must be non-empty.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint, keys]
+              properties:
+                endpoint:
+                  type: string
+                keys:
+                  type: object
+                  required: [p256dh, auth]
+                  properties:
+                    p256dh:
+                      type: string
+                      description: Base64url P-256 public key from the subscription
+                    auth:
+                      type: string
+                      description: Base64url auth secret from the subscription
+      responses:
+        "204":
+          description: Subscription stored
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [push]
+      summary: Remove a Web Push subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint]
+              properties:
+                endpoint:
+                  type: string
+      responses:
+        "204":
+          description: Subscription removed
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/push/prefs:
+    put:
+      tags: [push]
+      summary: Update push mute preferences and notification locale
+      description: |
+        Muted folders/threads suppress push notifications for new mail in
+        them. `locale` picks the notification language; anything other than
+        `zh` is stored as `en`. Omitted fields default to empty lists / `en`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mutedFolderIds:
+                  type: array
+                  items:
+                    type: string
+                mutedThreadIds:
+                  type: array
+                  items:
+                    type: string
+                locale:
+                  type: string
+                  enum: [en, zh]
+                  default: en
+      responses:
+        "204":
+          description: Preferences saved
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/push/test:
+    post:
+      tags: [push]
+      summary: Send a test notification to every registered device
+      description: |
+        Delivers a localized test payload to all of the caller's
+        subscriptions; endpoints that report Gone are removed and counted
+        in `removed`.
+      responses:
+        "200":
+          description: Delivery counts (`removed` = stale subscriptions pruned)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sent, removed]
+                properties:
+                  sent:
+                    type: integer
+                  removed:
+                    type: integer
+        "401":
           $ref: "#/components/responses/Error"
 
 components:
