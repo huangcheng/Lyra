@@ -26,6 +26,10 @@ services:
       DATA_DIR: /data
       RUST_LOG: info
       REDIS_URL: redis://redis:6379
+      # Seconds between per-account poll syncs; push (IMAP IDLE / JMAP
+      # EventSource) still handles instant delivery. Lower it when server-side
+      # rules file mail outside INBOX (IDLE watches INBOX only).
+      SYNC_POLL_SECS: ${SYNC_POLL_SECS:-300}
       # Required secret — set it in .env (see .env.example). Compose
       # refuses to start while it is unset.
       LYRA_MASTER_KEY: ${LYRA_MASTER_KEY:?set LYRA_MASTER_KEY in .env (openssl rand -base64 32)}

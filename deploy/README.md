@@ -13,8 +13,13 @@ printf 'LYRA_MASTER_KEY=%s\n' "$(openssl rand -base64 32)" >> .env
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `LYRA_MASTER_KEY` | **yes** (32+ bytes) | Master key for the per-user DEK hierarchy; all stored mail-account passwords and TOTP secrets are encrypted under it. Loss = unrecoverable credentials (re-add accounts). |
-| `LYRA_CAPTCHA_PROVIDER` | no | `none` (default) or `turnstile`. Optional login/bootstrap captcha. |
-| `LYRA_CAPTCHA_SITE_KEY` / `LYRA_CAPTCHA_SECRET` | when Turnstile | Cloudflare Turnstile keys. Host must reach `challenges.cloudflare.com` (skip for LAN-only/offline). |
+| `SYNC_POLL_SECS` | no (default 300) | Seconds between per-account poll syncs. IMAP IDLE / JMAP EventSource push still delivers instantly when the provider supports it; lower this when server-side rules file mail outside INBOX (IDLE watches INBOX only). |
+| `LYRA_CAPTCHA_PROVIDER` | no | `none` (default), `turnstile`, `hcaptcha`, `recaptcha`, or `recaptcha-v3`. Optional login/bootstrap captcha. |
+| `LYRA_CAPTCHA_SITE_KEY` / `LYRA_CAPTCHA_SECRET` | when a provider is set | Site key + secret for the chosen provider. The host must reach the provider's verify API (skip for LAN-only/offline). |
+
+Captcha can also be managed at runtime in Settings → Security → Login
+Captcha (per-provider key pairs, secrets encrypted under the master key);
+a saved setting overrides these env vars.
 
 Then:
 
@@ -76,8 +81,10 @@ The same migrations run on both backends.
 
 ### Login captcha (optional)
 
-Cloudflare Turnstile can protect login and first-time bootstrap on public
-hosts. Off by default — set in `.env` (see `.env.example`):
+A captcha can protect login and first-time bootstrap on public hosts.
+Supported providers: Cloudflare Turnstile, hCaptcha, Google reCAPTCHA v2
+(checkbox) and v3 (invisible, score-based). Off by default — set in `.env`
+(see `.env.example`):
 
 ```bash
 LYRA_CAPTCHA_PROVIDER=turnstile
@@ -85,9 +92,10 @@ LYRA_CAPTCHA_SITE_KEY=your-site-key
 LYRA_CAPTCHA_SECRET=your-secret
 ```
 
-Both the **browser** and the **Lyra server** need outbound HTTPS to
-`challenges.cloudflare.com`. Pure LAN or offline installs should leave captcha
-disabled (`LYRA_CAPTCHA_PROVIDER=none` or unset).
+Both the **browser** and the **Lyra server** need outbound HTTPS to the
+provider's endpoints. Pure LAN or offline installs should leave captcha
+disabled (`LYRA_CAPTCHA_PROVIDER=none` or unset). Settings → Security →
+Login Captcha can manage providers at runtime and overrides the env config.
 
 ### HTTPS
 
