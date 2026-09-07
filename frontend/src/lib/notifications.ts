@@ -62,6 +62,8 @@ export interface NotificationPrefs {
   enabled: boolean;
   /** Folder ids that never produce banners (right-click a folder to mute). */
   mutedFolderIds: string[];
+  /** Thread ids that never produce banners (conversation context menu → Mute). */
+  mutedThreadIds: string[];
 }
 
 const prefsListeners = new Set<() => void>();
@@ -79,17 +81,18 @@ export function readNotificationPrefs(): NotificationPrefs {
     const raw = localStorage.getItem(PREFS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<NotificationPrefs>;
-      const mutedFolderIds = Array.isArray(parsed.mutedFolderIds)
-        ? parsed.mutedFolderIds.filter((id): id is string => typeof id === 'string')
-        : [];
+      const stringList = (v: unknown): string[] =>
+        Array.isArray(v) ? v.filter((id): id is string => typeof id === 'string') : [];
+      const mutedFolderIds = stringList(parsed.mutedFolderIds);
+      const mutedThreadIds = stringList(parsed.mutedThreadIds);
       if (typeof parsed.enabled === 'boolean') {
-        return { enabled: parsed.enabled, mutedFolderIds };
+        return { enabled: parsed.enabled, mutedFolderIds, mutedThreadIds };
       }
     }
   } catch {
     // corrupted blob → defaults
   }
-  return { enabled: false, mutedFolderIds: [] };
+  return { enabled: false, mutedFolderIds: [], mutedThreadIds: [] };
 }
 
 export function writeNotificationPrefs(prefs: NotificationPrefs): void {
@@ -112,6 +115,23 @@ export function setFolderMuted(folderId: string, muted: boolean): void {
     next.delete(folderId);
   }
   writeNotificationPrefs({ ...prefs, mutedFolderIds: [...next] });
+}
+
+/** True when banners are muted for a conversation thread. */
+export function isThreadMuted(threadId: string): boolean {
+  return readNotificationPrefs().mutedThreadIds.includes(threadId);
+}
+
+/** Mute/unmute banners for a conversation thread (persists with the prefs). */
+export function setThreadMuted(threadId: string, muted: boolean): void {
+  const prefs = readNotificationPrefs();
+  const next = new Set(prefs.mutedThreadIds);
+  if (muted) {
+    next.add(threadId);
+  } else {
+    next.delete(threadId);
+  }
+  writeNotificationPrefs({ ...prefs, mutedThreadIds: [...next] });
 }
 
 export function notificationPermission(): NotificationPermission | 'unsupported' {
@@ -249,9 +269,16 @@ export async function handleSyncEventForNotifications(ev: SyncEvent): Promise<vo
   writeBaseline(baseline);
   if (known.size === 0) return; // first run seeds silently
 
-  // The baseline records everything incoming; the mute list only gates banners.
-  const muted = new Set(readNotificationPrefs().mutedFolderIds);
-  const fresh = slice.filter((m) => !known.has(messageIdentity(m)) && !muted.has(m.folderId));
+  // The baseline records everything incoming; the mute lists only gate banners.
+  const prefs = readNotificationPrefs();
+  const mutedFolders = new Set(prefs.mutedFolderIds);
+  const mutedThreads = new Set(prefs.mutedThreadIds);
+  const fresh = slice.filter(
+    (m) =>
+      !known.has(messageIdentity(m)) &&
+      !mutedFolders.has(m.folderId) &&
+      !(m.threadId && mutedThreads.has(m.threadId)),
+  );
   if (fresh.length === 0) return;
 
   const locale = useUIStore.getState().locale;

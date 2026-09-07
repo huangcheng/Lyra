@@ -31,6 +31,8 @@ export interface ApiMessage {
   folderId: string;
   /** Effective folder role (override wins); absent for custom folders. */
   folderRole?: string | null;
+  /** Lyra thread id (stable across folders/syncs); absent when unthreaded. */
+  threadId?: string | null;
   messageIdHeader?: string;
   inReplyTo?: string;
   referencesHeaders?: string;
@@ -157,6 +159,7 @@ export function mapApiMessage(msg: ApiMessage | Record<string, unknown>): MailMe
     id: String(row.id),
     accountId: String(row.accountId),
     folderId: String(row.folderId),
+    threadId: row.threadId ?? undefined,
     messageIdHeader: row.messageIdHeader ?? undefined,
     inReplyTo: row.inReplyTo ?? undefined,
     referencesHeaders: row.referencesHeaders ?? undefined,

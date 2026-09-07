@@ -192,6 +192,7 @@ const MESSAGE_LIST_COLS: &[message::Column] = &[
     message::Column::Id,
     message::Column::AccountId,
     message::Column::FolderId,
+    message::Column::ThreadId,
     message::Column::MessageIdHeader,
     message::Column::InReplyTo,
     message::Column::ReferencesHeaders,
@@ -314,6 +315,7 @@ pub(super) fn message_response_from_query_row(
             stored || folder_role.as_deref() == Some("drafts")
         },
         folder_role: row.try_get("", "folder_role")?,
+        thread_id: row_opt_id(row, "thread_id")?,
         has_attachments: row.try_get("", "has_attachments")?,
         labels: row_json_text(row, "labels")?,
         remote_content_blocked: false,
@@ -393,6 +395,10 @@ pub struct MessageResponse {
     /// `null` for custom folders. Clients use it for role-aware behavior like
     /// new-mail notifications on serverside-filtered accounts.
     pub folder_role: Option<String>,
+    /// Lyra thread this message belongs to (stable across folders and
+    /// syncs); clients use it for per-thread behavior like muted
+    /// conversations. `null` when the message is not threaded yet.
+    pub thread_id: Option<String>,
     /// RFC 5322 Message-ID — clients use it to recognize cross-folder
     /// copies of the same message (e.g. INBOX + Archive) and to link
     /// replies via In-Reply-To/References into threads.
@@ -603,6 +609,7 @@ pub(crate) struct MessageRow {
     pub(super) folder_name: String,
     pub(super) external_id: Option<String>,
     pub(super) message_id_header: Option<String>,
+    pub(super) thread_id: Option<String>,
     pub(super) in_reply_to: Option<String>,
     pub(super) references_headers: Option<String>,
     pub(super) protocol: String,
@@ -681,6 +688,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         is_starred: row.is_starred,
         is_draft: row.is_draft || row.folder_role.as_deref() == Some("drafts"),
         folder_role: row.folder_role.clone(),
+        thread_id: row.thread_id.clone(),
         has_attachments: row.has_attachments,
         labels: row.labels.clone(),
         remote_content_blocked: false,
@@ -702,6 +710,7 @@ const MESSAGE_LOAD_COLS: &[message::Column] = &[
     message::Column::AccountId,
     message::Column::FolderId,
     message::Column::ExternalId,
+    message::Column::ThreadId,
     message::Column::MessageIdHeader,
     message::Column::InReplyTo,
     message::Column::ReferencesHeaders,
@@ -770,6 +779,7 @@ pub(crate) async fn load_message_row(
         folder_name: row.try_get("", "folder_name").map_err(orm_err)?,
         external_id: row.try_get("", "external_id").map_err(orm_err)?,
         message_id_header: row.try_get("", "message_id_header").map_err(orm_err)?,
+        thread_id: row_opt_id(&row, "thread_id").map_err(orm_err)?,
         in_reply_to: row.try_get("", "in_reply_to").map_err(orm_err)?,
         references_headers: row.try_get("", "references_headers").map_err(orm_err)?,
         protocol: row.try_get("", "protocol").map_err(orm_err)?,

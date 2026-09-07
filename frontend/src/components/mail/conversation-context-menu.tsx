@@ -9,6 +9,7 @@ import { addDays, addHours, format, nextSaturday } from 'date-fns';
 import {
   Archive,
   ArchiveX,
+  Bell,
   BellOff,
   Check,
   Clock,
@@ -39,6 +40,7 @@ import {
 } from '@/components/ui/context-menu';
 import { t, type SupportedLocale } from '@/i18n';
 import { confirmMoveToTrash } from '@/lib/confirm-trash';
+import { isThreadMuted, setThreadMuted, subscribeNotificationPrefs } from '@/lib/notifications';
 import {
   actOnMessages,
   copyMessages,
@@ -174,6 +176,18 @@ export function ConversationContextMenu({
   const ids = convo.messages.map((m) => m.id);
   const today = new Date();
 
+  // Notification mute state for the conversation's thread (null when the
+  // messages are not threaded yet — then mute only hides them session-locally).
+  const notifyThreadId =
+    latest.threadId ?? convo.messages.find((m) => m.threadId)?.threadId ?? null;
+  const [notifyMuted, setNotifyMuted] = useState(() =>
+    notifyThreadId ? isThreadMuted(notifyThreadId) : false,
+  );
+  useEffect(() => {
+    if (!notifyThreadId) return;
+    return subscribeNotificationPrefs(() => setNotifyMuted(isThreadMuted(notifyThreadId)));
+  }, [notifyThreadId]);
+
   const report = (error: string | null) => onActionError(error);
   const run = (p: Promise<{ error: string | null }>) => void p.then((r) => report(r.error));
 
@@ -260,18 +274,28 @@ export function ConversationContextMenu({
         </ContextMenuItem>
         <ContextMenuItem
           onSelect={() => {
-            // Session-local mute, same store the reader's overflow menu uses.
             const ui = useUIStore.getState();
-            for (const id of ids) {
-              if (!ui.mutedMessageIds.includes(id)) ui.toggleMuteMessage(id);
-            }
-            if (ui.selectedMessageId && ids.includes(ui.selectedMessageId)) {
-              ui.setSelectedMessage(null);
+            if (notifyMuted) {
+              // Unmute: banners resume and the messages return to the list.
+              if (notifyThreadId) setThreadMuted(notifyThreadId, false);
+              for (const id of ids) {
+                if (ui.mutedMessageIds.includes(id)) ui.toggleMuteMessage(id);
+              }
+            } else {
+              // Mute: hide from the list (session-local) and stop new-mail
+              // banners for this thread (persisted in notification prefs).
+              if (notifyThreadId) setThreadMuted(notifyThreadId, true);
+              for (const id of ids) {
+                if (!ui.mutedMessageIds.includes(id)) ui.toggleMuteMessage(id);
+              }
+              if (ui.selectedMessageId && ids.includes(ui.selectedMessageId)) {
+                ui.setSelectedMessage(null);
+              }
             }
           }}
         >
-          <BellOff />
-          {t(locale, 'mail.muteThread')}
+          {notifyMuted ? <Bell /> : <BellOff />}
+          {t(locale, notifyMuted ? 'mail.unmuteThread' : 'mail.muteThread')}
         </ContextMenuItem>
         <ContextMenuSub>
           <ContextMenuSubTrigger>

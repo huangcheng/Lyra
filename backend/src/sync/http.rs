@@ -2892,6 +2892,7 @@ mod learn_hook_tests {
             labels: None,
             account_id: "acc".into(),
             folder_id: "fld".into(),
+            thread_id: None,
             folder_name: "Spam".into(),
             external_id: None,
             message_id_header: None,

@@ -8,10 +8,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   isFolderMuted,
   isIncomingFolderRole,
+  isThreadMuted,
   messageIdentity,
   readNotificationPrefs,
   senderLabel,
   setFolderMuted,
+  setThreadMuted,
   writeNotificationPrefs,
   type NotificationPrefs,
 } from './notifications';
@@ -33,10 +35,11 @@ describe('notification prefs', () => {
   afterEach(() => localStorage.clear());
 
   it('round-trips', () => {
-    writeNotificationPrefs({ enabled: true, mutedFolderIds: [] });
+    writeNotificationPrefs({ enabled: true, mutedFolderIds: [], mutedThreadIds: [] });
     expect(readNotificationPrefs()).toEqual<NotificationPrefs>({
       enabled: true,
       mutedFolderIds: [],
+      mutedThreadIds: [],
     });
   });
 
@@ -44,16 +47,19 @@ describe('notification prefs', () => {
     expect(readNotificationPrefs()).toEqual<NotificationPrefs>({
       enabled: false,
       mutedFolderIds: [],
+      mutedThreadIds: [],
     });
     localStorage.setItem('lyra.notifications', '{not json');
     expect(readNotificationPrefs()).toEqual<NotificationPrefs>({
       enabled: false,
       mutedFolderIds: [],
+      mutedThreadIds: [],
     });
     localStorage.setItem('lyra.notifications', '{"enabled":"yes"}');
     expect(readNotificationPrefs()).toEqual<NotificationPrefs>({
       enabled: false,
       mutedFolderIds: [],
+      mutedThreadIds: [],
     });
   });
 
@@ -62,19 +68,30 @@ describe('notification prefs', () => {
     expect(readNotificationPrefs()).toEqual<NotificationPrefs>({
       enabled: true,
       mutedFolderIds: [],
+      mutedThreadIds: [],
     });
     localStorage.setItem('lyra.notifications', '{"enabled":true,"mutedFolderIds":["f1",7,"f2"]}');
     expect(readNotificationPrefs().mutedFolderIds).toEqual(['f1', 'f2']);
   });
 
   it('mutes and unmutes folders', () => {
-    writeNotificationPrefs({ enabled: true, mutedFolderIds: [] });
+    writeNotificationPrefs({ enabled: true, mutedFolderIds: [], mutedThreadIds: [] });
     setFolderMuted('f1', true);
     expect(isFolderMuted('f1')).toBe(true);
     expect(isFolderMuted('f2')).toBe(false);
     setFolderMuted('f1', false);
     expect(isFolderMuted('f1')).toBe(false);
     expect(readNotificationPrefs().enabled).toBe(true);
+  });
+
+  it('mutes and unmutes threads', () => {
+    writeNotificationPrefs({ enabled: true, mutedFolderIds: [], mutedThreadIds: [] });
+    setThreadMuted('t1', true);
+    expect(isThreadMuted('t1')).toBe(true);
+    expect(isThreadMuted('t2')).toBe(false);
+    setThreadMuted('t1', false);
+    expect(isThreadMuted('t1')).toBe(false);
+    expect(readNotificationPrefs().mutedFolderIds).toEqual([]);
   });
 });
 
