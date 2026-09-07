@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   isIncomingFolderRole,
+  messageIdentity,
   readNotificationPrefs,
   senderLabel,
   writeNotificationPrefs,
@@ -62,15 +63,24 @@ describe('senderLabel', () => {
 });
 
 describe('isIncomingFolderRole', () => {
-  it('treats inbox and custom (null) folders as incoming', () => {
+  it('treats inbox, archive, and custom (null) folders as incoming', () => {
     expect(isIncomingFolderRole('inbox')).toBe(true);
+    expect(isIncomingFolderRole('archive')).toBe(true);
     expect(isIncomingFolderRole(null)).toBe(true);
     expect(isIncomingFolderRole(undefined)).toBe(true);
   });
 
   it('excludes outgoing and system folders', () => {
-    for (const role of ['sent', 'drafts', 'trash', 'spam', 'junk', 'outbox', 'archive']) {
+    for (const role of ['sent', 'drafts', 'trash', 'spam', 'junk', 'outbox']) {
       expect(isIncomingFolderRole(role)).toBe(false);
     }
+  });
+});
+
+describe('messageIdentity', () => {
+  it('prefers the RFC 5322 Message-ID, falling back to the row id', () => {
+    const withHeader = { ...msg('x@example.com'), messageIdHeader: '<m1@example.com>' };
+    expect(messageIdentity(withHeader)).toBe('<m1@example.com>');
+    expect(messageIdentity(msg('x@example.com'))).toBe('m1');
   });
 });

@@ -7,9 +7,11 @@
  * opening Lyra doesn't fire a notification storm.
  *
  * "New mail" means any message landing outside outgoing/system folders
- * (sent, drafts, trash, spam, archive) — not just role=inbox. Providers with
+ * (sent, drafts, trash, spam, outbox) — not just role=inbox. Providers with
  * server-side rules file most mail directly into custom folders (no special
- * role), so an inbox-only diff would never fire for those accounts.
+ * role) or straight to archive, so an inbox-only diff would never fire for
+ * those accounts. The diff identity is the RFC 5322 Message-ID, which is
+ * stable across folders: moving/archiving mail yourself never re-notifies.
  *
  * Notifications render through the service worker when present (works from
  * background tabs, one surface per origin) and fall back to the page-level
@@ -28,25 +30,32 @@ import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 import type { SyncEvent } from '@/types';
 
-const BASELINE_KEY = 'lyra.notify.baseline.v1';
+// v2: identities are RFC 5322 Message-IDs, not row ids (stable across
+// folders, so user-driven moves don't re-notify). v1 rows ids never match,
+// which is fine: the first sync under v2 re-seeds silently.
+const BASELINE_KEY = 'lyra.notify.baseline.v2';
 const PREFS_KEY = 'lyra.notifications';
 const INBOX_DIFF_LIMIT = 15;
 /** Never fire more than this many notifications per sync; extras fold into a summary. */
 const MAX_PER_SYNC = 3;
-/** Folder roles that never count as incoming mail. */
-const NON_INCOMING_ROLES = new Set([
-  'sent',
-  'drafts',
-  'trash',
-  'spam',
-  'junk',
-  'outbox',
-  'archive',
-]);
+/**
+ * Folder roles that never count as incoming mail. Archive IS incoming: with
+ * Message-ID identity, self-archived mail is already known and stays quiet,
+ * while server rules that skip the inbox (e.g. Gmail "Skip Inbox") notify.
+ */
+const NON_INCOMING_ROLES = new Set(['sent', 'drafts', 'trash', 'spam', 'junk', 'outbox']);
 
-/** True when the folder role counts as incoming mail (inbox or a custom folder). */
+/** True when the folder role counts as incoming mail (inbox, archive, or a custom folder). */
 export function isIncomingFolderRole(folderRole: string | null | undefined): boolean {
   return !NON_INCOMING_ROLES.has(folderRole ?? '');
+}
+
+/**
+ * Diff identity for a message: the RFC 5322 Message-ID is stable across
+ * folders and copies; fall back to the row id when a message lacks one.
+ */
+export function messageIdentity(msg: ApiMessage): string {
+  return msg.messageIdHeader || msg.id;
 }
 
 export interface NotificationPrefs {
@@ -198,14 +207,14 @@ export async function handleSyncEventForNotifications(ev: SyncEvent): Promise<vo
   }
   const incoming = messages.filter((m) => isIncomingFolderRole(m.folderRole));
   const slice = incoming.slice(0, INBOX_DIFF_LIMIT);
-  const ids = slice.map((m) => m.id);
+  const identities = slice.map(messageIdentity);
   const baseline = readBaseline();
   const known = new Set(baseline[accountId]);
-  baseline[accountId] = ids;
+  baseline[accountId] = identities;
   writeBaseline(baseline);
   if (known.size === 0) return; // first run seeds silently
 
-  const fresh = slice.filter((m) => !known.has(m.id));
+  const fresh = slice.filter((m) => !known.has(messageIdentity(m)));
   if (fresh.length === 0) return;
 
   const locale = useUIStore.getState().locale;
