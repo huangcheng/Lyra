@@ -27,7 +27,7 @@ void restoreSession().then(() => {
   });
   // Heal the server-side push subscription when banners are enabled (covers
   // pushservice endpoint rotation; cheap idempotent PUT).
-  void reconcilePushSubscription(readNotificationPrefs().enabled);
+  void reconcilePushSubscription(readNotificationPrefs().enabled).catch(() => {});
   registerServiceWorker();
   createRoot(document.getElementById('root')!).render(
     <StrictMode>

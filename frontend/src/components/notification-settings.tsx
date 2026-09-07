@@ -48,7 +48,10 @@ export function NotificationSettings() {
   const [pushTestResult, setPushTestResult] = useState<string | null>(null);
 
   useEffect(() => {
-    void pushStatus().then(setPush);
+    // Never reject: 'unsubscribed' is the safe default when status lookup fails.
+    void pushStatus()
+      .then(setPush)
+      .catch(() => {});
   }, []);
 
   const handlePushToggle = async (next: boolean) => {
@@ -65,7 +68,15 @@ export function NotificationSettings() {
         setPush(granted === 'denied' ? 'denied' : 'unsubscribed');
         return;
       }
-      await subscribePush();
+      try {
+        await subscribePush();
+      } catch {
+        // Subscribe failed (network, iOS non-standalone rejection, …): stay
+        // unsubscribed and say so instead of leaking an unhandled rejection.
+        setPush('unsubscribed');
+        setPushTestResult(t(locale, 'settings.notifications.push.testFailed'));
+        return;
+      }
       const prefs = readNotificationPrefs();
       await syncPushPrefs({
         mutedFolderIds: prefs.mutedFolderIds,
