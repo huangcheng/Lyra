@@ -14,6 +14,11 @@ mod store;
 #[allow(dead_code)]
 mod diff;
 
+// Send is exercised by tests now and by the fan-out task in a later plan
+// task; allow until that consumer lands.
+#[allow(dead_code)]
+mod send;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -272,5 +277,133 @@ mod tests {
         assert_eq!(out.fresh.len(), 1);
         assert_eq!(out.fresh[0].identity, "row-1");
         assert_eq!(out.fresh[0].id, "row-1");
+    }
+
+    /// Spin up a one-shot TCP server that answers the first HTTP request
+    /// with `status`, capturing the raw request for assertions.
+    async fn mock_push_server(status: u16) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 65536];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let reason = match status {
+                201 => "Created",
+                410 => "Gone",
+                403 => "Forbidden",
+                500 => "Internal Server Error",
+                _ => "OK",
+            };
+            let response = format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\n\r\n");
+            socket.write_all(response.as_bytes()).await.unwrap();
+            let _ = tx.send(request);
+        });
+        (format!("http://{addr}/wpush/v1/abc"), rx)
+    }
+
+    /// A real P-256 subscription keypair (p256dh) + 16-byte auth secret,
+    /// base64url-no-pad, as a browser would produce them.
+    fn test_subscription(endpoint: String) -> super::store::StoredSubscription {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let ua = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let point = ua.verifying_key().to_encoded_point(false);
+        super::store::StoredSubscription {
+            endpoint,
+            keys: super::store::StoredKeys {
+                p256dh: URL_SAFE_NO_PAD.encode(point.as_bytes()),
+                auth: URL_SAFE_NO_PAD.encode([7u8; 16]),
+            },
+            created_at: "2026-09-07T00:00:00Z".into(),
+        }
+    }
+
+    fn test_vapid_pem() -> String {
+        use p256::pkcs8::{EncodePrivateKey, LineEnding};
+        p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng)
+            .to_pkcs8_pem(LineEnding::LF)
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn send_builds_encrypted_request_and_maps_statuses() {
+        use super::send::{SendOutcome, send_push};
+        let client = reqwest::Client::new();
+        let vapid_pem = test_vapid_pem();
+
+        // 201 → Delivered, with the RFC 8291/8292 headers on the wire.
+        let (endpoint, rx) = mock_push_server(201).await;
+        let outcome = send_push(
+            &client,
+            &vapid_pem,
+            "mailto:test@example.com",
+            &test_subscription(endpoint),
+            r#"{"title":"t"}"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, SendOutcome::Delivered);
+        let request = rx.await.unwrap();
+        assert!(
+            request.starts_with("POST /wpush/v1/abc HTTP/1.1"),
+            "{request}"
+        );
+        // reqwest/hyper lowercase header names on the wire.
+        assert!(request.contains("\r\nttl: 3600\r\n"), "{request}");
+        assert!(request.contains("\r\nurgency: normal\r\n"), "{request}");
+        assert!(
+            request.contains("\r\ncontent-encoding: aes128gcm\r\n"),
+            "{request}"
+        );
+        assert!(request.contains("\r\nauthorization: vapid t="), "{request}");
+        // aes128gcm (RFC 8291/8188) embeds the salt and record size in the
+        // encrypted body, so there is no `Encryption` header (unlike the
+        // legacy aesgcm encoding). The binary body follows the blank line.
+        let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(body.len() > 16, "encrypted payload present: {request}");
+
+        // 410 → Gone (subscription must be deleted).
+        let (endpoint, _rx) = mock_push_server(410).await;
+        let outcome = send_push(
+            &client,
+            &vapid_pem,
+            "mailto:test@example.com",
+            &test_subscription(endpoint),
+            "{}",
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, SendOutcome::Gone);
+
+        // 403 → Unauthorized (VAPID misconfiguration).
+        let (endpoint, _rx) = mock_push_server(403).await;
+        let outcome = send_push(
+            &client,
+            &vapid_pem,
+            "mailto:test@example.com",
+            &test_subscription(endpoint),
+            "{}",
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, SendOutcome::Unauthorized);
+
+        // 500 → Failed, no panic.
+        let (endpoint, _rx) = mock_push_server(500).await;
+        let outcome = send_push(
+            &client,
+            &vapid_pem,
+            "mailto:test@example.com",
+            &test_subscription(endpoint),
+            "{}",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, SendOutcome::Failed(_)));
     }
 }
