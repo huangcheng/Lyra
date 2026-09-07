@@ -53,6 +53,47 @@ pub struct TotpEnrollResponse {
     pub otpauth_uri: String,
 }
 
+/// Settings-page captcha config (GET/PUT `/api/v1/settings/captcha`).
+/// Each provider keeps its own site-key/secret pair so switching providers
+/// never discards credentials; `active` picks which pair protects login.
+/// The secret is write-only: responses only report whether one is set.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptchaSettingsResponse {
+    /// `"none"`, `"turnstile"`, `"hcaptcha"`, or `"recaptcha"`.
+    pub active: String,
+    /// Known pairs keyed by provider. Includes the env pair when the setting
+    /// was saved but does not cover that provider.
+    pub providers: std::collections::BTreeMap<String, CaptchaProviderPair>,
+    /// Where the config came from: `"settings"` or `"env"`.
+    pub source: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptchaProviderPair {
+    pub site_key: String,
+    pub has_secret: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PutCaptchaSettingsRequest {
+    pub active: String,
+    /// Per-provider updates: an object upserts the pair (omitted fields keep
+    /// the stored value), `null` removes the pair.
+    #[serde(default)]
+    pub providers: std::collections::BTreeMap<String, Option<PutCaptchaProviderPair>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PutCaptchaProviderPair {
+    pub site_key: Option<String>,
+    /// Omit/empty to keep the stored secret for that provider.
+    pub secret: Option<String>,
+}
+
 /// Typed error for auth endpoints.
 ///
 /// `IntoResponse` preserves the exact status codes and user-facing messages

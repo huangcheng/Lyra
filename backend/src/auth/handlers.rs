@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use sea_orm::sea_query::{Expr, Query};
 use sea_orm::{ColumnTrait, ConnectionTrait};
 
-use super::captcha::{TurnstileError, verify_turnstile};
+use super::captcha::{CaptchaError, verify_captcha};
 use super::db::{
     UserData, dberr_to_sqlx, find_first_user_totp_enabled, find_user_by_id, find_user_by_username,
     has_any_user, id_bind_value, insert_user, is_unique_violation, parse_mark_read_policy,
@@ -32,8 +32,9 @@ use super::totp::{
     build_totp, build_totp_from_raw, decrypt_totp_secret, encrypt_totp_secret, matched_totp_step,
 };
 use super::{
-    AuthError, AuthStatus, AuthUser, BOOTSTRAP_TAKEN, BootstrapRequest, ChangePasswordRequest,
-    LoginRequest, LoginResponse, PreferencesRequest, TOTP_LAST_STEP_TTL_SECS, TotpDisableRequest,
+    AuthError, AuthStatus, AuthUser, BOOTSTRAP_TAKEN, BootstrapRequest, CaptchaSettingsResponse,
+    ChangePasswordRequest, LoginRequest, LoginResponse, PreferencesRequest,
+    PutCaptchaSettingsRequest, TOTP_LAST_STEP_TTL_SECS, TotpDisableRequest,
     TotpEnrollConfirmRequest, TotpEnrollResponse, TotpVerifyRequest, UserInfo,
     extract_token_from_headers,
 };
@@ -50,29 +51,105 @@ pub(super) async fn auth_status(State(state): State<AuthState>) -> Json<AuthStat
     } else {
         false
     };
+    let captcha = super::captcha::load_effective(state.kv(), &state.captcha)
+        .await
+        .0;
     Json(AuthStatus {
         has_user,
         totp_enabled,
-        captcha: state.captcha.public(),
+        captcha: captcha.public(),
     })
 }
 
-async fn ensure_captcha(captcha: &CaptchaConfig, token: Option<&str>) -> Result<(), AuthError> {
-    match captcha {
-        CaptchaConfig::None => Ok(()),
-        CaptchaConfig::Turnstile { secret, .. } => {
-            let Some(token) = token.filter(|t| !t.trim().is_empty()) else {
-                return Err(AuthError::BadRequest(
-                    "Captcha verification required".to_string(),
-                ));
-            };
-            verify_turnstile(secret, token).await.map_err(|e| match e {
-                TurnstileError::Invalid | TurnstileError::Unavailable => {
-                    AuthError::BadRequest("Captcha verification failed".to_string())
-                }
-            })
-        }
+async fn ensure_captcha(state: &AuthState, token: Option<&str>) -> Result<(), AuthError> {
+    let (captcha, _source) = super::captcha::load_effective(state.kv(), &state.captcha).await;
+    let captcha = &captcha;
+    if matches!(captcha, CaptchaConfig::None) {
+        return Ok(());
     }
+    let Some(token) = token.filter(|t| !t.trim().is_empty()) else {
+        return Err(AuthError::BadRequest(
+            "Captcha verification required".to_string(),
+        ));
+    };
+    verify_captcha(captcha, token).await.map_err(|e| match e {
+        CaptchaError::Invalid | CaptchaError::Unavailable => {
+            AuthError::BadRequest("Captcha verification failed".to_string())
+        }
+    })
+}
+
+fn captcha_settings_response(view: super::captcha::SettingsView) -> CaptchaSettingsResponse {
+    CaptchaSettingsResponse {
+        active: view.active,
+        providers: view
+            .providers
+            .into_iter()
+            .map(|(name, pair)| {
+                (
+                    name,
+                    super::types::CaptchaProviderPair {
+                        site_key: pair.site_key,
+                        has_secret: pair.has_secret,
+                    },
+                )
+            })
+            .collect(),
+        source: view.source.to_string(),
+    }
+}
+
+pub(super) async fn get_captcha_settings(
+    State(state): State<AuthState>,
+    AuthUser(_user_id): AuthUser,
+) -> Json<CaptchaSettingsResponse> {
+    let view = super::captcha::load_view(state.kv(), &state.captcha).await;
+    Json(captcha_settings_response(view))
+}
+
+pub(super) async fn put_captcha_settings(
+    State(state): State<AuthState>,
+    AuthUser(_user_id): AuthUser,
+    Json(req): Json<PutCaptchaSettingsRequest>,
+) -> Result<Json<CaptchaSettingsResponse>, AuthError> {
+    let Some(active) = super::captcha::parse_provider(&req.active) else {
+        return Err(AuthError::BadRequest(
+            "active must be none, turnstile, hcaptcha, recaptcha, or recaptcha-v3".to_string(),
+        ));
+    };
+
+    let mut updates = Vec::with_capacity(req.providers.len());
+    for (provider, pair) in req.providers {
+        let Some(provider) = super::captcha::parse_provider(&provider).filter(|p| *p != "none")
+        else {
+            return Err(AuthError::BadRequest(
+                "providers keys must be turnstile, hcaptcha, recaptcha, or recaptcha-v3"
+                    .to_string(),
+            ));
+        };
+        updates.push((
+            provider.to_string(),
+            pair.map(|p| super::captcha::PairUpdate {
+                site_key: p.site_key,
+                secret: p.secret,
+            }),
+        ));
+    }
+
+    super::captcha::save_settings(state.kv(), &state.captcha, active, updates)
+        .await
+        .map_err(|e| match e {
+            super::captcha::SaveSettingsError::IncompleteActive => {
+                AuthError::BadRequest("the active provider needs a site key and secret".to_string())
+            }
+            super::captcha::SaveSettingsError::Store(e) => {
+                tracing::error!("failed to save captcha settings: {e}");
+                AuthError::internal("Failed to save captcha settings")
+            }
+        })?;
+
+    let view = super::captcha::load_view(state.kv(), &state.captcha).await;
+    Ok(Json(captcha_settings_response(view)))
 }
 
 pub(super) async fn auth_bootstrap(
@@ -86,7 +163,7 @@ pub(super) async fn auth_bootstrap(
         return Err(AuthError::Conflict(BOOTSTRAP_TAKEN.to_string()));
     }
 
-    ensure_captcha(&state.captcha, req.captcha_token.as_deref()).await?;
+    ensure_captcha(&state, req.captcha_token.as_deref()).await?;
 
     if req.username.is_empty() || req.username.len() > 64 {
         return Err(AuthError::BadRequest(
@@ -160,7 +237,7 @@ pub(super) async fn auth_login(
     let rl_key = login_rl_key(&req.username);
     ensure_not_rate_limited(kv.as_ref(), &rl_key, "Authentication failed").await?;
 
-    ensure_captcha(&state.captcha, req.captcha_token.as_deref()).await?;
+    ensure_captcha(&state, req.captcha_token.as_deref()).await?;
 
     let Some(user) = find_user_by_username(&state.db, &req.username).await? else {
         note_failed_attempt(kv.as_ref(), &rl_key, "Authentication failed").await?;

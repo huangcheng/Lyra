@@ -61,9 +61,11 @@ function persistToken(token: string) {
   localStorage.setItem('lyra_token', token);
 }
 
+const KNOWN_CAPTCHA_PROVIDERS = new Set(['turnstile', 'hcaptcha', 'recaptcha', 'recaptcha-v3']);
+
 function captchaFromStatus(status: StatusResponse): CaptchaPublic | null {
   const c = status.captcha;
-  if (!c || c.provider !== 'turnstile' || !c.siteKey) return null;
+  if (!c || !KNOWN_CAPTCHA_PROVIDERS.has(c.provider) || !c.siteKey) return null;
   return { provider: c.provider, siteKey: c.siteKey };
 }
 

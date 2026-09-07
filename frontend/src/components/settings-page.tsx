@@ -24,6 +24,7 @@ import {
 
 import { t } from '../i18n';
 import { SlimPageNav, type SlimNavItem } from '@/components/slim-page-nav';
+import { CaptchaSettingsCard } from './captcha-settings';
 import { PimDialog } from './pim-dialog';
 import { FolderRoleMapping } from './folder-role-mapping';
 import { EncryptionSettings } from './encryption-settings';
@@ -1111,6 +1112,8 @@ export function SettingsPage() {
                   </div>
                 )}
               </section>
+
+              <CaptchaSettingsCard />
 
               <section className="flex items-center justify-between rounded-[10px] border border-border bg-card px-5 py-4">
                 <div className="text-[13px] font-medium">{t(locale, 'settings.session')}</div>

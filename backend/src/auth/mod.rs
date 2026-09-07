@@ -173,4 +173,8 @@ pub fn routes() -> Router<AuthState> {
         )
         .route("/api/v1/auth/totp/verify", post(handlers::totp_verify))
         .route("/api/v1/auth/totp/disable", post(handlers::totp_disable))
+        .route(
+            "/api/v1/settings/captcha",
+            get(handlers::get_captcha_settings).put(handlers::put_captcha_settings),
+        )
 }

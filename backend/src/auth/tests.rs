@@ -22,7 +22,8 @@ use super::session::{
 use super::state::AuthState;
 use super::totp::{build_totp, decrypt_totp_secret, encrypt_totp_secret};
 use super::types::{
-    BootstrapRequest, ChangePasswordRequest, LoginRequest, PreferencesRequest, TotpDisableRequest,
+    BootstrapRequest, ChangePasswordRequest, LoginRequest, PreferencesRequest,
+    PutCaptchaProviderPair, PutCaptchaSettingsRequest, TotpDisableRequest,
     TotpEnrollConfirmRequest, TotpVerifyRequest,
 };
 use super::{
@@ -1258,12 +1259,19 @@ fn turnstile_state(db: DbPool) -> AuthState {
     .unwrap()
 }
 
-async fn mock_turnstile_server(success: bool) -> (String, tokio::task::JoinHandle<()>) {
+async fn mock_siteverify_server(success: bool) -> (String, tokio::task::JoinHandle<()>) {
+    mock_siteverify_json(serde_json::json!({ "success": success })).await
+}
+
+async fn mock_siteverify_json(body: serde_json::Value) -> (String, tokio::task::JoinHandle<()>) {
     use axum::{Json, Router, routing::post};
 
     let app = Router::new().route(
         "/siteverify",
-        post(move || async move { Json(serde_json::json!({ "success": success })) }),
+        post(move || {
+            let body = body.clone();
+            async move { Json(body) }
+        }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1306,8 +1314,8 @@ async fn login_requires_captcha_when_turnstile_enabled() {
 async fn login_accepts_valid_turnstile_token() {
     let db = test_pool().await;
     bootstrap_alice(&test_state(db.clone())).await;
-    let (url, handle) = mock_turnstile_server(true).await;
-    super::captcha::set_test_siteverify_url(Some(url));
+    let (url, handle) = mock_siteverify_server(true).await;
+    super::captcha::set_test_siteverify_url("turnstile", Some(url));
 
     let result = auth_login(
         State(turnstile_state(db)),
@@ -1319,7 +1327,7 @@ async fn login_accepts_valid_turnstile_token() {
     )
     .await;
 
-    super::captcha::set_test_siteverify_url(None);
+    super::captcha::set_test_siteverify_url("turnstile", None);
     handle.abort();
 
     assert!(result.is_ok());
@@ -1327,12 +1335,393 @@ async fn login_accepts_valid_turnstile_token() {
 
 #[tokio::test]
 async fn turnstile_verify_rejects_invalid_token_from_mock() {
-    let (url, handle) = mock_turnstile_server(false).await;
-    super::captcha::set_test_siteverify_url(Some(url));
-    let err = super::captcha::verify_turnstile("secret", "bad-token")
+    let (url, handle) = mock_siteverify_server(false).await;
+    super::captcha::set_test_siteverify_url("turnstile", Some(url));
+    let config = crate::config::CaptchaConfig::Turnstile {
+        site_key: "site-key".into(),
+        secret: "secret".into(),
+    };
+    let err = super::captcha::verify_captcha(&config, "bad-token")
         .await
         .expect_err("invalid token");
-    super::captcha::set_test_siteverify_url(None);
+    super::captcha::set_test_siteverify_url("turnstile", None);
     handle.abort();
-    assert!(matches!(err, super::captcha::TurnstileError::Invalid));
+    assert!(matches!(err, super::captcha::CaptchaError::Invalid));
+}
+
+#[tokio::test]
+async fn hcaptcha_verify_accepts_valid_token_from_mock() {
+    let (url, handle) = mock_siteverify_server(true).await;
+    super::captcha::set_test_siteverify_url("hcaptcha", Some(url));
+    let config = crate::config::CaptchaConfig::HCaptcha {
+        site_key: "site-key".into(),
+        secret: "secret".into(),
+    };
+    let result = super::captcha::verify_captcha(&config, "token-ok").await;
+    super::captcha::set_test_siteverify_url("hcaptcha", None);
+    handle.abort();
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn recaptcha_verify_rejects_invalid_token_from_mock() {
+    let (url, handle) = mock_siteverify_server(false).await;
+    super::captcha::set_test_siteverify_url("recaptcha", Some(url));
+    let config = crate::config::CaptchaConfig::Recaptcha {
+        site_key: "site-key".into(),
+        secret: "secret".into(),
+    };
+    let err = super::captcha::verify_captcha(&config, "bad-token")
+        .await
+        .expect_err("invalid token");
+    super::captcha::set_test_siteverify_url("recaptcha", None);
+    handle.abort();
+    assert!(matches!(err, super::captcha::CaptchaError::Invalid));
+}
+
+#[tokio::test]
+async fn recaptcha_v3_verify_checks_score() {
+    let config = || crate::config::CaptchaConfig::RecaptchaV3 {
+        site_key: "site-key".into(),
+        secret: "secret".into(),
+    };
+
+    // High score passes.
+    let (url, handle) =
+        mock_siteverify_json(serde_json::json!({ "success": true, "score": 0.9 })).await;
+    super::captcha::set_test_siteverify_url("recaptcha-v3", Some(url));
+    super::captcha::verify_captcha(&config(), "token-ok")
+        .await
+        .expect("high score passes");
+    super::captcha::set_test_siteverify_url("recaptcha-v3", None);
+    handle.abort();
+
+    // Low score is rejected even though `success` is true.
+    let (url, handle) =
+        mock_siteverify_json(serde_json::json!({ "success": true, "score": 0.3 })).await;
+    super::captcha::set_test_siteverify_url("recaptcha-v3", Some(url));
+    let err = super::captcha::verify_captcha(&config(), "token-bot")
+        .await
+        .expect_err("low score rejected");
+    super::captcha::set_test_siteverify_url("recaptcha-v3", None);
+    handle.abort();
+    assert!(matches!(err, super::captcha::CaptchaError::Invalid));
+
+    // A missing score (unexpected from v3 keys) is rejected too.
+    let (url, handle) = mock_siteverify_json(serde_json::json!({ "success": true })).await;
+    super::captcha::set_test_siteverify_url("recaptcha-v3", Some(url));
+    let err = super::captcha::verify_captcha(&config(), "token-noscore")
+        .await
+        .expect_err("missing score rejected");
+    super::captcha::set_test_siteverify_url("recaptcha-v3", None);
+    handle.abort();
+    assert!(matches!(err, super::captcha::CaptchaError::Invalid));
+}
+
+// ── Captcha settings (Settings page, kv-backed) ─────────────────
+
+#[tokio::test]
+async fn captcha_settings_roundtrip_through_kv() {
+    install_test_master_key();
+    let kv: Arc<dyn crate::kv::KvStore> = Arc::new(MemoryKv::new());
+
+    assert!(super::captcha::load_stored(&kv).await.unwrap().is_none());
+
+    super::captcha::save_settings(
+        &kv,
+        &crate::config::CaptchaConfig::None,
+        "hcaptcha",
+        vec![(
+            "hcaptcha".to_string(),
+            Some(super::captcha::PairUpdate {
+                site_key: Some("hc-site".into()),
+                secret: Some("hc-secret".into()),
+            }),
+        )],
+    )
+    .await
+    .unwrap();
+    let loaded = super::captcha::load_stored(&kv).await.unwrap().unwrap();
+    assert_eq!(
+        loaded,
+        crate::config::CaptchaConfig::HCaptcha {
+            site_key: "hc-site".into(),
+            secret: "hc-secret".into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn captcha_settings_migrate_legacy_single_config_blob() {
+    install_test_master_key();
+    let kv: Arc<dyn crate::kv::KvStore> = Arc::new(MemoryKv::new());
+
+    // v1 blob: a single {provider, site_key, secret_encrypted} config.
+    let key = crate::crypto::derive_user_kek(
+        super::dek::master_key().unwrap(),
+        "server:captcha-settings",
+    );
+    let enc = crate::crypto::encrypt(&key, b"old-secret").unwrap();
+    let blob = serde_json::json!({
+        "provider": "hcaptcha",
+        "site_key": "old-site",
+        "secret_encrypted": serde_json::to_value(&enc).unwrap(),
+    });
+    kv.set("server:captcha-settings", &blob.to_string(), None)
+        .await
+        .unwrap();
+
+    let loaded = super::captcha::load_stored(&kv).await.unwrap().unwrap();
+    assert_eq!(
+        loaded,
+        crate::config::CaptchaConfig::HCaptcha {
+            site_key: "old-site".into(),
+            secret: "old-secret".into(),
+        }
+    );
+
+    let view = super::captcha::load_view(&kv, &crate::config::CaptchaConfig::None).await;
+    assert_eq!(view.active, "hcaptcha");
+    assert_eq!(view.source, "settings");
+    let pair = &view.providers[0];
+    assert_eq!(pair.0, "hcaptcha");
+    assert_eq!(pair.1.site_key, "old-site");
+    assert!(pair.1.has_secret);
+}
+
+#[tokio::test]
+async fn captcha_settings_override_env_and_disable() {
+    install_test_master_key();
+    let db = test_pool().await;
+    let state = turnstile_state(db); // env config = turnstile
+
+    // Env default surfaces when nothing is saved yet.
+    let initial =
+        super::handlers::get_captcha_settings(State(state.clone()), AuthUser("alice".into()))
+            .await
+            .0;
+    assert_eq!(initial.active, "turnstile");
+    assert_eq!(initial.source, "env");
+    assert_eq!(initial.providers["turnstile"].site_key, "site-key");
+    assert!(initial.providers["turnstile"].has_secret);
+
+    // Saving "none" disables captcha even though env enables turnstile.
+    let saved = super::handlers::put_captcha_settings(
+        State(state.clone()),
+        AuthUser("alice".into()),
+        Json(PutCaptchaSettingsRequest {
+            active: "none".into(),
+            providers: std::collections::BTreeMap::default(),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(saved.active, "none");
+    assert_eq!(saved.source, "settings");
+
+    let status = super::handlers::auth_status(State(state.clone())).await.0;
+    assert!(status.captcha.is_none());
+}
+
+#[tokio::test]
+async fn captcha_settings_put_hcaptcha_and_reuse_secret() {
+    install_test_master_key();
+    let db = test_pool().await;
+    let state = test_state(db);
+
+    // Missing secret is rejected for a fresh provider.
+    let err = super::handlers::put_captcha_settings(
+        State(state.clone()),
+        AuthUser("alice".into()),
+        Json(PutCaptchaSettingsRequest {
+            active: "hcaptcha".into(),
+            providers: [(
+                "hcaptcha".to_string(),
+                Some(PutCaptchaProviderPair {
+                    site_key: Some("hc-site".into()),
+                    secret: None,
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        }),
+    )
+    .await
+    .expect_err("secret required");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+    let saved = super::handlers::put_captcha_settings(
+        State(state.clone()),
+        AuthUser("alice".into()),
+        Json(PutCaptchaSettingsRequest {
+            active: "hcaptcha".into(),
+            providers: [(
+                "hcaptcha".to_string(),
+                Some(PutCaptchaProviderPair {
+                    site_key: Some("hc-site".into()),
+                    secret: Some("hc-secret".into()),
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(saved.active, "hcaptcha");
+    assert_eq!(saved.providers["hcaptcha"].site_key, "hc-site");
+    assert!(saved.providers["hcaptcha"].has_secret);
+    assert_eq!(saved.source, "settings");
+
+    // Omitting the secret for an already-stored provider keeps it.
+    let updated = super::handlers::put_captcha_settings(
+        State(state.clone()),
+        AuthUser("alice".into()),
+        Json(PutCaptchaSettingsRequest {
+            active: "hcaptcha".into(),
+            providers: [(
+                "hcaptcha".to_string(),
+                Some(PutCaptchaProviderPair {
+                    site_key: Some("hc-site-2".into()),
+                    secret: None,
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(updated.providers["hcaptcha"].site_key, "hc-site-2");
+    assert!(updated.providers["hcaptcha"].has_secret);
+
+    // Login status advertises the saved provider to anonymous clients.
+    let status = super::handlers::auth_status(State(state.clone())).await.0;
+    let public = status.captcha.expect("captcha public config");
+    assert_eq!(public.provider, "hcaptcha");
+    assert_eq!(public.site_key, "hc-site-2");
+
+    // The stored secret is the original one, retrievable for verification.
+    let stored = super::captcha::load_stored(state.kv())
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, secret) = stored.credentials();
+    assert_eq!(secret, Some("hc-secret"));
+}
+
+#[tokio::test]
+async fn captcha_settings_keep_pairs_when_switching_providers() {
+    install_test_master_key();
+    let db = test_pool().await;
+    let state = test_state(db);
+
+    // Configure hcaptcha, then add turnstile and switch to it: the hcaptcha
+    // pair must survive the switch.
+    let _ = super::handlers::put_captcha_settings(
+        State(state.clone()),
+        AuthUser("alice".into()),
+        Json(PutCaptchaSettingsRequest {
+            active: "hcaptcha".into(),
+            providers: [(
+                "hcaptcha".to_string(),
+                Some(PutCaptchaProviderPair {
+                    site_key: Some("hc-site".into()),
+                    secret: Some("hc-secret".into()),
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let switched = super::handlers::put_captcha_settings(
+        State(state.clone()),
+        AuthUser("alice".into()),
+        Json(PutCaptchaSettingsRequest {
+            active: "turnstile".into(),
+            providers: [(
+                "turnstile".to_string(),
+                Some(PutCaptchaProviderPair {
+                    site_key: Some("ts-site".into()),
+                    secret: Some("ts-secret".into()),
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(switched.active, "turnstile");
+    assert_eq!(switched.providers["hcaptcha"].site_key, "hc-site");
+    assert!(switched.providers["hcaptcha"].has_secret);
+    assert_eq!(switched.providers["turnstile"].site_key, "ts-site");
+
+    // Switching back needs no credentials: the stored pair is reused.
+    let back = super::handlers::put_captcha_settings(
+        State(state.clone()),
+        AuthUser("alice".into()),
+        Json(PutCaptchaSettingsRequest {
+            active: "hcaptcha".into(),
+            providers: std::collections::BTreeMap::default(),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(back.active, "hcaptcha");
+    let status = super::handlers::auth_status(State(state.clone())).await.0;
+    assert_eq!(status.captcha.unwrap().provider, "hcaptcha");
+
+    // A pair can be removed explicitly.
+    let removed = super::handlers::put_captcha_settings(
+        State(state.clone()),
+        AuthUser("alice".into()),
+        Json(PutCaptchaSettingsRequest {
+            active: "hcaptcha".into(),
+            providers: [("turnstile".to_string(), None)].into_iter().collect(),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(!removed.providers.contains_key("turnstile"));
+    assert!(removed.providers.contains_key("hcaptcha"));
+}
+
+#[tokio::test]
+async fn captcha_settings_reject_unknown_provider() {
+    install_test_master_key();
+    let db = test_pool().await;
+    let state = test_state(db);
+    let err = super::handlers::put_captcha_settings(
+        State(state.clone()),
+        AuthUser("alice".into()),
+        Json(PutCaptchaSettingsRequest {
+            active: "securimage".into(),
+            providers: std::collections::BTreeMap::default(),
+        }),
+    )
+    .await
+    .expect_err("unknown provider");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+    let err = super::handlers::put_captcha_settings(
+        State(state.clone()),
+        AuthUser("alice".into()),
+        Json(PutCaptchaSettingsRequest {
+            active: "none".into(),
+            providers: [("securimage".to_string(), None)].into_iter().collect(),
+        }),
+    )
+    .await
+    .expect_err("unknown providers key");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
 }

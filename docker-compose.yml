@@ -38,6 +38,10 @@ services:
       # Optional — enables Settings → Sign in with Yandex.
       LYRA_YANDEX_OAUTH_CLIENT_ID: ${LYRA_YANDEX_OAUTH_CLIENT_ID:-}
       LYRA_YANDEX_OAUTH_CLIENT_SECRET: ${LYRA_YANDEX_OAUTH_CLIENT_SECRET:-}
+      # Optional — Cloudflare Turnstile captcha on login and bootstrap.
+      LYRA_CAPTCHA_PROVIDER: ${LYRA_CAPTCHA_PROVIDER:-}
+      LYRA_CAPTCHA_SITE_KEY: ${LYRA_CAPTCHA_SITE_KEY:-}
+      LYRA_CAPTCHA_SECRET: ${LYRA_CAPTCHA_SECRET:-}
     volumes:
       - lyra-data:/data
       - ./config/oauth-providers.toml:/config/oauth-providers.toml:ro

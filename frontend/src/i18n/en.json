@@ -194,7 +194,8 @@
     "backToLogin": "Back to login",
     "statusCheckError": "Couldn't reach the Lyra server. Make sure the backend is running.",
     "captchaRequired": "Complete the captcha to continue.",
-    "captchaHint": "Requires internet access to Cloudflare Turnstile."
+    "captchaFailed": "Couldn't verify you're human. Check your connection and try again.",
+    "captchaHint": "Protected by {{provider}}."
   },
   "sync": {
     "syncing": "Syncing…",
@@ -304,6 +305,22 @@
       "enableTotpTitle": "Two-Factor Authentication",
       "enableTotpDescription": "Add an authenticator app to require a code at sign-in.",
       "enableTotp": "Enable 2FA"
+    },
+    "captcha": {
+      "title": "Login Captcha",
+      "subtitle": "Bot protection for the login page. Pick a provider or turn it off.",
+      "provider": {
+        "none": "Disabled",
+        "turnstile": "Cloudflare Turnstile",
+        "hcaptcha": "hCaptcha",
+        "recaptcha": "Google reCAPTCHA v2",
+        "recaptcha-v3": "Google reCAPTCHA v3"
+      },
+      "siteKey": "Site key",
+      "secret": "Secret key",
+      "secretKeep": "Leave empty to keep the current secret",
+      "saved": "Captcha settings saved.",
+      "sourceEnv": "Currently set via environment variables — saving here overrides them."
     },
     "accounts": {
       "title": "Mail Accounts",

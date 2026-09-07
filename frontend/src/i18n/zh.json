@@ -194,7 +194,8 @@
     "backToLogin": "返回登录",
     "statusCheckError": "无法连接 Lyra 服务器，请确认后端已启动。",
     "captchaRequired": "请先完成验证码。",
-    "captchaHint": "需要能访问 Cloudflare Turnstile（需联网）。"
+    "captchaFailed": "人机验证失败，请检查网络后重试。",
+    "captchaHint": "由 {{provider}} 提供人机验证保护。"
   },
   "sync": {
     "syncing": "同步中…",
@@ -304,6 +305,22 @@
       "enableTotpTitle": "两步验证",
       "enableTotpDescription": "添加身份验证器应用，登录时需要输入验证码。",
       "enableTotp": "启用两步验证"
+    },
+    "captcha": {
+      "title": "登录验证码",
+      "subtitle": "为登录页提供机器人防护。选择一个验证码服务，或完全关闭。",
+      "provider": {
+        "none": "关闭",
+        "turnstile": "Cloudflare Turnstile",
+        "hcaptcha": "hCaptcha",
+        "recaptcha": "Google reCAPTCHA v2",
+        "recaptcha-v3": "Google reCAPTCHA v3"
+      },
+      "siteKey": "站点密钥（Site Key）",
+      "secret": "密钥（Secret）",
+      "secretKeep": "留空则保留当前密钥",
+      "saved": "验证码设置已保存。",
+      "sourceEnv": "当前通过环境变量配置——在此保存后将覆盖环境变量。"
     },
     "accounts": {
       "title": "邮箱账户",

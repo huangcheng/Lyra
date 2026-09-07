@@ -70,7 +70,7 @@ use tracing_subscriber::EnvFilter;
 
 /// Matches the CSP meta tag in `frontend/index.html`; sent as a real header
 /// because `frame-ancestors` is ignored in `<meta>` form.
-const SPA_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+const SPA_CSP: &str = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://hcaptcha.com https://*.hcaptcha.com https://www.google.com https://www.gstatic.com; style-src 'self' 'unsafe-inline' https://hcaptcha.com https://*.hcaptcha.com; img-src 'self' data: blob: https: http:; font-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com https://hcaptcha.com https://*.hcaptcha.com https://www.google.com https://www.gstatic.com; frame-src https://challenges.cloudflare.com https://hcaptcha.com https://*.hcaptcha.com https://www.google.com https://recaptcha.google.com; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 /// Baseline security headers for API and static/SPA responses.
 async fn security_headers(req: Request, next: middleware::Next) -> Response {
@@ -344,6 +344,10 @@ mod tests {
         let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("default-src 'self'"));
+        // Captcha widgets need script/frame/connect access to their providers.
+        assert!(csp.contains("https://challenges.cloudflare.com"));
+        assert!(csp.contains("https://*.hcaptcha.com"));
+        assert!(csp.contains("frame-src https://challenges.cloudflare.com https://hcaptcha.com https://*.hcaptcha.com https://www.google.com https://recaptcha.google.com"));
     }
 
     async fn test_app() -> (Router, DbPool) {

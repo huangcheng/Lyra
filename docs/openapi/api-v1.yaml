@@ -1776,6 +1776,65 @@ paths:
         "200":
           description: Updated allowlist
 
+  /api/v1/settings/captcha:
+    get:
+      tags: [settings]
+      summary: Login captcha settings
+      description: |
+        Server-wide captcha config for login/bootstrap. Each provider keeps
+        its own site-key/secret pair so switching providers never discards
+        credentials; `active` picks which pair protects login. The secret is
+        write-only — responses only report `hasSecret`. `source` tells whether
+        the config came from a saved setting or the `LYRA_CAPTCHA_*`
+        env vars; a saved setting overrides the env config. When a setting is
+        saved, the env pair is merged into `providers` for any provider the
+        setting does not cover.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaptchaSettings"
+    put:
+      tags: [settings]
+      summary: Set login captcha provider and key pairs
+      description: |
+        `active: "none"` disables the captcha entirely (also overriding any
+        env config). `providers` merges per-provider updates: an object
+        upserts that pair (omitted fields keep the stored value), `null`
+        removes the pair. The active provider must resolve to a complete pair
+        (from the settings or the env config for the same provider).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [active]
+              properties:
+                active:
+                  type: string
+                  enum: [none, turnstile, hcaptcha, recaptcha, recaptcha-v3]
+                providers:
+                  type: object
+                  additionalProperties:
+                    oneOf:
+                      - type: "null"
+                      - type: object
+                        properties:
+                          siteKey:
+                            type: string
+                          secret:
+                            type: string
+                            description: Omit/empty to keep the stored secret.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaptchaSettings"
+        "400":
+          description: Unknown provider, or the active provider lacks a site key/secret
+
   /api/v1/proxy/{*target}:
     get:
       tags: [media]
@@ -2042,7 +2101,7 @@ components:
           properties:
             provider:
               type: string
-              enum: [turnstile]
+              enum: [turnstile, hcaptcha, recaptcha, recaptcha-v3]
             siteKey:
               type: string
 
@@ -2191,6 +2250,29 @@ components:
           type: boolean
           default: false
           description: Opt-in — allow Gravatar lookups for sender avatars.
+
+    CaptchaSettings:
+      type: object
+      properties:
+        active:
+          type: string
+          enum: [none, turnstile, hcaptcha, recaptcha, recaptcha-v3]
+          description: The provider currently protecting login.
+        providers:
+          type: object
+          description: Known key pairs keyed by provider (secret never included).
+          additionalProperties:
+            type: object
+            properties:
+              siteKey:
+                type: string
+              hasSecret:
+                type: boolean
+                description: The secret is write-only; this reports whether one is stored.
+        source:
+          type: string
+          enum: [settings, env]
+          description: Saved setting (overrides) or LYRA_CAPTCHA_* env vars.
 
     OpengpgKey:
       type: object

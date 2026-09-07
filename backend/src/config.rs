@@ -42,18 +42,63 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptchaConfig {
     None,
-    Turnstile { site_key: String, secret: String },
+    Turnstile {
+        site_key: String,
+        secret: String,
+    },
+    HCaptcha {
+        site_key: String,
+        secret: String,
+    },
+    Recaptcha {
+        site_key: String,
+        secret: String,
+    },
+    /// reCAPTCHA v3: invisible, score-based (no checkbox challenge).
+    RecaptchaV3 {
+        site_key: String,
+        secret: String,
+    },
 }
 
 impl CaptchaConfig {
     /// Public site-facing slice (never includes the secret).
     pub fn public(&self) -> Option<CaptchaPublicConfig> {
+        let (provider, site_key) = match self {
+            Self::None => return None,
+            Self::Turnstile { site_key, .. } => ("turnstile", site_key),
+            Self::HCaptcha { site_key, .. } => ("hcaptcha", site_key),
+            Self::Recaptcha { site_key, .. } => ("recaptcha", site_key),
+            Self::RecaptchaV3 { site_key, .. } => ("recaptcha-v3", site_key),
+        };
+        Some(CaptchaPublicConfig {
+            provider: provider.to_string(),
+            site_key: site_key.clone(),
+        })
+    }
+
+    /// Provider slug: `"none"`, `"turnstile"`, `"hcaptcha"`, `"recaptcha"`,
+    /// or `"recaptcha-v3"`.
+    pub fn provider_name(&self) -> &'static str {
         match self {
-            Self::None => None,
-            Self::Turnstile { site_key, .. } => Some(CaptchaPublicConfig {
-                provider: "turnstile".to_string(),
-                site_key: site_key.clone(),
-            }),
+            Self::None => "none",
+            Self::Turnstile { .. } => "turnstile",
+            Self::HCaptcha { .. } => "hcaptcha",
+            Self::Recaptcha { .. } => "recaptcha",
+            Self::RecaptchaV3 { .. } => "recaptcha-v3",
+        }
+    }
+
+    /// `(site_key, secret)` for provider variants; both `None` when disabled.
+    pub fn credentials(&self) -> (Option<&str>, Option<&str>) {
+        match self {
+            Self::None => (None, None),
+            Self::Turnstile { site_key, secret }
+            | Self::HCaptcha { site_key, secret }
+            | Self::Recaptcha { site_key, secret }
+            | Self::RecaptchaV3 { site_key, secret } => {
+                (Some(site_key.as_str()), Some(secret.as_str()))
+            }
         }
     }
 }
@@ -90,15 +135,13 @@ pub enum ConfigError {
     PublicUrlInvalid(String),
     #[error("mail OAuth provider config is invalid: {0}")]
     OauthConfig(String),
-    #[error("LYRA_CAPTCHA_PROVIDER must be \"none\" or \"turnstile\" (got {0:?})")]
+    #[error(
+        "LYRA_CAPTCHA_PROVIDER must be \"none\", \"turnstile\", \"hcaptcha\", \"recaptcha\", or \"recaptcha-v3\" (got {0:?})"
+    )]
     CaptchaProviderUnknown(String),
-    #[error(
-        "LYRA_CAPTCHA_PROVIDER=turnstile requires LYRA_CAPTCHA_SITE_KEY and LYRA_CAPTCHA_SECRET"
-    )]
-    CaptchaTurnstileIncomplete,
-    #[error(
-        "unused captcha env vars detected ({0}); Lyra v1 supports turnstile only via LYRA_CAPTCHA_*"
-    )]
+    #[error("LYRA_CAPTCHA_PROVIDER={0} requires LYRA_CAPTCHA_SITE_KEY and LYRA_CAPTCHA_SECRET")]
+    CaptchaIncomplete(String),
+    #[error("unused captcha env vars detected ({0}); configure captcha via LYRA_CAPTCHA_*")]
     CaptchaMisconfigured(String),
 }
 
@@ -127,21 +170,38 @@ fn captcha_from_env() -> Result<CaptchaConfig, ConfigError> {
     if provider.is_empty() || provider.eq_ignore_ascii_case("none") {
         return Ok(CaptchaConfig::None);
     }
-    if provider.eq_ignore_ascii_case("turnstile") {
+
+    let keys = || -> Result<(String, String), ConfigError> {
         let site_key = env::var("LYRA_CAPTCHA_SITE_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .ok_or(ConfigError::CaptchaTurnstileIncomplete)?;
+            .ok_or_else(|| ConfigError::CaptchaIncomplete(provider.to_string()))?;
         let secret = env::var("LYRA_CAPTCHA_SECRET")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .ok_or(ConfigError::CaptchaTurnstileIncomplete)?;
-        return Ok(CaptchaConfig::Turnstile {
-            site_key: site_key.trim().to_string(),
-            secret: secret.trim().to_string(),
-        });
+            .ok_or_else(|| ConfigError::CaptchaIncomplete(provider.to_string()))?;
+        Ok((site_key.trim().to_string(), secret.trim().to_string()))
+    };
+
+    match provider.to_ascii_lowercase().as_str() {
+        "turnstile" => {
+            let (site_key, secret) = keys()?;
+            Ok(CaptchaConfig::Turnstile { site_key, secret })
+        }
+        "hcaptcha" => {
+            let (site_key, secret) = keys()?;
+            Ok(CaptchaConfig::HCaptcha { site_key, secret })
+        }
+        "recaptcha" => {
+            let (site_key, secret) = keys()?;
+            Ok(CaptchaConfig::Recaptcha { site_key, secret })
+        }
+        "recaptcha-v3" | "recaptcha_v3" => {
+            let (site_key, secret) = keys()?;
+            Ok(CaptchaConfig::RecaptchaV3 { site_key, secret })
+        }
+        _ => Err(ConfigError::CaptchaProviderUnknown(provider.to_string())),
     }
-    Err(ConfigError::CaptchaProviderUnknown(provider.to_string()))
 }
 
 /// Load and validate the master key from `LYRA_MASTER_KEY`.
@@ -383,7 +443,7 @@ mod tests {
             env::remove_var("LYRA_CAPTCHA_SECRET");
         }
         let err = Config::from_env().unwrap_err();
-        assert!(matches!(err, ConfigError::CaptchaTurnstileIncomplete));
+        assert!(matches!(err, ConfigError::CaptchaIncomplete(p) if p == "turnstile"));
         unsafe {
             env::remove_var("LYRA_MASTER_KEY");
             env::remove_var("LYRA_PUBLIC_URL");
@@ -424,7 +484,7 @@ mod tests {
         unsafe {
             env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
             env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
-            env::set_var("LYRA_CAPTCHA_PROVIDER", "hcaptcha");
+            env::set_var("LYRA_CAPTCHA_PROVIDER", "securimage");
         }
         let err = Config::from_env().unwrap_err();
         assert!(matches!(err, ConfigError::CaptchaProviderUnknown(_)));
@@ -432,6 +492,95 @@ mod tests {
             env::remove_var("LYRA_MASTER_KEY");
             env::remove_var("LYRA_PUBLIC_URL");
             env::remove_var("LYRA_CAPTCHA_PROVIDER");
+        }
+    }
+
+    #[test]
+    fn captcha_hcaptcha_loads_when_complete() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
+            env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
+            env::set_var("LYRA_CAPTCHA_PROVIDER", "hcaptcha");
+            env::set_var("LYRA_CAPTCHA_SITE_KEY", "site-key-test");
+            env::set_var("LYRA_CAPTCHA_SECRET", "secret-test");
+        }
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.captcha,
+            CaptchaConfig::HCaptcha {
+                site_key: "site-key-test".into(),
+                secret: "secret-test".into(),
+            }
+        );
+        unsafe {
+            env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
+            env::remove_var("LYRA_CAPTCHA_PROVIDER");
+            env::remove_var("LYRA_CAPTCHA_SITE_KEY");
+            env::remove_var("LYRA_CAPTCHA_SECRET");
+        }
+    }
+
+    #[test]
+    fn captcha_recaptcha_loads_when_complete() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
+            env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
+            env::set_var("LYRA_CAPTCHA_PROVIDER", "recaptcha");
+            env::set_var("LYRA_CAPTCHA_SITE_KEY", "site-key-test");
+            env::set_var("LYRA_CAPTCHA_SECRET", "secret-test");
+        }
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.captcha,
+            CaptchaConfig::Recaptcha {
+                site_key: "site-key-test".into(),
+                secret: "secret-test".into(),
+            }
+        );
+        assert_eq!(
+            cfg.captcha.public().unwrap().provider,
+            "recaptcha".to_string()
+        );
+        unsafe {
+            env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
+            env::remove_var("LYRA_CAPTCHA_PROVIDER");
+            env::remove_var("LYRA_CAPTCHA_SITE_KEY");
+            env::remove_var("LYRA_CAPTCHA_SECRET");
+        }
+    }
+
+    #[test]
+    fn captcha_recaptcha_v3_loads_when_complete() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            env::set_var("LYRA_MASTER_KEY", "test-master-key-with-32-bytes-minimum!!");
+            env::set_var("LYRA_PUBLIC_URL", "http://localhost:3000");
+            env::set_var("LYRA_CAPTCHA_PROVIDER", "recaptcha-v3");
+            env::set_var("LYRA_CAPTCHA_SITE_KEY", "site-key-test");
+            env::set_var("LYRA_CAPTCHA_SECRET", "secret-test");
+        }
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(
+            cfg.captcha,
+            CaptchaConfig::RecaptchaV3 {
+                site_key: "site-key-test".into(),
+                secret: "secret-test".into(),
+            }
+        );
+        assert_eq!(
+            cfg.captcha.public().unwrap().provider,
+            "recaptcha-v3".to_string()
+        );
+        unsafe {
+            env::remove_var("LYRA_MASTER_KEY");
+            env::remove_var("LYRA_PUBLIC_URL");
+            env::remove_var("LYRA_CAPTCHA_PROVIDER");
+            env::remove_var("LYRA_CAPTCHA_SITE_KEY");
+            env::remove_var("LYRA_CAPTCHA_SECRET");
         }
     }
 

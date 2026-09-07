@@ -3,14 +3,19 @@
  */
 
 import type { ComponentProps, FormEvent } from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
+import { CaptchaWidget, type CaptchaTokenFetcher } from '@/components/captcha-widget';
 import { StampLogo } from '@/components/stamp-logo';
-import { TurnstileWidget } from '@/components/turnstile-widget';
 import { Button } from '@/components/ui/button';
 import { Field, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { t } from '@/i18n';
+import {
+  captchaProviderName,
+  isInvisibleCaptchaProvider,
+  type CaptchaProvider,
+} from '@/lib/captcha-providers';
 import { cn } from '@/lib/utils';
 import type { CaptchaPublic } from '@/machines/auth';
 import { useUIStore } from '@/stores/ui';
@@ -54,9 +59,12 @@ export function LoginForm({
   const [validationError, setValidationError] = useState<string | null>(null);
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const [captchaResetKey, setCaptchaResetKey] = useState(0);
+  const [captchaVerifying, setCaptchaVerifying] = useState(false);
+  const captchaFetchRef = useRef<CaptchaTokenFetcher | null>(null);
 
   const formError = error || validationError;
-  const needsCaptcha = Boolean(captcha?.provider === 'turnstile' && captcha.siteKey);
+  const needsCaptcha = Boolean(captcha?.provider && captcha.siteKey);
+  const invisibleCaptcha = captcha ? isInvisibleCaptchaProvider(captcha.provider) : false;
 
   useEffect(() => {
     if (error && needsCaptcha) {
@@ -65,6 +73,24 @@ export function LoginForm({
     }
   }, [error, needsCaptcha]);
 
+  /**
+   * Resolve the token to submit with: `undefined` when no captcha is active,
+   * a token on success, or `null` on failure. Interactive providers use the
+   * token from the checkbox widget; invisible ones fetch a fresh token now.
+   */
+  const resolveCaptchaToken = async (): Promise<string | null | undefined> => {
+    if (!needsCaptcha) return undefined;
+    if (!invisibleCaptcha) return captchaToken;
+    const fetcher = captchaFetchRef.current;
+    if (!fetcher) return null;
+    setCaptchaVerifying(true);
+    try {
+      return await fetcher();
+    } finally {
+      setCaptchaVerifying(false);
+    }
+  };
+
   const handleLoginSubmit = (e: FormEvent) => {
     e.preventDefault();
     setValidationError(null);
@@ -72,11 +98,17 @@ export function LoginForm({
       setValidationError(t(locale, 'common.error'));
       return;
     }
-    if (needsCaptcha && !captchaToken) {
-      setValidationError(t(locale, 'auth.captchaRequired'));
-      return;
-    }
-    onLogin(username, password, captchaToken);
+    void resolveCaptchaToken().then((token) => {
+      if (token === null) {
+        setValidationError(t(locale, 'auth.captchaFailed'));
+        return;
+      }
+      if (needsCaptcha && !token) {
+        setValidationError(t(locale, 'auth.captchaRequired'));
+        return;
+      }
+      onLogin(username, password, token);
+    });
   };
 
   const handleBootstrapSubmit = (e: FormEvent) => {
@@ -90,11 +122,17 @@ export function LoginForm({
       setValidationError(t(locale, 'auth.passwordMismatch'));
       return;
     }
-    if (needsCaptcha && !captchaToken) {
-      setValidationError(t(locale, 'auth.captchaRequired'));
-      return;
-    }
-    onBootstrap(username, password, displayName || undefined, locale, captchaToken);
+    void resolveCaptchaToken().then((token) => {
+      if (token === null) {
+        setValidationError(t(locale, 'auth.captchaFailed'));
+        return;
+      }
+      if (needsCaptcha && !token) {
+        setValidationError(t(locale, 'auth.captchaRequired'));
+        return;
+      }
+      onBootstrap(username, password, displayName || undefined, locale, token);
+    });
   };
 
   const handleTotpSubmit = (e: FormEvent) => {
@@ -122,13 +160,17 @@ export function LoginForm({
   const captchaField =
     needsCaptcha && captcha ? (
       <Field>
-        <TurnstileWidget
+        <CaptchaWidget
+          provider={captcha.provider as CaptchaProvider}
           siteKey={captcha.siteKey}
           onToken={setCaptchaToken}
           resetKey={captchaResetKey}
           className="flex justify-center"
+          fetchTokenRef={captchaFetchRef}
         />
-        <p className="pt-1 text-[11px] text-muted-foreground">{t(locale, 'auth.captchaHint')}</p>
+        <p className="pt-1 text-[11px] text-muted-foreground">
+          {t(locale, 'auth.captchaHint', { provider: captchaProviderName(captcha.provider) })}
+        </p>
       </Field>
     ) : null;
 
@@ -247,7 +289,12 @@ export function LoginForm({
                   {captchaField}
                   {formError ? <FieldError>{formError}</FieldError> : null}
                   <Field>
-                    <Button type="submit" variant="outline" className={submitButtonClass}>
+                    <Button
+                      type="submit"
+                      variant="outline"
+                      className={submitButtonClass}
+                      disabled={captchaVerifying}
+                    >
                       {t(locale, 'auth.createAccount')}
                     </Button>
                   </Field>
@@ -283,7 +330,12 @@ export function LoginForm({
                   {captchaField}
                   {formError ? <FieldError>{formError}</FieldError> : null}
                   <Field>
-                    <Button type="submit" variant="outline" className={submitButtonClass}>
+                    <Button
+                      type="submit"
+                      variant="outline"
+                      className={submitButtonClass}
+                      disabled={captchaVerifying}
+                    >
                       {t(locale, 'auth.login')}
                     </Button>
                   </Field>
