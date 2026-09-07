@@ -5,6 +5,8 @@
  *  - App-shell caching so the installed PWA opens instantly (and offline).
  *  - Displaying mail notifications on behalf of the page (works from
  *    background tabs; the page's JS keeps the SSE stream alive).
+ *  - Receiving Web Push messages (RFC 8030) and showing them as
+ *    notifications when no Lyra tab is open to do it.
  *  - Focusing + routing to a message on notification click.
  *
  * Deliberately NOT cached:
@@ -17,7 +19,7 @@
  * up when the UI asks for it.
  */
 
-const VERSION = 'lyra-v1';
+const VERSION = 'lyra-v2';
 const SHELL_CACHE = `${VERSION}-shell`;
 const RUNTIME_CACHE = `${VERSION}-runtime`;
 
@@ -126,6 +128,37 @@ self.addEventListener('notificationclick', (event) => {
         client = await self.clients.openWindow('/');
       }
       client?.postMessage({ type: 'lyra:open-message', messageId });
+    })(),
+  );
+});
+
+self.addEventListener('push', (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = {};
+  }
+  const title = typeof data.title === 'string' && data.title ? data.title : 'Lyra';
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: typeof data.body === 'string' ? data.body : '',
+      tag: typeof data.tag === 'string' ? data.tag : undefined,
+      icon: '/icons/icon-192.png',
+      badge: '/icons/icon-192.png',
+      data: data.data && typeof data.data === 'object' ? data.data : {},
+    }),
+  );
+});
+
+// The push service rotated our subscription. Re-subscribe with the same key;
+// the server record is healed by the page's reconcilePushSubscription on the
+// next app open (the SW cannot reach the auth token in localStorage).
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(
+    (async () => {
+      const options = event.oldSubscription?.options ?? { userVisibleOnly: true };
+      await self.registration.pushManager.subscribe(options).catch(() => {});
     })(),
   );
 });
