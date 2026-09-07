@@ -1,10 +1,15 @@
 /**
- * Mail notifications: permission management + new-inbox detection.
+ * Mail notifications: permission management + new-mail detection.
  *
- * New-mail awareness is frontend-driven v1: on `sync_complete` the inbox is
- * re-listed (limit 15, newest first) and diffed against a per-account
- * high-water mark of known message ids. The first run seeds the baseline
- * silently so opening Lyra doesn't fire a notification storm.
+ * New-mail awareness is frontend-driven v1: on `sync_complete` the account's
+ * newest messages are re-listed and diffed against a per-account high-water
+ * mark of known message ids. The first run seeds the baseline silently so
+ * opening Lyra doesn't fire a notification storm.
+ *
+ * "New mail" means any message landing outside outgoing/system folders
+ * (sent, drafts, trash, spam, archive) — not just role=inbox. Providers with
+ * server-side rules file most mail directly into custom folders (no special
+ * role), so an inbox-only diff would never fire for those accounts.
  *
  * Notifications render through the service worker when present (works from
  * background tabs, one surface per origin) and fall back to the page-level
@@ -28,6 +33,21 @@ const PREFS_KEY = 'lyra.notifications';
 const INBOX_DIFF_LIMIT = 15;
 /** Never fire more than this many notifications per sync; extras fold into a summary. */
 const MAX_PER_SYNC = 3;
+/** Folder roles that never count as incoming mail. */
+const NON_INCOMING_ROLES = new Set([
+  'sent',
+  'drafts',
+  'trash',
+  'spam',
+  'junk',
+  'outbox',
+  'archive',
+]);
+
+/** True when the folder role counts as incoming mail (inbox or a custom folder). */
+export function isIncomingFolderRole(folderRole: string | null | undefined): boolean {
+  return !NON_INCOMING_ROLES.has(folderRole ?? '');
+}
 
 export interface NotificationPrefs {
   enabled: boolean;
@@ -153,9 +173,9 @@ export async function openMessage(messageId: string): Promise<void> {
 }
 
 /**
- * React to a sync event: when an account finished syncing, diff the inbox
- * and notify for messages not seen before. No-ops unless notifications are
- * enabled + permitted, and stays quiet while the tab is focused.
+ * React to a sync event: when an account finished syncing, diff its newest
+ * incoming messages and notify for ids not seen before. No-ops unless
+ * notifications are enabled + permitted.
  */
 export async function handleSyncEventForNotifications(ev: SyncEvent): Promise<void> {
   if (ev.type !== 'sync_complete' && ev.type !== 'incremental_complete') return;
@@ -170,12 +190,14 @@ export async function handleSyncEventForNotifications(ev: SyncEvent): Promise<vo
   const { accountId } = ev;
   let messages: ApiMessage[];
   try {
-    messages = await api<ApiMessage[]>(`/messages?role=inbox&accountId=${accountId}`);
+    // All folders, newest first: providers with server-side rules file mail
+    // straight into custom folders, so an inbox-only diff never fires there.
+    messages = await api<ApiMessage[]>(`/messages?accountId=${accountId}`);
   } catch {
     return; // next sync retries
   }
-  // Newest-first; only the freshest slice participates in the diff.
-  const slice = messages.slice(0, INBOX_DIFF_LIMIT);
+  const incoming = messages.filter((m) => isIncomingFolderRole(m.folderRole));
+  const slice = incoming.slice(0, INBOX_DIFF_LIMIT);
   const ids = slice.map((m) => m.id);
   const baseline = readBaseline();
   const known = new Set(baseline[accountId]);

@@ -29,6 +29,8 @@ export interface ApiMessage {
   id: string;
   accountId: string;
   folderId: string;
+  /** Effective folder role (override wins); absent for custom folders. */
+  folderRole?: string | null;
   messageIdHeader?: string;
   inReplyTo?: string;
   referencesHeaders?: string;

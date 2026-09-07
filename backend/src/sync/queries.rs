@@ -313,6 +313,7 @@ pub(super) fn message_response_from_query_row(
             let folder_role: Option<String> = row.try_get("", "folder_role")?;
             stored || folder_role.as_deref() == Some("drafts")
         },
+        folder_role: row.try_get("", "folder_role")?,
         has_attachments: row.try_get("", "has_attachments")?,
         labels: row_json_text(row, "labels")?,
         remote_content_blocked: false,
@@ -388,6 +389,10 @@ pub struct MessageResponse {
     pub id: String,
     pub account_id: String,
     pub folder_id: String,
+    /// Effective role of the containing folder (override wins over detected);
+    /// `null` for custom folders. Clients use it for role-aware behavior like
+    /// new-mail notifications on serverside-filtered accounts.
+    pub folder_role: Option<String>,
     /// RFC 5322 Message-ID — clients use it to recognize cross-folder
     /// copies of the same message (e.g. INBOX + Archive) and to link
     /// replies via In-Reply-To/References into threads.
@@ -675,6 +680,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
         is_read: row.is_read,
         is_starred: row.is_starred,
         is_draft: row.is_draft || row.folder_role.as_deref() == Some("drafts"),
+        folder_role: row.folder_role.clone(),
         has_attachments: row.has_attachments,
         labels: row.labels.clone(),
         remote_content_blocked: false,

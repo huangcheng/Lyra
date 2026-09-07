@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  isIncomingFolderRole,
   readNotificationPrefs,
   senderLabel,
   writeNotificationPrefs,
@@ -57,5 +58,19 @@ describe('senderLabel', () => {
     expect(senderLabel(msg('grace@example.com'))).toBe('grace@example.com');
     expect(senderLabel(msg(''))).toBe('');
     expect(senderLabel(msg(undefined))).toBe('');
+  });
+});
+
+describe('isIncomingFolderRole', () => {
+  it('treats inbox and custom (null) folders as incoming', () => {
+    expect(isIncomingFolderRole('inbox')).toBe(true);
+    expect(isIncomingFolderRole(null)).toBe(true);
+    expect(isIncomingFolderRole(undefined)).toBe(true);
+  });
+
+  it('excludes outgoing and system folders', () => {
+    for (const role of ['sent', 'drafts', 'trash', 'spam', 'junk', 'outbox', 'archive']) {
+      expect(isIncomingFolderRole(role)).toBe(false);
+    }
   });
 });
