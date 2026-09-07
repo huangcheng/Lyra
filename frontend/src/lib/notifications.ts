@@ -18,13 +18,15 @@
  * Notification API otherwise. Clicking focuses Lyra and opens the message
  * (the SW posts `lyra:open-message`; main.tsx routes it here).
  *
- * Limitation (by design, see the notifications/PWA spec): delivery requires
- * the app to be running — the SSE stream lives in the page. Closed-app
- * push is the Push-API workstream.
+ * These banners require the app to be running — the SSE stream lives in the
+ * page. Closed-app delivery is the Web Push workstream (`lib/push.ts`); the
+ * mute prefs written here are mirrored to the server (`syncPushPrefs`) so
+ * the push fan-out can filter before sending.
  */
 
 import { api } from '@/lib/api-client';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
+import { syncPushPrefs } from '@/lib/push';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -98,6 +100,12 @@ export function readNotificationPrefs(): NotificationPrefs {
 export function writeNotificationPrefs(prefs: NotificationPrefs): void {
   localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   for (const listener of prefsListeners) listener();
+  // Server-side copy for the push fan-out (no-op when push isn't subscribed).
+  void syncPushPrefs({
+    mutedFolderIds: prefs.mutedFolderIds,
+    mutedThreadIds: prefs.mutedThreadIds,
+    locale: useUIStore.getState().locale,
+  });
 }
 
 /** True when banners are muted for a folder. */

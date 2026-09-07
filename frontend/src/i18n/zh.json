@@ -476,8 +476,17 @@
       "test": "发送测试通知",
       "denied": "浏览器已阻止此网站的通知。请先在浏览器设置中允许 Lyra，再重新开启。",
       "unsupported": "此浏览器不支持网页通知。",
-      "runningNote": "通知需要 Lyra 处于运行状态（标签页或已安装应用）；应用关闭后的推送将在后续版本提供。",
-      "eventTitle": "即将开始"
+      "runningNote": "应用内横幅需要 Lyra 处于打开状态；下方后台推送可覆盖应用关闭后的场景。",
+      "eventTitle": "即将开始",
+      "push": {
+        "title": "后台推送",
+        "hint": "即使 Lyra 未打开也能收到新邮件通知。经由浏览器推送服务发送，邮件内容端到端加密。",
+        "test": "发送测试推送",
+        "testResult": "已推送到 {{sent}} 台设备。",
+        "testFailed": "测试推送失败，请查看服务端日志。",
+        "unsupported": "当前浏览器不支持推送通知。",
+        "iosHint": "在 iPhone/iPad 上，请先将 Lyra 添加到主屏幕，然后才能开启推送。"
+      }
     },
     "install": {
       "title": "安装 Lyra",

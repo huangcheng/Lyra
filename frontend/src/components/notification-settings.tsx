@@ -1,5 +1,6 @@
 /**
- * Settings → General: notifications + install card.
+ * Settings → General: notifications (in-app banners + background push) and
+ * the install card.
  *
  * Notifications need a user gesture to request browser permission, so the
  * switch both flips the preference and asks (once). The install card adapts
@@ -7,13 +8,14 @@
  * Screen steps (iOS Safari), or "already installed" in standalone mode.
  */
 
-import { useState } from 'react';
-import { Bell, Download } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Bell, BellRing, Download } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { t } from '@/i18n';
+import { api } from '@/lib/api-client';
 import {
   notificationPermission,
   readNotificationPrefs,
@@ -21,6 +23,13 @@ import {
   sendTestNotification,
   writeNotificationPrefs,
 } from '@/lib/notifications';
+import {
+  pushStatus,
+  subscribePush,
+  syncPushPrefs,
+  unsubscribePush,
+  type PushStatus,
+} from '@/lib/push';
 import { isIos, isStandalone, promptInstall, useInstallAvailable } from '@/lib/pwa';
 import { useUIStore } from '@/stores/ui';
 
@@ -33,6 +42,54 @@ export function NotificationSettings() {
   const installable = useInstallAvailable();
   const standalone = isStandalone();
   const ios = isIos();
+
+  const [push, setPush] = useState<PushStatus>('unsubscribed');
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushTestResult, setPushTestResult] = useState<string | null>(null);
+
+  useEffect(() => {
+    void pushStatus().then(setPush);
+  }, []);
+
+  const handlePushToggle = async (next: boolean) => {
+    setPushBusy(true);
+    try {
+      if (!next) {
+        await unsubscribePush();
+        setPush('unsubscribed');
+        return;
+      }
+      const granted = await requestNotificationPermission();
+      setPermission(granted);
+      if (granted !== 'granted') {
+        setPush(granted === 'denied' ? 'denied' : 'unsubscribed');
+        return;
+      }
+      await subscribePush();
+      const prefs = readNotificationPrefs();
+      await syncPushPrefs({
+        mutedFolderIds: prefs.mutedFolderIds,
+        mutedThreadIds: prefs.mutedThreadIds,
+        locale,
+      });
+      setPush('subscribed');
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const handlePushTest = async () => {
+    setPushBusy(true);
+    setPushTestResult(null);
+    try {
+      const res = await api<{ sent: number; removed: number }>('/push/test', { method: 'POST' });
+      setPushTestResult(t(locale, 'settings.notifications.push.testResult', { sent: res.sent }));
+    } catch {
+      setPushTestResult(t(locale, 'settings.notifications.push.testFailed'));
+    } finally {
+      setPushBusy(false);
+    }
+  };
 
   const handleToggle = async (next: boolean) => {
     if (!next) {
@@ -116,6 +173,53 @@ export function NotificationSettings() {
             {t(locale, 'settings.notifications.runningNote')}
           </p>
         ) : null}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
+          <div className="flex items-start gap-2.5">
+            <BellRing className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <div>
+              <div className="text-[13px] font-medium">
+                {t(locale, 'settings.notifications.push.title')}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {t(locale, 'settings.notifications.push.hint')}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {push === 'subscribed' ? (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={pushBusy}
+                onClick={() => void handlePushTest()}
+              >
+                {t(locale, 'settings.notifications.push.test')}
+              </Button>
+            ) : null}
+            <Switch
+              checked={push === 'subscribed'}
+              disabled={pushBusy || push === 'unsupported' || push === 'denied'}
+              onCheckedChange={(v) => void handlePushToggle(v)}
+              aria-label={t(locale, 'settings.notifications.push.title')}
+            />
+          </div>
+        </div>
+        {push === 'unsupported' ? (
+          <p className="text-xs text-muted-foreground">
+            {t(locale, 'settings.notifications.push.unsupported')}
+          </p>
+        ) : null}
+        {push === 'denied' ? (
+          <p className="text-xs text-muted-foreground">
+            {t(locale, 'settings.notifications.denied')}
+          </p>
+        ) : null}
+        {ios && !standalone ? (
+          <p className="text-xs text-muted-foreground">
+            {t(locale, 'settings.notifications.push.iosHint')}
+          </p>
+        ) : null}
+        {pushTestResult ? <p className="text-xs text-muted-foreground">{pushTestResult}</p> : null}
       </section>
 
       <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">

@@ -3,7 +3,7 @@
  * sender-label extraction from the stored `fromAddress` forms.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   isFolderMuted,
@@ -18,6 +18,9 @@ import {
   type NotificationPrefs,
 } from './notifications';
 import type { ApiMessage } from './mail-api';
+import { syncPushPrefs } from './push';
+
+vi.mock('./push', () => ({ syncPushPrefs: vi.fn() }));
 
 function msg(fromAddress?: string): ApiMessage {
   return {
@@ -92,6 +95,15 @@ describe('notification prefs', () => {
     setThreadMuted('t1', false);
     expect(isThreadMuted('t1')).toBe(false);
     expect(readNotificationPrefs().mutedFolderIds).toEqual([]);
+  });
+
+  it('writeNotificationPrefs mirrors mutes to the push server', () => {
+    writeNotificationPrefs({ enabled: true, mutedFolderIds: ['f1'], mutedThreadIds: ['t1'] });
+    expect(syncPushPrefs).toHaveBeenCalledWith({
+      mutedFolderIds: ['f1'],
+      mutedThreadIds: ['t1'],
+      locale: expect.any(String),
+    });
   });
 });
 

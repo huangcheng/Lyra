@@ -476,8 +476,17 @@
       "test": "Send test notification",
       "denied": "Notifications are blocked for this site in your browser settings. Unblock Lyra there, then toggle again.",
       "unsupported": "This browser does not support web notifications.",
-      "runningNote": "Delivery needs Lyra to be running (open tab or installed app); push for closed apps comes later.",
-      "eventTitle": "Upcoming event"
+      "runningNote": "In-app banners need Lyra running; background push below covers closed apps.",
+      "eventTitle": "Upcoming event",
+      "push": {
+        "title": "Background push",
+        "hint": "Get notified even when Lyra is closed. Uses your browser's push service; message content is encrypted end-to-end.",
+        "test": "Send test push",
+        "testResult": "Push sent to {{sent}} device(s).",
+        "testFailed": "Test push failed — check the server logs.",
+        "unsupported": "This browser does not support push notifications.",
+        "iosHint": "On iPhone/iPad, install Lyra to the Home Screen first to enable push."
+      }
     },
     "install": {
       "title": "Install Lyra",
