@@ -7,6 +7,7 @@
 
 import {
   Archive,
+  BellOff,
   ChevronDown,
   ChevronRight,
   File,
@@ -18,13 +19,27 @@ import {
   Trash2,
   type LucideIcon,
 } from 'lucide-react';
-import { useMemo, type CSSProperties, type HTMLAttributes, type Ref } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type HTMLAttributes,
+  type ReactNode,
+  type Ref,
+} from 'react';
 import { useDndContext, useDroppable } from '@dnd-kit/core';
 import { ThinkingOrb } from 'thinking-orbs';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
 import type { FolderDropData, UnifiedRoleDropData } from '@/components/mail/mail-dnd';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { t } from '@/i18n';
 import { orderAccounts } from '@/lib/account-order';
@@ -41,11 +56,52 @@ import {
   type FolderTreeNode,
 } from '@/lib/folder-tree';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
+import { isFolderMuted, setFolderMuted, subscribeNotificationPrefs } from '@/lib/notifications';
 import { useSyncProgress } from '@/lib/sync-progress';
 import { avatarTone, cn } from '@/lib/utils';
 import { useMailStore, type UnifiedFolder } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 import type { MailAccount, MailFolder, SupportedLocale } from '@/types';
+
+/** Reactive muted-notification state for a folder row. */
+function useFolderMuted(folderId: string): boolean {
+  const [muted, setMuted] = useState(() => isFolderMuted(folderId));
+  useEffect(() => subscribeNotificationPrefs(() => setMuted(isFolderMuted(folderId))), [folderId]);
+  return muted;
+}
+
+/** Right-click wrapper adding the per-folder notification mute toggle. */
+function FolderNotificationMenu({ folderId, children }: { folderId: string; children: ReactNode }) {
+  const locale = useUIStore((s) => s.locale);
+  const muted = useFolderMuted(folderId);
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onClick={() => setFolderMuted(folderId, !muted)}>
+          <BellOff className="size-4" />
+          {t(locale, muted ? 'mail.unmuteFolderNotifications' : 'mail.muteFolderNotifications')}
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+/** Trailing marker shown on folders with muted notifications. */
+function FolderMutedMark() {
+  const locale = useUIStore((s) => s.locale);
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <BellOff
+          className="ml-auto size-3 shrink-0 text-muted-foreground"
+          aria-label={t(locale, 'mail.folderNotificationsMuted')}
+        />
+      </TooltipTrigger>
+      <TooltipContent>{t(locale, 'mail.folderNotificationsMuted')}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 const ROLE_ICONS: Record<StandardFolderRole, LucideIcon> = {
   inbox: Inbox,
@@ -224,6 +280,7 @@ function CustomFolderBranch({
   const hasChildren = node.children.length > 0;
   const expanded = expandedIds.has(node.id);
   const active = selectedFolderId === node.id;
+  const muted = useFolderMuted(node.id);
   const { setNodeRef, rowClass } = useFolderDropTarget(
     { type: 'folder', accountId, folderId: node.id },
     `drop:folder:${node.id}`,
@@ -231,47 +288,50 @@ function CustomFolderBranch({
 
   return (
     <div className="min-w-0">
-      <div
-        ref={setNodeRef}
-        className={cn(navRowClass(active), rowClass)}
-        style={{ paddingLeft: depth * 16 }}
-      >
-        {hasChildren ? (
+      <FolderNotificationMenu folderId={node.id}>
+        <div
+          ref={setNodeRef}
+          className={cn(navRowClass(active), rowClass)}
+          style={{ paddingLeft: depth * 16 }}
+        >
+          {hasChildren ? (
+            <button
+              type="button"
+              className="flex size-5 shrink-0 items-center justify-center text-ter-foreground"
+              onClick={() => toggleExpanded(node.id)}
+              aria-expanded={expanded}
+              aria-label={
+                expanded ? t(locale, 'mail.collapseFolder') : t(locale, 'mail.expandFolder')
+              }
+            >
+              {expanded ? (
+                <ChevronDown className="size-3.5" />
+              ) : (
+                <ChevronRight className="size-3.5" />
+              )}
+            </button>
+          ) : (
+            <span className="inline-block size-5 shrink-0" />
+          )}
           <button
             type="button"
-            className="flex size-5 shrink-0 items-center justify-center text-ter-foreground"
-            onClick={() => toggleExpanded(node.id)}
-            aria-expanded={expanded}
-            aria-label={
-              expanded ? t(locale, 'mail.collapseFolder') : t(locale, 'mail.expandFolder')
-            }
+            className="flex h-8 min-w-0 flex-1 items-center gap-2 pr-2.5 text-left text-[13px]"
+            onClick={() => selectAccountFolder(accountId, node.id)}
           >
-            {expanded ? (
-              <ChevronDown className="size-3.5" />
-            ) : (
-              <ChevronRight className="size-3.5" />
-            )}
+            <span
+              aria-hidden
+              className={cn('size-2 shrink-0 rounded-[3px]', avatarTone(node.title))}
+            />
+            <span className="truncate">{node.title}</span>
+            {node.label ? (
+              <span className="ml-auto text-[11.5px] tabular-nums text-muted-foreground">
+                {node.label}
+              </span>
+            ) : null}
+            {muted ? <FolderMutedMark /> : null}
           </button>
-        ) : (
-          <span className="inline-block size-5 shrink-0" />
-        )}
-        <button
-          type="button"
-          className="flex h-8 min-w-0 flex-1 items-center gap-2 pr-2.5 text-left text-[13px]"
-          onClick={() => selectAccountFolder(accountId, node.id)}
-        >
-          <span
-            aria-hidden
-            className={cn('size-2 shrink-0 rounded-[3px]', avatarTone(node.title))}
-          />
-          <span className="truncate">{node.title}</span>
-          {node.label ? (
-            <span className="ml-auto text-[11.5px] tabular-nums text-muted-foreground">
-              {node.label}
-            </span>
-          ) : null}
-        </button>
-      </div>
+        </div>
+      </FolderNotificationMenu>
       {hasChildren && expanded
         ? node.children.map((child) => (
             <CustomFolderBranch
@@ -312,6 +372,7 @@ function RoleFolderRow({
   const hasChildren = children.length > 0;
   const childrenExpanded = expandedIds.has(folder.id);
   const active = selectedFolderId === folder.id;
+  const muted = useFolderMuted(folder.id);
   const { setNodeRef, rowClass } = useFolderDropTarget(
     { type: 'folder', accountId: account.id, folderId: folder.id },
     `drop:folder:${folder.id}`,
@@ -319,38 +380,41 @@ function RoleFolderRow({
 
   return (
     <div className="min-w-0">
-      <div ref={setNodeRef} className={cn(navRowClass(active), rowClass)}>
-        {hasChildren ? (
+      <FolderNotificationMenu folderId={folder.id}>
+        <div ref={setNodeRef} className={cn(navRowClass(active), rowClass)}>
+          {hasChildren ? (
+            <button
+              type="button"
+              className="flex size-5 shrink-0 items-center justify-center text-ter-foreground"
+              onClick={() => onToggleExpanded(folder.id)}
+              aria-expanded={childrenExpanded}
+              aria-label={
+                childrenExpanded ? t(locale, 'mail.collapseFolder') : t(locale, 'mail.expandFolder')
+              }
+            >
+              {childrenExpanded ? (
+                <ChevronDown className="size-3.5" />
+              ) : (
+                <ChevronRight className="size-3.5" />
+              )}
+            </button>
+          ) : (
+            <span className="inline-block size-5 shrink-0" />
+          )}
           <button
             type="button"
-            className="flex size-5 shrink-0 items-center justify-center text-ter-foreground"
-            onClick={() => onToggleExpanded(folder.id)}
-            aria-expanded={childrenExpanded}
-            aria-label={
-              childrenExpanded ? t(locale, 'mail.collapseFolder') : t(locale, 'mail.expandFolder')
-            }
+            onClick={() => selectAccountFolder(account.id, folder.id)}
+            className="flex h-8 min-w-0 flex-1 items-center gap-2 pr-2.5 text-left text-[13px]"
           >
-            {childrenExpanded ? (
-              <ChevronDown className="size-3.5" />
-            ) : (
-              <ChevronRight className="size-3.5" />
-            )}
+            <Icon
+              className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')}
+            />
+            <span className="truncate">{t(locale, `mail.folder.${role}`)}</span>
+            <UnreadCount count={folder.unreadCount} />
+            {muted ? <FolderMutedMark /> : null}
           </button>
-        ) : (
-          <span className="inline-block size-5 shrink-0" />
-        )}
-        <button
-          type="button"
-          onClick={() => selectAccountFolder(account.id, folder.id)}
-          className="flex h-8 min-w-0 flex-1 items-center gap-2 pr-2.5 text-left text-[13px]"
-        >
-          <Icon
-            className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-ter-foreground')}
-          />
-          <span className="truncate">{t(locale, `mail.folder.${role}`)}</span>
-          <UnreadCount count={folder.unreadCount} />
-        </button>
-      </div>
+        </div>
+      </FolderNotificationMenu>
       {hasChildren && childrenExpanded
         ? children.map((child) => (
             <CustomFolderBranch

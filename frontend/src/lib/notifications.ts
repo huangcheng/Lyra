@@ -60,6 +60,18 @@ export function messageIdentity(msg: ApiMessage): string {
 
 export interface NotificationPrefs {
   enabled: boolean;
+  /** Folder ids that never produce banners (right-click a folder to mute). */
+  mutedFolderIds: string[];
+}
+
+const prefsListeners = new Set<() => void>();
+
+/** Subscribe to preference changes (e.g. folder mute toggles); returns unsubscribe. */
+export function subscribeNotificationPrefs(listener: () => void): () => void {
+  prefsListeners.add(listener);
+  return () => {
+    prefsListeners.delete(listener);
+  };
 }
 
 export function readNotificationPrefs(): NotificationPrefs {
@@ -67,16 +79,39 @@ export function readNotificationPrefs(): NotificationPrefs {
     const raw = localStorage.getItem(PREFS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<NotificationPrefs>;
-      if (typeof parsed.enabled === 'boolean') return { enabled: parsed.enabled };
+      const mutedFolderIds = Array.isArray(parsed.mutedFolderIds)
+        ? parsed.mutedFolderIds.filter((id): id is string => typeof id === 'string')
+        : [];
+      if (typeof parsed.enabled === 'boolean') {
+        return { enabled: parsed.enabled, mutedFolderIds };
+      }
     }
   } catch {
     // corrupted blob → defaults
   }
-  return { enabled: false };
+  return { enabled: false, mutedFolderIds: [] };
 }
 
 export function writeNotificationPrefs(prefs: NotificationPrefs): void {
   localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  for (const listener of prefsListeners) listener();
+}
+
+/** True when banners are muted for a folder. */
+export function isFolderMuted(folderId: string): boolean {
+  return readNotificationPrefs().mutedFolderIds.includes(folderId);
+}
+
+/** Mute/unmute banners for a folder (persists with the notification prefs). */
+export function setFolderMuted(folderId: string, muted: boolean): void {
+  const prefs = readNotificationPrefs();
+  const next = new Set(prefs.mutedFolderIds);
+  if (muted) {
+    next.add(folderId);
+  } else {
+    next.delete(folderId);
+  }
+  writeNotificationPrefs({ ...prefs, mutedFolderIds: [...next] });
 }
 
 export function notificationPermission(): NotificationPermission | 'unsupported' {
@@ -214,7 +249,9 @@ export async function handleSyncEventForNotifications(ev: SyncEvent): Promise<vo
   writeBaseline(baseline);
   if (known.size === 0) return; // first run seeds silently
 
-  const fresh = slice.filter((m) => !known.has(messageIdentity(m)));
+  // The baseline records everything incoming; the mute list only gates banners.
+  const muted = new Set(readNotificationPrefs().mutedFolderIds);
+  const fresh = slice.filter((m) => !known.has(messageIdentity(m)) && !muted.has(m.folderId));
   if (fresh.length === 0) return;
 
   const locale = useUIStore.getState().locale;

@@ -37,7 +37,7 @@ export function NotificationSettings() {
   const handleToggle = async (next: boolean) => {
     if (!next) {
       setEnabled(false);
-      writeNotificationPrefs({ enabled: false });
+      writeNotificationPrefs({ ...readNotificationPrefs(), enabled: false });
       return;
     }
     setBusy(true);
@@ -46,7 +46,7 @@ export function NotificationSettings() {
       setPermission(granted);
       if (granted === 'granted') {
         setEnabled(true);
-        writeNotificationPrefs({ enabled: true });
+        writeNotificationPrefs({ ...readNotificationPrefs(), enabled: true });
       }
       // denied/default → leave off; hint below explains how to unblock.
     } finally {

@@ -199,7 +199,7 @@ export function CaptchaWidget({
         widgetIdRef.current = null;
       }
     };
-  }, [containerId, provider, siteKey, resetKey]);
+  }, [containerId, provider, siteKey, resetKey, fetchTokenRef]);
 
   // Invisible providers render nothing (Google shows its own badge).
   if (PROVIDERS[provider].invisible) return null;

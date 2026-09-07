@@ -6,10 +6,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  isFolderMuted,
   isIncomingFolderRole,
   messageIdentity,
   readNotificationPrefs,
   senderLabel,
+  setFolderMuted,
   writeNotificationPrefs,
   type NotificationPrefs,
 } from './notifications';
@@ -31,16 +33,48 @@ describe('notification prefs', () => {
   afterEach(() => localStorage.clear());
 
   it('round-trips', () => {
-    writeNotificationPrefs({ enabled: true });
-    expect(readNotificationPrefs()).toEqual<NotificationPrefs>({ enabled: true });
+    writeNotificationPrefs({ enabled: true, mutedFolderIds: [] });
+    expect(readNotificationPrefs()).toEqual<NotificationPrefs>({
+      enabled: true,
+      mutedFolderIds: [],
+    });
   });
 
   it('defaults when unset or corrupted', () => {
-    expect(readNotificationPrefs()).toEqual<NotificationPrefs>({ enabled: false });
+    expect(readNotificationPrefs()).toEqual<NotificationPrefs>({
+      enabled: false,
+      mutedFolderIds: [],
+    });
     localStorage.setItem('lyra.notifications', '{not json');
-    expect(readNotificationPrefs()).toEqual<NotificationPrefs>({ enabled: false });
+    expect(readNotificationPrefs()).toEqual<NotificationPrefs>({
+      enabled: false,
+      mutedFolderIds: [],
+    });
     localStorage.setItem('lyra.notifications', '{"enabled":"yes"}');
-    expect(readNotificationPrefs()).toEqual<NotificationPrefs>({ enabled: false });
+    expect(readNotificationPrefs()).toEqual<NotificationPrefs>({
+      enabled: false,
+      mutedFolderIds: [],
+    });
+  });
+
+  it('reads legacy blobs without mutedFolderIds and filters junk entries', () => {
+    localStorage.setItem('lyra.notifications', '{"enabled":true}');
+    expect(readNotificationPrefs()).toEqual<NotificationPrefs>({
+      enabled: true,
+      mutedFolderIds: [],
+    });
+    localStorage.setItem('lyra.notifications', '{"enabled":true,"mutedFolderIds":["f1",7,"f2"]}');
+    expect(readNotificationPrefs().mutedFolderIds).toEqual(['f1', 'f2']);
+  });
+
+  it('mutes and unmutes folders', () => {
+    writeNotificationPrefs({ enabled: true, mutedFolderIds: [] });
+    setFolderMuted('f1', true);
+    expect(isFolderMuted('f1')).toBe(true);
+    expect(isFolderMuted('f2')).toBe(false);
+    setFolderMuted('f1', false);
+    expect(isFolderMuted('f1')).toBe(false);
+    expect(readNotificationPrefs().enabled).toBe(true);
   });
 });
 
