@@ -36,6 +36,11 @@ pub struct Config {
     pub yandex_oauth: Option<crate::oauth::YandexOAuthConfig>,
     /// Optional login/bootstrap captcha (off by default).
     pub captcha: CaptchaConfig,
+    /// VAPID `sub` contact for Web Push (RFC 8292). Defaults to
+    /// `mailto:admin@<LYRA_PUBLIC_URL host>`.
+    // Read by the push fan-out spawn (wired in the next plan task).
+    #[allow(dead_code)]
+    pub vapid_subject: String,
 }
 
 /// Captcha provider configuration (`LYRA_CAPTCHA_*` env vars).
@@ -229,6 +234,7 @@ impl Config {
     ///   - `SYNC_POLL_SECS` — default `300`
     ///   - `REDIS_URL` — if set, Redis kv (fail boot on connect error); else memory
     ///   - `LYRA_PUBLIC_URL` — required; public base URL (no trailing slash)
+    ///   - `LYRA_VAPID_SUBJECT` — optional; VAPID contact for Web Push
     ///
     /// # Errors
     /// Returns `ConfigError` if `LYRA_MASTER_KEY` or `LYRA_PUBLIC_URL` is invalid.
@@ -271,6 +277,18 @@ impl Config {
         let public_url = normalize_public_url(
             &env::var("LYRA_PUBLIC_URL").map_err(|_| ConfigError::PublicUrlMissing)?,
         )?;
+        let vapid_subject = env::var("LYRA_VAPID_SUBJECT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                let host = public_url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or("localhost");
+                format!("mailto:admin@{host}")
+            });
         // Fail closed: a present-but-invalid provider matrix refuses boot
         // instead of silently disabling mail OAuth. (A missing file is fine —
         // `load` returns an empty registry then.)
@@ -296,6 +314,7 @@ impl Config {
             ms_oauth,
             yandex_oauth,
             captcha,
+            vapid_subject,
         })
     }
 }
@@ -323,6 +342,7 @@ mod tests {
             env::remove_var("SYNC_POLL_SECS");
             env::remove_var("REDIS_URL");
             env::remove_var("LYRA_PUBLIC_URL");
+            env::remove_var("LYRA_VAPID_SUBJECT");
             env::remove_var("LYRA_CAPTCHA_PROVIDER");
             env::remove_var("LYRA_CAPTCHA_SITE_KEY");
             env::remove_var("LYRA_CAPTCHA_SECRET");
@@ -340,6 +360,7 @@ mod tests {
         assert_eq!(cfg.sync_poll_secs, 300);
         assert!(cfg.redis_url.is_none());
         assert_eq!(cfg.master_key, b"test-master-key-with-32-bytes-minimum!!");
+        assert_eq!(cfg.vapid_subject, "mailto:admin@localhost:3000");
 
         unsafe {
             env::remove_var("LYRA_MASTER_KEY");

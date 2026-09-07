@@ -369,6 +369,7 @@ mod tests {
             ms_oauth: None,
             yandex_oauth: None,
             captcha: config::CaptchaConfig::None,
+            vapid_subject: "mailto:test@example.com".to_string(),
         };
         let state = auth::AuthState::new(
             db.clone(),

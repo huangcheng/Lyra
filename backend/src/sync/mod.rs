@@ -369,6 +369,7 @@ mod tests {
             ms_oauth: None,
             yandex_oauth: None,
             captcha: crate::config::CaptchaConfig::None,
+            vapid_subject: "mailto:test@example.com".to_string(),
         };
         AuthState::new(
             DbPool::Sqlite(pool),
