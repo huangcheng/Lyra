@@ -46,6 +46,7 @@ mod pim_write;
 mod plugins;
 mod privacy;
 mod protocol;
+mod push;
 mod repository;
 mod sanitize;
 mod scheduler;

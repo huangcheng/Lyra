@@ -24,6 +24,7 @@ mod tests;
 mod totp;
 mod types;
 
+pub(crate) use dek::master_key;
 #[cfg(test)]
 pub(crate) use dek::{TEST_MASTER_KEY, install_test_master_key};
 #[allow(unused_imports)]
