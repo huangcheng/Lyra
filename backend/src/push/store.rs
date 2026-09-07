@@ -41,7 +41,7 @@ pub(crate) struct StoredKeys {
     pub(crate) auth: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StoredPrefs {
     #[serde(default)]
@@ -51,6 +51,16 @@ pub(crate) struct StoredPrefs {
     /// BCP-47-ish UI locale ("en" | "zh") for server-rendered summary pushes.
     #[serde(default = "default_locale")]
     pub(crate) locale: String,
+}
+
+impl Default for StoredPrefs {
+    fn default() -> Self {
+        Self {
+            muted_folder_ids: Vec::new(),
+            muted_thread_ids: Vec::new(),
+            locale: default_locale(),
+        }
+    }
 }
 
 fn default_locale() -> String {
