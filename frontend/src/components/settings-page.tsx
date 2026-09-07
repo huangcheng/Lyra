@@ -1,8 +1,9 @@
 /**
  * Settings page with account management.
  *
- * Standalone slim-nav shell; sections: General, Accounts, Spam & Filters,
- * Privacy, Encryption. Provides CRUD operations for mail accounts with i18n support.
+ * Standalone slim-nav shell; sections: General, Security, Accounts,
+ * Spam & Filters, Privacy, Encryption. Provides CRUD operations for mail
+ * accounts with i18n support.
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -15,6 +16,7 @@ import {
   RefreshCw,
   Radar,
   Shield,
+  ShieldCheck,
   SlidersHorizontal,
   Star,
   Trash2,
@@ -88,7 +90,7 @@ import type { MarkReadPolicy } from '@/types';
 const REMOTE_IMAGE_MODES = ['block', 'proxy'] as const;
 type RemoteImageMode = (typeof REMOTE_IMAGE_MODES)[number];
 
-type SettingsSection = 'general' | 'accounts' | 'spam' | 'privacy' | 'encryption';
+type SettingsSection = 'general' | 'security' | 'accounts' | 'spam' | 'privacy' | 'encryption';
 
 interface MailAccount {
   id: string;
@@ -234,6 +236,7 @@ export function SettingsPage() {
     const sectionParam = params.get('section');
     if (
       sectionParam === 'general' ||
+      sectionParam === 'security' ||
       sectionParam === 'accounts' ||
       sectionParam === 'spam' ||
       sectionParam === 'privacy' ||
@@ -852,6 +855,13 @@ export function SettingsPage() {
       onClick: () => setSection('general'),
     },
     {
+      key: 'security',
+      label: t(locale, 'settings.security.title'),
+      icon: ShieldCheck,
+      active: section === 'security',
+      onClick: () => setSection('security'),
+    },
+    {
       key: 'accounts',
       label: t(locale, 'settings.accountsNav'),
       icon: Users,
@@ -885,6 +895,10 @@ export function SettingsPage() {
     general: {
       title: t(locale, 'settings.general'),
       subtitle: t(locale, 'settings.generalSubtitle'),
+    },
+    security: {
+      title: t(locale, 'settings.security.title'),
+      subtitle: t(locale, 'settings.security.subtitle'),
     },
     accounts: {
       title: t(locale, 'settings.accounts.title'),
@@ -996,7 +1010,11 @@ export function SettingsPage() {
               </section>
 
               <NotificationSettings />
+            </>
+          )}
 
+          {section === 'security' && (
+            <>
               <section className="space-y-4 rounded-[10px] border border-border bg-card px-5 py-4">
                 <h2 className="text-[13px] font-medium">{t(locale, 'settings.security.title')}</h2>
                 {securityError && <div className="text-sm text-destructive">{securityError}</div>}

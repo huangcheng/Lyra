@@ -214,7 +214,7 @@
     "title": "Settings",
     "section": "Settings",
     "general": "General",
-    "generalSubtitle": "Language, appearance, reading, and security",
+    "generalSubtitle": "Language, appearance, and reading",
     "accountsNav": "Accounts",
     "accountsSubtitle": "Connected mail accounts and sync",
     "privacySubtitle": "Remote content, tracking, and your data",
@@ -292,6 +292,7 @@
     "syncQueued": "Sync queued",
     "security": {
       "title": "Security",
+      "subtitle": "Password, two-factor authentication, login captcha, and session",
       "changePasswordTitle": "Change Password",
       "currentPassword": "Current password",
       "newPassword": "New password",

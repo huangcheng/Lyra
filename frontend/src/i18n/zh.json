@@ -214,7 +214,7 @@
     "title": "设置",
     "section": "设置",
     "general": "通用",
-    "generalSubtitle": "语言、外观、阅读与安全",
+    "generalSubtitle": "语言、外观与阅读",
     "accountsNav": "账户",
     "accountsSubtitle": "已连接的邮箱账户与同步",
     "privacySubtitle": "远程内容、跟踪防护与您的数据",
@@ -292,6 +292,7 @@
     "syncQueued": "已加入同步队列",
     "security": {
       "title": "安全",
+      "subtitle": "密码、两步验证、登录验证码与会话",
       "changePasswordTitle": "修改密码",
       "currentPassword": "当前密码",
       "newPassword": "新密码",
