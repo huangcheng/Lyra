@@ -232,4 +232,45 @@ mod tests {
             "mutes never touch the baseline"
         );
     }
+
+    #[test]
+    fn diff_sender_label_matches_frontend_edge_cases() {
+        use super::diff::diff_new_messages;
+        // Frontend `senderLabel`: bare-string array entry is returned as-is.
+        let mut string_entry = msg("m1", Some("<a@x>"), Some("inbox"), None);
+        string_entry.from_address = Some(r#"["alice@x.com"]"#.into());
+        // Empty-string name is returned unchanged (?? falls through only on
+        // null/undefined); the fan-out's empty-title fallback handles it.
+        let mut empty_name = msg("m2", Some("<b@x>"), Some("inbox"), None);
+        empty_name.from_address = Some(r#"[{"name":"","email":"e@x.com"}]"#.into());
+        // Object with neither name nor email yields "".
+        let mut no_fields = msg("m3", Some("<c@x>"), Some("inbox"), None);
+        no_fields.from_address = Some(r"[{}]".into());
+        // Empty array falls through to the raw string.
+        let mut empty_array = msg("m4", Some("<d@x>"), Some("inbox"), None);
+        empty_array.from_address = Some("[]".into());
+        // Null name falls through to email.
+        let mut null_name = msg("m5", Some("<e@x>"), Some("inbox"), None);
+        null_name.from_address = Some(r#"[{"name":null,"email":"e@x.com"}]"#.into());
+
+        let messages = vec![string_entry, empty_name, no_fields, empty_array, null_name];
+        let out = diff_new_messages(&messages, &["<old@x>".to_string()], &[], &[]);
+        let titles: Vec<&str> = out.fresh.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["alice@x.com", "", "", "[]", "e@x.com"]);
+    }
+
+    #[test]
+    fn diff_identity_falls_back_to_row_id_on_empty_header() {
+        use super::diff::diff_new_messages;
+        // Frontend `messageIdentity` is `msg.messageIdHeader || msg.id`: an
+        // empty header string is falsy and falls back to the row id.
+        let messages = vec![msg("row-1", Some(""), Some("inbox"), None)];
+        let seeded = diff_new_messages(&messages, &[], &[], &[]);
+        assert_eq!(seeded.new_baseline, vec!["row-1"]);
+
+        let out = diff_new_messages(&messages, &["<old@x>".to_string()], &[], &[]);
+        assert_eq!(out.fresh.len(), 1);
+        assert_eq!(out.fresh[0].identity, "row-1");
+        assert_eq!(out.fresh[0].id, "row-1");
+    }
 }

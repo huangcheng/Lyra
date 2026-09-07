@@ -30,24 +30,33 @@ fn is_incoming(role: Option<&str>) -> bool {
 }
 
 fn identity(m: &MessageResponse) -> String {
-    m.message_id_header.clone().unwrap_or_else(|| m.id.clone())
+    // Matches the frontend's `msg.messageIdHeader || msg.id`: an empty
+    // header string is falsy and falls back to the row id.
+    m.message_id_header
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| m.id.clone())
 }
 
-/// Display label for the sender: first address entry's name, else email,
-/// else the raw string. `from_address` is a JSON array string (or bare).
+/// Display label for the sender, mirroring the frontend `senderLabel`:
+/// JSON array → first entry (a bare string is returned as-is; an object
+/// yields `name ?? email ?? ''`, where an empty-string name is returned
+/// unchanged); anything else (non-array, empty array, unparseable) → the
+/// raw string. `from_address` is a JSON array string (or bare).
 fn sender_label(from_address: Option<&str>) -> String {
     let raw = from_address.unwrap_or("");
     if let Ok(serde_json::Value::Array(entries)) = serde_json::from_str::<serde_json::Value>(raw)
         && let Some(first) = entries.first()
     {
-        if let Some(name) = first.get("name").and_then(|v| v.as_str())
-            && !name.is_empty()
-        {
-            return name.to_string();
+        if let Some(entry) = first.as_str() {
+            return entry.to_string();
         }
-        if let Some(email) = first.get("email").and_then(|v| v.as_str()) {
-            return email.to_string();
-        }
+        return first
+            .get("name")
+            .and_then(|v| v.as_str())
+            .or_else(|| first.get("email").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
     }
     raw.to_string()
 }
