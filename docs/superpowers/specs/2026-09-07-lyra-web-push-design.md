@@ -91,9 +91,10 @@ set, else `mailto:admin@<request host>`.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/v1/push/vapid-key` | `{ publicKey }` for `pushManager.subscribe` |
-| `PUT /api/v1/push/subscription` | upsert `{ endpoint, keys: { p256dh, auth } }` |
+| `GET /api/v1/push/status` | `{ devices }` — subscription count for the Settings UI |
+| `PUT /api/v1/push/subscription` | upsert `{ endpoint, keys: { p256dh, auth } }` (https endpoints; http allowed for loopback dev) |
 | `DELETE /api/v1/push/subscription` | remove by `{ endpoint }` |
-| `PUT /api/v1/push/prefs` | store the mute-list copy `{ mutedFolderIds, mutedThreadIds }` |
+| `PUT /api/v1/push/prefs` | store the mute-list copy `{ mutedFolderIds, mutedThreadIds, locale }` |
 | `POST /api/v1/push/test` | send a test push to all of the user's subscriptions (full-path parity with the in-page test banner) |
 
 **Fan-out task.** Spawned in `main.rs` next to `jobs::spawn_workers`.
@@ -144,9 +145,9 @@ or x509-parser chains.
   badge, data }))`. The existing `notificationclick` handler deep-links via
   `data.messageId` unchanged.
 - `pushsubscriptionchange` listener: re-subscribe with the same
-  `applicationServerKey` and `PUT` the new endpoint to the backend (requires
-  the user to have a valid session; if logged out, the subscription is simply
-  lost until the next login re-subscribes — acceptable for v1).
+  `applicationServerKey`. In v1 the SW re-subscribes locally only; the server
+  record is healed by `reconcilePushSubscription` on the next app open (the
+  SW cannot reach the auth token in localStorage).
 - Bump `VERSION` so the new worker rolls out.
 
 **`frontend/src/lib/push.ts`** (new, vitest-covered with a mocked

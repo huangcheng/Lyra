@@ -74,6 +74,7 @@ Detail lives in specs; this file stays short and accurate.
 | Product UI (redesign v2: stamp brand, folder-tree mail, standalone dashboard/settings) | `docs/superpowers/specs/2026-08-24-lyra-redesign-v2-design.md` |
 | **PIM subsystems** — Calendar/Contacts Thunderbird-style shell, then ICS subscriptions | `docs/superpowers/specs/2026-09-04-lyra-pim-subsystems-design.md` |
 | **PIM credentials** — app password for CardDAV/CalDAV (bearer mail), then calendar read-completeness | `docs/superpowers/specs/2026-09-04-lyra-pim-credentials-design.md` |
+| **Web Push** — closed-app new-mail notifications (VAPID, kv subscriptions, sync-event fan-out) | `docs/superpowers/specs/2026-09-07-lyra-web-push-design.md` |
 | Mail sidebar Favorites (Apple Mail–style; local views, expandable All Inboxes + Starred) | `docs/superpowers/specs/2026-09-03-lyra-favorites-sidebar-design.md` |
 
 Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall back to **IMAP**. Honor v1 non-goals (no collaboration suite, no SaaS, no multi-user UX yet). Ship a **client-agnostic `/api/v1`**; native apps are far-horizon only.
@@ -110,6 +111,7 @@ Lyra/
       sync/                     ← sync HTTP, IMAP/JMAP loops, JMAP seam (jmap_client.rs), persist transactions
       imap.rs / smtp.rs
       oauth/                    ← Microsoft + Yandex mail OAuth (PKCE) + XOAUTH2
+      push/                     ← Web Push (RFC 8030/8291/8292): fan-out on sync events, kv subscriptions
       jobs.rs / scheduler.rs / kernel/
     migrations/
       sqlite/                   ← SQLite migration SQL files
