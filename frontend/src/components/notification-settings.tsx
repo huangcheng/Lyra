@@ -58,7 +58,12 @@ export function NotificationSettings() {
     setPushBusy(true);
     try {
       if (!next) {
-        await unsubscribePush();
+        try {
+          await unsubscribePush();
+        } catch {
+          // Server DELETE failed; push.ts already unsubscribed locally in its
+          // finally, so the UI state below is still correct — fail quietly.
+        }
         setPush('unsubscribed');
         return;
       }
