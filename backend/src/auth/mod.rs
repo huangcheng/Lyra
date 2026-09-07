@@ -12,6 +12,7 @@ use axum::{
     routing::{get, patch, post},
 };
 
+mod captcha;
 mod db;
 mod dek;
 mod handlers;

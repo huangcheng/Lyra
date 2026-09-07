@@ -2035,6 +2035,16 @@ components:
           type: boolean
         totp_enabled:
           type: boolean
+        captcha:
+          type: object
+          nullable: true
+          description: Present when a captcha provider is configured (secret never included).
+          properties:
+            provider:
+              type: string
+              enum: [turnstile]
+            siteKey:
+              type: string
 
     BootstrapRequest:
       type: object
@@ -2047,6 +2057,9 @@ components:
         locale:
           type: string
           default: en
+        captchaToken:
+          type: string
+          description: Required when auth status reports a captcha provider
 
     LoginRequest:
       type: object
@@ -2056,6 +2069,9 @@ components:
           type: string
         password:
           type: string
+        captchaToken:
+          type: string
+          description: Required when auth status reports a captcha provider
         totp:
           type: string
           description: Six-digit TOTP when enabled

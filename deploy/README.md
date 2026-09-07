@@ -13,6 +13,8 @@ printf 'LYRA_MASTER_KEY=%s\n' "$(openssl rand -base64 32)" >> .env
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `LYRA_MASTER_KEY` | **yes** (32+ bytes) | Master key for the per-user DEK hierarchy; all stored mail-account passwords and TOTP secrets are encrypted under it. Loss = unrecoverable credentials (re-add accounts). |
+| `LYRA_CAPTCHA_PROVIDER` | no | `none` (default) or `turnstile`. Optional login/bootstrap captcha. |
+| `LYRA_CAPTCHA_SITE_KEY` / `LYRA_CAPTCHA_SECRET` | when Turnstile | Cloudflare Turnstile keys. Host must reach `challenges.cloudflare.com` (skip for LAN-only/offline). |
 
 Then:
 
@@ -71,6 +73,21 @@ Data persists in the `lyra-data` volume (`/data` in the container → SQLite by 
   `DATABASE_URL` rolls back to it.
 
 The same migrations run on both backends.
+
+### Login captcha (optional)
+
+Cloudflare Turnstile can protect login and first-time bootstrap on public
+hosts. Off by default — set in `.env` (see `.env.example`):
+
+```bash
+LYRA_CAPTCHA_PROVIDER=turnstile
+LYRA_CAPTCHA_SITE_KEY=your-site-key
+LYRA_CAPTCHA_SECRET=your-secret
+```
+
+Both the **browser** and the **Lyra server** need outbound HTTPS to
+`challenges.cloudflare.com`. Pure LAN or offline installs should leave captcha
+disabled (`LYRA_CAPTCHA_PROVIDER=none` or unset).
 
 ### HTTPS
 

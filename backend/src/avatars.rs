@@ -808,6 +808,7 @@ mod tests {
             master_key: TEST_MASTER_KEY.to_vec(),
             ms_oauth: None,
             yandex_oauth: None,
+            captcha: crate::config::CaptchaConfig::None,
         };
         let kv = MemoryKv::new();
         let state = AuthState::new(

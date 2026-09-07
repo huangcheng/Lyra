@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 use sea_orm::sea_query::{Expr, Query};
 use sea_orm::{ColumnTrait, ConnectionTrait};
 
+use super::captcha::{TurnstileError, verify_turnstile};
 use super::db::{
     UserData, dberr_to_sqlx, find_first_user_totp_enabled, find_user_by_id, find_user_by_username,
     has_any_user, id_bind_value, insert_user, is_unique_violation, parse_mark_read_policy,
@@ -38,6 +39,8 @@ use super::{
 };
 use crate::entities::lyra_user as user_entity;
 
+use crate::config::CaptchaConfig;
+
 pub(super) async fn auth_status(State(state): State<AuthState>) -> Json<AuthStatus> {
     let has_user = has_any_user(&state.db).await.is_ok_and(|v| v);
     let totp_enabled = if has_user {
@@ -50,7 +53,26 @@ pub(super) async fn auth_status(State(state): State<AuthState>) -> Json<AuthStat
     Json(AuthStatus {
         has_user,
         totp_enabled,
+        captcha: state.captcha.public(),
     })
+}
+
+async fn ensure_captcha(captcha: &CaptchaConfig, token: Option<&str>) -> Result<(), AuthError> {
+    match captcha {
+        CaptchaConfig::None => Ok(()),
+        CaptchaConfig::Turnstile { secret, .. } => {
+            let Some(token) = token.filter(|t| !t.trim().is_empty()) else {
+                return Err(AuthError::BadRequest(
+                    "Captcha verification required".to_string(),
+                ));
+            };
+            verify_turnstile(secret, token).await.map_err(|e| match e {
+                TurnstileError::Invalid | TurnstileError::Unavailable => {
+                    AuthError::BadRequest("Captcha verification failed".to_string())
+                }
+            })
+        }
+    }
 }
 
 pub(super) async fn auth_bootstrap(
@@ -63,6 +85,8 @@ pub(super) async fn auth_bootstrap(
     if has_any_user(&state.db).await.is_ok_and(|v| v) {
         return Err(AuthError::Conflict(BOOTSTRAP_TAKEN.to_string()));
     }
+
+    ensure_captcha(&state.captcha, req.captcha_token.as_deref()).await?;
 
     if req.username.is_empty() || req.username.len() > 64 {
         return Err(AuthError::BadRequest(
@@ -135,6 +159,8 @@ pub(super) async fn auth_login(
     let kv = Arc::clone(state.sessions.kv());
     let rl_key = login_rl_key(&req.username);
     ensure_not_rate_limited(kv.as_ref(), &rl_key, "Authentication failed").await?;
+
+    ensure_captcha(&state.captcha, req.captcha_token.as_deref()).await?;
 
     let Some(user) = find_user_by_username(&state.db, &req.username).await? else {
         note_failed_attempt(kv.as_ref(), &rl_key, "Authentication failed").await?;
@@ -343,6 +369,7 @@ pub(super) async fn totp_enroll_confirm(
     Ok(Json(AuthStatus {
         has_user: true,
         totp_enabled: true,
+        captcha: state.captcha.public(),
     }))
 }
 
@@ -383,6 +410,7 @@ pub(super) async fn totp_disable(
     Ok(Json(AuthStatus {
         has_user: true,
         totp_enabled: false,
+        captcha: state.captcha.public(),
     }))
 }
 

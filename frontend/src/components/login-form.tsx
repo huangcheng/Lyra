@@ -3,24 +3,33 @@
  */
 
 import type { ComponentProps, FormEvent } from 'react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { StampLogo } from '@/components/stamp-logo';
+import { TurnstileWidget } from '@/components/turnstile-widget';
 import { Button } from '@/components/ui/button';
 import { Field, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { t } from '@/i18n';
 import { cn } from '@/lib/utils';
+import type { CaptchaPublic } from '@/machines/auth';
 import { useUIStore } from '@/stores/ui';
 
 interface LoginFormProps {
-  onLogin: (username: string, password: string) => void;
-  onBootstrap: (username: string, password: string, displayName?: string, locale?: string) => void;
+  onLogin: (username: string, password: string, captchaToken?: string | null) => void;
+  onBootstrap: (
+    username: string,
+    password: string,
+    displayName?: string,
+    locale?: string,
+    captchaToken?: string | null,
+  ) => void;
   onTotpVerify: (code: string) => void;
   onRetry?: () => void;
   error: string | null;
   hasUser: boolean | null;
   requiresTotp: boolean;
+  captcha: CaptchaPublic | null;
 }
 
 export function LoginForm({
@@ -32,6 +41,7 @@ export function LoginForm({
   error,
   hasUser,
   requiresTotp,
+  captcha,
   ...props
 }: LoginFormProps & ComponentProps<'div'>) {
   const locale = useUIStore((s) => s.locale);
@@ -42,8 +52,18 @@ export function LoginForm({
   const [displayName, setDisplayName] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaResetKey, setCaptchaResetKey] = useState(0);
 
   const formError = error || validationError;
+  const needsCaptcha = Boolean(captcha?.provider === 'turnstile' && captcha.siteKey);
+
+  useEffect(() => {
+    if (error && needsCaptcha) {
+      setCaptchaToken(null);
+      setCaptchaResetKey((k) => k + 1);
+    }
+  }, [error, needsCaptcha]);
 
   const handleLoginSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -52,7 +72,11 @@ export function LoginForm({
       setValidationError(t(locale, 'common.error'));
       return;
     }
-    onLogin(username, password);
+    if (needsCaptcha && !captchaToken) {
+      setValidationError(t(locale, 'auth.captchaRequired'));
+      return;
+    }
+    onLogin(username, password, captchaToken);
   };
 
   const handleBootstrapSubmit = (e: FormEvent) => {
@@ -66,7 +90,11 @@ export function LoginForm({
       setValidationError(t(locale, 'auth.passwordMismatch'));
       return;
     }
-    onBootstrap(username, password, displayName || undefined, locale);
+    if (needsCaptcha && !captchaToken) {
+      setValidationError(t(locale, 'auth.captchaRequired'));
+      return;
+    }
+    onBootstrap(username, password, displayName || undefined, locale, captchaToken);
   };
 
   const handleTotpSubmit = (e: FormEvent) => {
@@ -90,6 +118,19 @@ export function LoginForm({
   }
 
   const submitButtonClass = 'h-[42px] w-full rounded-lg font-medium';
+
+  const captchaField =
+    needsCaptcha && captcha ? (
+      <Field>
+        <TurnstileWidget
+          siteKey={captcha.siteKey}
+          onToken={setCaptchaToken}
+          resetKey={captchaResetKey}
+          className="flex justify-center"
+        />
+        <p className="pt-1 text-[11px] text-muted-foreground">{t(locale, 'auth.captchaHint')}</p>
+      </Field>
+    ) : null;
 
   return (
     <div className={cn('flex flex-col', className)} {...props}>
@@ -203,6 +244,7 @@ export function LoginForm({
                       required
                     />
                   </Field>
+                  {captchaField}
                   {formError ? <FieldError>{formError}</FieldError> : null}
                   <Field>
                     <Button type="submit" variant="outline" className={submitButtonClass}>
@@ -238,6 +280,7 @@ export function LoginForm({
                       required
                     />
                   </Field>
+                  {captchaField}
                   {formError ? <FieldError>{formError}</FieldError> : null}
                   <Field>
                     <Button type="submit" variant="outline" className={submitButtonClass}>

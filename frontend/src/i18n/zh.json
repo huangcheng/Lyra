@@ -192,7 +192,9 @@
     "totpEnabled": "两步验证已启用",
     "totpDisabled": "两步验证已关闭",
     "backToLogin": "返回登录",
-    "statusCheckError": "无法连接 Lyra 服务器，请确认后端已启动。"
+    "statusCheckError": "无法连接 Lyra 服务器，请确认后端已启动。",
+    "captchaRequired": "请先完成验证码。",
+    "captchaHint": "需要能访问 Cloudflare Turnstile（需联网）。"
   },
   "sync": {
     "syncing": "同步中…",
@@ -536,7 +538,8 @@
     "orgPlaceholder": "公司（可选）",
     "create": "添加联系人",
     "creating": "正在添加…",
-    "created": "联系人已添加"
+    "created": "联系人已添加",
+    "alphabetIndex": "跳转到字母"
   },
   "calendar": {
     "title": "日历",

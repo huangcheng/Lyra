@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Value};
 
+use crate::config::CaptchaConfig;
 use crate::crypto::{self, CryptoError};
 use crate::db_row::id_param;
 use crate::entities::mail_account as account_entity;
@@ -31,6 +32,8 @@ pub struct AuthState {
     pub ms_oauth: Option<crate::oauth::MsOAuthConfig>,
     /// Optional Yandex mail OAuth app settings (None when not configured).
     pub yandex_oauth: Option<crate::oauth::YandexOAuthConfig>,
+    /// Login/bootstrap captcha (off when [`CaptchaConfig::None`]).
+    pub captcha: CaptchaConfig,
 }
 
 impl AuthState {
@@ -52,6 +55,7 @@ impl AuthState {
             opengpg_unlock: Arc::new(crate::opengpg::UnlockRing::new()),
             ms_oauth: config.ms_oauth.clone(),
             yandex_oauth: config.yandex_oauth.clone(),
+            captcha: config.captcha.clone(),
         })
     }
 

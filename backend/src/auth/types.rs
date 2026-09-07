@@ -6,6 +6,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::api_error::ApiErrorBody;
+use crate::config::CaptchaPublicConfig;
 use crate::crypto::CryptoError;
 
 #[derive(Debug, Serialize)]
@@ -42,6 +43,8 @@ pub struct PreferencesRequest {
 pub struct AuthStatus {
     pub has_user: bool,
     pub totp_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captcha: Option<CaptchaPublicConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,12 +126,16 @@ pub struct BootstrapRequest {
     pub password: String,
     pub display_name: Option<String>,
     pub locale: Option<String>,
+    #[serde(rename = "captchaToken", default)]
+    pub captcha_token: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
+    #[serde(rename = "captchaToken", default)]
+    pub captcha_token: Option<String>,
 }
 
 #[derive(Deserialize)]

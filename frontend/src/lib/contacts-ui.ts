@@ -27,6 +27,11 @@ export function contactLetter(c: ContactLike): string {
 
 export type LetterGroup<T extends ContactLike> = { letter: string; contacts: T[] };
 
+/** Letters shown on the Apple-style index rail (only buckets that have contacts). */
+export function indexLettersFromGroups(groups: { letter: string }[]): string[] {
+  return groups.map((g) => g.letter);
+}
+
 /** Group sorted contacts under A–Z / `#` headers. */
 export function groupContactsByLetter<T extends ContactLike>(contacts: T[]): LetterGroup<T>[] {
   const sorted = [...contacts].sort((a, b) =>
