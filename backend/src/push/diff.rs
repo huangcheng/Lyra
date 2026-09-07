@@ -11,6 +11,9 @@ const DIFF_LIMIT: usize = 15;
 
 pub(crate) struct PushCandidate {
     pub(crate) id: String,
+    // Kept for test assertions on the diff semantics; the fan-out sends by
+    // row `id`.
+    #[allow(dead_code)]
     pub(crate) identity: String,
     pub(crate) title: String,
     pub(crate) body: String,

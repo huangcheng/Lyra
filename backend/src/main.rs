@@ -126,6 +126,12 @@ async fn main() -> anyhow::Result<()> {
     scheduler::start_scheduler(auth_state.db.clone(), config.sync_poll_secs);
     imap_idle::start_idle_supervisor(auth_state.db.clone());
     jmap_push::start_jmap_push_supervisor(auth_state.db.clone());
+    push::spawn_fanout(
+        auth_state.db.clone(),
+        auth_state.kv().clone(),
+        &auth_state.app,
+        config.vapid_subject.clone(),
+    );
 
     let api = api_router(auth_state);
 

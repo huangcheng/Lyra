@@ -38,8 +38,6 @@ pub struct Config {
     pub captcha: CaptchaConfig,
     /// VAPID `sub` contact for Web Push (RFC 8292). Defaults to
     /// `mailto:admin@<LYRA_PUBLIC_URL host>`.
-    // Read by the push fan-out spawn (wired in the next plan task).
-    #[allow(dead_code)]
     pub vapid_subject: String,
 }
 

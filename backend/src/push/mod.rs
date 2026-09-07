@@ -4,20 +4,12 @@
 
 #![allow(clippy::doc_markdown)]
 
-// Subscriptions/baselines/prefs accessors are exercised by tests now and by
-// the fan-out task in a later plan task; allow until those consumers land.
-#[allow(dead_code)]
+mod diff;
+mod fanout;
+mod send;
 mod store;
 
-// Diff is exercised by tests now and by the fan-out task in a later plan
-// task; allow until that consumer lands.
-#[allow(dead_code)]
-mod diff;
-
-// Send is exercised by tests now and by the fan-out task in a later plan
-// task; allow until that consumer lands.
-#[allow(dead_code)]
-mod send;
+pub(crate) use fanout::spawn_fanout;
 
 #[cfg(test)]
 mod tests {
@@ -405,5 +397,171 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(outcome, SendOutcome::Failed(_)));
+    }
+
+    /// Seed an in-memory SQLite db with one user/account/INBOX and `n`
+    /// messages (uid 1..=n, message-ids <1@x>..<n@x>), oldest first.
+    async fn seed_mail_db(n: u32) -> (crate::storage::DbPool, String, String) {
+        let storage = crate::storage::Storage::new("sqlite::memory:")
+            .await
+            .unwrap();
+        storage.run_migrations().await.unwrap();
+        let db = storage.pool().clone();
+        let crate::storage::DbPool::Sqlite(pool) = &db else {
+            panic!("sqlite")
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let account_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) \
+             VALUES (?, ?, 'hash', '[]')",
+        )
+        .bind(&user_id)
+        .bind(format!("push-{user_id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mail_account (\
+                 id, user_id, display_name, email_address, protocol, auth_type, \
+                 credential, imap_host, imap_port, imap_security, is_active, sync_enabled\
+             ) VALUES (?, ?, 'Push', 'push@example.com', 'imap', 'password', \
+                       'cred', 'imap.example.com', 993, 'tls', 1, 1)",
+        )
+        .bind(&account_id)
+        .bind(&user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        crate::sync::upsert_folder(&db, &account_id, "INBOX", None, &[])
+            .await
+            .unwrap();
+        let folder_id = crate::sync::get_folder_id(&db, &account_id, "INBOX")
+            .await
+            .unwrap();
+        for uid in 1..=n {
+            crate::sync::upsert_message(
+                &db,
+                &account_id,
+                &folder_id,
+                &crate::imap::ImapMessage {
+                    uid,
+                    message_id: Some(format!("<{uid}@x>")),
+                    subject: Some(format!("Mail {uid}")),
+                    from: Some("alice@example.com".into()),
+                    to: Some("me@example.com".into()),
+                    cc: None,
+                    date: Some(format!("2025-09-07T12:00:{uid:02}Z")),
+                    in_reply_to: None,
+                    references: None,
+                    flags: vec![],
+                    size: Some(1),
+                    body: None,
+                    body_text: None,
+                    body_html: None,
+                    has_attachments: false,
+                    attachments: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        }
+        (db, user_id, account_id)
+    }
+
+    #[tokio::test]
+    async fn fanout_seeds_then_pushes_new_mail_and_drops_gone_subs() {
+        use super::fanout::fan_out_account;
+        install_test_master_key();
+        let kv: Arc<dyn KvStore> = Arc::new(MemoryKv::new());
+        let client = reqwest::Client::new();
+
+        let (db, user_id, account_id) = seed_mail_db(1).await;
+
+        // Run 1: one live sub (201) + one dead sub (410). First run seeds
+        // silently — no sends — so the dead sub survives (no send attempted).
+        let (ep1, _rx1) = mock_push_server(201).await;
+        let (gone_endpoint, _gone_rx) = mock_push_server(410).await;
+        upsert_subscription(&kv, &user_id, test_subscription(ep1))
+            .await
+            .unwrap();
+        upsert_subscription(&kv, &user_id, test_subscription(gone_endpoint.clone()))
+            .await
+            .unwrap();
+        fan_out_account(&db, &kv, &client, &account_id, "mailto:test@example.com")
+            .await
+            .unwrap();
+        assert_eq!(
+            load_baseline(&kv, &account_id).await.unwrap(),
+            vec!["<1@x>"]
+        );
+        assert_eq!(load_subscriptions(&kv, &user_id).await.unwrap().len(), 2);
+
+        // New mail arrives; run 2 sends. Mock servers are one-shot, so
+        // register a fresh live endpoint and a fresh dead (410) endpoint.
+        let (live2, rx2) = mock_push_server(201).await;
+        let (gone2, _g2) = mock_push_server(410).await;
+        upsert_subscription(&kv, &user_id, test_subscription(live2))
+            .await
+            .unwrap();
+        upsert_subscription(&kv, &user_id, test_subscription(gone2.clone()))
+            .await
+            .unwrap();
+
+        let folder_id = crate::sync::get_folder_id(&db, &account_id, "INBOX")
+            .await
+            .unwrap();
+        crate::sync::upsert_message(
+            &db,
+            &account_id,
+            &folder_id,
+            &crate::imap::ImapMessage {
+                uid: 2,
+                message_id: Some("<2@x>".into()),
+                subject: Some("Mail 2".into()),
+                from: Some("alice@example.com".into()),
+                to: Some("me@example.com".into()),
+                cc: None,
+                date: Some("2025-09-07T12:05:00Z".into()),
+                in_reply_to: None,
+                references: None,
+                flags: vec![],
+                size: Some(1),
+                body: None,
+                body_text: None,
+                body_html: None,
+                has_attachments: false,
+                attachments: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        fan_out_account(&db, &kv, &client, &account_id, "mailto:test@example.com")
+            .await
+            .unwrap();
+
+        // Live endpoint got one POST carrying the encrypted payload.
+        let request = rx2.await.unwrap();
+        assert!(
+            request.starts_with("POST /wpush/v1/abc HTTP/1.1"),
+            "{request}"
+        );
+        // Dead endpoints were pruned (run-1's 410 listener is consumed, but
+        // gone2 answered this run); the two live subscriptions remain.
+        let endpoints: Vec<String> = load_subscriptions(&kv, &user_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.endpoint)
+            .collect();
+        assert!(
+            !endpoints.contains(&gone2),
+            "410 endpoint pruned: {endpoints:?}"
+        );
+        assert_eq!(
+            load_baseline(&kv, &account_id).await.unwrap(),
+            vec!["<2@x>", "<1@x>"]
+        );
     }
 }

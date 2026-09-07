@@ -180,6 +180,9 @@ async fn save_subscriptions(
 ///
 /// Read-modify-write is non-atomic (the kv seam has no CAS); acceptable for
 /// single-user v1 where concurrent writers are unlikely.
+// Exercised by tests now; the push HTTP endpoints (later plan task) are the
+// production consumer.
+#[allow(dead_code)]
 pub(crate) async fn upsert_subscription(
     kv: &Arc<dyn KvStore>,
     user_id: &str,
@@ -251,6 +254,9 @@ pub(crate) async fn load_prefs(
     }
 }
 
+// Exercised by tests now; the push HTTP endpoints (later plan task) are the
+// production consumer.
+#[allow(dead_code)]
 pub(crate) async fn save_prefs(
     kv: &Arc<dyn KvStore>,
     user_id: &str,
