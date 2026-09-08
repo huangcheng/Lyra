@@ -1485,7 +1485,6 @@ pub(crate) async fn set_message_raw_blob(
 }
 
 /// Blob-store relative path of a message's raw RFC822 bytes, when fetched.
-#[cfg(test)]
 pub(crate) async fn get_message_raw_blob_path(
     db: &DbPool,
     message_id: &str,

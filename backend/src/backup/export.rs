@@ -7,25 +7,30 @@
 //! [`collect_mail`]. Decrypted credentials and raw message bytes are never
 //! logged.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use sea_orm::sea_query::{Expr, Order, Query as Sq};
 use sea_orm::{ColumnTrait, ConnectionTrait, ExprTrait, QueryResult, Value};
 use serde_json::{Value as Json, json};
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::auth::AuthState;
 use crate::blobs;
 use crate::crypto::{self, EncryptedCredential};
-use crate::db_row::{IdParam, id_param};
+use crate::db_row::{IdParam, id_param, parse_ts};
 use crate::entities::{
     attachment, calendar, calendar_event, contact, folder, lyra_user, mail_account, message,
 };
+use crate::kv::KvStore;
 use crate::storage::DbPool;
+use crate::sync::store;
 
 use super::BackupError;
+use super::format::{MetaLine, write_mbox_message};
 
 /// Section counts for the manifest plus non-fatal warnings (missing blobs).
 #[derive(Debug, Default)]
@@ -102,6 +107,14 @@ fn orm_err(err: sea_orm::DbErr) -> BackupError {
         other => sqlx::Error::Protocol(other.to_string()),
     };
     BackupError::Db(sqlx_err)
+}
+
+/// Map a sync-store error (raw-blob path read/write) into BackupError.
+fn sync_err(err: crate::sync::SyncError) -> BackupError {
+    match err {
+        crate::sync::SyncError::Database(e) => BackupError::Db(e),
+        other => BackupError::Internal(other.to_string()),
+    }
 }
 
 /// UUID-column id bind: TEXT on SQLite/MySQL, native `Uuid` on Postgres.
@@ -566,13 +579,451 @@ async fn collect_blobs(
     Ok((copied, warnings))
 }
 
+// ── Mail (Task 6): per-folder mbox + sidecar with raw resolution ──────
+
+/// One message row as needed for export. (`flags`/`size_bytes` columns are
+/// deliberately not read: the sidecar derives flags from `is_read` /
+/// `is_starred`, and mbox carries the bytes themselves.)
+struct MailRow {
+    id: String,
+    external_id: Option<String>,
+    message_id_header: Option<String>,
+    subject: Option<String>,
+    from_address: Option<String>,
+    to_addresses: Option<String>,
+    cc_addresses: Option<String>,
+    date: Option<String>,
+    is_read: bool,
+    is_starred: bool,
+    body_text: Option<String>,
+    body_html: Option<String>,
+}
+
+async fn load_folder_messages(db: &DbPool, folder_id: &str) -> Result<Vec<MailRow>, BackupError> {
+    let mut sel = Sq::select();
+    sel.columns([
+        message::Column::Id,
+        message::Column::ExternalId,
+        message::Column::MessageIdHeader,
+        message::Column::Subject,
+        message::Column::FromAddress,
+        message::Column::ToAddresses,
+        message::Column::CcAddresses,
+        message::Column::Date,
+        message::Column::IsRead,
+        message::Column::IsStarred,
+        message::Column::BodyText,
+        message::Column::BodyHtml,
+    ])
+    .from(message::Entity)
+    .and_where(message::Column::FolderId.eq(id_bind(db, folder_id)?))
+    .order_by_expr(Expr::col(message::Column::Date), Order::Asc);
+    let rows = db.orm().query_all(&sel).await.map_err(orm_err)?;
+    rows.iter()
+        .map(|row| {
+            Ok(MailRow {
+                id: row_id(row, "id")?,
+                external_id: row_opt_str(row, "external_id")?,
+                message_id_header: row_opt_str(row, "message_id_header")?,
+                subject: row_opt_str(row, "subject")?,
+                from_address: row_json_text(row, "from_address")?,
+                to_addresses: row_json_text(row, "to_addresses")?,
+                cc_addresses: row_json_text(row, "cc_addresses")?,
+                date: row_opt_ts(row, "date")?,
+                is_read: row_bool(row, "is_read")?,
+                is_starred: row_bool(row, "is_starred")?,
+                body_text: row_opt_str(row, "body_text")?,
+                body_html: row_opt_str(row, "body_html")?,
+            })
+        })
+        .collect()
+}
+
+/// Collect all mail into `mail/<n>/<folder-uuid>.mbox` + `.meta.jsonl` and
+/// `mail/<n>/folders.json`. Returns the total messages exported.
+///
+/// Raw resolution order per message: stored `raw_blob_path` → batched server
+/// fetch (only when `allow_server_fetch`; integration path, unreachable in
+/// tests) → reconstruction from parsed columns (flagged in the sidecar).
+pub(crate) async fn collect_mail(
+    state: &AuthState,
+    user_id: &str,
+    job_id: &str,
+    kv: &Arc<dyn KvStore>,
+    staging: &Path,
+    allow_server_fetch: bool,
+) -> Result<u64, BackupError> {
+    let db = &state.db;
+    let accounts = load_accounts(db, user_id).await?;
+    let mut total = 0u64;
+    for (n, account) in accounts.iter().enumerate() {
+        let dir = staging.join("mail").join(n.to_string());
+        tokio::fs::create_dir_all(&dir).await?;
+        let folders = load_account_folders(db, &account.id).await?;
+
+        let mut folders_json = serde_json::Map::new();
+        for f in &folders {
+            folders_json.insert(
+                f.id.clone(),
+                json!({
+                    "path": f.external_id.clone().unwrap_or_else(|| f.name.clone()),
+                    "role": store::effective_folder_role(f.role.as_deref(), f.role_override.as_deref()),
+                }),
+            );
+        }
+        write_json(dir.join("folders.json"), &Json::Object(folders_json)).await?;
+
+        for f in &folders {
+            total += export_folder(state, user_id, account, f, &dir, allow_server_fetch).await?;
+            let progress = json!({
+                "phase": "mail",
+                "account": n,
+                "folder": f.external_id.clone().unwrap_or_else(|| f.name.clone()),
+                "messages_done": total,
+            });
+            let _ = kv
+                .set(
+                    &format!("backup:progress:{job_id}"),
+                    &progress.to_string(),
+                    Some(3600),
+                )
+                .await;
+        }
+    }
+    Ok(total)
+}
+
+/// Export one folder's messages; returns how many were written.
+async fn export_folder(
+    state: &AuthState,
+    user_id: &str,
+    account: &AccountRow,
+    folder: &FolderRow,
+    dir: &Path,
+    allow_server_fetch: bool,
+) -> Result<u64, BackupError> {
+    let db = &state.db;
+    let rows = load_folder_messages(db, &folder.id).await?;
+
+    // Path (a): stored raw blobs.
+    let mut resolved: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut unresolved: Vec<usize> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let path = store::get_message_raw_blob_path(db, &row.id)
+            .await
+            .map_err(sync_err)?;
+        let bytes = match path {
+            Some(p) => blobs::read(&state.data_dir, &p).await.ok(),
+            None => None,
+        };
+        match bytes {
+            Some(b) => {
+                resolved.insert(row.id.clone(), b);
+            }
+            None => unresolved.push(i),
+        }
+    }
+
+    // Path (b): one batched server fetch per folder; failures leave the
+    // message for reconstruction. Successful fetches backfill raw_blob_path.
+    if allow_server_fetch && !unresolved.is_empty() {
+        let refs: Vec<&MailRow> = unresolved.iter().map(|&i| &rows[i]).collect();
+        let fetched =
+            fetch_raw_from_server(db, user_id, account, folder.external_id.as_deref(), &refs).await;
+        for (row_id, bytes) in fetched {
+            if let Ok(rel) = blobs::store(&state.data_dir, &account.id, &bytes).await {
+                let _ = store::set_message_raw_blob(db, &row_id, &rel).await;
+            }
+            resolved.insert(row_id, bytes);
+        }
+    }
+
+    let mut mbox = tokio::fs::File::create(dir.join(format!("{}.mbox", folder.id))).await?;
+    let mut meta = String::new();
+    for row in &rows {
+        // Path (c): reconstruct from parsed columns.
+        let (raw, reconstructed) = match resolved.get(&row.id) {
+            Some(b) => (b.clone(), false),
+            None => (reconstruct_message(row), true),
+        };
+        let from_addr = mbox_from_addr(row.from_address.as_deref());
+        let epoch = row
+            .date
+            .as_deref()
+            .and_then(parse_ts)
+            .map_or(0, |d| d.timestamp());
+        let mut buf = Vec::new();
+        write_mbox_message(&mut buf, &from_addr, epoch, &raw).map_err(BackupError::Io)?;
+        mbox.write_all(&buf).await?;
+
+        let mut flags = Vec::new();
+        if row.is_read {
+            flags.push("seen".to_string());
+        }
+        if row.is_starred {
+            flags.push("flagged".to_string());
+        }
+        let line = MetaLine {
+            message_id: row.message_id_header.clone(),
+            flags,
+            date: row
+                .date
+                .as_deref()
+                .and_then(parse_ts)
+                .map(|d| d.to_rfc3339()),
+            sha256: blobs::sha256_hex(&raw),
+            reconstructed,
+        };
+        meta.push_str(&serde_json::to_string(&line)?);
+        meta.push('\n');
+    }
+    mbox.flush().await?;
+    tokio::fs::write(dir.join(format!("{}.meta.jsonl", folder.id)), meta).await?;
+    Ok(u64::try_from(rows.len()).unwrap_or(u64::MAX))
+}
+
+/// Path (b): batch-fetch raw RFC822 from the source server. Never fails the
+/// export — any connection/fetch error leaves those rows for reconstruction.
+async fn fetch_raw_from_server(
+    db: &DbPool,
+    user_id: &str,
+    account: &AccountRow,
+    folder_wire: Option<&str>,
+    rows: &[&MailRow],
+) -> HashMap<String, Vec<u8>> {
+    match account.protocol.as_str() {
+        "imap" => fetch_raw_imap(db, user_id, account, folder_wire, rows).await,
+        "jmap" => fetch_raw_jmap(db, user_id, account, rows).await,
+        _ => HashMap::new(),
+    }
+}
+
+/// IMAP: connect once, select the folder, `fetch_bodies` in chunks of ≤50.
+async fn fetch_raw_imap(
+    db: &DbPool,
+    user_id: &str,
+    account: &AccountRow,
+    folder_wire: Option<&str>,
+    rows: &[&MailRow],
+) -> HashMap<String, Vec<u8>> {
+    let mut out = HashMap::new();
+    let Some(wire) = folder_wire else { return out };
+    let Ok((mut client, _)) =
+        crate::sync::http::connect_imap_for_account(db, user_id, &account.id).await
+    else {
+        return out;
+    };
+    if client.select(wire).await.is_err() {
+        return out;
+    }
+    let uid_rows: Vec<(u32, &str)> = rows
+        .iter()
+        .filter_map(|r| {
+            store::parse_imap_uid(r.external_id.as_deref())
+                .ok()
+                .map(|uid| (uid, r.id.as_str()))
+        })
+        .collect();
+    for chunk in uid_rows.chunks(50) {
+        let uids: Vec<u32> = chunk.iter().map(|(uid, _)| *uid).collect();
+        let Ok(bodies) = client.fetch_bodies(&uids).await else {
+            continue;
+        };
+        let row_by_uid: HashMap<u32, &str> = chunk.iter().copied().collect();
+        for msg in bodies {
+            if let (Some(body), Some(row_id)) = (msg.body, row_by_uid.get(&msg.uid)) {
+                out.insert((*row_id).to_string(), body);
+            }
+        }
+    }
+    out
+}
+
+/// JMAP: `Email/get` for blobIds (≤50 per call) + `download_blob` per id.
+async fn fetch_raw_jmap(
+    db: &DbPool,
+    user_id: &str,
+    account: &AccountRow,
+    rows: &[&MailRow],
+) -> HashMap<String, Vec<u8>> {
+    let mut out = HashMap::new();
+    let Ok(seam) = crate::sync::http::connect_jmap_for_account(db, user_id, &account.id).await
+    else {
+        return out;
+    };
+    let id_rows: Vec<(&str, &str)> = rows
+        .iter()
+        .filter_map(|r| r.external_id.as_deref().map(|ext| (ext, r.id.as_str())))
+        .collect();
+    for chunk in id_rows.chunks(50) {
+        let ids: Vec<String> = chunk.iter().map(|(ext, _)| (*ext).to_string()).collect();
+        let Ok((emails, _)) = seam.get_emails(&ids).await else {
+            continue;
+        };
+        let row_by_ext: HashMap<&str, &str> = chunk.iter().copied().collect();
+        for email in emails {
+            let (Some(blob_id), Some(row_id)) = (email.blob_id, row_by_ext.get(email.id.as_str()))
+            else {
+                continue;
+            };
+            if let Ok(bytes) = seam.download_blob(&blob_id).await {
+                out.insert((*row_id).to_string(), bytes);
+            }
+        }
+    }
+    out
+}
+
+/// Minimal RFC822 message rebuilt from parsed columns (path c). Column
+/// values are already-decoded display strings; non-ASCII header text goes
+/// out as RFC 2047 base64 encoded-words. HTML body wins over plain text.
+fn reconstruct_message(row: &MailRow) -> Vec<u8> {
+    let mut out = String::new();
+    push_header(&mut out, "From", &header_from(row.from_address.as_deref()));
+    if let Some(to) = header_address_list(row.to_addresses.as_deref()) {
+        push_header(&mut out, "To", &to);
+    }
+    if let Some(cc) = header_address_list(row.cc_addresses.as_deref()) {
+        push_header(&mut out, "Cc", &cc);
+    }
+    if let Some(subject) = row.subject.as_deref().filter(|s| !s.is_empty()) {
+        push_header(&mut out, "Subject", &encode_header_value(subject));
+    }
+    if let Some(date) = row.date.as_deref().and_then(parse_ts) {
+        push_header(&mut out, "Date", &date.to_rfc2822());
+    }
+    if let Some(mid) = row.message_id_header.as_deref().filter(|s| !s.is_empty()) {
+        push_header(&mut out, "Message-ID", &sanitize_header(mid));
+    }
+    out.push_str("MIME-Version: 1.0\r\n");
+    if let Some(html) = row.body_html.as_deref().filter(|b| !b.is_empty()) {
+        out.push_str("Content-Type: text/html; charset=utf-8\r\n\r\n");
+        out.push_str(html);
+    } else {
+        out.push_str("Content-Type: text/plain; charset=utf-8\r\n\r\n");
+        if let Some(text) = row.body_text.as_deref() {
+            out.push_str(text);
+        }
+    }
+    out.into_bytes()
+}
+
+/// CR/LF in a header value would inject extra headers — flatten them.
+fn sanitize_header(value: &str) -> String {
+    value.replace(['\r', '\n'], " ")
+}
+
+fn push_header(out: &mut String, name: &str, value: &str) {
+    out.push_str(name);
+    out.push_str(": ");
+    out.push_str(value);
+    out.push_str("\r\n");
+}
+
+/// RFC 2047 encoded-word for non-ASCII header text; ASCII passes through.
+fn encode_header_value(value: &str) -> String {
+    let clean = sanitize_header(value);
+    if clean.is_ascii() {
+        clean
+    } else {
+        format!("=?UTF-8?B?{}?=", B64.encode(clean.as_bytes()))
+    }
+}
+
+/// Split a display address into (name, email): `Name <email>`, bare email,
+/// or a bare name.
+fn split_address(raw: &str) -> (Option<String>, Option<String>) {
+    let raw = raw.trim();
+    if let Some((name, rest)) = raw.rsplit_once('<') {
+        let email = rest.trim_end_matches('>').trim();
+        let name = name.trim().trim_matches('"');
+        (
+            (!name.is_empty()).then(|| name.to_string()),
+            (!email.is_empty()).then(|| email.to_string()),
+        )
+    } else if raw.contains('@') {
+        (None, Some(raw.to_string()))
+    } else if raw.is_empty() {
+        (None, None)
+    } else {
+        (Some(raw.to_string()), None)
+    }
+}
+
+/// Address column JSON → (name, email) pairs. Shapes mirror
+/// `push/diff.rs::sender_label`: an array of strings or {name,email}
+/// objects, a single `{"raw": "…"}` object, or a bare string.
+fn address_entries(json_text: Option<&str>) -> Vec<(Option<String>, Option<String>)> {
+    let raw = json_text.unwrap_or("").trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    match serde_json::from_str::<Json>(raw) {
+        Ok(Json::Array(entries)) => entries
+            .iter()
+            .map(|entry| match entry {
+                Json::String(s) => split_address(s),
+                other => {
+                    let name = other.get("name").and_then(Json::as_str).unwrap_or("");
+                    let email = other.get("email").and_then(Json::as_str).unwrap_or("");
+                    (
+                        (!name.is_empty()).then(|| name.to_string()),
+                        (!email.is_empty()).then(|| email.to_string()),
+                    )
+                }
+            })
+            .filter(|(n, e)| n.is_some() || e.is_some())
+            .collect(),
+        Ok(Json::Object(obj)) => obj
+            .get("raw")
+            .and_then(Json::as_str)
+            .map(|s| vec![split_address(s)])
+            .unwrap_or_default(),
+        Ok(Json::String(s)) => vec![split_address(&s)],
+        _ => vec![split_address(raw)],
+    }
+}
+
+/// One mailbox as an RFC 5322 address; only the display name is encoded.
+fn format_mailbox(name: Option<&str>, email: Option<&str>) -> String {
+    match (name, email) {
+        (Some(n), Some(e)) => format!("{} <{e}>", encode_header_value(n)),
+        (None, Some(e)) => sanitize_header(e),
+        (Some(n), None) => encode_header_value(n),
+        (None, None) => String::new(),
+    }
+}
+
+fn header_address_list(json_text: Option<&str>) -> Option<String> {
+    let list = address_entries(json_text)
+        .iter()
+        .map(|(n, e)| format_mailbox(n.as_deref(), e.as_deref()))
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    (!list.is_empty()).then_some(list)
+}
+
+/// From header value: the sender address, or a placeholder when unknown.
+fn header_from(from_json: Option<&str>) -> String {
+    header_address_list(from_json).unwrap_or_else(|| "unknown@localhost".to_string())
+}
+
+/// mbox separator address: the sender's bare email, else a placeholder.
+fn mbox_from_addr(from_json: Option<&str>) -> String {
+    address_entries(from_json)
+        .first()
+        .and_then(|(_, email)| email.clone())
+        .filter(|e| e.contains('@') && !e.contains(['\r', '\n']))
+        .unwrap_or_else(|| "unknown@localhost".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::{TEST_MASTER_KEY, install_test_master_key};
     use crate::kernel::App;
     use crate::kv::MemoryKv;
-    use crate::sync::store;
     use crate::storage::{DbPool, Storage};
     use std::sync::Arc;
 
@@ -852,5 +1303,207 @@ mod tests {
         assert_eq!(counts.blobs, 0);
         assert_eq!(counts.warnings.len(), 1);
         assert!(counts.warnings[0].contains("missing"));
+    }
+
+    fn imap_msg(uid: u32) -> crate::imap::ImapMessage {
+        crate::imap::ImapMessage {
+            uid,
+            message_id: None,
+            subject: Some(format!("m{uid}")),
+            from: Some("alice@example.com".into()),
+            to: Some("u@example.com".into()),
+            cc: None,
+            date: None,
+            in_reply_to: None,
+            references: None,
+            flags: vec![],
+            size: None,
+            body: None,
+            body_text: None,
+            body_html: None,
+            has_attachments: false,
+            attachments: vec![],
+        }
+    }
+
+    /// Three messages: one with a real raw blob, one with parsed bodies only
+    /// (reconstructed — no server in tests), one fully empty (headers-only
+    /// reconstruction).
+    #[tokio::test]
+    async fn mail_export_resolves_raw_and_reconstructs() {
+        let fx = seed().await;
+        let pool = sqlite_pool(&fx.db).clone();
+        let kv: Arc<dyn KvStore> = Arc::new(MemoryKv::new());
+        let folder_id = store::get_folder_id(&fx.db, &fx.account_id, "INBOX")
+            .await
+            .unwrap();
+
+        for uid in 1..=3u32 {
+            store::upsert_message(&fx.db, &fx.account_id, &folder_id, &imap_msg(uid))
+                .await
+                .unwrap();
+        }
+        // msg1: raw bytes already in the blob store.
+        let raw1 =
+            b"From: alice@example.com\r\nSubject: raw one\r\n\r\nraw body bytes\r\n".to_vec();
+        let rel1 = blobs::store(fx.data_dir.path(), &fx.account_id, &raw1)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE message SET raw_blob_path = ?, is_read = 1, \
+             date = '2026-09-01 10:00:00', message_id_header = '<m1@example.com>' \
+             WHERE external_id = ?",
+        )
+        .bind(&rel1)
+        .bind(store::imap_message_external_id(&folder_id, 1))
+        .execute(&pool)
+        .await
+        .unwrap();
+        // msg2: parsed bodies only → reconstructed.
+        sqlx::query(
+            "UPDATE message SET body_html = '<p>你好</p>', subject = '你好 世界', \
+             is_starred = 1, date = '2026-09-02 10:00:00', \
+             from_address = '{\"raw\":\"Alice <alice@example.com>\"}', \
+             to_addresses = '[{\"name\":\"鲍勃\",\"email\":\"bob@example.com\"}]' \
+             WHERE external_id = ?",
+        )
+        .bind(store::imap_message_external_id(&folder_id, 2))
+        .execute(&pool)
+        .await
+        .unwrap();
+        // msg3: fully empty → headers-only reconstruction.
+        sqlx::query(
+            "UPDATE message SET subject = NULL, from_address = NULL, to_addresses = NULL, \
+             date = NULL, message_id_header = NULL WHERE external_id = ?",
+        )
+        .bind(store::imap_message_external_id(&folder_id, 3))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let total = collect_mail(
+            &fx.state,
+            &fx.user_id,
+            "job-1",
+            &kv,
+            fx.staging.path(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(total, 3);
+
+        let mail_dir = fx.staging.path().join("mail/0");
+        let mbox = std::fs::read(mail_dir.join(format!("{folder_id}.mbox"))).unwrap();
+        let text = String::from_utf8_lossy(&mbox);
+        assert!(text.contains("raw body bytes")); // raw verbatim
+        assert!(text.contains("From alice@example.com ")); // mbox separator
+        assert!(text.contains("<p>你好</p>")); // reconstructed html body
+        assert!(text.contains("Subject: =?UTF-8?B?")); // non-ASCII encoded-word
+        assert!(text.contains("From: unknown@localhost")); // empty sender placeholder
+
+        let meta =
+            std::fs::read_to_string(mail_dir.join(format!("{folder_id}.meta.jsonl"))).unwrap();
+        let lines: Vec<MetaLine> = meta
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 3);
+        let raw_line = lines
+            .iter()
+            .find(|l| l.message_id.as_deref() == Some("<m1@example.com>"))
+            .unwrap();
+        assert_eq!(raw_line.sha256, blobs::sha256_hex(&raw1));
+        assert_eq!(raw_line.flags, vec!["seen"]);
+        assert!(!raw_line.reconstructed);
+        assert_eq!(raw_line.date.as_deref(), Some("2026-09-01T10:00:00+00:00"));
+        assert_eq!(lines.iter().filter(|l| l.reconstructed).count(), 2);
+        assert!(lines.iter().any(|l| l.flags == ["flagged"]));
+
+        // folders.json maps the folder UUID to its wire path + role.
+        let folders = read_json(&fx, "mail/0/folders.json");
+        assert_eq!(folders[folder_id.as_str()]["path"], json!("INBOX"));
+        assert_eq!(folders[folder_id.as_str()]["role"], json!("inbox"));
+
+        // Progress recorded after the folder.
+        let progress = kv.get("backup:progress:job-1").await.unwrap().unwrap();
+        let progress: Json = serde_json::from_str(&progress).unwrap();
+        assert_eq!(progress["phase"], json!("mail"));
+        assert_eq!(progress["account"], json!(0));
+        assert_eq!(progress["messages_done"], json!(3));
+    }
+
+    #[test]
+    fn reconstruct_encodes_non_ascii_headers() {
+        let row = MailRow {
+            id: "r1".into(),
+            external_id: None,
+            message_id_header: Some("<r1@example.com>".into()),
+            subject: Some("你好 世界".into()),
+            from_address: Some(r#"{"raw":"QQ邮箱管理员 <10000@qq.com>"}"#.into()),
+            to_addresses: Some(r#"[{"name":"鲍勃","email":"bob@example.com"}]"#.into()),
+            cc_addresses: None,
+            date: Some("2026-09-01 10:00:00".into()),
+            is_read: false,
+            is_starred: false,
+            body_text: Some("plain body".into()),
+            body_html: None,
+        };
+        let raw = reconstruct_message(&row);
+        let text = String::from_utf8(raw).unwrap();
+        // Display name encoded; addr-spec stays bare.
+        assert!(text.contains("From: =?UTF-8?B?"));
+        assert!(text.contains("<10000@qq.com>"));
+        assert!(text.contains("To: =?UTF-8?B?"));
+        assert!(text.contains("<bob@example.com>"));
+        assert!(text.contains("Subject: =?UTF-8?B?"));
+        assert!(text.contains("Content-Type: text/plain; charset=utf-8"));
+        assert!(text.ends_with("plain body"));
+    }
+
+    #[test]
+    fn reconstruct_prefers_html_and_handles_empty() {
+        let mut row = MailRow {
+            id: "r2".into(),
+            external_id: None,
+            message_id_header: None,
+            subject: None,
+            from_address: None,
+            to_addresses: None,
+            cc_addresses: None,
+            date: None,
+            is_read: false,
+            is_starred: false,
+            body_text: Some("text".into()),
+            body_html: Some("<b>html</b>".into()),
+        };
+        let html = String::from_utf8(reconstruct_message(&row)).unwrap();
+        assert!(html.contains("Content-Type: text/html; charset=utf-8"));
+        assert!(html.ends_with("<b>html</b>"));
+        assert!(html.starts_with("From: unknown@localhost\r\n"));
+
+        row.body_html = None;
+        row.body_text = None;
+        let empty = String::from_utf8(reconstruct_message(&row)).unwrap();
+        assert!(empty.ends_with("Content-Type: text/plain; charset=utf-8\r\n\r\n"));
+    }
+
+    #[test]
+    fn address_parsing_mirrors_sender_label_shapes() {
+        assert_eq!(
+            mbox_from_addr(Some(r#"{"raw":"Name <n@example.com>"}"#)),
+            "n@example.com"
+        );
+        assert_eq!(
+            mbox_from_addr(Some(r#"[{"name":"A","email":"a@example.com"}]"#)),
+            "a@example.com"
+        );
+        assert_eq!(mbox_from_addr(Some("bare@example.com")), "bare@example.com");
+        assert_eq!(mbox_from_addr(None), "unknown@localhost");
+        assert_eq!(mbox_from_addr(Some("no-at-sign")), "unknown@localhost");
+        assert_eq!(
+            header_address_list(Some(r#"{"raw":"QQ邮箱管理员 <10000@qq.com>"}"#)).unwrap(),
+            format!("{} <10000@qq.com>", encode_header_value("QQ邮箱管理员"))
+        );
     }
 }
