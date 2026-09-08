@@ -10,7 +10,6 @@
 use async_imap::Session;
 use async_imap::types::Capabilities;
 use futures_util::TryStreamExt;
-use imap_proto::types::Address;
 use serde::Deserialize;
 use std::future::Future;
 use std::time::Duration;
@@ -458,16 +457,16 @@ impl ImapClient {
         .await
     }
 
-    /// Fetch message metadata (envelope + flags + size) for the given UIDs.
+    /// Fetch message metadata (headers + flags + size) for the given UIDs.
     ///
     /// Does **not** fetch message bodies — use `fetch_bodies` for that.
-    /// Fetch envelopes for many UIDs. Large mailbox folders (QQ custom
-    /// folders run 1000+) must not produce one giant FETCH response: QQ's
-    /// ENVELOPE streams trip async-imap's incremental parser roughly 4KB
-    /// into a response (mid-line TakeWhile1 failure, session desynced),
-    /// while Outlook's larger streams parse fine. Chunked commands keep
-    /// each response small — every command completes inside the timeout
-    /// and fully drained.
+    /// Metadata travels as `BODY.PEEK[HEADER.FIELDS ...]` literals, not
+    /// ENVELOPE: QQ/Coremail emit malformed JavaMail Message-IDs with bare
+    /// nested quotes inside the ENVELOPE quoted string, which imap-proto's
+    /// RFC-strict parser rejects (TakeWhile1), wedging the whole chunk
+    /// deterministically. Length-prefixed literals bypass that parser, and
+    /// mail-parser extracts the fields leniently. Chunking still bounds the
+    /// response size for large folders (QQ custom folders run 1000+).
     pub async fn fetch_metadata(&mut self, uids: &[u32]) -> Result<Vec<ImapMessage>, ImapError> {
         const MAX_RETRIES_PER_CHUNK: u8 = 3;
         if uids.len() <= METADATA_CHUNK {
@@ -509,7 +508,9 @@ impl ImapClient {
 
         timed(COMMAND_TIMEOUT, async {
             let uid_set = format_uid_set(uids);
-            let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE");
+            let fetch_items = parenthesize_fetch_atts(
+                "UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)]",
+            );
 
             let stream = self
                 .session
@@ -541,7 +542,9 @@ impl ImapClient {
         }
 
         timed(COMMAND_TIMEOUT, async {
-            let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE");
+            let fetch_items = parenthesize_fetch_atts(
+                "UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)]",
+            );
             let query = format!("{fetch_items} (CHANGEDSINCE {modseq})");
 
             let stream = self
@@ -571,7 +574,7 @@ impl ImapClient {
 
         timed(COMMAND_TIMEOUT, async {
             let uid_set = format_uid_set(uids);
-            let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[]");
+            let fetch_items = parenthesize_fetch_atts("UID FLAGS RFC822.SIZE BODY.PEEK[]");
 
             let stream = self
                 .session
@@ -849,8 +852,100 @@ pub fn decode_mime_header_bytes(raw: &[u8]) -> String {
     }
 }
 
-fn decode_opt_mime_header_bytes(raw: Option<&[u8]>) -> Option<String> {
-    raw.map(decode_mime_header_bytes)
+/// Metadata fields extracted from a message's header block.
+type HeaderMetadata = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Parse message metadata from a `BODY[HEADER.FIELDS ...]` literal (or the
+/// header section of a full body).
+///
+/// This replaces ENVELOPE parsing: imap-proto's quoted-string parser is
+/// RFC-strict and dies on QQ/Coremail responses whose Message-ID contains
+/// bare nested quotes (malformed JavaMail ids relayed verbatim). Literals
+/// are length-prefixed, so the header bytes reach us untouched and
+/// mail-parser (lenient) does the field extraction.
+fn parse_header_metadata(header_bytes: &[u8]) -> HeaderMetadata {
+    let Some(msg) = mail_parser::MessageParser::default().parse_headers(header_bytes) else {
+        return HeaderMetadata::default();
+    };
+
+    // Identity/date fields: raw header text, unfolded, brackets intact — the
+    // same shape the old ENVELOPE path stored, so existing rows and the
+    // frontend's messageIdentity diff keep matching.
+    let raw_text = |name: mail_parser::HeaderName<'_>| -> Option<String> {
+        msg.headers()
+            .iter()
+            .find(|h| h.name == name)
+            .map(|h| {
+                unfold_header(&String::from_utf8_lossy(
+                    &header_bytes[h.offset_start as usize..h.offset_end as usize],
+                ))
+            })
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let subject = msg
+        .headers()
+        .iter()
+        .find(|h| h.name == mail_parser::HeaderName::Subject)
+        .map(|h| {
+            decode_mime_header_bytes(&header_bytes[h.offset_start as usize..h.offset_end as usize])
+        })
+        .filter(|s| !s.is_empty());
+    let format_addrs = |addr: Option<&mail_parser::Address>| -> Option<String> {
+        let parts: Vec<String> = addr?
+            .iter()
+            .filter_map(|a| {
+                let email = a.address.as_deref()?;
+                Some(match a.name.as_deref().filter(|n| !n.is_empty()) {
+                    Some(name) => format!("{name} <{email}>"),
+                    None => email.to_string(),
+                })
+            })
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(", "))
+        }
+    };
+
+    (
+        raw_text(mail_parser::HeaderName::MessageId),
+        subject,
+        format_addrs(msg.from()),
+        format_addrs(msg.to()),
+        format_addrs(msg.cc()),
+        raw_text(mail_parser::HeaderName::Date),
+        raw_text(mail_parser::HeaderName::InReplyTo),
+        raw_text(mail_parser::HeaderName::References),
+    )
+}
+
+/// Collapse RFC 5322 folding (CRLF + whitespace) into a single space.
+fn unfold_header(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' && chars.peek() == Some(&'\n') {
+            chars.next();
+            while matches!(chars.peek(), Some(' ' | '\t')) {
+                chars.next();
+            }
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Parse an `async_imap::types::Fetch` into our `ImapMessage`.
@@ -859,31 +954,17 @@ fn parse_fetch_to_message(fetch: &async_imap::types::Fetch, include_body: bool) 
     let flags: Vec<String> = fetch.flags().map(|f| format!("{f:?}")).collect();
     let size = fetch.size;
 
-    // Parse envelope if present
-    let (message_id, subject, from, to, cc, date, in_reply_to, references) =
-        if let Some(envelope) = fetch.envelope() {
-            (
-                envelope
-                    .message_id
-                    .as_ref()
-                    .map(|n| String::from_utf8_lossy(n).into_owned()),
-                decode_opt_mime_header_bytes(envelope.subject.as_deref()),
-                envelope.from.as_ref().map(|a| format_address_list(a)),
-                envelope.to.as_ref().map(|a| format_address_list(a)),
-                envelope.cc.as_ref().map(|a| format_address_list(a)),
-                envelope
-                    .date
-                    .as_ref()
-                    .map(|n| String::from_utf8_lossy(n).into_owned()),
-                envelope
-                    .in_reply_to
-                    .as_ref()
-                    .map(|n| String::from_utf8_lossy(n).into_owned()),
-                None, // References not in Envelope; would need to parse headers
-            )
-        } else {
-            (None, None, None, None, None, None, None, None)
-        };
+    // Metadata comes from the header block: the dedicated HEADER.FIELDS
+    // literal on metadata fetches, or the header section of BODY.PEEK[].
+    let (message_id, subject, from, to, cc, date, in_reply_to, references) = if include_body {
+        fetch
+            .body()
+            .map_or_else(HeaderMetadata::default, parse_header_metadata)
+    } else {
+        fetch
+            .header()
+            .map_or_else(HeaderMetadata::default, parse_header_metadata)
+    };
 
     let (body_bytes, body_text, body_html, has_attachments, attachments) = if include_body {
         if let Some(raw) = fetch.body() {
@@ -964,34 +1045,6 @@ fn format_uid_set(uids: &[u32]) -> String {
     }
 
     parts.join(",")
-}
-
-/// Format an IMAP address list into a readable string.
-fn format_address_list(addrs: &[Address]) -> String {
-    let parts: Vec<String> = addrs
-        .iter()
-        .map(|addr| {
-            let mailbox = addr
-                .mailbox
-                .as_ref()
-                .map(|m| String::from_utf8_lossy(m).into_owned())
-                .unwrap_or_default();
-            let host = addr
-                .host
-                .as_ref()
-                .map(|h| String::from_utf8_lossy(h).into_owned())
-                .unwrap_or_default();
-            let name = addr.name.as_deref().map(decode_mime_header_bytes);
-
-            if let Some(name) = name {
-                format!("{name} <{mailbox}@{host}>")
-            } else {
-                format!("{mailbox}@{host}")
-            }
-        })
-        .collect();
-
-    parts.join(", ")
 }
 
 /// Extract plain-text, HTML, and attachment parts from a raw RFC 822 message.
@@ -1084,6 +1137,67 @@ pub fn decrypt_account_password(credential_json: &str, dek: &[u8]) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envelope_with_nested_quotes_fails_imap_proto_parse() {
+        // Root-cause documentation (QQ, 2026-09): JavaMail emits a malformed
+        // Message-ID containing bare quotes; QQ/Coremail fail to escape them
+        // inside the ENVELOPE quoted string. imap-proto is RFC-strict and
+        // rejects the whole response (TakeWhile1), wedging sync forever.
+        let wire = b"* 6 FETCH (UID 8 FLAGS (\\Seen) RFC822.SIZE 4115 ENVELOPE (\"Fri, 28 Jun 2024 14:19:59 +0800 (CST)\" \"=?utf-8?B?5bel5Lia?=\" ((\"zwfw-info\" NIL \"zwfw-info\" \"miit.gov.cn\")) ((\"zwfw-info\" NIL \"zwfw-info\" \"miit.gov.cn\")) ((\"zwfw-info\" NIL \"zwfw-info\" \"miit.gov.cn\")) ((\"491564601\" NIL \"491564601\" \"qq.com\")) NIL NIL NIL \"<1364539391.160358.1719555599402.JavaMail.\"zwfw-info@miit.gov.cn\"@jszt-idc07-msgcenter-5b6dc56f8f-v7cvc>\"))\r\nA0028 OK UID FETCH Completed\r\n";
+        assert!(
+            imap_proto::parser::parse_response(wire).is_err(),
+            "documents why ENVELOPE can never carry this message"
+        );
+    }
+
+    #[test]
+    fn header_fields_response_survives_nested_quotes() {
+        // The same malformed Message-ID inside a HEADER.FIELDS literal:
+        // length-prefixed framing bypasses the quoted-string parser entirely.
+        let header_block = b"Message-ID: <1364539391.160358.1719555599402.JavaMail.\"zwfw-info@miit.gov.cn\"@jszt-idc07-msgcenter-5b6dc56f8f-v7cvc>\r\nDate: Fri, 28 Jun 2024 14:19:59 +0800 (CST)\r\n\r\n";
+        let mut wire = format!(
+            "* 6 FETCH (UID 8 FLAGS (\\Seen) RFC822.SIZE 4115 BODY[HEADER.FIELDS (MESSAGE-ID DATE)] {{{}}}\r\n",
+            header_block.len()
+        )
+        .into_bytes();
+        wire.extend_from_slice(header_block);
+        wire.extend_from_slice(b")\r\nA0028 OK UID FETCH Completed\r\n");
+        assert!(
+            imap_proto::parser::parse_response(&wire).is_ok(),
+            "literal framing must parse"
+        );
+    }
+
+    #[test]
+    fn parse_header_metadata_handles_nested_quote_message_id() {
+        // The exact header block QQ sent for UID 8 (subject truncated).
+        let headers = b"Date: Fri, 28 Jun 2024 14:19:59 +0800 (CST)\r\nSubject: =?utf-8?B?5bel5Lia?=\r\nFrom: =?utf-8?B?endmdy1pbmZv?= <zwfw-info@miit.gov.cn>\r\nTo: 491564601@qq.com\r\nMessage-ID: <1364539391.160358.1719555599402.JavaMail.\"zwfw-info@miit.gov.cn\"@jszt-idc07-msgcenter-5b6dc56f8f-v7cvc>\r\nIn-Reply-To: <prev@qq.com>\r\nReferences: <root@qq.com> <prev@qq.com>\r\n\r\n";
+        let (message_id, subject, from, to, cc, date, in_reply_to, references) =
+            parse_header_metadata(headers);
+        assert_eq!(
+            message_id.as_deref(),
+            Some(
+                "<1364539391.160358.1719555599402.JavaMail.\"zwfw-info@miit.gov.cn\"@jszt-idc07-msgcenter-5b6dc56f8f-v7cvc>"
+            )
+        );
+        assert_eq!(subject.as_deref(), Some("工业"));
+        assert_eq!(from.as_deref(), Some("zwfw-info <zwfw-info@miit.gov.cn>"));
+        assert_eq!(to.as_deref(), Some("491564601@qq.com"));
+        assert_eq!(cc, None);
+        assert_eq!(
+            date.as_deref(),
+            Some("Fri, 28 Jun 2024 14:19:59 +0800 (CST)")
+        );
+        assert_eq!(in_reply_to.as_deref(), Some("<prev@qq.com>"));
+        assert_eq!(references.as_deref(), Some("<root@qq.com> <prev@qq.com>"));
+    }
+
+    #[test]
+    fn parse_header_metadata_empty_on_garbage() {
+        let out = parse_header_metadata(b"not a header block");
+        assert_eq!(out, Default::default());
+    }
 
     #[test]
     fn role_to_specialuse_maps_rfc6154() {
