@@ -14,6 +14,7 @@ mod ai;
 mod api_error;
 mod auth;
 mod avatars;
+mod backup;
 mod bimi;
 mod blobs;
 mod config;
