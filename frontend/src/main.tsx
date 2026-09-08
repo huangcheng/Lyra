@@ -6,7 +6,7 @@ import { startViewStatePersistence } from './lib/persist-view-state';
 import { restoreSession } from './lib/session';
 import { initTheme } from './lib/theme';
 import { registerServiceWorker } from './lib/pwa';
-import { openMessage, readNotificationPrefs, setOpenMessageNavigator } from './lib/notifications';
+import { openMessage, setOpenMessageNavigator } from './lib/notifications';
 import { reconcilePushSubscription } from './lib/push';
 import '@fontsource-variable/inter';
 import '@fontsource-variable/inter-tight';
@@ -25,9 +25,9 @@ void restoreSession().then(() => {
     const data = ev.data as { type?: string; messageId?: string } | null;
     if (data?.type === 'lyra:open-message') void openMessage(data.messageId ?? '');
   });
-  // Heal the server-side push subscription when banners are enabled (covers
+  // Heal the server-side push subscription when this browser has one (covers
   // pushservice endpoint rotation; cheap idempotent PUT).
-  void reconcilePushSubscription(readNotificationPrefs().enabled).catch(() => {});
+  void reconcilePushSubscription().catch(() => {});
   registerServiceWorker();
   createRoot(document.getElementById('root')!).render(
     <StrictMode>

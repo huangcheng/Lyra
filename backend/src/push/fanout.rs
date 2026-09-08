@@ -98,6 +98,10 @@ pub(crate) async fn fan_out_account(
 
     let vapid = load_or_generate_vapid(kv).await?;
 
+    // Push services cap payloads (~4KB); subjects/senders are unbounded TEXT.
+    // Truncate well under the cap so a pathological mail can't 413 the send.
+    let clip = |s: &str| -> String { s.chars().take(200).collect() };
+
     let mut payloads: Vec<PushPayload> = outcome
         .fresh
         .iter()
@@ -106,9 +110,9 @@ pub(crate) async fn fan_out_account(
             title: if c.title.is_empty() {
                 "New message".to_string()
             } else {
-                c.title.clone()
+                clip(&c.title)
             },
-            body: c.body.clone(),
+            body: clip(&c.body),
             tag: format!("lyra-{}", c.id),
             data: PushData {
                 message_id: c.id.clone(),

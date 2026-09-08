@@ -64,8 +64,9 @@ export interface PushPrefsPayload {
 
 /**
  * Write-through of the mute lists so the server can filter before sending.
- * No-op when this browser has no active push subscription. Fire-and-forget:
- * failures are swallowed (the next prefs write or app open retries).
+ * No-op when this browser has no active push subscription (mutes made on an
+ * unsubscribed device reach the server at the next write from a subscribed
+ * one). Fire-and-forget: failures are swallowed; the next prefs write retries.
  */
 export async function syncPushPrefs(prefs: PushPrefsPayload): Promise<void> {
   if (!(await currentSubscription())) return;
@@ -77,12 +78,12 @@ export async function syncPushPrefs(prefs: PushPrefsPayload): Promise<void> {
 }
 
 /**
- * Heal-on-open: when the user has banners enabled, make sure the server's
- * subscription matches this browser's (covers pushservice endpoint rotation
- * and re-installs). Cheap: one local read + one idempotent PUT.
+ * Heal-on-open: when this browser has an active push subscription, make sure
+ * the server has it (covers pushservice endpoint rotation and re-installs).
+ * Cheap: one local read + one idempotent PUT. Gated on subscription state,
+ * not the banner pref — a user may rely on push alone.
  */
-export async function reconcilePushSubscription(enabled: boolean): Promise<void> {
-  if (!enabled) return;
+export async function reconcilePushSubscription(): Promise<void> {
   const sub = await currentSubscription();
   if (!sub) return;
   const json = sub.toJSON();
