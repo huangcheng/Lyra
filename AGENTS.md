@@ -75,6 +75,7 @@ Detail lives in specs; this file stays short and accurate.
 | **PIM subsystems** — Calendar/Contacts Thunderbird-style shell, then ICS subscriptions | `docs/superpowers/specs/2026-09-04-lyra-pim-subsystems-design.md` |
 | **PIM credentials** — app password for CardDAV/CalDAV (bearer mail), then calendar read-completeness | `docs/superpowers/specs/2026-09-04-lyra-pim-credentials-design.md` |
 | **Web Push** — closed-app new-mail notifications (VAPID, kv subscriptions, sync-event fan-out) | `docs/superpowers/specs/2026-09-07-lyra-web-push-design.md` |
+| **Backup export/import** — full-instance age-encrypted archive, job-based, additive merge | `docs/superpowers/specs/2026-09-08-lyra-backup-export-import-design.md` |
 | Mail sidebar Favorites (Apple Mail–style; local views, expandable All Inboxes + Starred) | `docs/superpowers/specs/2026-09-03-lyra-favorites-sidebar-design.md` |
 | **AI assist** — BYOK settings, LLM dialect seam, draft/reply suggest | `docs/specs/2026-09-08-lyra-ai-byok-spec.md` |
 
