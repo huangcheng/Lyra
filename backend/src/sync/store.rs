@@ -1503,6 +1503,7 @@ pub(crate) async fn get_message_raw_blob_path(
     }
 }
 
+/// Refresh read/star/flags state plus fill-in semantics for a matched message.
 ///
 /// `flags = excluded.flags`, while subject/snippet/address columns only move
 /// off RFC-2047-encoded placeholders or U+FFFD mojibake and date/header
