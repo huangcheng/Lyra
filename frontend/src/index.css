@@ -221,6 +221,12 @@
   #root {
     height: 100%;
   }
+  /* The router's root wrapper must carry the viewport height down the tree,
+     or `h-full` panes (mail reading pane) grow with content instead of
+     bounding the inner scroll area. */
+  .app-root {
+    height: 100%;
+  }
   body {
     @apply bg-background font-sans text-foreground antialiased;
     font-synthesis-weight: none;
