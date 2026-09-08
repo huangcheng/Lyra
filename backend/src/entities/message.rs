@@ -42,6 +42,8 @@ pub struct Model {
     pub body_text: Option<String>,
     pub body_html: Option<String>,
     pub body_blob_path: Option<String>,
+    /// Raw RFC822 bytes in the blob store, when fetched (view/DKIM/export).
+    pub raw_blob_path: Option<String>,
     pub is_read: bool,
     pub is_starred: bool,
     pub is_draft: bool,

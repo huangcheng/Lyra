@@ -97,6 +97,9 @@ web-push = { version = "0.11", default-features = false }
 # VAPID ES256 keypair generation (PKCS#8 PEM for web-push, uncompressed point
 # for the browser's applicationServerKey).
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+# Backup archives: zip container + age passphrase encryption (rage-compatible).
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+age = { version = "0.11", default-features = false, features = ["armor"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
