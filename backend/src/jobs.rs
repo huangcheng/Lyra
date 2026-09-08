@@ -18,6 +18,8 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
+use crate::auth::AuthState;
+use crate::backup::BackupError;
 use crate::entities::{jobs, mail_account, message};
 use crate::kernel::App;
 use crate::storage::DbPool;
@@ -37,6 +39,20 @@ pub enum JobPayload {
     SendMessage {
         account_id: String,
         outbound: serde_json::Value,
+    },
+    /// Full-instance backup export. `password_wrapped` is the archive
+    /// password as an `EncryptedCredential` JSON envelope under the user DEK
+    /// — the jobs table never holds it in plaintext. The kv progress/report
+    /// key is the jobs row id (`job.id`), not a payload field.
+    ExportBackup {
+        user_id: String,
+        artifact_id: String,
+        password_wrapped: String,
+    },
+    ImportBackup {
+        user_id: String,
+        upload_id: String,
+        password_wrapped: String,
     },
 }
 
@@ -140,6 +156,8 @@ fn payload_kind(payload: &JobPayload) -> &'static str {
         JobPayload::SyncAccount { .. } => "sync_account",
         JobPayload::UnsnoozeMessage { .. } => "unsnooze_message",
         JobPayload::SendMessage { .. } => "send_message",
+        JobPayload::ExportBackup { .. } => "export_backup",
+        JobPayload::ImportBackup { .. } => "import_backup",
     }
 }
 
@@ -455,12 +473,13 @@ async fn revert_pending(db: &DbPool, id: &str) -> Result<(), sqlx::Error> {
 /// Dispatch a claimed job. Plugin errors mark the job `failed` (no panic).
 /// `permit` must already be held; it is released when this future ends.
 pub async fn process_job(
-    db: &DbPool,
-    app: &App,
+    state: &AuthState,
     inflight: &InFlight,
     _permit: OwnedSemaphorePermit,
     job: ClaimedJob,
 ) -> Result<(), sqlx::Error> {
+    let db = &state.db;
+    let app: &App = &state.app;
     match job.payload {
         JobPayload::SyncAccount {
             account_id,
@@ -521,8 +540,86 @@ pub async fn process_job(
         } => {
             handle_send_message(db, app, &job.id, &account_id, &outbound).await?;
         }
+        JobPayload::ExportBackup {
+            user_id,
+            artifact_id,
+            password_wrapped,
+        } => {
+            let result = match unwrap_backup_password(db, &user_id, &password_wrapped).await {
+                Ok(password) => {
+                    crate::backup::export::run(state, &user_id, &job.id, &artifact_id, &password)
+                        .await
+                }
+                Err(err) => {
+                    // `run` never started, so it could not write the failure
+                    // report itself — the job-status endpoint polls for it.
+                    write_backup_failure_report(state.kv(), &job.id, &err).await;
+                    Err(err)
+                }
+            };
+            finalize_backup_job(db, &job.id, result).await?;
+        }
+        JobPayload::ImportBackup { .. } => {
+            // TODO(plan 2026-09-08-lyra-backup-export-import Task 11): call
+            // backup::import::run here once import.rs lands.
+            let err = BackupError::Internal("import not yet wired".into());
+            write_backup_failure_report(state.kv(), &job.id, &err).await;
+            finalize_backup_job(db, &job.id, Err(err)).await?;
+        }
     }
     Ok(())
+}
+
+/// Decrypt the archive password travelling in the job payload: an
+/// `EncryptedCredential` JSON envelope under the user DEK.
+async fn unwrap_backup_password(
+    db: &DbPool,
+    user_id: &str,
+    password_wrapped: &str,
+) -> Result<String, BackupError> {
+    let dek = AuthState::get_user_dek(db, user_id)
+        .await
+        .map_err(|e| BackupError::Crypto(e.to_string()))?;
+    let envelope: crate::crypto::EncryptedCredential = serde_json::from_str(password_wrapped)?;
+    let bytes =
+        crate::crypto::decrypt(&dek, &envelope).map_err(|e| BackupError::Crypto(e.to_string()))?;
+    String::from_utf8(bytes).map_err(|e| BackupError::Crypto(e.to_string()))
+}
+
+/// `{"ok":false,"error":…}` into `backup:report:<job_id>` for failures that
+/// happen outside `backup::export::run` (which writes its own report).
+/// BackupError's Display carries no secrets (passwords never appear in its
+/// messages); best-effort — the terminal job write still happens without it.
+async fn write_backup_failure_report(
+    kv: &Arc<dyn crate::kv::KvStore>,
+    job_id: &str,
+    err: &BackupError,
+) {
+    let report = serde_json::json!({"ok": false, "error": err.to_string()});
+    let _ = kv
+        .set(
+            &format!("backup:report:{job_id}"),
+            &report.to_string(),
+            None,
+        )
+        .await;
+}
+
+/// Terminal write for a backup job: Ok → `completed`; Err → `failed` with a
+/// static category plus the scrubbed BackupError Display as detail.
+async fn finalize_backup_job(
+    db: &DbPool,
+    job_id: &str,
+    result: Result<(), BackupError>,
+) -> Result<(), sqlx::Error> {
+    match result {
+        Ok(()) => mark_completed(db, job_id).await,
+        Err(err) => {
+            let detail = scrub_error_detail(&err.to_string());
+            tracing::warn!(job_id = %job_id, error = %detail, "backup job failed");
+            mark_failed(db, job_id, "backup job failed", Some(&detail)).await
+        }
+    }
 }
 
 /// Run one `SendMessage` payload through the account's configured send plugin.
@@ -680,8 +777,10 @@ pub async fn list_sync_account_errors(
     Ok(items)
 }
 
-/// Spawn the job poller after `AuthState` exists. Worker needs the db pool + `Arc<App>`.
-pub fn spawn_workers(db: DbPool, app: Arc<App>, max_concurrent: usize) {
+/// Spawn the job poller after `AuthState` exists. Workers need the full
+/// state: sync uses db + `App`, backup jobs also need `data_dir` and kv.
+pub fn spawn_workers(state: AuthState, max_concurrent: usize) {
+    let db = state.db.clone();
     let inflight = Arc::new(InFlight::new());
     let sem = Arc::new(Semaphore::new(max_concurrent.max(1)));
     tokio::spawn(async move {
@@ -692,11 +791,10 @@ pub fn spawn_workers(db: DbPool, app: Arc<App>, max_concurrent: usize) {
             let now = chrono::Utc::now().to_rfc3339();
             match try_claim_with_permit(&db, &now, &inflight, &sem).await {
                 Ok(Some((job, permit))) => {
-                    let db = db.clone();
-                    let app = Arc::clone(&app);
+                    let state = state.clone();
                     let inflight = Arc::clone(&inflight);
                     tokio::spawn(async move {
-                        if let Err(error) = process_job(&db, &app, &inflight, permit, job).await {
+                        if let Err(error) = process_job(&state, &inflight, permit, job).await {
                             tracing::error!(%error, "job process failed");
                         }
                     });
@@ -728,6 +826,36 @@ mod tests {
         let storage = Storage::new("sqlite::memory:").await.unwrap();
         storage.run_migrations().await.unwrap();
         storage.pool().clone()
+    }
+
+    /// AuthState over an in-memory pool + temp data dir (workers now take the
+    /// full state; the tempdir return keeps it alive for the test).
+    fn test_state(db: &DbPool, app: App) -> (AuthState, tempfile::TempDir) {
+        crate::auth::install_test_master_key();
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = crate::config::Config {
+            listen_addr: "127.0.0.1:0".into(),
+            database_url: "sqlite::memory:".into(),
+            data_dir: data_dir.path().to_string_lossy().into_owned(),
+            min_password_length: 8,
+            sync_max_concurrent: 3,
+            sync_poll_secs: 300,
+            max_attachment_bytes: 25 * 1024 * 1024,
+            redis_url: None,
+            master_key: crate::auth::TEST_MASTER_KEY.to_vec(),
+            ms_oauth: None,
+            yandex_oauth: None,
+            captcha: crate::config::CaptchaConfig::None,
+            vapid_subject: "mailto:test@example.com".to_string(),
+        };
+        let state = AuthState::new(
+            db.clone(),
+            &config,
+            Arc::new(app),
+            Arc::new(crate::kv::MemoryKv::new()),
+        )
+        .unwrap();
+        (state, data_dir)
     }
 
     fn sqlite_pool(db: &DbPool) -> &sqlx::SqlitePool {
@@ -894,12 +1022,13 @@ mod tests {
         let claimed = claim_due(&db, now).await.unwrap().expect("due job");
 
         let mut events = app.events.subscribe();
+        let (state, _data_dir) = test_state(&db, app);
         let inflight = InFlight::new();
         let sem = Arc::new(Semaphore::new(3));
         let permit = Arc::clone(&sem)
             .try_acquire_owned()
             .expect("test semaphore has a permit");
-        process_job(&db, &app, &inflight, permit, claimed)
+        process_job(&state, &inflight, permit, claimed)
             .await
             .expect("plugin error must not panic");
 
@@ -1181,13 +1310,14 @@ mod tests {
         }
     }
 
-    async fn process_one(db: &DbPool, app: &App, job: ClaimedJob) {
+    async fn process_one(db: &DbPool, app: App, job: ClaimedJob) {
+        let (state, _data_dir) = test_state(db, app);
         let inflight = InFlight::new();
         let sem = Arc::new(Semaphore::new(1));
         let permit = Arc::clone(&sem)
             .try_acquire_owned()
             .expect("test semaphore has a permit");
-        process_job(db, app, &inflight, permit, job)
+        process_job(&state, &inflight, permit, job)
             .await
             .expect("process_job");
     }
@@ -1207,7 +1337,7 @@ mod tests {
         };
         let job_id = enqueue(&db, &payload, now).await.unwrap();
         let claimed = claim_due(&db, now).await.unwrap().expect("due job");
-        process_one(&db, &app, claimed).await;
+        process_one(&db, app, claimed).await;
 
         let status: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = ?")
             .bind(&job_id)
@@ -1232,7 +1362,7 @@ mod tests {
         };
         let job_id = enqueue(&db, &payload, now).await.unwrap();
         let claimed = claim_due(&db, now).await.unwrap().expect("due job");
-        process_one(&db, &app, claimed).await;
+        process_one(&db, app, claimed).await;
 
         let row = sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT status, last_error FROM jobs WHERE id = ?",
@@ -1276,7 +1406,7 @@ mod tests {
         };
         let job_id = enqueue(&db, &payload, now).await.unwrap();
         let claimed = claim_due(&db, now).await.unwrap().expect("due job");
-        process_one(&db, &app, claimed).await;
+        process_one(&db, app, claimed).await;
 
         let row = sqlx::query_as::<_, (String, Option<String>, i64)>(
             "SELECT status, last_error, attempts FROM jobs WHERE id = ?",
@@ -1288,6 +1418,101 @@ mod tests {
         assert_eq!(row.0, "pending");
         assert_eq!(row.1.as_deref(), Some("SMTP transient"));
         assert_eq!(row.2, 1);
+    }
+
+    #[test]
+    fn backup_payload_serde_roundtrip_and_kinds() {
+        let export = JobPayload::ExportBackup {
+            user_id: "u1".into(),
+            artifact_id: "a1".into(),
+            password_wrapped: "{}".into(),
+        };
+        let json = serde_json::to_value(&export).unwrap();
+        assert_eq!(json["kind"], serde_json::json!("export_backup"));
+        let back: JobPayload = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(
+                &back,
+                JobPayload::ExportBackup { user_id, artifact_id, .. }
+                if user_id == "u1" && artifact_id == "a1"
+            ),
+            "{back:?}"
+        );
+        assert_eq!(payload_kind(&back), "export_backup");
+
+        let import = JobPayload::ImportBackup {
+            user_id: "u1".into(),
+            upload_id: "up1".into(),
+            password_wrapped: "{}".into(),
+        };
+        let json = serde_json::to_value(&import).unwrap();
+        assert_eq!(json["kind"], serde_json::json!("import_backup"));
+        let back: JobPayload = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(
+                &back,
+                JobPayload::ImportBackup { user_id, upload_id, .. }
+                if user_id == "u1" && upload_id == "up1"
+            ),
+            "{back:?}"
+        );
+        assert_eq!(payload_kind(&back), "import_backup");
+    }
+
+    #[tokio::test]
+    async fn import_backup_placeholder_fails_not_yet_wired() {
+        let db = test_pool().await;
+        let (state, _data_dir) = test_state(&db, App::new());
+        let now = "2026-09-09T00:00:00+00:00";
+        let payload = JobPayload::ImportBackup {
+            user_id: "u1".into(),
+            upload_id: "up1".into(),
+            password_wrapped: "{}".into(),
+        };
+        let job_id = enqueue(&db, &payload, now).await.unwrap();
+        let claimed = claim_due(&db, now).await.unwrap().expect("due job");
+
+        let inflight = InFlight::new();
+        let sem = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&sem)
+            .try_acquire_owned()
+            .expect("test semaphore has a permit");
+        process_job(&state, &inflight, permit, claimed)
+            .await
+            .expect("process_job");
+
+        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            "SELECT status, last_error, last_error_detail FROM jobs WHERE id = ?",
+        )
+        .bind(&job_id)
+        .fetch_one(sqlite_pool(&db))
+        .await
+        .unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1.as_deref(), Some("backup job failed"));
+        assert!(
+            row.2.as_deref().unwrap().contains("import not yet wired"),
+            "{:?}",
+            row.2
+        );
+
+        // The placeholder still writes the kv failure report the
+        // job-status endpoint polls for.
+        let report = state
+            .kv()
+            .get(&format!("backup:report:{job_id}"))
+            .await
+            .unwrap()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(report["ok"], serde_json::json!(false));
+        assert!(
+            report["error"]
+                .as_str()
+                .unwrap()
+                .contains("import not yet wired"),
+            "{report}"
+        );
     }
 }
 

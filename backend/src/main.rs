@@ -120,11 +120,7 @@ async fn main() -> anyhow::Result<()> {
         std::sync::Arc::new(kv::MemoryKv::new())
     };
     let auth_state = auth::AuthState::new(db, &config, app, kv)?;
-    jobs::spawn_workers(
-        auth_state.db.clone(),
-        std::sync::Arc::clone(&auth_state.app),
-        config.sync_max_concurrent,
-    );
+    jobs::spawn_workers(auth_state.clone(), config.sync_max_concurrent);
     scheduler::start_scheduler(auth_state.db.clone(), config.sync_poll_secs);
     imap_idle::start_idle_supervisor(auth_state.db.clone());
     jmap_push::start_jmap_push_supervisor(auth_state.db.clone());

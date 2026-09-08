@@ -1487,16 +1487,15 @@ mod tests {
             .unwrap()
             .expect("due unsnooze job");
 
-        let app = crate::kernel::App::new();
+        let state = test_auth_state(pool.clone());
         let inflight = crate::jobs::InFlight::new();
         let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
         let permit = std::sync::Arc::clone(&sem)
             .try_acquire_owned()
             .expect("test semaphore has a permit");
-        crate::jobs::process_job(&as_db(&pool), &app, &inflight, permit, claimed)
+        crate::jobs::process_job(&state, &inflight, permit, claimed)
             .await
             .expect("unsnooze dispatch must not panic");
-        drop(app);
 
         let snoozed: Option<String> =
             sqlx::query_scalar("SELECT snoozed_until FROM message WHERE id = ?")
