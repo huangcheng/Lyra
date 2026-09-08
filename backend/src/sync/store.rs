@@ -114,7 +114,7 @@ fn orm_err(err: sea_orm::DbErr) -> SyncError {
 }
 
 /// Bind a UUID-column id: TEXT on SQLite, native `Uuid` on Postgres.
-fn id_value(db: &DbPool, id: &str) -> Result<Value, SyncError> {
+pub(crate) fn id_value(db: &DbPool, id: &str) -> Result<Value, SyncError> {
     Ok(match id_param(db, id)? {
         IdParam::Text(s) => Value::String(Some(s)),
         IdParam::Uuid(u) => Value::Uuid(Some(u)),
@@ -122,7 +122,7 @@ fn id_value(db: &DbPool, id: &str) -> Result<Value, SyncError> {
 }
 
 /// Optional UUID-column id (e.g. folder `parent_id`).
-fn opt_id_value(db: &DbPool, id: Option<&str>) -> Result<Value, SyncError> {
+pub(crate) fn opt_id_value(db: &DbPool, id: Option<&str>) -> Result<Value, SyncError> {
     let Some(id) = id else {
         return Ok(match db.backend() {
             DbBackend::Sqlite => Value::String(None),
@@ -1327,35 +1327,35 @@ async fn find_message_id_in_tx(
 }
 
 /// One message row ready for the shared envelope insert.
-struct MessageInsert<'a> {
-    id_bind: Value,
-    account_bind: Value,
-    folder_bind: Value,
-    external_id: &'a str,
-    message_id_header: Option<&'a str>,
-    subject: Option<&'a str>,
-    from_json: Option<&'a str>,
-    to_json: Option<&'a str>,
-    cc_json: Option<&'a str>,
-    date: Option<&'a str>,
-    is_read: bool,
-    is_starred: bool,
-    flags_json: &'a str,
-    size_bytes: Option<i32>,
-    in_reply_to: Option<&'a str>,
-    references_headers: Option<&'a str>,
-    snippet: Option<&'a str>,
-    has_attachments: bool,
-    body_text: Option<&'a str>,
-    body_html: Option<&'a str>,
-    jmap_thread_id: Option<&'a str>,
+pub(crate) struct MessageInsert<'a> {
+    pub(crate) id_bind: Value,
+    pub(crate) account_bind: Value,
+    pub(crate) folder_bind: Value,
+    pub(crate) external_id: &'a str,
+    pub(crate) message_id_header: Option<&'a str>,
+    pub(crate) subject: Option<&'a str>,
+    pub(crate) from_json: Option<&'a str>,
+    pub(crate) to_json: Option<&'a str>,
+    pub(crate) cc_json: Option<&'a str>,
+    pub(crate) date: Option<&'a str>,
+    pub(crate) is_read: bool,
+    pub(crate) is_starred: bool,
+    pub(crate) flags_json: &'a str,
+    pub(crate) size_bytes: Option<i32>,
+    pub(crate) in_reply_to: Option<&'a str>,
+    pub(crate) references_headers: Option<&'a str>,
+    pub(crate) snippet: Option<&'a str>,
+    pub(crate) has_attachments: bool,
+    pub(crate) body_text: Option<&'a str>,
+    pub(crate) body_html: Option<&'a str>,
+    pub(crate) jmap_thread_id: Option<&'a str>,
 }
 
 /// Insert one message with the canonical envelope column set.
 ///
 /// Shared body of the IMAP/JMAP upserts (`snoozed_until` stays schema-default
 /// NULL exactly like the legacy `VALUES (…, NULL)` spelling).
-fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStatement {
+pub(crate) fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStatement {
     let mut ins = Sq::insert();
     ins.into_table(message::Entity)
         .columns([

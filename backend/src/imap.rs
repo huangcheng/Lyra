@@ -853,7 +853,7 @@ pub fn decode_mime_header_bytes(raw: &[u8]) -> String {
 }
 
 /// Metadata fields extracted from a message's header block.
-type HeaderMetadata = (
+pub(crate) type HeaderMetadata = (
     Option<String>,
     Option<String>,
     Option<String>,
@@ -872,7 +872,7 @@ type HeaderMetadata = (
 /// bare nested quotes (malformed JavaMail ids relayed verbatim). Literals
 /// are length-prefixed, so the header bytes reach us untouched and
 /// mail-parser (lenient) does the field extraction.
-fn parse_header_metadata(header_bytes: &[u8]) -> HeaderMetadata {
+pub(crate) fn parse_header_metadata(header_bytes: &[u8]) -> HeaderMetadata {
     let Some(msg) = mail_parser::MessageParser::default().parse_headers(header_bytes) else {
         return HeaderMetadata::default();
     };
@@ -1072,7 +1072,9 @@ fn format_uid_set(uids: &[u32]) -> String {
 ///
 /// Returns `(body_text, body_html, attachments)`. HTML is **not** sanitized
 /// here — persist via [`crate::sanitize::persist_body_html`].
-fn extract_mime_parts(raw: &[u8]) -> (Option<String>, Option<String>, Vec<ExtractedAttachment>) {
+pub(crate) fn extract_mime_parts(
+    raw: &[u8],
+) -> (Option<String>, Option<String>, Vec<ExtractedAttachment>) {
     let Some(message) = mail_parser::MessageParser::default().parse(raw) else {
         return (None, None, Vec::new());
     };
