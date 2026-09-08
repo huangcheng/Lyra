@@ -63,9 +63,9 @@ pub(crate) async fn create_staging_dir(data_dir: &Path) -> Result<PathBuf, Backu
 /// Full export: stage every section, zip, age-encrypt to
 /// `data_dir/backups/<artifact_id>.lyra`, then register the artifact.
 /// Progress and the final report live in kv (`backup:progress:<job_id>` /
-/// `backup:report:<job_id>`). On ANY error the staging dir and temp zip are
-/// removed best-effort and a `{"ok":false,"error":…}` report is written
-/// before the error propagates.
+/// `backup:report:<job_id>`). On ANY error the staging dir, temp zip, and a
+/// possibly-created artifact file are removed best-effort and a scrubbed
+/// `{"ok":false,"error":…}` report is written before the error propagates.
 pub async fn run(
     state: &AuthState,
     user_id: &str,
@@ -86,7 +86,8 @@ pub async fn run(
     match run_inner(state, user_id, job_id, artifact_id, password).await {
         Ok(()) => Ok(()),
         Err(err) => {
-            let report = json!({"ok": false, "error": err.to_string()});
+            let report =
+                json!({"ok": false, "error": crate::jobs::scrub_error_detail(&err.to_string())});
             let _ = kv
                 .set(
                     &format!("backup:report:{job_id}"),
@@ -165,50 +166,60 @@ async fn collect_and_archive(
 
     // Zip + age are blocking (age reads the whole zip into memory for v1).
     let artifact = artifacts::artifact_path(&state.data_dir, artifact_id)?;
-    let staging_owned = staging.to_path_buf();
-    let zip_owned = zip_path.to_path_buf();
-    let artifact_owned = artifact.clone();
-    let password_owned = password.to_string();
-    tokio::task::spawn_blocking(move || {
-        zip_dir(&staging_owned, &zip_owned)?;
-        super::crypto::encrypt_file(&zip_owned, &artifact_owned, &password_owned)
-    })
-    .await
-    .map_err(|e| BackupError::Internal(format!("zip/encrypt task failed: {e}")))??;
-    // Artifacts hold decrypted credentials under the age layer only: 0600.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).await?;
+    let outcome = async {
+        let staging_owned = staging.to_path_buf();
+        let zip_owned = zip_path.to_path_buf();
+        let artifact_owned = artifact.clone();
+        // The owned plaintext lives in Zeroizing at every owned site; the
+        // closure borrows it as &str for age.
+        let password_owned = zeroize::Zeroizing::new(password.to_string());
+        tokio::task::spawn_blocking(move || {
+            zip_dir(&staging_owned, &zip_owned)?;
+            super::crypto::encrypt_file(&zip_owned, &artifact_owned, password_owned.as_str())
+        })
+        .await
+        .map_err(|e| BackupError::Internal(format!("zip/encrypt task failed: {e}")))??;
+        // Artifacts hold decrypted credentials under the age layer only: 0600.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).await?;
+        }
+
+        let size_bytes = tokio::fs::metadata(&artifact).await?.len();
+        artifacts::add(
+            kv,
+            user_id,
+            artifacts::ArtifactMeta {
+                id: artifact_id.to_string(),
+                filename: format!("lyra-backup-{}.lyra", created.format("%Y%m%d-%H%M%S")),
+                size_bytes,
+                created_at: created.to_rfc3339(),
+            },
+        )
+        .await?;
+
+        let report = json!({
+            "ok": true,
+            "artifact_id": artifact_id,
+            "sections": serde_json::to_value(&manifest.sections)?,
+            "warnings": counts.warnings,
+        });
+        kv.set(
+            &format!("backup:report:{job_id}"),
+            &report.to_string(),
+            None,
+        )
+        .await
+        .map_err(|e| BackupError::Internal(e.to_string()))?;
+        Ok::<(), BackupError>(())
     }
-
-    let size_bytes = tokio::fs::metadata(&artifact).await?.len();
-    artifacts::add(
-        kv,
-        user_id,
-        artifacts::ArtifactMeta {
-            id: artifact_id.to_string(),
-            filename: format!("lyra-backup-{}.lyra", created.format("%Y%m%d-%H%M%S")),
-            size_bytes,
-            created_at: created.to_rfc3339(),
-        },
-    )
-    .await?;
-
-    let report = json!({
-        "ok": true,
-        "artifact_id": artifact_id,
-        "sections": serde_json::to_value(&manifest.sections)?,
-        "warnings": counts.warnings,
-    });
-    kv.set(
-        &format!("backup:report:{job_id}"),
-        &report.to_string(),
-        None,
-    )
-    .await
-    .map_err(|e| BackupError::Internal(e.to_string()))?;
-    Ok(())
+    .await;
+    if outcome.is_err() {
+        // Never leave an unregistered (possibly partial) artifact behind.
+        let _ = tokio::fs::remove_file(&artifact).await;
+    }
+    outcome
 }
 
 /// Zip every file under `src` into `dst`; entry names are paths relative to
@@ -1375,14 +1386,8 @@ mod tests {
         }
     }
 
-    async fn seed() -> Fixture {
-        install_test_master_key();
-        let data_dir = tempfile::tempdir().unwrap();
-        let staging = tempfile::tempdir().unwrap();
-        let storage = Storage::new("sqlite::memory:").await.unwrap();
-        storage.run_migrations().await.unwrap();
-        let db = storage.pool().clone();
-        let config = crate::config::Config {
+    fn test_config(data_dir: &tempfile::TempDir) -> crate::config::Config {
+        crate::config::Config {
             listen_addr: "127.0.0.1:0".into(),
             database_url: "sqlite::memory:".into(),
             data_dir: data_dir.path().to_string_lossy().into_owned(),
@@ -1396,7 +1401,50 @@ mod tests {
             yandex_oauth: None,
             captcha: crate::config::CaptchaConfig::None,
             vapid_subject: "mailto:test@example.com".to_string(),
-        };
+        }
+    }
+
+    /// kv whose writes always fail — drives the failure path AFTER the
+    /// encrypted artifact exists on disk (`artifacts::add` errors).
+    struct FailingKv;
+
+    #[async_trait::async_trait]
+    impl KvStore for FailingKv {
+        async fn get(&self, _key: &str) -> Result<Option<String>, crate::kv::KvError> {
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            _key: &str,
+            _value: &str,
+            _ttl_secs: Option<u64>,
+        ) -> Result<(), crate::kv::KvError> {
+            Err(crate::kv::KvError::Internal("kv down".into()))
+        }
+        async fn del(&self, _key: &str) -> Result<(), crate::kv::KvError> {
+            Ok(())
+        }
+        async fn del_prefix(&self, _prefix: &str) -> Result<(), crate::kv::KvError> {
+            Ok(())
+        }
+        async fn incr(
+            &self,
+            _key: &str,
+            _delta: i64,
+            _ttl_secs: Option<u64>,
+        ) -> Result<i64, crate::kv::KvError> {
+            Ok(0)
+        }
+    }
+
+    async fn seed() -> Fixture {
+        install_test_master_key();
+        let data_dir = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let storage = Storage::new("sqlite::memory:").await.unwrap();
+        storage.run_migrations().await.unwrap();
+        let db = storage.pool().clone();
+        let config = test_config(&data_dir);
         let state = AuthState::new(
             db.clone(),
             &config,
@@ -2113,6 +2161,47 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let staging_parent = fx.data_dir.path().join("backups/staging");
+        let leftovers: Vec<_> = std::fs::read_dir(&staging_parent).unwrap().collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging must be cleaned: {leftovers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_failure_after_artifact_creation_removes_orphan() {
+        let fx = seed().await;
+        seed_raw_backed_message(&fx).await;
+        // Registry writes fail → artifacts::add errors AFTER the encrypted
+        // artifact file exists on disk.
+        let config = test_config(&fx.data_dir);
+        let state = AuthState::new(
+            fx.db.clone(),
+            &config,
+            Arc::new(App::new()),
+            Arc::new(FailingKv),
+        )
+        .unwrap();
+
+        let job_id = store::new_uuid_text();
+        let artifact_id = store::new_uuid_text();
+        let err = run(
+            &state,
+            &fx.user_id,
+            &job_id,
+            &artifact_id,
+            "test-password-9",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, BackupError::Internal(_)), "{err:?}");
+
+        let artifact =
+            crate::backup::artifacts::artifact_path(fx.data_dir.path(), &artifact_id).unwrap();
+        assert!(!artifact.exists(), "orphan artifact must be removed");
+
+        // Staging dir and temp zip are gone too.
         let staging_parent = fx.data_dir.path().join("backups/staging");
         let leftovers: Vec<_> = std::fs::read_dir(&staging_parent).unwrap().collect();
         assert!(

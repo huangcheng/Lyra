@@ -17,6 +17,7 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use zeroize::Zeroizing;
 
 use crate::auth::AuthState;
 use crate::backup::BackupError;
@@ -571,31 +572,36 @@ pub async fn process_job(
 }
 
 /// Decrypt the archive password travelling in the job payload: an
-/// `EncryptedCredential` JSON envelope under the user DEK.
+/// `EncryptedCredential` JSON envelope under the user DEK. Both the raw
+/// decrypted bytes and the UTF-8 string live in `Zeroizing` (the codebase
+/// convention for credential material).
 async fn unwrap_backup_password(
     db: &DbPool,
     user_id: &str,
     password_wrapped: &str,
-) -> Result<String, BackupError> {
+) -> Result<Zeroizing<String>, BackupError> {
     let dek = AuthState::get_user_dek(db, user_id)
         .await
         .map_err(|e| BackupError::Crypto(e.to_string()))?;
     let envelope: crate::crypto::EncryptedCredential = serde_json::from_str(password_wrapped)?;
-    let bytes =
-        crate::crypto::decrypt(&dek, &envelope).map_err(|e| BackupError::Crypto(e.to_string()))?;
-    String::from_utf8(bytes).map_err(|e| BackupError::Crypto(e.to_string()))
+    let bytes = Zeroizing::new(
+        crate::crypto::decrypt(&dek, &envelope).map_err(|e| BackupError::Crypto(e.to_string()))?,
+    );
+    let text = std::str::from_utf8(&bytes).map_err(|e| BackupError::Crypto(e.to_string()))?;
+    Ok(Zeroizing::new(text.to_string()))
 }
 
 /// `{"ok":false,"error":…}` into `backup:report:<job_id>` for failures that
 /// happen outside `backup::export::run` (which writes its own report).
 /// BackupError's Display carries no secrets (passwords never appear in its
-/// messages); best-effort — the terminal job write still happens without it.
+/// messages) and is scrubbed anyway, same as the jobs-table detail path;
+/// best-effort — the terminal job write still happens without it.
 async fn write_backup_failure_report(
     kv: &Arc<dyn crate::kv::KvStore>,
     job_id: &str,
     err: &BackupError,
 ) {
-    let report = serde_json::json!({"ok": false, "error": err.to_string()});
+    let report = serde_json::json!({"ok": false, "error": scrub_error_detail(&err.to_string())});
     let _ = kv
         .set(
             &format!("backup:report:{job_id}"),
