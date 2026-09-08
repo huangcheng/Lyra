@@ -16,12 +16,20 @@ export type ApiErrorCode = 'unauthorized' | 'http' | 'network';
 export class ApiError extends Error {
   readonly status: number;
   readonly code: ApiErrorCode;
+  /** Backend `code` field from the error body (e.g. `upload_incomplete`). */
+  readonly serverCode: string | null;
 
-  constructor(status: number, code: ApiErrorCode, message: string) {
+  constructor(
+    status: number,
+    code: ApiErrorCode,
+    message: string,
+    serverCode: string | null = null,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.serverCode = serverCode;
   }
 }
 
@@ -112,12 +120,12 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     if (auth && isSessionExpiry(message, code)) {
       clearSessionAndRedirect();
     }
-    throw new ApiError(401, 'unauthorized', message);
+    throw new ApiError(401, 'unauthorized', message, code);
   }
 
   if (!res.ok) {
-    const { message } = await errorBody(res);
-    throw new ApiError(res.status, 'http', message);
+    const { message, code } = await errorBody(res);
+    throw new ApiError(res.status, 'http', message, code);
   }
 
   if (res.status === 204) {
@@ -151,11 +159,11 @@ export async function apiBlob(path: string): Promise<Blob> {
     if (isSessionExpiry(message, code)) {
       clearSessionAndRedirect();
     }
-    throw new ApiError(401, 'unauthorized', message);
+    throw new ApiError(401, 'unauthorized', message, code);
   }
   if (!res.ok) {
-    const { message } = await errorBody(res);
-    throw new ApiError(res.status, 'http', message);
+    const { message, code } = await errorBody(res);
+    throw new ApiError(res.status, 'http', message, code);
   }
   return res.blob();
 }
@@ -179,11 +187,11 @@ export async function apiStream(path: string, signal?: AbortSignal): Promise<Res
     if (isSessionExpiry(message, code)) {
       clearSessionAndRedirect();
     }
-    throw new ApiError(401, 'unauthorized', message);
+    throw new ApiError(401, 'unauthorized', message, code);
   }
   if (!res.ok) {
-    const { message } = await errorBody(res);
-    throw new ApiError(res.status, 'http', message);
+    const { message, code } = await errorBody(res);
+    throw new ApiError(res.status, 'http', message, code);
   }
   return res;
 }
