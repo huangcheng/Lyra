@@ -4,20 +4,21 @@
 //! so cross-user probes answer 404, never 403.
 //! Spec: docs/superpowers/specs/2026-09-08-lyra-backup-export-import-design.md §7.
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
-use crate::api_error::{ApiErrorBody, api_error};
+use crate::api_error::{ApiErrorBody, api_error, api_error_with_code};
 use crate::auth::{AuthState, AuthUser};
 use crate::jobs::{self, JobPayload};
 
+use super::upload::{self, UploadError};
 use super::{BackupError, artifacts};
 
 pub(crate) fn routes() -> Router<AuthState> {
@@ -30,6 +31,15 @@ pub(crate) fn routes() -> Router<AuthState> {
             get(download_artifact),
         )
         .route("/api/v1/backup/artifacts/{id}", delete(delete_artifact))
+        .route("/api/v1/backup/import/uploads", post(start_upload))
+        .route(
+            "/api/v1/backup/import/uploads/{id}/chunks/{n}",
+            put(put_chunk),
+        )
+        .route(
+            "/api/v1/backup/import/uploads/{id}/finish",
+            post(finish_upload),
+        )
 }
 
 impl IntoResponse for BackupError {
@@ -71,6 +81,24 @@ impl IntoResponse for BackupError {
     }
 }
 
+impl IntoResponse for UploadError {
+    fn into_response(self) -> Response {
+        match self {
+            UploadError::NotFound => api_error(StatusCode::NOT_FOUND, self.to_string()),
+            UploadError::Incomplete(missing) => api_error_with_code(
+                StatusCode::BAD_REQUEST,
+                format!("upload incomplete; missing chunks: {missing:?}"),
+                "upload_incomplete",
+            ),
+            UploadError::ChunkOutOfRange(_)
+            | UploadError::EmptyChunk
+            | UploadError::OversizedChunk => api_error(StatusCode::BAD_REQUEST, self.to_string()),
+            UploadError::Io(e) => BackupError::Io(e).into_response(),
+            UploadError::Backup(err) => err.into_response(),
+        }
+    }
+}
+
 /// Handler error type: typed 404/400 plus the store errors (pattern:
 /// `push::PushHttpError`).
 #[derive(Debug)]
@@ -78,6 +106,7 @@ pub(crate) enum BackupHttpError {
     NotFound(&'static str),
     BadRequest(&'static str),
     Backup(BackupError),
+    Upload(UploadError),
 }
 
 impl IntoResponse for BackupHttpError {
@@ -86,6 +115,7 @@ impl IntoResponse for BackupHttpError {
             BackupHttpError::NotFound(m) => api_error(StatusCode::NOT_FOUND, m),
             BackupHttpError::BadRequest(m) => api_error(StatusCode::BAD_REQUEST, m),
             BackupHttpError::Backup(e) => e.into_response(),
+            BackupHttpError::Upload(e) => e.into_response(),
         }
     }
 }
@@ -93,6 +123,12 @@ impl IntoResponse for BackupHttpError {
 impl From<BackupError> for BackupHttpError {
     fn from(e: BackupError) -> Self {
         BackupHttpError::Backup(e)
+    }
+}
+
+impl From<UploadError> for BackupHttpError {
+    fn from(e: UploadError) -> Self {
+        BackupHttpError::Upload(e)
     }
 }
 
@@ -259,6 +295,55 @@ async fn delete_artifact(
         let _ = tokio::fs::remove_file(path).await;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Import uploads ─────────────────────────────────────────────────
+
+async fn start_upload(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+) -> Result<(StatusCode, Json<JsonValue>), BackupHttpError> {
+    let upload_id = upload::start(state.kv(), &state.data_dir, &user_id).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"upload_id": upload_id, "chunk_size": upload::CHUNK_SIZE})),
+    ))
+}
+
+async fn put_chunk(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+    Path((id, n)): Path<(String, u32)>,
+    body: Bytes,
+) -> Result<StatusCode, BackupHttpError> {
+    upload::put_chunk(state.kv(), &state.data_dir, &user_id, &id, n, &body).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct FinishUploadRequest {
+    password: String,
+    total_chunks: u32,
+}
+
+async fn finish_upload(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<FinishUploadRequest>,
+) -> Result<(StatusCode, Json<JsonValue>), BackupHttpError> {
+    let _staged =
+        upload::finish(state.kv(), &state.data_dir, &user_id, &id, req.total_chunks).await?;
+    let password_wrapped = wrap_password(&state, &user_id, &req.password).await?;
+    let payload = JobPayload::ImportBackup {
+        user_id,
+        upload_id: id,
+        password_wrapped,
+    };
+    let job_id = jobs::enqueue(&state.db, &payload, &chrono::Utc::now().to_rfc3339())
+        .await
+        .map_err(BackupError::Db)?;
+    Ok((StatusCode::ACCEPTED, Json(json!({"job_id": job_id}))))
 }
 
 #[cfg(test)]

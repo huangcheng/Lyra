@@ -9,6 +9,7 @@ pub mod crypto;
 pub mod export;
 pub mod format;
 mod http;
+mod upload;
 
 pub(crate) use http::routes;
 
