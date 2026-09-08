@@ -43,7 +43,8 @@ mail/<n>/<folder-id>.mbox     # RFC 4155, raw RFC822 bytes
 mail/<n>/<folder-id>.meta.jsonl # one line per message:
                               # {message_id, flags:[seen,flagged], date, sha256}
 contacts.vcf                  # all contacts, vCard 4
-calendars/<name>.ics          # one per calendar/subscription
+calendars/<n>.ics              # one per calendar (0-based index); names live in
+calendars.json                # [{index, name, color, description, timezone}]
 blobs/<sha256>                # attachment + avatar blobs referenced above
 ```
 
@@ -91,9 +92,10 @@ view/DKIM time). Backup therefore works like this:
 - Export resolution order per message: **stored raw blob** → **fetch from
   the source server at export time** (batch per folder for reachable
   accounts; also fills `raw_blob_path` for next time) → **reconstruct**
-  from parsed parts (marked `reconstructed: true` in the sidecar and
-  counted in the report). A dead/decommissioned account still exports its
-  parsed content instead of vanishing silently.
+  from parsed parts (marked `reconstructed: true` in the sidecar; the export
+  report carries warnings but no per-message reconstructed count). A
+  dead/decommissioned account still exports its parsed content instead of
+  vanishing silently.
 
 ## 5. Export flow
 
@@ -127,11 +129,16 @@ authenticated file download. `DELETE` removes an artifact.
 2. Job: age-decrypt to staging zip (wrong password → typed
    `invalid_backup_password`), open zip, validate manifest + format
    version (`unsupported_backup_format`).
-3. Additive merge, per section, each in its own transaction:
+3. Additive merge, per section. Merges are deliberately **not**
+   transaction-wrapped: every operation is idempotent, partial failures are
+   collected per item, and re-running the import heals incomplete sections
+   (messages additionally self-heal rows whose raw blob/attachments are
+   missing):
    - **settings**: applied wholesale (single-user singleton blob).
-   - **accounts**: match on `(protocol, host, username)`; matched → keep
-     existing id (credentials left untouched); unmatched → insert with new
-     id, credentials re-encrypted under this instance's master key.
+   - **accounts**: match on `(protocol, email_address)` case-insensitive
+     (host matching is unreliable across auto-config variants); matched →
+     keep existing id (credentials left untouched); unmatched → insert with
+     new id, credentials re-encrypted under this instance's master key.
    - **folders**: match by account + full path; map to existing/new ids.
    - **messages**: match by `message_id_header` within the account
      (fallback: raw-bytes SHA-256); existing → skip; new → insert from the
