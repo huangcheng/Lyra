@@ -1,9 +1,6 @@
 //! Archive layout: manifest, mbox escaping, per-folder sidecar lines.
 //! Spec: docs/superpowers/specs/2026-09-08-lyra-backup-export-import-design.md §3.
 
-// Consumed by export/import (later tasks); remove once wired up.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 
@@ -40,7 +37,10 @@ pub struct MetaLine {
 }
 
 /// Append one message to an mbox stream (RFC 4155): separator line,
-/// `>From `-escaped body, trailing blank line.
+/// `>From `-escaped body, trailing CRLF. When the body does not end in
+/// `\n`, the trailing CRLF terminates the last line rather than adding a
+/// blank separator line — import must strip exactly one trailing CRLF per
+/// message.
 pub fn write_mbox_message(
     out: &mut impl Write,
     from_addr: &str,
@@ -85,6 +85,14 @@ mod tests {
         assert!(text.contains("\r\n>From nowhere\r\n"));
         assert!(text.contains("\r\n>>From quoted\r\n"));
         assert!(text.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn unescape_strips_exactly_one_angle() {
+        assert_eq!(unescape_mbox_line(b">>From x"), b">From x");
+        assert_eq!(unescape_mbox_line(b">From x"), b"From x");
+        assert_eq!(unescape_mbox_line(b"plain line"), b"plain line");
+        assert_eq!(unescape_mbox_line(b""), b"");
     }
 
     #[test]

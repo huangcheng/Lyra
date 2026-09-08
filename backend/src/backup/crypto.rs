@@ -40,7 +40,11 @@ pub fn decrypt_file(src: &Path, dst: &Path, password: &str) -> Result<(), Backup
         .decrypt(std::iter::once(&identity as _))
         .map_err(|_| BackupError::InvalidPassword)?;
     let mut plaintext = Vec::new();
-    reader.read_to_end(&mut plaintext)?;
+    // A mid-stream read failure means a truncated/tampered payload, not a
+    // local IO fault.
+    reader
+        .read_to_end(&mut plaintext)
+        .map_err(|_| BackupError::CorruptArchive)?;
     std::fs::write(dst, &plaintext)?;
     Ok(())
 }
