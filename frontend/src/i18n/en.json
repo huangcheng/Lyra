@@ -563,6 +563,61 @@
       "draftReply": "Assist replies and forwards",
       "draftReplyDesc": "Add an AI button in compose that drafts suggested text. You always edit and send.",
       "privacy": "While a feature is on, Lyra sends the minimum needed message content to the endpoint configured above."
+    },
+    "backup": {
+      "title": "Backup",
+      "subtitle": "Export an encrypted archive of this instance, or merge one back in",
+      "export": {
+        "title": "Create backup",
+        "hint": "Bundle the whole instance into an encrypted .lyra archive. The password encrypts it — there is no recovery if you lose it.",
+        "password": "Encryption password",
+        "confirm": "Confirm password",
+        "tooShort": "Password must be at least 8 characters",
+        "mismatch": "Passwords do not match",
+        "create": "Create backup",
+        "creating": "Creating…",
+        "success": "Backup finished — find it in Archives below.",
+        "failed": "Backup failed"
+      },
+      "archives": {
+        "title": "Archives",
+        "hint": "Backups stored on this server.",
+        "empty": "No archives yet",
+        "download": "Download",
+        "delete": "Delete",
+        "confirmDeleteTitle": "Delete this archive?",
+        "confirmDeleteDesc": "{{name}} will be permanently removed from the server."
+      },
+      "import": {
+        "title": "Restore from backup",
+        "hint": "Pick a .lyra archive and enter its password. Data is merged in additively — existing content is never overwritten.",
+        "chooseFile": "Archive file",
+        "password": "Archive password",
+        "start": "Import",
+        "importing": "Importing…",
+        "uploading": "Uploading {{pct}}%",
+        "success": "Import finished",
+        "failed": "Import failed",
+        "settingsImported": "imported",
+        "settingsSkipped": "skipped (already configured)",
+        "counts": "inserted {{inserted}} · skipped {{skipped}} · repaired {{repaired}} · failed {{failed}}",
+        "errors": "Some items could not be imported"
+      },
+      "sections": {
+        "settings": "Settings",
+        "accounts": "Accounts",
+        "folders": "Folders",
+        "messages": "Messages",
+        "contacts": "Contacts",
+        "calendars": "Calendars"
+      },
+      "phase": {
+        "queued": "Queued",
+        "collecting": "Collecting data",
+        "mail": "Exporting mail",
+        "decrypting": "Decrypting archive",
+        "merging": "Merging data"
+      }
     }
   },
   "contacts": {

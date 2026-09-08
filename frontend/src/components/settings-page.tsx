@@ -2,13 +2,14 @@
  * Settings page with account management.
  *
  * Standalone slim-nav shell; sections: General, Security, Accounts,
- * Spam & Filters, Privacy, Encryption. Provides CRUD operations for mail
+ * Spam & Filters, Privacy, Encryption, Backup. Provides CRUD operations for mail
  * accounts with i18n support.
  */
 
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import {
+  DatabaseBackup,
   Flag,
   KeyRound,
   Pencil,
@@ -32,6 +33,7 @@ import { PimDialog } from './pim-dialog';
 import { FolderRoleMapping } from './folder-role-mapping';
 import { EncryptionSettings } from './encryption-settings';
 import { AiSettingsCard } from './ai-settings';
+import { BackupSettings } from './backup-settings';
 import { NotificationSettings } from './notification-settings';
 import { TotpEnroll } from './totp-enroll';
 import { useUIStore } from '../stores/ui';
@@ -93,7 +95,7 @@ const REMOTE_IMAGE_MODES = ['block', 'proxy'] as const;
 type RemoteImageMode = (typeof REMOTE_IMAGE_MODES)[number];
 
 type SettingsSection =
-  'general' | 'security' | 'accounts' | 'spam' | 'ai' | 'privacy' | 'encryption';
+  'general' | 'security' | 'accounts' | 'spam' | 'ai' | 'privacy' | 'encryption' | 'backup';
 
 interface MailAccount {
   id: string;
@@ -900,6 +902,13 @@ export function SettingsPage() {
       active: section === 'encryption',
       onClick: () => setSection('encryption'),
     },
+    {
+      key: 'backup',
+      label: t(locale, 'settings.backup.title'),
+      icon: DatabaseBackup,
+      active: section === 'backup',
+      onClick: () => setSection('backup'),
+    },
   ];
 
   const sectionMeta: Record<SettingsSection, { title: string; subtitle: string }> = {
@@ -930,6 +939,10 @@ export function SettingsPage() {
     encryption: {
       title: t(locale, 'settings.encryption.title'),
       subtitle: t(locale, 'settings.encryption.subtitle'),
+    },
+    backup: {
+      title: t(locale, 'settings.backup.title'),
+      subtitle: t(locale, 'settings.backup.subtitle'),
     },
   };
 
@@ -1672,6 +1685,8 @@ export function SettingsPage() {
           )}
 
           {section === 'encryption' && <EncryptionSettings />}
+
+          {section === 'backup' && <BackupSettings locale={locale} />}
         </div>
 
         <Dialog

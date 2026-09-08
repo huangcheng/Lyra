@@ -563,6 +563,61 @@
       "draftReply": "辅助撰写回复/转发",
       "draftReplyDesc": "在写信界面添加 AI 按钮，生成建议文本。始终由你编辑并发送。",
       "privacy": "功能开启期间，Lyra 只会把所需的最少邮件内容发送到上方配置的服务。"
+    },
+    "backup": {
+      "title": "备份",
+      "subtitle": "导出本实例的加密存档，或从存档合并恢复",
+      "export": {
+        "title": "创建备份",
+        "hint": "将整个实例打包为加密的 .lyra 存档。密码用于加密存档，遗失后无法找回。",
+        "password": "加密密码",
+        "confirm": "确认密码",
+        "tooShort": "密码至少 8 个字符",
+        "mismatch": "两次输入的密码不一致",
+        "create": "创建备份",
+        "creating": "正在创建…",
+        "success": "备份完成，可在下方“存档”中下载。",
+        "failed": "备份失败"
+      },
+      "archives": {
+        "title": "存档",
+        "hint": "保存在本服务器上的备份存档。",
+        "empty": "暂无存档",
+        "download": "下载",
+        "delete": "删除",
+        "confirmDeleteTitle": "删除该存档？",
+        "confirmDeleteDesc": "“{{name}}”将从服务器上永久删除。"
+      },
+      "import": {
+        "title": "从备份恢复",
+        "hint": "选择 .lyra 存档并输入其密码。数据将以追加方式合并，不会覆盖现有内容。",
+        "chooseFile": "存档文件",
+        "password": "存档密码",
+        "start": "开始导入",
+        "importing": "正在导入…",
+        "uploading": "正在上传 {{pct}}%",
+        "success": "导入完成",
+        "failed": "导入失败",
+        "settingsImported": "已导入",
+        "settingsSkipped": "已跳过（已有设置）",
+        "counts": "新增 {{inserted}} · 跳过 {{skipped}} · 修复 {{repaired}} · 失败 {{failed}}",
+        "errors": "部分项目未能导入"
+      },
+      "sections": {
+        "settings": "设置",
+        "accounts": "账户",
+        "folders": "文件夹",
+        "messages": "邮件",
+        "contacts": "联系人",
+        "calendars": "日历"
+      },
+      "phase": {
+        "queued": "排队中",
+        "collecting": "正在收集数据",
+        "mail": "正在导出邮件",
+        "decrypting": "正在解密存档",
+        "merging": "正在合并数据"
+      }
     }
   },
   "contacts": {
