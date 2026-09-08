@@ -57,23 +57,100 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                 "properties": {},
             }),
         },
+        ToolSpec {
+            name: "propose_draft",
+            description: "Stage a reply/compose draft for the user. Nothing is sent — \
+                          the user reviews the draft and decides. Use when asked to \
+                          write or reply to mail.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "Recipient address(es), comma separated." },
+                    "subject": { "type": "string" },
+                    "body": { "type": "string", "description": "Full draft body in the conversation's language." },
+                },
+                "required": ["to", "subject", "body"],
+            }),
+        },
+        ToolSpec {
+            name: "propose_move",
+            description: "Propose filing one message. Nothing moves until the user \
+                          confirms. action is one of spam, archive, trash, notSpam.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "message_id": { "type": "string", "description": "From a search_mail hit." },
+                    "action": {
+                        "type": "string",
+                        "enum": ["spam", "archive", "trash", "notSpam"],
+                        "description": "spam = move to the junk/spam folder; trash = deleted items; archive; notSpam = rescue from junk to inbox.",
+                    },
+                },
+                "required": ["message_id", "action"],
+            }),
+        },
     ]
 }
 
-/// Run one tool call; the return value is the tool-result payload for the
-/// model (always valid JSON).
+/// Run one tool call. Returns the tool-result payload for the model
+/// (always valid JSON) plus a pending user-confirmation action when the
+/// tool was a mutation proposal (nothing executed server-side).
 pub(crate) async fn execute_tool(
     db: &DbPool,
     user_id: &str,
     name: &str,
     arguments: &str,
-) -> String {
+) -> (String, Option<PendingAction>) {
     let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
     match name {
-        "search_mail" => search_mail(db, user_id, &args).await,
-        "read_mail" => read_mail(db, user_id, &args).await,
-        "list_folders" => list_folders(db, user_id).await,
-        other => json!({ "error": format!("unknown tool: {other}") }).to_string(),
+        "search_mail" => (search_mail(db, user_id, &args).await, None),
+        "read_mail" => (read_mail(db, user_id, &args).await, None),
+        "list_folders" => (list_folders(db, user_id).await, None),
+        "propose_draft" => propose_draft(&args),
+        "propose_move" => propose_move(&args),
+        other => (
+            json!({ "error": format!("unknown tool: {other}") }).to_string(),
+            None,
+        ),
+    }
+}
+
+fn propose_draft(args: &Value) -> (String, Option<PendingAction>) {
+    let pick = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
+    match (pick("to"), pick("subject"), pick("body")) {
+        (Some(to), Some(subject), Some(body)) if !to.trim().is_empty() && !subject.trim().is_empty() => {
+            (
+                json!({ "ok": true, "status": "draft ready", "note": "The user must review the draft and send it themselves." }).to_string(),
+                Some(PendingAction::OpenDraft { to, subject, body }),
+            )
+        }
+        _ => (
+            json!({ "error": "to, subject and body are all required" }).to_string(),
+            None,
+        ),
+    }
+}
+
+fn propose_move(args: &Value) -> (String, Option<PendingAction>) {
+    let id = ["message_id", "messageId", "id"]
+        .iter()
+        .find_map(|k| args.get(*k).and_then(Value::as_str));
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+    match (id, action) {
+        (Some(message_id), a) if !message_id.is_empty() && valid_move_action(a) => (
+            json!({ "ok": true, "note": "Move staged — the user must confirm." }).to_string(),
+            Some(PendingAction::MoveMessage {
+                message_id: message_id.to_string(),
+                action: a.to_string(),
+            }),
+        ),
+        _ => (
+            json!({
+                "error": "message_id and action are required; action must be one of spam, archive, trash, notSpam"
+            })
+            .to_string(),
+            None,
+        ),
     }
 }
 
@@ -143,8 +220,9 @@ mod tests {
         let db = crate::storage::Storage::new("sqlite::memory:")
             .await
             .unwrap();
-        let out = execute_tool(db.pool(), "u1", "search_mail", r#"{"query":"a"}"#).await;
+        let (out, action) = execute_tool(db.pool(), "u1", "search_mail", r#"{"query":"a"}"#).await;
         assert!(out.contains("at least 2 characters"));
+        assert_eq!(action, None);
     }
 
     #[tokio::test]
@@ -152,14 +230,24 @@ mod tests {
         let db = crate::storage::Storage::new("sqlite::memory:")
             .await
             .unwrap();
-        let out = execute_tool(db.pool(), "u1", "teleport", "{}").await;
+        let (out, action) = execute_tool(db.pool(), "u1", "teleport", "{}").await;
         assert!(out.contains("unknown tool"));
+        assert_eq!(action, None);
     }
 
     #[test]
     fn tool_specs_advertise_search_read_list() {
         let names: Vec<_> = tool_specs().iter().map(|t| t.name).collect();
-        assert_eq!(names, vec!["search_mail", "read_mail", "list_folders"]);
+        assert_eq!(
+            names,
+            vec![
+                "search_mail",
+                "read_mail",
+                "list_folders",
+                "propose_draft",
+                "propose_move",
+            ]
+        );
     }
 
     async fn seeded() -> DbPool {
@@ -211,7 +299,7 @@ mod tests {
     #[tokio::test]
     async fn read_mail_returns_the_body_and_sender() {
         let db = seeded().await;
-        let out = execute_tool(&db, "u1", "read_mail", r#"{"messageId":"m1"}"#).await;
+        let (out, _) = execute_tool(&db, "u1", "read_mail", r#"{"messageId":"m1"}"#).await;
         assert!(out.contains("八月发票"), "subject in payload: {out}");
         assert!(out.contains("41,200"), "body in payload: {out}");
         assert!(out.contains("b@x.dev"), "sender in payload: {out}");
@@ -220,7 +308,7 @@ mod tests {
     #[tokio::test]
     async fn read_mail_reports_unknown_ids_to_the_model() {
         let db = seeded().await;
-        let out = execute_tool(&db, "u1", "read_mail", r#"{"messageId":"nope"}"#).await;
+        let (out, _) = execute_tool(&db, "u1", "read_mail", r#"{"messageId":"nope"}"#).await;
         assert!(
             out.contains("not found") || out.contains("error"),
             "payload: {out}"
@@ -230,12 +318,95 @@ mod tests {
     #[tokio::test]
     async fn list_folders_returns_names_roles_and_unread() {
         let db = seeded().await;
-        let out = execute_tool(&db, "u1", "list_folders", "{}").await;
+        let (out, _) = execute_tool(&db, "u1", "list_folders", "{}").await;
         assert!(out.contains("INBOX"));
         assert!(out.contains("spam"));
         assert!(
             out.contains("\"unread\":2"),
             "unread counts in payload: {out}"
         );
+    }
+}
+
+// ── Confirm-first actions (phase E) ─────────────────────────────────
+//
+// The assistant may PROPOSE mutations; nothing is executed server-side.
+// Proposals ride back on the chat response and the panel renders a
+// confirm card — the user's click runs the existing action endpoints.
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub(crate) enum PendingAction {
+    /// Open a compose dialog prefilled with the draft (dialog = confirmation).
+    OpenDraft {
+        to: String,
+        subject: String,
+        body: String,
+    },
+    /// File one message via the existing per-role endpoints; `action` is
+    /// `spam` | `archive` | `trash` | `notSpam`.
+    MoveMessage { message_id: String, action: String },
+}
+
+fn valid_move_action(a: &str) -> bool {
+    matches!(a, "spam" | "archive" | "trash" | "notSpam")
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn propose_draft_yields_an_open_draft_action() {
+        let db = crate::storage::Storage::new("sqlite::memory:")
+            .await
+            .unwrap();
+        let (result, action) = execute_tool(
+            db.pool(),
+            "u1",
+            "propose_draft",
+            r#"{"to":"zhangwei@partner.example.com","subject":"Re: 会议确认","body":"好的,周四见。"}"#,
+        )
+        .await;
+        assert!(result.contains("draft ready"));
+        assert_eq!(
+            action,
+            Some(PendingAction::OpenDraft {
+                to: "zhangwei@partner.example.com".into(),
+                subject: "Re: 会议确认".into(),
+                body: "好的,周四见。".into(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_move_validates_the_action_and_message() {
+        let db = crate::storage::Storage::new("sqlite::memory:")
+            .await
+            .unwrap();
+        let (_, action) = execute_tool(
+            db.pool(),
+            "u1",
+            "propose_move",
+            r#"{"message_id":"m1","action":"spam"}"#,
+        )
+        .await;
+        assert_eq!(
+            action,
+            Some(PendingAction::MoveMessage {
+                message_id: "m1".into(),
+                action: "spam".into(),
+            })
+        );
+
+        let (result, action) = execute_tool(
+            db.pool(),
+            "u1",
+            "propose_move",
+            r#"{"message_id":"m1","action":"delete-everything"}"#,
+        )
+        .await;
+        assert!(result.contains("error"));
+        assert_eq!(action, None);
     }
 }

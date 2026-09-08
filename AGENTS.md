@@ -78,6 +78,7 @@ Detail lives in specs; this file stays short and accurate.
 | **Backup export/import** — full-instance age-encrypted archive, job-based, additive merge | `docs/superpowers/specs/2026-09-08-lyra-backup-export-import-design.md` |
 | Mail sidebar Favorites (Apple Mail–style; local views, expandable All Inboxes + Starred) | `docs/superpowers/specs/2026-09-03-lyra-favorites-sidebar-design.md` |
 | **AI assist** — BYOK settings, LLM dialect seam, draft/reply suggest | `docs/specs/2026-09-08-lyra-ai-byok-spec.md` |
+| **AI assistant suite** — chat widget, tools (search/read/list), spam assist modes, calendar-from-email, confirm-first actions | `docs/specs/2026-09-08-lyra-ai-assistant-spec.md` |
 
 Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall back to **IMAP**. Honor v1 non-goals (no collaboration suite, no SaaS, no multi-user UX yet). Ship a **client-agnostic `/api/v1`**; native apps are far-horizon only.
 
@@ -112,7 +113,7 @@ Lyra/
       entities/                 ← SeaORM entity per table (schema truth for data-layer code)
       sync/                     ← sync HTTP, IMAP/JMAP loops, JMAP seam (jmap_client.rs), persist transactions
       imap.rs / smtp.rs
-      ai/                        ← AI assist (BYOK): settings, LLM dialect adapters, draft/reply
+      ai/                        ← AI assist (BYOK): settings, LLM dialect adapters + tools, assistant chat, spam/calendar assists
       oauth/                    ← Microsoft + Yandex mail OAuth (PKCE) + XOAUTH2
       push/                     ← Web Push (RFC 8030/8291/8292): fan-out on sync events, kv subscriptions
       backup/                   ← Backup export/import: age-encrypted `.lyra` archives, artifact registry, chunked import uploads, additive merge

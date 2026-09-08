@@ -794,7 +794,10 @@
     "clear": "清空对话",
     "summarize": "总结",
     "context": "正在读",
-    "emptyHint": "随便问 —— 比如「找上个月的发票」或「总结这封邮件」。"
+    "emptyHint": "随便问 —— 比如「找上个月的发票」或「总结这封邮件」。",
+    "confirm": "确认",
+    "discard": "放弃",
+    "proposal": "AI 建议"
   },
   "aiEvent": {
     "title": "从邮件创建日程",

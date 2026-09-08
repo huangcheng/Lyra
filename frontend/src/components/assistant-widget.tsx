@@ -17,6 +17,8 @@ import {
   type AiChatMessage,
 } from '@/lib/ai-api';
 import { assistantAvailable, summarizePrompt } from '@/lib/assistant';
+import { describePendingAction, type PendingAction } from '@/lib/assistant-actions';
+import { actOnMessages } from '@/lib/conversation-actions';
 import { t, type SupportedLocale } from '@/i18n';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -61,6 +63,7 @@ function ChatPanel({ locale, onClose }: { locale: SupportedLocale; onClose: () =
   const openMessage = selectedMessageId ? messages[selectedMessageId] : undefined;
 
   const [history, setHistory] = useState<AiChatMessage[] | null>(null);
+  const [pending, setPending] = useState<PendingAction[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -83,10 +86,12 @@ function ChatPanel({ locale, onClose }: { locale: SupportedLocale; onClose: () =
     setBusy(true);
     setError(null);
     setInput('');
+    setPending([]);
     setHistory((h) => [...(h ?? []), { role: 'user', content: message, createdAt: '' }]);
     try {
-      const reply = await sendAiChat(message, openMessage?.id);
+      const { reply, actions } = await sendAiChat(message, openMessage?.id);
       setHistory((h) => [...(h ?? []), { role: 'assistant', content: reply, createdAt: '' }]);
+      setPending(actions);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -112,7 +117,10 @@ function ChatPanel({ locale, onClose }: { locale: SupportedLocale; onClose: () =
           disabled={busy}
           onClick={() => {
             void clearAiChat()
-              .then(() => setHistory([]))
+              .then(() => {
+                setHistory([]);
+                setPending([]);
+              })
               .catch((e) => setError(e instanceof Error ? e.message : String(e)));
           }}
         >
@@ -170,6 +178,51 @@ function ChatPanel({ locale, onClose }: { locale: SupportedLocale; onClose: () =
         {busy ? <TypingDots /> : null}
         {error ? <div className="text-xs text-destructive">{error}</div> : null}
       </div>
+
+      {pending.length > 0 ? (
+        <div className="space-y-1.5 border-t border-border/60 px-3 py-2">
+          {pending.map((a, i) => (
+            <div
+              key={i}
+              className="flex items-center gap-2 rounded-lg border border-border bg-background px-2.5 py-2 text-xs"
+            >
+              <Sparkles className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+              <span className="min-w-0 flex-1 truncate">
+                <span className="text-muted-foreground">{t(locale, 'assistant.proposal')}:</span>{' '}
+                {describePendingAction(a, locale)}
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 rounded-full px-2"
+                disabled={busy}
+                onClick={() => {
+                  setPending((p) => p.filter((_, j) => j !== i));
+                  if (a.type === 'openDraft') {
+                    useUIStore
+                      .getState()
+                      .openCompose({ to: a.to, subject: a.subject, body: a.body, mode: 'new' });
+                  } else {
+                    void actOnMessages([a.messageId], a.action).then((res) => {
+                      if (res.error) setError(res.error);
+                    });
+                  }
+                }}
+              >
+                {t(locale, 'assistant.confirm')}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 rounded-full px-2 text-muted-foreground"
+                onClick={() => setPending((p) => p.filter((_, j) => j !== i))}
+              >
+                {t(locale, 'assistant.discard')}
+              </Button>
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <div className="flex shrink-0 items-end gap-2 border-t border-border/60 p-2">
         <textarea

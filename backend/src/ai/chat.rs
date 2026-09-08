@@ -123,7 +123,7 @@ fn system_prompt(context_body: Option<&str>) -> String {
     let mut p = format!(
         "You are Lyra's mail assistant, helping the user with their mailbox. \
          Today is {today}. Answer in the user's language, concisely. \
-         You can call search_mail to find messages, read_mail to open one in \n         full, and list_folders for folder overviews; cite subjects/dates from \n         the hits. You cannot send, move, or modify mail — suggest what the \n         user could do instead."
+         You can call search_mail to find messages, read_mail to open one in \n         full, and list_folders for folder overviews; cite subjects/dates from \n         the hits. When the user asks you to write or reply to mail, ALWAYS \n         call propose_draft (never paste drafts only in chat). When asked to \n         file mail, call propose_move. Nothing is sent or moved until the \n         user confirms the proposal card."
     );
     if let Some(body) = context_body {
         p.push_str("\n\nThe user currently has this message open:\n\n");
@@ -151,12 +151,18 @@ async fn context_block(db: &DbPool, user_id: &str, message_id: &str) -> Option<S
 
 /// One assistant turn: gates, context build, tool loop, persistence.
 /// Returns the assistant's final text.
+/// One assistant turn: the reply text plus confirm-first action proposals.
+pub struct ChatTurn {
+    pub reply: String,
+    pub actions: Vec<tools::PendingAction>,
+}
+
 pub async fn chat(
     state: &AuthState,
     user_id: &str,
     message: &str,
     message_id: Option<&str>,
-) -> Result<String, AiError> {
+) -> Result<ChatTurn, AiError> {
     let db = state.db();
     let settings = load_settings(db, user_id).await?;
     if !settings.enabled {
@@ -200,6 +206,7 @@ pub async fn chat(
     // Accumulated tool exchanges for THIS turn, replayed natively per
     // dialect on every subsequent round.
     let mut exchanges: Vec<ToolRound> = Vec::new();
+    let mut pending: Vec<tools::PendingAction> = Vec::new();
     let mut reply = String::new();
     for round in 0..=MAX_TOOL_ROUNDS {
         let tools = if round == MAX_TOOL_ROUNDS {
@@ -219,7 +226,7 @@ pub async fn chat(
                 break;
             }
             LlmTurnReply::ToolCalls(calls) => {
-                let results = run_tools(db, user_id, &calls).await;
+                let results = run_tools(db, user_id, &calls, &mut pending).await;
                 exchanges.push((calls, results));
             }
         }
@@ -227,20 +234,30 @@ pub async fn chat(
 
     append(db, user_id, "user", message).await?;
     append(db, user_id, "assistant", &reply).await?;
-    Ok(reply)
+    Ok(ChatTurn {
+        reply,
+        actions: pending,
+    })
 }
 
 /// One completed round: the model's calls plus their (id, payload) results.
 type ToolRound = (Vec<ToolCall>, Vec<(String, String)>);
 
 /// Execute every call; results align with `calls` by position (id, payload).
-async fn run_tools(db: &DbPool, user_id: &str, calls: &[ToolCall]) -> Vec<(String, String)> {
+/// Pending confirmations accumulate into the turn's action list.
+async fn run_tools(
+    db: &DbPool,
+    user_id: &str,
+    calls: &[ToolCall],
+    pending: &mut Vec<tools::PendingAction>,
+) -> Vec<(String, String)> {
     let mut out = Vec::with_capacity(calls.len());
     for call in calls {
-        out.push((
-            call.id.clone(),
-            tools::execute_tool(db, user_id, &call.name, &call.arguments).await,
-        ));
+        let (payload, action) = tools::execute_tool(db, user_id, &call.name, &call.arguments).await;
+        if let Some(a) = action {
+            pending.push(a);
+        }
+        out.push((call.id.clone(), payload));
     }
     out
 }

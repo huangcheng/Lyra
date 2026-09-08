@@ -4,6 +4,7 @@
  */
 
 import { api } from '@/lib/api-client';
+import type { PendingAction } from '@/lib/assistant-actions';
 
 export type AiDialect = 'openai_chat' | 'openai_responses' | 'anthropic';
 
@@ -64,12 +65,14 @@ export async function fetchAiChat(): Promise<AiChatMessage[]> {
   return api<AiChatMessage[]>('/ai/chat');
 }
 
-export async function sendAiChat(message: string, messageId?: string): Promise<string> {
-  const res = await api<{ reply: string }>('/ai/chat', {
+export async function sendAiChat(
+  message: string,
+  messageId?: string,
+): Promise<{ reply: string; actions: PendingAction[] }> {
+  return api<{ reply: string; actions: PendingAction[] }>('/ai/chat', {
     method: 'POST',
     body: JSON.stringify({ message, messageId }),
   });
-  return res.reply;
 }
 
 /** Proposed calendar event from one message (confirm-first). */

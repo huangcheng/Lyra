@@ -792,7 +792,10 @@
     "clear": "Clear conversation",
     "summarize": "Summarize",
     "context": "Reading",
-    "emptyHint": "Ask anything — e.g. find last month's invoice, or summarize the open email."
+    "emptyHint": "Ask anything — e.g. find last month's invoice, or summarize the open email.",
+    "confirm": "Confirm",
+    "discard": "Discard",
+    "proposal": "AI proposal"
   },
   "aiEvent": {
     "title": "Create event from email",

@@ -259,9 +259,11 @@ async fn post_chat(
             "message must be 1-8000 characters".into(),
         ));
     }
-    let reply =
+    let turn =
         crate::ai::chat::chat(&state, &user_id, &message, body.message_id.as_deref()).await?;
-    Ok(Json(serde_json::json!({ "reply": reply })))
+    Ok(Json(
+        serde_json::json!({ "reply": turn.reply, "actions": turn.actions }),
+    ))
 }
 
 async fn delete_chat(
