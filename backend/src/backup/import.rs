@@ -7,14 +7,14 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
-use sea_orm::sea_query::{Expr, Query as Sq};
+use sea_orm::sea_query::{Alias, Expr, Func, Query as Sq};
 use sea_orm::{ColumnTrait, ConnectionTrait, ExprTrait, QueryResult, Value};
 use serde_json::{Value as Json, json};
 use uuid::Uuid;
 
 use crate::auth::AuthState;
 use crate::entities::{
-    calendar, calendar_event, contact, folder, lyra_user, mail_account, message,
+    attachment, calendar, calendar_event, contact, folder, lyra_user, mail_account, message,
 };
 use crate::storage::DbPool;
 use crate::sync::store;
@@ -126,14 +126,19 @@ async fn run_inner(
 fn decrypt_and_open(upload: &Path, dir: &Path, password: &str) -> Result<Manifest, BackupError> {
     let zip_path = dir.join("archive.zip");
     crypto::decrypt_file(upload, &zip_path, password)?;
-    let result = extract_archive(&zip_path, dir);
+    let result = extract_archive(&zip_path, dir, MAX_EXTRACTED_BYTES);
     let _ = std::fs::remove_file(&zip_path);
     result
 }
 
+/// Total extracted-size cap: a hostile zip can inflate far past its
+/// compressed size, so bail out past 16 GiB of extracted payload.
+const MAX_EXTRACTED_BYTES: u64 = 16 << 30;
+
 /// Validate the manifest and extract every entry under `dir`, rejecting
-/// zip-slip names (absolute paths, `..` components, backslashes).
-fn extract_archive(zip_path: &Path, dir: &Path) -> Result<Manifest, BackupError> {
+/// zip-slip names (absolute paths, `..` components, backslashes) and
+/// payloads exceeding `max_bytes` in total (zip-bomb guard).
+fn extract_archive(zip_path: &Path, dir: &Path, max_bytes: u64) -> Result<Manifest, BackupError> {
     use std::io::Read as _;
     let file = std::fs::File::open(zip_path)?;
     let mut zip = zip::ZipArchive::new(file).map_err(|_| BackupError::CorruptArchive)?;
@@ -150,8 +155,9 @@ fn extract_archive(zip_path: &Path, dir: &Path) -> Result<Manifest, BackupError>
     if manifest.app != "lyra" || manifest.format != FORMAT_VERSION {
         return Err(BackupError::UnsupportedFormat);
     }
+    let mut total = 0u64;
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|_| BackupError::CorruptArchive)?;
+        let entry = zip.by_index(i).map_err(|_| BackupError::CorruptArchive)?;
         let Some(rel) = sanitize_entry_name(entry.name()) else {
             return Err(BackupError::CorruptArchive);
         };
@@ -164,7 +170,14 @@ fn extract_archive(zip_path: &Path, dir: &Path) -> Result<Manifest, BackupError>
             std::fs::create_dir_all(dir.join(parent))?;
         }
         let mut out = std::fs::File::create(&target)?;
-        std::io::copy(&mut entry, &mut out)?;
+        // Read at most one byte past the remaining budget, so the copy
+        // stops early instead of writing an unbounded entry.
+        let remaining = max_bytes.saturating_sub(total);
+        let written = std::io::copy(&mut entry.take(remaining.saturating_add(1)), &mut out)?;
+        total += written;
+        if total > max_bytes {
+            return Err(BackupError::CorruptArchive);
+        }
     }
     Ok(manifest)
 }
@@ -194,6 +207,9 @@ fn sanitize_entry_name(name: &str) -> Option<PathBuf> {
 struct SectionCounts {
     inserted: u64,
     skipped: u64,
+    /// Existing rows whose missing raw blob / attachments were backfilled
+    /// from the archive (messages section; always 0 elsewhere).
+    repaired: u64,
     failed: u64,
 }
 
@@ -996,30 +1012,130 @@ fn recover_raw(chunk: &[u8]) -> Vec<u8> {
     out
 }
 
-/// True when the account already holds this message: same `import:<sha256>`
-/// external id (re-import) or same Message-ID header (already-synced copy).
-async fn message_exists(
+/// The row an incoming archive message matched, with what it still lacks.
+struct ExistingMessage {
+    id: String,
+    has_raw: bool,
+    has_attachments: bool,
+}
+
+/// The account's existing copy of this message, if any: same
+/// `import:<sha256>` external id (re-import) or same Message-ID header
+/// (already-synced copy).
+async fn find_existing_message(
     db: &DbPool,
     account_id: &str,
     external_id: &str,
     message_id_header: Option<&str>,
-) -> Result<bool, BackupError> {
+) -> Result<Option<ExistingMessage>, BackupError> {
     let mut cond = Expr::col(message::Column::ExternalId).eq(external_id);
     if let Some(mid) = message_id_header.filter(|m| !m.is_empty()) {
         cond = cond.or(Expr::col(message::Column::MessageIdHeader).eq(mid));
     }
     let mut sel = Sq::select();
     sel.column(message::Column::Id)
+        .column(message::Column::RawBlobPath)
         .from(message::Entity)
         .and_where(message::Column::AccountId.eq(id_bind(db, account_id)?))
         .and_where(cond);
-    Ok(db.orm().query_one(&sel).await.map_err(orm_err)?.is_some())
+    let Some(row) = db.orm().query_one(&sel).await.map_err(orm_err)? else {
+        return Ok(None);
+    };
+    let id = row_id(&row, "id")?;
+    let has_raw = row_opt_str(&row, "raw_blob_path")?.is_some_and(|p| !p.is_empty());
+    let mut cnt = Sq::select();
+    cnt.expr_as(
+        Func::count(Expr::col(attachment::Column::Id)),
+        Alias::new("n"),
+    )
+    .from(attachment::Entity)
+    .and_where(attachment::Column::MessageId.eq(id_bind(db, &id)?));
+    let row = db.orm().query_one(&cnt).await.map_err(orm_err)?;
+    let n = row
+        .and_then(|r| r.try_get::<i64>("", "n").ok())
+        .unwrap_or(0);
+    Ok(Some(ExistingMessage {
+        id,
+        has_raw,
+        has_attachments: n > 0,
+    }))
 }
 
-/// Outcome of one message: inserted/skipped plus non-fatal blob warnings.
+/// Outcome of one message: inserted/skipped/repaired plus non-fatal blob
+/// warnings.
 struct MessageOutcome {
     inserted: bool,
+    repaired: bool,
     warnings: Vec<String>,
+}
+
+/// Partition parsed attachments by whether the archive `blobs/` dir carries
+/// their content hash; missing ones become warnings, never fatal.
+fn partition_attachments(
+    attachments: Vec<crate::imap::ExtractedAttachment>,
+    blobs_dir: &Path,
+) -> (Vec<crate::imap::ExtractedAttachment>, Vec<String>) {
+    let mut present = Vec::new();
+    let mut warnings = Vec::new();
+    for att in attachments {
+        if blobs_dir
+            .join(crate::blobs::sha256_hex(&att.data))
+            .is_file()
+        {
+            present.push(att);
+        } else {
+            warnings.push(format!(
+                "attachment '{}' blob missing from archive",
+                att.filename
+            ));
+        }
+    }
+    (present, warnings)
+}
+
+/// Repair a matched row that a previous partial import (or a sync without
+/// raw fetch) left incomplete: backfill the raw blob and/or the attachment
+/// links from the archive. `rel` is the freshly re-stored raw blob path.
+async fn repair_existing_message(
+    state: &AuthState,
+    account_id: &str,
+    existing: &ExistingMessage,
+    rel: &str,
+    attachments: Vec<crate::imap::ExtractedAttachment>,
+    blobs_dir: &Path,
+) -> Result<MessageOutcome, BackupError> {
+    let db = &state.db;
+    let mut repaired = false;
+    let mut warnings = Vec::new();
+    if !existing.has_raw {
+        store::set_message_raw_blob(db, &existing.id, rel)
+            .await
+            .map_err(sync_err)?;
+        repaired = true;
+    }
+    if !existing.has_attachments && !attachments.is_empty() {
+        let (present, missing) = partition_attachments(attachments, blobs_dir);
+        warnings = missing;
+        if !present.is_empty() {
+            // The row has no attachment rows, so persist_attachments' initial
+            // delete is a no-op here.
+            crate::sync::http::persist_attachments(
+                db,
+                &state.data_dir,
+                account_id,
+                &existing.id,
+                &present,
+            )
+            .await
+            .map_err(sync_err)?;
+            repaired = true;
+        }
+    }
+    Ok(MessageOutcome {
+        inserted: false,
+        repaired,
+        warnings,
+    })
 }
 
 /// Verify + dedupe + insert one message from its raw bytes and sidecar line.
@@ -1037,17 +1153,22 @@ async fn import_one_message(
     }
     let db = &state.db;
     let external_id = format!("import:{sha}");
-    if message_exists(db, account_id, &external_id, meta.message_id.as_deref()).await? {
-        return Ok(MessageOutcome {
-            inserted: false,
-            warnings: Vec::new(),
-        });
-    }
+
+    // Store the raw blob BEFORE any DB write: blobs::store is
+    // content-addressed and idempotent, so a failure after this point can
+    // never strand a message row whose blob is unrecoverable.
+    let rel = crate::blobs::store(&state.data_dir, account_id, raw)
+        .await
+        .map_err(|e| BackupError::Internal(e.to_string()))?;
+
+    let existing =
+        find_existing_message(db, account_id, &external_id, meta.message_id.as_deref()).await?;
 
     // Re-parse headers via the lenient mail-parser path used by IMAP sync.
-    // The subject/address slices carry the leading space + trailing CRLF of
-    // the raw header line (the identity fields are trimmed inside the
-    // parser); trim here so imported rows are clean.
+    // mail-parser's offset slices carry the leading space + trailing CRLF of
+    // the raw header line; parse_header_metadata trims the identity/address
+    // fields (raw_text/addr_text) but NOT the subject — trim everything here
+    // so imported rows are clean.
     let (parsed_mid, subject, from, to, cc, parsed_date, in_reply_to, references) =
         crate::imap::parse_header_metadata(raw);
     let trim = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
@@ -1062,6 +1183,13 @@ async fn import_one_message(
     );
     let (body_text, body_html_raw, attachments) = crate::imap::extract_mime_parts(raw);
     let body_html = crate::sanitize::persist_body_html(body_html_raw.as_deref());
+
+    // Matched row: repair what it lacks instead of blindly skipping, so a
+    // previously partial import heals instead of being skipped forever.
+    if let Some(existing) = existing {
+        return repair_existing_message(state, account_id, &existing, &rel, attachments, blobs_dir)
+            .await;
+    }
 
     let message_id_header = meta.message_id.as_deref().or(parsed_mid.as_deref());
     let date = meta.date.as_deref().or(parsed_date.as_deref());
@@ -1103,30 +1231,13 @@ async fn import_one_message(
     );
     db.orm().execute(&insert).await.map_err(orm_err)?;
 
-    let rel = crate::blobs::store(&state.data_dir, account_id, raw)
-        .await
-        .map_err(|e| BackupError::Internal(e.to_string()))?;
     store::set_message_raw_blob(db, &id, &rel)
         .await
         .map_err(sync_err)?;
 
     // Attachments: re-extract from the raw bytes, but only link blobs the
     // archive actually carries — a missing one is a warning, never fatal.
-    let mut present = Vec::new();
-    let mut warnings = Vec::new();
-    for att in attachments {
-        if blobs_dir
-            .join(crate::blobs::sha256_hex(&att.data))
-            .is_file()
-        {
-            present.push(att);
-        } else {
-            warnings.push(format!(
-                "attachment '{}' blob missing from archive",
-                att.filename
-            ));
-        }
-    }
+    let (present, warnings) = partition_attachments(attachments, blobs_dir);
     if !present.is_empty() {
         crate::sync::http::persist_attachments(db, &state.data_dir, account_id, &id, &present)
             .await
@@ -1134,6 +1245,7 @@ async fn import_one_message(
     }
     Ok(MessageOutcome {
         inserted: true,
+        repaired: false,
         warnings,
     })
 }
@@ -1199,6 +1311,8 @@ async fn merge_folder_mail(
             Ok(outcome) => {
                 if outcome.inserted {
                     report.messages.inserted += 1;
+                } else if outcome.repaired {
+                    report.messages.repaired += 1;
                 } else {
                     report.messages.skipped += 1;
                 }
@@ -2147,7 +2261,7 @@ mod tests {
         let (_job, report) = import_archive(&fx, &artifact).await;
         assert_eq!(
             report["report"]["accounts"],
-            json!({"inserted": 0, "skipped": 1, "failed": 0})
+            json!({"inserted": 0, "skipped": 1, "repaired": 0, "failed": 0})
         );
 
         let rows: Vec<(String, String)> =
@@ -2176,7 +2290,7 @@ mod tests {
         let (_job, report) = import_archive(&fx, &artifact).await;
         assert_eq!(
             report["report"]["accounts"],
-            json!({"inserted": 1, "skipped": 0, "failed": 0})
+            json!({"inserted": 1, "skipped": 0, "repaired": 0, "failed": 0})
         );
 
         let pool = sqlite_pool(&fx.db).clone();
@@ -2227,7 +2341,7 @@ mod tests {
         let (_job, report) = import_archive(&fx, &artifact).await;
         assert_eq!(
             report["report"]["folders"],
-            json!({"inserted": 2, "skipped": 0, "failed": 0})
+            json!({"inserted": 2, "skipped": 0, "repaired": 0, "failed": 0})
         );
 
         let pool = sqlite_pool(&fx.db).clone();
@@ -2606,23 +2720,23 @@ mod tests {
         assert_eq!(report1["report"]["settings"], json!(true));
         assert_eq!(
             report1["report"]["accounts"],
-            json!({"inserted": 1, "skipped": 0, "failed": 0})
+            json!({"inserted": 1, "skipped": 0, "repaired": 0, "failed": 0})
         );
         assert_eq!(
             report1["report"]["folders"],
-            json!({"inserted": 2, "skipped": 0, "failed": 0})
+            json!({"inserted": 2, "skipped": 0, "repaired": 0, "failed": 0})
         );
         assert_eq!(
             report1["report"]["messages"],
-            json!({"inserted": 3, "skipped": 0, "failed": 0})
+            json!({"inserted": 3, "skipped": 0, "repaired": 0, "failed": 0})
         );
         assert_eq!(
             report1["report"]["contacts"],
-            json!({"inserted": 1, "skipped": 0, "failed": 0})
+            json!({"inserted": 1, "skipped": 0, "repaired": 0, "failed": 0})
         );
         assert_eq!(
             report1["report"]["calendars"],
-            json!({"inserted": 2, "skipped": 0, "failed": 0})
+            json!({"inserted": 2, "skipped": 0, "repaired": 0, "failed": 0})
         );
         assert_roundtrip_state(&b).await;
 
@@ -2634,23 +2748,23 @@ mod tests {
         let report2 = kv_report(&b, &job2).await;
         assert_eq!(
             report2["report"]["accounts"],
-            json!({"inserted": 0, "skipped": 1, "failed": 0})
+            json!({"inserted": 0, "skipped": 1, "repaired": 0, "failed": 0})
         );
         assert_eq!(
             report2["report"]["folders"],
-            json!({"inserted": 0, "skipped": 2, "failed": 0})
+            json!({"inserted": 0, "skipped": 2, "repaired": 0, "failed": 0})
         );
         assert_eq!(
             report2["report"]["messages"],
-            json!({"inserted": 0, "skipped": 3, "failed": 0})
+            json!({"inserted": 0, "skipped": 3, "repaired": 0, "failed": 0})
         );
         assert_eq!(
             report2["report"]["contacts"],
-            json!({"inserted": 0, "skipped": 1, "failed": 0})
+            json!({"inserted": 0, "skipped": 1, "repaired": 0, "failed": 0})
         );
         assert_eq!(
             report2["report"]["calendars"],
-            json!({"inserted": 0, "skipped": 2, "failed": 0})
+            json!({"inserted": 0, "skipped": 2, "repaired": 0, "failed": 0})
         );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message")
             .fetch_one(sqlite_pool(&b.db))
@@ -2687,11 +2801,11 @@ mod tests {
         let report = kv_report(&c, &job).await;
         assert_eq!(
             report["report"]["accounts"],
-            json!({"inserted": 0, "skipped": 1, "failed": 0})
+            json!({"inserted": 0, "skipped": 1, "repaired": 0, "failed": 0})
         );
         assert_eq!(
             report["report"]["messages"],
-            json!({"inserted": 3, "skipped": 0, "failed": 0})
+            json!({"inserted": 3, "skipped": 0, "repaired": 0, "failed": 0})
         );
 
         let accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_account")
@@ -2790,7 +2904,7 @@ mod tests {
         let (_job, report) = import_archive(&fx, &artifact).await;
         assert_eq!(
             report["report"]["messages"],
-            json!({"inserted": 1, "skipped": 0, "failed": 1}),
+            json!({"inserted": 1, "skipped": 0, "repaired": 0, "failed": 1}),
             "{report}"
         );
         let errors = report["report"]["errors"].as_array().unwrap();
@@ -2842,7 +2956,7 @@ mod tests {
         let (_job, report) = import_archive(&fx, &artifact).await;
         assert_eq!(
             report["report"]["messages"],
-            json!({"inserted": 0, "skipped": 0, "failed": 1}),
+            json!({"inserted": 0, "skipped": 0, "repaired": 0, "failed": 1}),
             "{report}"
         );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message")
@@ -2970,8 +3084,169 @@ mod tests {
             _data_dir: data_dir,
         }
     }
-}
 
+    /// A row left behind by a partial import (raw_blob_path NULL, no
+    /// attachment rows) is REPAIRED on re-import — raw blob backfilled,
+    /// attachments linked — and counted in the report's `repaired` bucket.
+    #[tokio::test]
+    async fn partial_import_row_is_repaired_not_skipped_forever() {
+        use crate::backup::format::write_mbox_message;
+        let folder_uuid = "f0f0f0f0-3333-4333-8333-333333333333";
+        let raw = raw_with_attachment();
+        let sha = crate::blobs::sha256_hex(&raw);
+        let mut mbox = Vec::new();
+        write_mbox_message(&mut mbox, "a@b.com", 1, &raw).unwrap();
+        let meta = serde_json::to_string(&MetaLine {
+            message_id: Some("<m1@example.com>".into()),
+            flags: vec!["seen".into()],
+            date: None,
+            sha256: sha.clone(),
+            reconstructed: false,
+        })
+        .unwrap();
+        let account = ACCOUNT_DOC.replace(
+            r#""folders": []"#,
+            &format!(
+                r#""folders": [{{"id":"{folder_uuid}","external_id":"INBOX","name":"INBOX","parent_external_id":null,"role":"inbox","role_override":null,"sort_order":0}}]"#
+            ),
+        );
+        let att_blob = crate::blobs::sha256_hex(b"attachment-bytes");
+        let mbox_name = format!("mail/0/{folder_uuid}.mbox");
+        let meta_name = format!("mail/0/{folder_uuid}.meta.jsonl");
+        let blob_name = format!("blobs/{att_blob}");
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = build_archive(
+            &dir,
+            &[
+                ("manifest.json", GOOD_MANIFEST.as_bytes()),
+                ("accounts/0.json", account.as_bytes()),
+                (&mbox_name, &mbox),
+                (&meta_name, meta.as_bytes()),
+                (&blob_name, b"attachment-bytes".as_slice()),
+            ],
+            "test-password-12",
+        );
+
+        let fx = seed_instance("import-repair").await;
+        let pool = sqlite_pool(&fx.db).clone();
+        // Pre-seed the account + folder + the PARTIAL message row (external
+        // id matches, raw_blob_path NULL, no attachments) — the state a
+        // transient failure after the row insert would have left behind.
+        let account_id = store::new_uuid_text();
+        sqlx::query(
+            "INSERT INTO mail_account (id, user_id, email_address, protocol, auth_type, credential, \
+             is_active, sync_enabled, receive_protocol, send_protocol) \
+             VALUES (?, ?, 'u@example.com', 'imap', 'password', 'keepme', 1, 1, 'imap', 'smtp')",
+        )
+        .bind(&account_id)
+        .bind(&fx.user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        store::upsert_folder(&fx.db, &account_id, "INBOX", None, &[])
+            .await
+            .unwrap();
+        let folder_id = store::get_folder_id(&fx.db, &account_id, "INBOX")
+            .await
+            .unwrap();
+        store::upsert_message(&fx.db, &account_id, &folder_id, &imap_msg(1))
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE message SET external_id = ?, raw_blob_path = NULL, has_attachments = 0",
+        )
+        .bind(format!("import:{sha}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let upload1 = stage_upload(&fx, &artifact).await;
+        let job1 = store::new_uuid_text();
+        run(&fx.state, &fx.user_id, &job1, &upload1, "test-password-12")
+            .await
+            .unwrap();
+        let report = kv_report(&fx, &job1).await;
+        assert_eq!(
+            report["report"]["messages"],
+            json!({"inserted": 0, "skipped": 0, "repaired": 1, "failed": 0}),
+            "{report}"
+        );
+        assert_repaired_message(&fx, &account_id, &raw).await;
+
+        // Once healed, the next import is a plain skip again.
+        let upload2 = stage_upload(&fx, &artifact).await;
+        let job2 = store::new_uuid_text();
+        run(&fx.state, &fx.user_id, &job2, &upload2, "test-password-12")
+            .await
+            .unwrap();
+        let report = kv_report(&fx, &job2).await;
+        assert_eq!(
+            report["report"]["messages"],
+            json!({"inserted": 0, "skipped": 1, "repaired": 0, "failed": 0}),
+            "{report}"
+        );
+    }
+
+    /// Assert the repair fully healed the row: raw blob readable,
+    /// attachment re-linked from the archive blob.
+    async fn assert_repaired_message(fx: &Fixture, account_id: &str, raw: &[u8]) {
+        let pool = sqlite_pool(&fx.db).clone();
+        let rel: Option<String> =
+            sqlx::query_scalar("SELECT raw_blob_path FROM message WHERE account_id = ?")
+                .bind(account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let rel = rel.expect("raw blob backfilled");
+        assert_eq!(
+            crate::blobs::read(fx.data_dir.path(), &rel).await.unwrap(),
+            raw
+        );
+        let attachments: Vec<(String, String)> = sqlx::query_as(
+            "SELECT filename, storage_path FROM attachment a \
+             JOIN message m ON m.id = a.message_id WHERE m.account_id = ?",
+        )
+        .bind(account_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].0, "a.bin");
+        assert_eq!(
+            crate::blobs::read(fx.data_dir.path(), &attachments[0].1)
+                .await
+                .unwrap(),
+            b"attachment-bytes"
+        );
+    }
+
+    /// The extraction size cap stops zip bombs (tested with a tiny budget).
+    #[tokio::test]
+    async fn extraction_size_cap_is_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("bomb.zip");
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("manifest.json", options).unwrap();
+            zip.write_all(GOOD_MANIFEST.as_bytes()).unwrap();
+            zip.start_file("big.bin", options).unwrap();
+            zip.write_all(&[b'x'; 100]).unwrap();
+            zip.finish().unwrap();
+        }
+        let out = tempfile::tempdir().unwrap();
+        let err = extract_archive(&zip_path, out.path(), 10).unwrap_err();
+        assert!(matches!(err, BackupError::CorruptArchive), "{err:?}");
+        // Under the real budget the same archive extracts fine.
+        let out2 = tempfile::tempdir().unwrap();
+        extract_archive(&zip_path, out2.path(), MAX_EXTRACTED_BYTES).unwrap();
+        assert_eq!(
+            std::fs::read(out2.path().join("big.bin")).unwrap().len(),
+            100
+        );
+    }
+}
 #[cfg(test)]
 #[cfg(feature = "postgres")]
 mod postgres_live {
