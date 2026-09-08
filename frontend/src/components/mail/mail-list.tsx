@@ -189,6 +189,13 @@ export function MailList() {
       const mapped = await fetchMessagesForView(viewOpts);
       replaceMessagesForView(viewOpts, mapped);
       setFetchError(null);
+      // A server-restored selection that the freshly loaded view doesn't
+      // contain (message moved/deleted, or read on the unread tab) dangles —
+      // clear it so the reader doesn't wait on a message that won't come.
+      const selected = useUIStore.getState().selectedMessageId;
+      if (selected && !useMailStore.getState().messages[selected]) {
+        useUIStore.getState().setSelectedMessage(null);
+      }
       // Self-heal stale sidebar badges: empty list but folder still claims unread.
       if (mapped.length === 0 && viewOpts.folderId) {
         const folder = useMailStore.getState().folders[viewOpts.folderId];

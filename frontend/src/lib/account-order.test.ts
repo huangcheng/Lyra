@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { moveId, orderAccounts } from '@/lib/account-order';
+import { moveId, orderAccounts, pruneAccountOrder } from '@/lib/account-order';
 import type { MailAccount } from '@/types';
 
 function account(id: string): MailAccount {
@@ -60,5 +60,19 @@ describe('moveId', () => {
     expect(moveId(['a', 'b'], 'a', 'a')).toEqual(['a', 'b']);
     expect(moveId(['a', 'b'], 'x', 'a')).toEqual(['a', 'b']);
     expect(moveId(['a', 'b'], 'a', 'x')).toEqual(['a', 'b']);
+  });
+});
+
+describe('pruneAccountOrder', () => {
+  it('drops ids of deleted accounts and keeps the rest in order', () => {
+    expect(pruneAccountOrder([account('a'), account('b')], ['x', 'a', 'y', 'b'])).toEqual([
+      'a',
+      'b',
+    ]);
+  });
+
+  it('is a no-op when every id is live', () => {
+    expect(pruneAccountOrder([account('a'), account('b')], ['b', 'a'])).toEqual(['b', 'a']);
+    expect(pruneAccountOrder([account('a')], [])).toEqual([]);
   });
 });

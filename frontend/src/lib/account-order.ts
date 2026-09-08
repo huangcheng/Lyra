@@ -32,3 +32,11 @@ export function moveId(ids: string[], activeId: string, overId: string): string[
   next.splice(to, 0, activeId);
   return next;
 }
+
+/** Drop persisted ids that no longer match any loaded account, so the
+ *  uiState blob doesn't carry deleted accounts forever (ordering itself
+ *  already ignores them — this is blob hygiene, not correctness). */
+export function pruneAccountOrder(accounts: MailAccount[], accountOrder: string[]): string[] {
+  const live = new Set(accounts.map((a) => a.id));
+  return accountOrder.filter((id) => live.has(id));
+}

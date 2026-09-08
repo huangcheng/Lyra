@@ -127,6 +127,8 @@
   --canvas: #f4f4f5; /* login backdrop */
   /* Soft edge for controls that still need a hairline (not nav selection). */
   --shadow-whisper: 0 0 0 1px rgba(228, 228, 231, 0.9);
+  /* Elevation for lifted surfaces (drag overlays, floating chips). */
+  --shadow-lift: 0 1px 2px rgba(24, 24, 27, 0.08), 0 12px 28px -8px rgba(24, 24, 27, 0.28);
 }
 
 .dark {
@@ -162,11 +164,15 @@
   --ter-foreground: #8b9098; /* cool slate — AA-safe on all dark surfaces (5.2:1+) */
   --canvas: #101012;
   --shadow-whisper: 0 0 0 1px rgba(44, 44, 49, 0.8);
+  --shadow-lift: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 28px -8px rgba(0, 0, 0, 0.55);
 }
 
 @layer utilities {
   .shadow-whisper {
     box-shadow: var(--shadow-whisper);
+  }
+  .shadow-lift {
+    box-shadow: var(--shadow-lift);
   }
 }
 

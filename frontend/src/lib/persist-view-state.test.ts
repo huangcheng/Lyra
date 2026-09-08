@@ -98,6 +98,33 @@ describe('applyViewState theme + notification prefs', () => {
   });
 });
 
+describe('applyViewState listTab + message selection', () => {
+  it('restores the unread tab and ignores unknown values', () => {
+    applyViewState({ listTab: 'unread' });
+    expect(useUIStore.getState().listTab).toBe('unread');
+    applyViewState({ listTab: 'snoozed' });
+    expect(useUIStore.getState().listTab).toBe('unread');
+  });
+
+  it('restores the message selection after the account/folder resetters ran', () => {
+    applyViewState({
+      selectedAccountId: 'acc-1',
+      selectedFolderId: 'f-1',
+      selectedMessageId: 'm-9',
+    });
+    const s = useUIStore.getState();
+    expect(s.selectedAccountId).toBe('acc-1');
+    expect(s.selectedFolderId).toBe('f-1');
+    expect(s.selectedMessageId).toBe('m-9');
+    useUIStore.getState().setSelectedMessage(null);
+  });
+
+  it('ignores non-string message selections', () => {
+    applyViewState({ selectedMessageId: 42 });
+    expect(useUIStore.getState().selectedMessageId).toBeNull();
+  });
+});
+
 describe('startViewStatePersistence accountOrder', () => {
   it('includes accountOrder in the PATCH payload when it changes', async () => {
     const stop = startViewStatePersistence();
@@ -125,6 +152,30 @@ describe('startViewStatePersistence accountOrder', () => {
         body: expect.stringContaining('"defaultAccountId":"acc-1"'),
       }),
     );
+  });
+
+  it('includes listTab and selectedMessageId in the PATCH payload when they change', async () => {
+    const stop = startViewStatePersistence();
+    useUIStore.getState().setListTab('unread');
+    useUIStore.getState().setSelectedMessage('m-1');
+    await vi.advanceTimersByTimeAsync(500);
+    stop();
+    expect(mockedApi).toHaveBeenCalledWith(
+      '/auth/preferences',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: expect.stringContaining('"listTab":"unread"'),
+      }),
+    );
+    expect(mockedApi).toHaveBeenCalledWith(
+      '/auth/preferences',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: expect.stringContaining('"selectedMessageId":"m-1"'),
+      }),
+    );
+    useUIStore.getState().setListTab('all');
+    useUIStore.getState().setSelectedMessage(null);
   });
 
   it('does not PATCH when only unrelated state changes', async () => {

@@ -249,12 +249,14 @@ export function Mail() {
     return (
       <TooltipProvider delayDuration={0}>
         <MailDndProvider>
-          <div className="flex h-full flex-col bg-background">
-            {selectedMessageId ? (
-              <MailDisplay />
-            ) : (
+          <div className="relative flex h-full flex-col bg-background">
+            {/* ListPane stays mounted (hidden) while reading so a
+                server-restored selection still loads its view — and going
+                back keeps the list scroll. */}
+            <div className={selectedMessageId ? 'absolute inset-0 hidden' : 'h-full'}>
               <ListPane onOpenDrawer={() => setDrawerOpen(true)} />
-            )}
+            </div>
+            {selectedMessageId ? <MailDisplay /> : null}
           </div>
           {drawerOpen ? (
             <div className="fixed inset-0 z-50">

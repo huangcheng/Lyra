@@ -62,19 +62,29 @@ export function applyViewState(uiState: Record<string, unknown> | null | undefin
   if (typeof uiState.defaultAccountId === 'string' && uiState.defaultAccountId) {
     ui.setDefaultAccount(uiState.defaultAccountId);
   }
+  if (
+    typeof uiState.listTab === 'string' &&
+    (uiState.listTab === 'all' || uiState.listTab === 'unread')
+  ) {
+    ui.setListTab(uiState.listTab);
+  }
   if (typeof uiState.favoritesAllInboxesExpanded === 'boolean') {
     ui.setFavoritesAllInboxesExpanded(uiState.favoritesAllInboxesExpanded);
   }
   if (uiState.theme === 'light' || uiState.theme === 'dark' || uiState.theme === 'system') {
     ui.setTheme(uiState.theme);
   }
-  if (uiState.notificationPrefs && typeof uiState.notificationPrefs === 'object') {
+  if (typeof uiState.notificationPrefs === 'object' && uiState.notificationPrefs !== null) {
     const o = uiState.notificationPrefs as Record<string, unknown>;
     writeNotificationPrefs({
       enabled: typeof o.enabled === 'boolean' ? o.enabled : false,
       mutedFolderIds: stringList(o.mutedFolderIds),
       mutedThreadIds: stringList(o.mutedThreadIds),
     });
+  }
+  // Message selection goes last — the account/folder setters above reset it.
+  if (typeof uiState.selectedMessageId === 'string' && uiState.selectedMessageId) {
+    ui.setSelectedMessage(uiState.selectedMessageId);
   }
 }
 
@@ -85,6 +95,8 @@ function currentUiState(): Record<string, unknown> {
     selectedAccountId: s.selectedAccountId,
     selectedFolderId: s.selectedFolderId,
     selectedFolderRole: s.selectedFolderRole,
+    selectedMessageId: s.selectedMessageId,
+    listTab: s.listTab,
     folderExpansion: s.folderExpansion,
     accountOrder: s.accountOrder,
     defaultAccountId: s.defaultAccountId,
@@ -125,6 +137,8 @@ export function startViewStatePersistence(): () => void {
       state.selectedAccountId === prev.selectedAccountId &&
       state.selectedFolderId === prev.selectedFolderId &&
       state.selectedFolderRole === prev.selectedFolderRole &&
+      state.selectedMessageId === prev.selectedMessageId &&
+      state.listTab === prev.listTab &&
       state.folderExpansion === prev.folderExpansion &&
       state.accountOrder === prev.accountOrder &&
       state.defaultAccountId === prev.defaultAccountId &&

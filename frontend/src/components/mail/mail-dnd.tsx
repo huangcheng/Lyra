@@ -26,10 +26,10 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core';
 import { sortableKeyboardCoordinates } from '@dnd-kit/sortable';
-import { GripVertical } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { Badge } from '@/components/ui/badge';
+import { ChevronRight } from 'lucide-react';
 import { t } from '@/i18n';
 import { moveId, orderAccounts } from '@/lib/account-order';
 import {
@@ -42,11 +42,16 @@ import { cn } from '@/lib/utils';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 
-/** Shared lift chip for DragOverlay — whisper shadow, 7px radius (redesign v2). */
+/** Shared lift chip for DragOverlay — the dragged row itself, quietly
+ *  elevated (lift shadow + hairline + 2% scale) instead of a decorated clone. */
 const dragChipClass =
-  'pointer-events-none cursor-grabbing rounded-[7px] border border-border bg-card shadow-whisper';
+  'pointer-events-none cursor-grabbing rounded-[7px] border border-border bg-card shadow-lift scale-[1.02]';
 
-function AccountDragChip({ name }: { name: string }) {
+function AccountDragChip({ id, name }: { id: string; name: string }) {
+  const folders = useMailStore((s) => s.folders);
+  const unread = Object.values(folders)
+    .filter((f) => f.accountId === id)
+    .reduce((sum, f) => sum + f.unreadCount, 0);
   return (
     <div
       className={cn(
@@ -54,8 +59,12 @@ function AccountDragChip({ name }: { name: string }) {
         'flex h-8 w-[216px] max-w-[calc(100vw-2rem)] items-center gap-1.5 px-2.5',
       )}
     >
-      <GripVertical className="size-3.5 shrink-0 text-ter-foreground" aria-hidden />
+      {/* Mirrors the collapsed header row: chevron, name, unread slot. */}
+      <ChevronRight className="size-3.5 shrink-0 text-ter-foreground" aria-hidden />
       <span className="min-w-0 truncate text-[12.5px] font-semibold">{name}</span>
+      <span className="ml-auto min-w-[1.25rem] shrink-0 text-right text-[11.5px] tabular-nums text-muted-foreground">
+        {unread > 0 ? unread : '\u00a0'}
+      </span>
     </div>
   );
 }
@@ -253,7 +262,7 @@ export function MailDndProvider({ children }: { children: ReactNode }) {
         {drag ? (
           <ConversationDragChip subject={drag.subject} count={drag.count} />
         ) : accountDrag ? (
-          <AccountDragChip name={accountDrag.name} />
+          <AccountDragChip id={accountDrag.id} name={accountDrag.name} />
         ) : null}
       </DragOverlay>
       {progress ? (

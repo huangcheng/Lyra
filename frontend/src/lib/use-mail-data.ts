@@ -5,6 +5,7 @@
 import { useCallback, useEffect } from 'react';
 
 import { api } from '@/lib/api-client';
+import { pruneAccountOrder } from '@/lib/account-order';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import {
   FOLDER_REFRESH_DEBOUNCE_MS,
@@ -14,6 +15,7 @@ import {
 import { syncEvents$ } from '@/rxjs/sync-events';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
+import { useUIStore } from '@/stores/ui';
 import type { MailAccount } from '@/types';
 
 /** @deprecated Prefer FOLDER_REFRESH_DEBOUNCE_MS from refresh-folders. */
@@ -50,6 +52,11 @@ export function useMailData() {
         lastSyncAt: a.lastSyncAt,
       }));
       setAccounts(accounts);
+      // Blob hygiene: drop persisted accountOrder ids whose accounts are
+      // gone (also fires a save so the server copy stays clean).
+      const ui = useUIStore.getState();
+      const pruned = pruneAccountOrder(accounts, ui.accountOrder);
+      if (pruned.length !== ui.accountOrder.length) ui.setAccountOrder(pruned);
     } catch {
       /* network or HTTP error — keep last good snapshot */
     }
