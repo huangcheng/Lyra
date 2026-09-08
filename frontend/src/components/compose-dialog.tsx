@@ -11,6 +11,7 @@ import {
   Paperclip,
   PenLine,
   SendHorizontal,
+  Sparkles,
   Trash2,
   Type,
   X,
@@ -37,6 +38,8 @@ import {
   type InlineImageEntry,
 } from '@/lib/inline-images';
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
+import { fetchAiSettings, requestAiDraft } from '@/lib/ai-api';
+import { textToHtml } from '@/lib/compose-html';
 import { resolveFromAccountId } from '@/lib/resolve-from-account';
 import { cn } from '@/lib/utils';
 import {
@@ -105,6 +108,9 @@ export function ComposeDialog() {
   const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
   const [showCc, setShowCc] = useState(false);
   const [showBcc, setShowBcc] = useState(false);
+  /** AI assist: availability (settings fetch) + in-flight state. */
+  const [aiAvailable, setAiAvailable] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
   const [cryptoOpen, setCryptoOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** objectURL → {file, contentId} for every inline image in the editor. */
@@ -116,6 +122,46 @@ export function ComposeDialog() {
   /** The draft this open session seeded from — guards against re-seeding on
    * store identity churn (accounts/folders refresh on every sync tick). */
   const seededForRef = useRef<unknown>(null);
+
+  // AI assist availability: master switch + feature flag + a message to
+  // assist with. Fetched once per open; failures just hide the button.
+  const assistable = composeDraft?.mode === 'reply' || composeDraft?.mode === 'forward';
+  useEffect(() => {
+    setAiAvailable(false);
+    if (composeOpen && assistable && composeDraft?.sourceMessageId) {
+      void fetchAiSettings()
+        .then((s) => setAiAvailable(s.enabled && s.features.draftReply && s.hasKey))
+        .catch(() => setAiAvailable(false));
+    }
+  }, [composeOpen, assistable, composeDraft?.sourceMessageId]);
+
+  /** Ask the model for suggested text and drop it in above the signature. */
+  const handleAiDraft = async () => {
+    const sourceMessageId = composeDraft?.sourceMessageId;
+    if (!sourceMessageId || aiBusy) return;
+    setAiBusy(true);
+    setError(null);
+    try {
+      const text = await requestAiDraft(
+        sourceMessageId,
+        composeDraft?.mode === 'forward' ? 'forward' : 'reply',
+      );
+      if (richMode) {
+        const html = textToHtml(text);
+        // Prepend so the signature and quoted original stay in place.
+        setInitialHtml((prev) => `${html}${prev}`);
+        setEditorKey((k) => k + 1);
+      } else {
+        setForm((f) => ({ ...f, body: `${text}\n\n${f.body}` }));
+      }
+    } catch (err: unknown) {
+      setError(
+        `${t(locale, 'mail.aiDraftFailed')}: ${err instanceof Error ? err.message : ''}`.trim(),
+      );
+    } finally {
+      setAiBusy(false);
+    }
+  };
 
   /** The From account owns a secret (identity) key → sign/encrypt available. */
   const fromAccountHasKey = useMemo(
@@ -903,6 +949,18 @@ export function ComposeDialog() {
                 </span>
               ) : null}
             </button>
+            {aiAvailable ? (
+              <button
+                type="button"
+                className={iconBtn}
+                disabled={aiBusy || sending || seeding}
+                title={t(locale, 'mail.aiDraft')}
+                aria-label={t(locale, 'mail.aiDraft')}
+                onClick={() => void handleAiDraft()}
+              >
+                <Sparkles className={cn('size-4', aiBusy && 'animate-pulse')} aria-hidden />
+              </button>
+            ) : null}
             <button
               type="button"
               className={cn(iconBtn, !richMode && 'bg-accent text-foreground')}

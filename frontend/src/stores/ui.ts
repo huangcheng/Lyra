@@ -21,6 +21,8 @@ export interface ComposeDraft {
   accountId?: string;
   /** Initial rich-editor content (reply/forward quote, restored draft body). */
   initialHtml?: string;
+  /** The message being replied to / forwarded — AI assist context. */
+  sourceMessageId?: string;
   /** Forwarding carries the original's non-inline attachments (metadata). */
   forwardAttachments?: Array<{ id: string; filename?: string; contentType?: string }>;
   /** Inline (cid:) parts of the source message/draft — resolved to object

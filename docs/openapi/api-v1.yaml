@@ -1664,6 +1664,105 @@ paths:
         "200":
           description: Updated settings
 
+  /api/v1/settings/ai:
+    get:
+      tags: [settings]
+      summary: AI assist (BYOK) settings; the API key is never returned
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current settings (`hasKey` instead of the key itself)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiSettings"
+    put:
+      tags: [settings]
+      summary: Update AI settings
+      description: >
+        Partial update; `apiKey` omitted keeps the stored key, an empty
+        string clears it. The key is DEK-encrypted at rest.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+                $ref: "#/components/schemas/AiSettingsUpdate"
+      responses:
+        "200":
+          description: Saved settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiSettings"
+  /api/v1/settings/ai/test:
+    post:
+      tags: [settings]
+      summary: Test the configured AI endpoint with a minimal completion
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Round trip succeeded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  reply:
+                    type: string
+                  model:
+                    type: string
+        "409":
+          description: AI not configured/enabled (`ai_not_configured`)
+        "502":
+          description: Provider unreachable or rejected the request
+  /api/v1/ai/draft:
+    post:
+      tags: [ai]
+      summary: Suggest reply/forward text for one message
+      description: >
+        Sends the message's subject, sender, and (truncated) body to the
+        configured LLM. Suggest-only: the user edits and sends.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messageId, mode]
+              properties:
+                messageId:
+                  type: string
+                mode:
+                  type: string
+                  enum: [reply, forward]
+                instruction:
+                  type: string
+                  description: Optional extra user instruction
+      responses:
+        "200":
+          description: Suggested text
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  text:
+                    type: string
+        "403":
+          description: Feature disabled (`ai_feature_disabled`)
+        "409":
+          description: AI not configured (`ai_not_configured`)
+        "502":
+          description: Provider error
   /api/v1/settings/spam:
     get:
       tags: [settings]
@@ -2224,6 +2323,50 @@ components:
             $ref: "#/components/schemas/ApiError"
 
   schemas:
+    AiSettings:
+      type: object
+      required: [enabled, dialect, baseUrl, model, hasKey, features]
+      properties:
+        enabled:
+          type: boolean
+          description: Master switch (default off)
+        dialect:
+          type: string
+          enum: [openai_chat, openai_responses, anthropic]
+        baseUrl:
+          type: string
+          description: >
+            Versioned root for the OpenAI dialects (e.g.
+            `.../compatible-mode/v1`); API root for `anthropic`.
+        model:
+          type: string
+        hasKey:
+          type: boolean
+        features:
+          type: object
+          properties:
+            draftReply:
+              type: boolean
+    AiSettingsUpdate:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        dialect:
+          type: string
+          enum: [openai_chat, openai_responses, anthropic]
+        baseUrl:
+          type: string
+        model:
+          type: string
+        apiKey:
+          type: string
+          description: Write-only; omitted keeps, empty clears.
+        features:
+          type: object
+          properties:
+            draftReply:
+              type: boolean
     MessageActionResponse:
       type: object
       required: [status, action, role]

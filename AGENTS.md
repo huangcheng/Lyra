@@ -76,6 +76,7 @@ Detail lives in specs; this file stays short and accurate.
 | **PIM credentials** — app password for CardDAV/CalDAV (bearer mail), then calendar read-completeness | `docs/superpowers/specs/2026-09-04-lyra-pim-credentials-design.md` |
 | **Web Push** — closed-app new-mail notifications (VAPID, kv subscriptions, sync-event fan-out) | `docs/superpowers/specs/2026-09-07-lyra-web-push-design.md` |
 | Mail sidebar Favorites (Apple Mail–style; local views, expandable All Inboxes + Starred) | `docs/superpowers/specs/2026-09-03-lyra-favorites-sidebar-design.md` |
+| **AI assist** — BYOK settings, LLM dialect seam, draft/reply suggest | `docs/specs/2026-09-08-lyra-ai-byok-spec.md` |
 
 Lyra is a **self-hosted mail client** (not a mail server). Prefer **JMAP**, fall back to **IMAP**. Honor v1 non-goals (no collaboration suite, no SaaS, no multi-user UX yet). Ship a **client-agnostic `/api/v1`**; native apps are far-horizon only.
 
@@ -110,6 +111,7 @@ Lyra/
       entities/                 ← SeaORM entity per table (schema truth for data-layer code)
       sync/                     ← sync HTTP, IMAP/JMAP loops, JMAP seam (jmap_client.rs), persist transactions
       imap.rs / smtp.rs
+      ai/                        ← AI assist (BYOK): settings, LLM dialect adapters, draft/reply
       oauth/                    ← Microsoft + Yandex mail OAuth (PKCE) + XOAUTH2
       push/                     ← Web Push (RFC 8030/8291/8292): fan-out on sync events, kv subscriptions
       jobs.rs / scheduler.rs / kernel/

@@ -18,6 +18,7 @@ import {
   Shield,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
   Star,
   Trash2,
   Users,
@@ -30,6 +31,7 @@ import { CaptchaSettingsCard } from './captcha-settings';
 import { PimDialog } from './pim-dialog';
 import { FolderRoleMapping } from './folder-role-mapping';
 import { EncryptionSettings } from './encryption-settings';
+import { AiSettingsCard } from './ai-settings';
 import { NotificationSettings } from './notification-settings';
 import { TotpEnroll } from './totp-enroll';
 import { useUIStore } from '../stores/ui';
@@ -90,7 +92,8 @@ import type { MarkReadPolicy } from '@/types';
 const REMOTE_IMAGE_MODES = ['block', 'proxy'] as const;
 type RemoteImageMode = (typeof REMOTE_IMAGE_MODES)[number];
 
-type SettingsSection = 'general' | 'security' | 'accounts' | 'spam' | 'privacy' | 'encryption';
+type SettingsSection =
+  'general' | 'security' | 'accounts' | 'spam' | 'ai' | 'privacy' | 'encryption';
 
 interface MailAccount {
   id: string;
@@ -239,6 +242,7 @@ export function SettingsPage() {
       sectionParam === 'security' ||
       sectionParam === 'accounts' ||
       sectionParam === 'spam' ||
+      sectionParam === 'ai' ||
       sectionParam === 'privacy' ||
       sectionParam === 'encryption'
     ) {
@@ -876,6 +880,13 @@ export function SettingsPage() {
       onClick: () => setSection('spam'),
     },
     {
+      key: 'ai',
+      label: t(locale, 'settings.ai.title'),
+      icon: Sparkles,
+      active: section === 'ai',
+      onClick: () => setSection('ai'),
+    },
+    {
       key: 'privacy',
       label: t(locale, 'settings.privacy.title'),
       icon: Shield,
@@ -907,6 +918,10 @@ export function SettingsPage() {
     spam: {
       title: t(locale, 'settings.spam.title'),
       subtitle: t(locale, 'settings.spam.subtitle'),
+    },
+    ai: {
+      title: t(locale, 'settings.ai.title'),
+      subtitle: t(locale, 'settings.ai.subtitle'),
     },
     privacy: {
       title: t(locale, 'settings.privacy.title'),
@@ -1494,6 +1509,8 @@ export function SettingsPage() {
               </section>
             </div>
           )}
+
+          {section === 'ai' && <AiSettingsCard locale={locale} />}
 
           {section === 'privacy' && (
             <>

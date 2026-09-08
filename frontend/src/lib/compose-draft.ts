@@ -60,6 +60,7 @@ export function buildReplyDraft(
   return {
     mode: 'reply',
     accountId: m.accountId,
+    sourceMessageId: m.id,
     to,
     subject: m.subject.startsWith('Re:') ? m.subject : `Re: ${m.subject}`,
     body: quoteBody(m),
@@ -76,6 +77,7 @@ export function buildForwardDraft(m: MailMessage, accounts: MailAccount[]): Part
   return {
     mode: 'forward',
     accountId: m.accountId,
+    sourceMessageId: m.id,
     to: '',
     subject: m.subject.startsWith('Fwd:') ? m.subject : `Fwd: ${m.subject}`,
     body: quoteBody(m),

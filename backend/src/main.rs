@@ -10,6 +10,7 @@
 
 #[macro_use]
 mod accounts;
+mod ai;
 mod api_error;
 mod auth;
 mod avatars;
@@ -174,6 +175,7 @@ fn api_router(auth_state: auth::AuthState) -> Router {
         .merge(stats::routes())
         .merge(privacy::routes())
         .merge(spam::routes())
+        .merge(ai::http::routes())
         .merge(media::routes())
         .merge(avatars::routes())
         .merge(opengpg::routes())

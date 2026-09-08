@@ -166,7 +166,9 @@
     "noLabels": "还没有标签。",
     "labelPlaceholder": "添加标签（如 work、travel）",
     "removeLabel": "移除标签",
-    "labelsBestEffort": "支持自定义关键字的服务器会同步标签；否则仅保存在本服务器。"
+    "labelsBestEffort": "支持自定义关键字的服务器会同步标签；否则仅保存在本服务器。",
+    "aiDraft": "AI 起草",
+    "aiDraftFailed": "AI 起草失败"
   },
   "auth": {
     "tagline": "自己托管的邮件。",
@@ -538,6 +540,29 @@
       "skipped": "未配置——请打开“日历与联系人”完成连接",
       "autoDiscovered": "已自动发现此账户的 CardDAV/CalDAV",
       "autoDiscoverNone": "未发现 CardDAV/CalDAV（可能需要应用专用密码）"
+    },
+    "ai": {
+      "title": "AI 助手",
+      "subtitle": "自带密钥（BYOK）",
+      "provider": "AI 提供商",
+      "providerDesc": "使用你自己的 LLM 服务与密钥。默认关闭；未启用前不会向任何地方发送内容。",
+      "dialect": "API 方言",
+      "dialect_openai_chat": "OpenAI 兼容（Chat Completions）",
+      "dialect_openai_responses": "OpenAI Responses",
+      "dialect_anthropic": "Anthropic Messages",
+      "baseUrl": "接口地址",
+      "model": "模型",
+      "apiKey": "API 密钥",
+      "keySet": "已保存密钥——输入新值可替换",
+      "clearKey": "清除",
+      "keyEncrypted": "密钥加密存储，不会出现在任何 API 响应中。",
+      "test": "测试连接",
+      "testing": "测试中…",
+      "testOk": "连接成功",
+      "features": "功能",
+      "draftReply": "辅助撰写回复/转发",
+      "draftReplyDesc": "在写信界面添加 AI 按钮，生成建议文本。始终由你编辑并发送。",
+      "privacy": "功能开启期间，Lyra 只会把所需的最少邮件内容发送到上方配置的服务。"
     }
   },
   "contacts": {

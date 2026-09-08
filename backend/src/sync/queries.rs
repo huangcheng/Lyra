@@ -739,6 +739,28 @@ const MESSAGE_LOAD_COLS: &[message::Column] = &[
     message::Column::Labels,
 ];
 
+/// AI-assist context projection: just the prompt fields the `ai` module
+/// needs. `MessageRow` fields are `pub(super)` — this keeps the sync types
+/// from leaking without widening them.
+pub(crate) struct AiMessageContext {
+    pub(crate) from_address: Option<String>,
+    pub(crate) subject: Option<String>,
+    pub(crate) body_text: Option<String>,
+}
+
+pub(crate) async fn load_ai_message_context(
+    db: &DbPool,
+    user_id: &str,
+    message_id: &str,
+) -> Result<AiMessageContext, SyncError> {
+    let row = load_message_row(db, user_id, message_id).await?;
+    Ok(AiMessageContext {
+        from_address: row.from_address.clone(),
+        subject: row.subject.clone(),
+        body_text: row.body_text.clone(),
+    })
+}
+
 pub(crate) async fn load_message_row(
     db: &DbPool,
     user_id: &str,
