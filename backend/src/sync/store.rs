@@ -139,7 +139,7 @@ pub(crate) fn opt_str_value(raw: Option<&str>) -> Value {
 
 /// JSON column bind mirroring `JsonParam::lenient`: raw text on SQLite,
 /// parsed JSONB on Postgres (non-JSON text becomes a JSON string scalar).
-fn opt_json_value(db: &DbPool, raw: Option<&str>) -> Value {
+pub(crate) fn opt_json_value(db: &DbPool, raw: Option<&str>) -> Value {
     let Some(raw) = raw else {
         return match db.backend() {
             DbBackend::Sqlite => Value::String(None),

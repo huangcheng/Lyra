@@ -1,9 +1,6 @@
 //! Full-instance backup: age-encrypted zip export/import.
 //! Spec: docs/superpowers/specs/2026-09-08-lyra-backup-export-import-design.md
 
-// Consumed by export/import (later tasks); remove once wired up.
-#![allow(dead_code)]
-
 pub mod artifacts;
 pub mod crypto;
 pub mod export;

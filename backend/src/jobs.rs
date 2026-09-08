@@ -594,12 +594,24 @@ pub async fn process_job(
             };
             finalize_backup_job(db, &job.id, result).await?;
         }
-        JobPayload::ImportBackup { .. } => {
-            // TODO(plan 2026-09-08-lyra-backup-export-import Task 11): call
-            // backup::import::run here once import.rs lands.
-            let err = BackupError::Internal("import not yet wired".into());
-            write_backup_failure_report(state.kv(), &job.id, &err).await;
-            finalize_backup_job(db, &job.id, Err(err)).await?;
+        JobPayload::ImportBackup {
+            user_id,
+            upload_id,
+            password_wrapped,
+        } => {
+            let result = match unwrap_backup_password(db, &user_id, &password_wrapped).await {
+                Ok(password) => {
+                    crate::backup::import::run(state, &user_id, &job.id, &upload_id, &password)
+                        .await
+                }
+                Err(err) => {
+                    // `run` never started, so it could not write the failure
+                    // report itself — the job-status endpoint polls for it.
+                    write_backup_failure_report(state.kv(), &job.id, &err).await;
+                    Err(err)
+                }
+            };
+            finalize_backup_job(db, &job.id, result).await?;
         }
     }
     Ok(())
@@ -1521,8 +1533,11 @@ mod tests {
         assert_eq!(payload_kind(&back), "import_backup");
     }
 
+    /// The wired import path, unwrap failure: a bad password envelope fails
+    /// BEFORE `import::run` starts — the job layer writes the kv failure
+    /// report itself (import never ran, so it could not).
     #[tokio::test]
-    async fn import_backup_placeholder_fails_not_yet_wired() {
+    async fn import_backup_bad_password_envelope_fails_job() {
         let db = test_pool().await;
         let (state, _data_dir) = test_state(&db, App::new());
         let now = "2026-09-09T00:00:00+00:00";
@@ -1552,14 +1567,8 @@ mod tests {
         .unwrap();
         assert_eq!(row.0, "failed");
         assert_eq!(row.1.as_deref(), Some("backup job failed"));
-        assert!(
-            row.2.as_deref().unwrap().contains("import not yet wired"),
-            "{:?}",
-            row.2
-        );
+        assert!(row.2.is_some());
 
-        // The placeholder still writes the kv failure report the
-        // job-status endpoint polls for.
         let report = state
             .kv()
             .get(&format!("backup:report:{job_id}"))
@@ -1568,13 +1577,91 @@ mod tests {
             .unwrap();
         let report: serde_json::Value = serde_json::from_str(&report).unwrap();
         assert_eq!(report["ok"], serde_json::json!(false));
-        assert!(
-            report["error"]
-                .as_str()
-                .unwrap()
-                .contains("import not yet wired"),
-            "{report}"
-        );
+    }
+
+    /// The wired import path, success: a real (manifest-only) age-encrypted
+    /// archive staged as a finished upload is decrypted, validated, merged
+    /// (zero sections), reported, and the upload file consumed.
+    #[tokio::test]
+    async fn import_backup_job_runs_import_to_completion() {
+        let db = test_pool().await;
+        let (state, data_dir) = test_state(&db, App::new());
+        let pool = sqlite_pool(&db);
+
+        // User with a decryptable DEK (mirrors the backup import fixtures).
+        let user_id = crate::sync::store::new_uuid_text();
+        sqlx::query("INSERT INTO lyra_user (id, username, password_hash) VALUES (?, ?, 'hash')")
+            .bind(&user_id)
+            .bind(format!("jobs-import-{user_id}"))
+            .execute(pool)
+            .await
+            .unwrap();
+        let dek = crate::crypto::generate_key();
+        let kek = crate::crypto::derive_user_kek(crate::auth::TEST_MASTER_KEY, &user_id);
+        let wrapped = crate::crypto::wrap_dek(&kek, &dek).unwrap();
+        sqlx::query("UPDATE lyra_user SET encrypted_dek = ? WHERE id = ?")
+            .bind(&wrapped)
+            .bind(&user_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        // Hand-build a manifest-only .lyra staged as a finished upload.
+        let password = "pw-12345678";
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("a.zip");
+        {
+            use std::io::Write as _;
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(
+                br#"{"format":1,"app":"lyra","app_version":"0.1.0","created_at":"2026-09-09T00:00:00Z","sections":{"settings":false,"accounts":0,"messages":0,"contacts":0,"calendars":0,"blobs":0}}"#,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        let upload_id = uuid::Uuid::now_v7().to_string();
+        let staging = data_dir.path().join("backups").join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let upload = staging.join(format!("upload-{upload_id}.lyra"));
+        crate::backup::crypto::encrypt_file(&zip_path, &upload, password).unwrap();
+
+        let envelope = crate::crypto::encrypt(&dek, password.as_bytes()).unwrap();
+        let payload = JobPayload::ImportBackup {
+            user_id: user_id.clone(),
+            upload_id: upload_id.clone(),
+            password_wrapped: serde_json::to_string(&envelope).unwrap(),
+        };
+        let now = "2026-09-09T00:00:00+00:00";
+        let job_id = enqueue(&db, &payload, now).await.unwrap();
+        let claimed = claim_due(&db, now).await.unwrap().expect("due job");
+
+        let inflight = InFlight::new();
+        let sem = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&sem)
+            .try_acquire_owned()
+            .expect("test semaphore has a permit");
+        process_job(&state, &inflight, permit, claimed)
+            .await
+            .expect("process_job");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = ?")
+            .bind(&job_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "completed");
+        let report = state
+            .kv()
+            .get(&format!("backup:report:{job_id}"))
+            .await
+            .unwrap()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(report["ok"], serde_json::json!(true), "{report}");
+        assert!(!upload.exists(), "import consumed the staged upload file");
     }
 }
 

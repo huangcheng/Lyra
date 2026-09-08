@@ -36,7 +36,6 @@ use super::{BackupError, artifacts};
 #[derive(Debug, Default)]
 pub(crate) struct ExportCounts {
     pub accounts: u32,
-    pub messages: u64,
     pub contacts: u32,
     pub calendars: u32,
     pub blobs: u64,
@@ -1371,7 +1370,6 @@ mod tests {
         db: DbPool,
         user_id: String,
         account_id: String,
-        dek: Vec<u8>,
         data_dir: tempfile::TempDir,
         staging: tempfile::TempDir,
     }
@@ -1506,7 +1504,6 @@ mod tests {
             db,
             user_id,
             account_id,
-            dek: dek.to_vec(),
             data_dir,
             staging,
         }
