@@ -123,9 +123,7 @@ fn system_prompt(context_body: Option<&str>) -> String {
     let mut p = format!(
         "You are Lyra's mail assistant, helping the user with their mailbox. \
          Today is {today}. Answer in the user's language, concisely. \
-         You can call search_mail to find messages before answering questions \
-         about them; cite subjects/dates from the hits. You cannot send, \
-         move, or modify mail — suggest what the user could do instead."
+         You can call search_mail to find messages, read_mail to open one in \n         full, and list_folders for folder overviews; cite subjects/dates from \n         the hits. You cannot send, move, or modify mail — suggest what the \n         user could do instead."
     );
     if let Some(body) = context_body {
         p.push_str("\n\nThe user currently has this message open:\n\n");

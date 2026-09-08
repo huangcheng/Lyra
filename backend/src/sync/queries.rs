@@ -13,7 +13,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::db_row::{IdParam, id_param};
-use crate::entities::{folder, mail_account, message};
+use crate::entities::{folder, mail_account as account_entity, message};
 use crate::storage::DbPool;
 
 use super::store::effective_folder_role;
@@ -227,7 +227,7 @@ pub(super) fn add_message_list_columns(query: &mut SelectStatement) {
 pub(super) fn add_message_account_join(query: &mut SelectStatement) {
     query.from_as(message::Entity, Alias::new("m")).join_as(
         JoinType::InnerJoin,
-        mail_account::Entity,
+        account_entity::Entity,
         Alias::new("a"),
         Expr::cust("m.account_id = a.id"),
     );
@@ -559,6 +559,53 @@ pub(super) async fn search_like_fallback(
 
 /// Fetch FTS hits (in rank order), mapping each to a response the requesting
 /// user owns and that is not soft-deleted.
+/// One folder row for the assistant's `list_folders` tool.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiFolderHit {
+    pub(crate) account: String,
+    pub(crate) name: String,
+    /// Effective role (`inbox`, `spam`, …; null for custom folders).
+    pub(crate) role: Option<String>,
+    pub(crate) unread: i64,
+    pub(crate) total: i64,
+}
+
+/// Every folder of the user's accounts, oldest sort first.
+pub(crate) async fn ai_list_folders(
+    db: &DbPool,
+    user_id: &str,
+) -> Result<Vec<AiFolderHit>, SyncError> {
+    let user_value = id_value(db, user_id)?;
+    let mut q = Sq::select();
+    q.expr_as(aliased_col("f", "name"), Alias::new("name"))
+        .expr_as(
+            Expr::cust("COALESCE(f.role_override, f.role)"),
+            Alias::new("role"),
+        )
+        .expr_as(aliased_col("f", "unread_messages"), Alias::new("unread"))
+        .expr_as(aliased_col("f", "total_messages"), Alias::new("total"))
+        .expr_as(aliased_col("f", "sort_order"), Alias::new("sort_order"))
+        .expr_as(Expr::cust("a.display_name"), Alias::new("account"))
+        .from_as(folder::Entity, Alias::new("f"))
+        .and_where(aliased_col("f", "account_id").eq(Expr::cust("a.id")))
+        .from_as(account_entity::Entity, Alias::new("a"))
+        .and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)))
+        .order_by_expr(Expr::cust("a.display_name"), sea_orm::sea_query::Order::Asc)
+        .order_by_expr(Expr::cust("f.sort_order"), sea_orm::sea_query::Order::Asc);
+    let rows = db.orm().query_all(&q).await.map_err(orm_err)?;
+    Ok(rows
+        .iter()
+        .map(|r| AiFolderHit {
+            account: r.try_get("", "account").unwrap_or_default(),
+            name: r.try_get("", "name").unwrap_or_default(),
+            role: r.try_get("", "role").ok().flatten(),
+            unread: r.try_get("", "unread").unwrap_or(0),
+            total: r.try_get("", "total").unwrap_or(0),
+        })
+        .collect())
+}
+
 /// Compact search hit for the AI assistant's `search_mail` tool — enough
 /// for the model to answer, without body payloads.
 #[derive(Debug, serde::Serialize)]
@@ -802,6 +849,7 @@ pub(crate) struct AiMessageContext {
     pub(crate) from_address: Option<String>,
     pub(crate) subject: Option<String>,
     pub(crate) body_text: Option<String>,
+    pub(crate) date: Option<String>,
 }
 
 pub(crate) async fn load_ai_message_context(
@@ -814,6 +862,7 @@ pub(crate) async fn load_ai_message_context(
         from_address: row.from_address.clone(),
         subject: row.subject.clone(),
         body_text: row.body_text.clone(),
+        date: row.date.clone(),
     })
 }
 
