@@ -66,6 +66,8 @@ pub struct AiSettings {
     /// DEK-encrypted JSON blob, or empty when unset.
     api_key_blob: String,
     pub features: AiFeatures,
+    /// Roadmap P4 spam-assist mode (`off`/`suggest`/`auto`).
+    pub spam_mode: super::spam_assist::SpamMode,
 }
 
 impl AiSettings {
@@ -77,6 +79,7 @@ impl AiSettings {
             model: String::new(),
             api_key_blob: String::new(),
             features: AiFeatures::default(),
+            spam_mode: super::spam_assist::SpamMode::Off,
         }
     }
 
@@ -86,6 +89,7 @@ impl AiSettings {
     }
 
     /// Build from stored column values (store layer only).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_columns(
         enabled: bool,
         dialect: AiDialect,
@@ -93,6 +97,7 @@ impl AiSettings {
         model: String,
         api_key_blob: String,
         features: AiFeatures,
+        spam_mode: super::spam_assist::SpamMode,
     ) -> Self {
         Self {
             enabled,
@@ -101,6 +106,7 @@ impl AiSettings {
             model,
             api_key_blob,
             features,
+            spam_mode,
         }
     }
 

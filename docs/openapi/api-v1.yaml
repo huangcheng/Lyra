@@ -1828,6 +1828,40 @@ paths:
       responses:
         "200":
           description: Cleared
+  /api/v1/ai/spam/suggest:
+    post:
+      tags: [ai]
+      summary: Suggest-mode spam verdict for one message (never files)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messageId]
+              properties:
+                messageId:
+                  type: string
+      responses:
+        "200":
+          description: Verdict
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  isSpam:
+                    type: boolean
+                  confidence:
+                    type: integer
+                    minimum: 0
+                    maximum: 100
+                  reason:
+                    type: string
+        "403":
+          description: Suggest mode not active (`ai_feature_disabled`)
   /api/v1/settings/spam:
     get:
       tags: [settings]
@@ -2749,6 +2783,10 @@ components:
             assistant:
               type: boolean
               description: Assistant chat bubble with the mail-search tool
+        spamMode:
+          type: string
+          enum: [off, suggest, auto]
+          description: Spam assist; `auto` files AI-spam post-sync (audited `ai_spam` verdicts)
     AiSettingsUpdate:
       type: object
       properties:
@@ -2771,6 +2809,9 @@ components:
               type: boolean
             assistant:
               type: boolean
+        spamMode:
+          type: string
+          enum: [off, suggest, auto]
     MessageActionResponse:
       type: object
       required: [status, action, role]

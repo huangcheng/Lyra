@@ -42,6 +42,7 @@ pub async fn load_settings(db: &DbPool, user_id: &str) -> Result<AiSettings, AiS
         Alias::new("model"),
         Alias::new("api_key"),
         Alias::new("features"),
+        Alias::new("spam_mode"),
     ])
     .from(Alias::new("ai_settings"))
     .and_where(Expr::cust("user_id").eq(Expr::val(user)));
@@ -59,6 +60,11 @@ pub async fn load_settings(db: &DbPool, user_id: &str) -> Result<AiSettings, AiS
         .as_deref()
         .and_then(|raw| serde_json::from_str::<AiFeatures>(raw).ok())
         .unwrap_or_default();
+    let spam_mode = row
+        .try_get::<String>("", "spam_mode")
+        .ok()
+        .and_then(|m| super::spam_assist::SpamMode::parse(&m))
+        .unwrap_or_default();
     Ok(AiSettings::from_columns(
         row.try_get("", "enabled").unwrap_or(false),
         dialect,
@@ -72,6 +78,7 @@ pub async fn load_settings(db: &DbPool, user_id: &str) -> Result<AiSettings, AiS
             .flatten()
             .unwrap_or_default(),
         features,
+        spam_mode,
     ))
 }
 
@@ -94,6 +101,7 @@ pub async fn save_settings(
             Alias::new("model"),
             Alias::new("api_key"),
             Alias::new("features"),
+            Alias::new("spam_mode"),
         ])
         .values_panic(vec![
             Expr::val(user),
@@ -103,6 +111,7 @@ pub async fn save_settings(
             Expr::val(s.model.trim()),
             Expr::val(s.key_blob()),
             Expr::val(features),
+            Expr::val(s.spam_mode.as_str()),
         ])
         .on_conflict(
             sea_orm::sea_query::OnConflict::column(Alias::new("user_id"))
@@ -113,6 +122,7 @@ pub async fn save_settings(
                     Alias::new("model"),
                     Alias::new("api_key"),
                     Alias::new("features"),
+                    Alias::new("spam_mode"),
                 ])
                 .to_owned(),
         );
@@ -163,6 +173,7 @@ mod tests {
                 draft_reply: true,
                 assistant: true,
             },
+            crate::ai::spam_assist::SpamMode::Suggest,
         );
         save_settings(&db, "u1", &on).await.unwrap();
         assert_eq!(load_settings(&db, "u1").await.unwrap(), on);

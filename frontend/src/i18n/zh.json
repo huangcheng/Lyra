@@ -168,7 +168,9 @@
     "removeLabel": "移除标签",
     "labelsBestEffort": "支持自定义关键字的服务器会同步标签；否则仅保存在本服务器。",
     "aiDraft": "AI 起草",
-    "aiDraftFailed": "AI 起草失败"
+    "aiDraftFailed": "AI 起草失败",
+    "aiSpamCheck": "AI 垃圾邮件判定",
+    "aiSpamMove": "移到垃圾邮件"
   },
   "auth": {
     "tagline": "自己托管的邮件。",
@@ -565,6 +567,12 @@
       "privacy": "While a feature is on, Lyra sends the minimum needed message content to the endpoint configured above.",
       "privacy": "功能开启期间，Lyra 只会把所需的最少邮件内容发送到上方配置的服务。",
       "assistant": "助手对话",
+      "assistantDesc": "聊天气泡：可搜索邮件、讨论当前打开的邮件。",
+      "spamMode": "垃圾邮件辅助",
+      "spamModeDesc": "建议：按需判定；自动：每次同步后自动归档 AI 判定的垃圾邮件。",
+      "spamMode_off": "关闭",
+      "spamMode_suggest": "建议",
+      "spamMode_auto": "自动 → 垃圾邮件",
       "assistantDesc": "聊天气泡：可搜索邮件、讨论当前打开的邮件。",
       "privacy": "功能开启期间，Lyra 只会把所需的最少邮件内容发送到上方配置的服务。"
     },

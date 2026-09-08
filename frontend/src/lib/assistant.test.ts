@@ -9,6 +9,7 @@ const base = {
   model: 'qwen3-max',
   hasKey: true,
   features: { draftReply: false, assistant: true },
+  spamMode: 'off' as const,
 };
 
 describe('assistantAvailable', () => {

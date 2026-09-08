@@ -19,6 +19,8 @@ export interface AiChatMessage {
   createdAt: string;
 }
 
+export type AiSpamMode = 'off' | 'suggest' | 'auto';
+
 export interface AiSettings {
   enabled: boolean;
   dialect: AiDialect;
@@ -26,12 +28,14 @@ export interface AiSettings {
   model: string;
   hasKey: boolean;
   features: AiFeatures;
+  spamMode: AiSpamMode;
 }
 
 export type AiSettingsUpdate = Partial<
-  Omit<AiSettings, 'hasKey' | 'dialect' | 'features'> & {
+  Omit<AiSettings, 'hasKey' | 'dialect' | 'features' | 'spamMode'> & {
     dialect: AiDialect;
     features: AiFeatures;
+    spamMode: AiSpamMode;
     /** Omitted ⇒ keep the stored key; empty string clears it. */
     apiKey: string;
   }
@@ -64,6 +68,16 @@ export async function sendAiChat(message: string, messageId?: string): Promise<s
     body: JSON.stringify({ message, messageId }),
   });
   return res.reply;
+}
+
+/** Suggest-mode verdict for one message (never files anything). */
+export async function suggestAiSpam(
+  messageId: string,
+): Promise<{ isSpam: boolean; confidence: number; reason: string }> {
+  return api('/ai/spam/suggest', {
+    method: 'POST',
+    body: JSON.stringify({ messageId }),
+  });
 }
 
 export async function clearAiChat(): Promise<void> {

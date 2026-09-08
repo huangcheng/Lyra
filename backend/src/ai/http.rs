@@ -67,6 +67,7 @@ struct AiSettingsResponse {
     model: String,
     has_key: bool,
     features: AiFeatures,
+    spam_mode: crate::ai::SpamMode,
 }
 
 fn response_for(s: &AiSettings) -> Json<AiSettingsResponse> {
@@ -77,6 +78,7 @@ fn response_for(s: &AiSettings) -> Json<AiSettingsResponse> {
         model: s.model.clone(),
         has_key: s.has_key(),
         features: s.features,
+        spam_mode: s.spam_mode,
     })
 }
 
@@ -101,6 +103,7 @@ struct PutAiSettingsRequest {
     /// Write-only: `None` keeps the stored key, `""` clears it.
     api_key: Option<String>,
     features: Option<AiFeatures>,
+    spam_mode: Option<String>,
 }
 
 async fn put_ai(
@@ -126,6 +129,10 @@ async fn put_ai(
     }
     if let Some(features) = body.features {
         current.features = features;
+    }
+    if let Some(raw) = &body.spam_mode {
+        current.spam_mode = crate::ai::SpamMode::parse(raw)
+            .ok_or_else(|| crate::ai::AiError::InvalidInput(format!("unknown spamMode: {raw}")))?;
     }
     if let Some(api_key) = body.api_key {
         let blob = if api_key.trim().is_empty() {
@@ -169,6 +176,24 @@ struct AiDraftRequest {
     message_id: String,
     mode: String,
     instruction: Option<String>,
+}
+
+async fn post_spam_suggest(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, crate::ai::AiError> {
+    let Some(message_id) = body.get("messageId").and_then(|v| v.as_str()) else {
+        return Err(crate::ai::AiError::InvalidInput(
+            "messageId required".into(),
+        ));
+    };
+    let verdict = crate::ai::spam_assist::suggest(&state, &user_id, message_id).await?;
+    Ok(Json(serde_json::json!({
+        "isSpam": verdict.is_spam,
+        "confidence": verdict.confidence,
+        "reason": verdict.reason,
+    })))
 }
 
 async fn post_draft(
@@ -238,6 +263,7 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/v1/settings/ai", get(get_ai).put(put_ai))
         .route("/api/v1/settings/ai/test", post(test_ai))
         .route("/api/v1/ai/draft", post(post_draft))
+        .route("/api/v1/ai/spam/suggest", post(post_spam_suggest))
         .route(
             "/api/v1/ai/chat",
             get(get_chat).post(post_chat).delete(delete_chat),

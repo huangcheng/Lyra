@@ -2576,6 +2576,8 @@ async fn spam_pass_inner(db: &DbPool, user_id: &str) -> Result<(), SyncError> {
         .await
         .map_err(|e| SyncError::Database(spam_db_err(e)))?;
     if !settings.enabled && !settings.auto_delete {
+        // The AI auto pass runs independently of the heuristic engine.
+        ai_spam_auto_pass(db, user_id).await;
         return Ok(());
     }
     let senders = crate::spam::list_senders(db, user_id)
@@ -2588,7 +2590,68 @@ async fn spam_pass_inner(db: &DbPool, user_id: &str) -> Result<(), SyncError> {
     if settings.auto_delete {
         purge_old_spam(db, user_id).await?;
     }
+    ai_spam_auto_pass(db, user_id).await;
     Ok(())
+}
+
+/// AI spam-assist `auto` mode: judge a capped batch of still-unjudged
+/// inbox mail with the configured model and file spam through the same
+/// move seam as the heuristic engine. Verdicts are stamped `ai_spam` /
+/// `ai_clean` so the one-judgment rule holds across engines. Failures
+/// leave rows unjudged (retried next pass) and never block sync.
+const AI_SPAM_PASS_CAP: usize = 10;
+
+async fn ai_spam_auto_pass(db: &DbPool, user_id: &str) {
+    let Ok(ai) = crate::ai::load_settings(db, user_id).await else {
+        return;
+    };
+    if !ai.enabled || ai.spam_mode != crate::ai::SpamMode::Auto {
+        return;
+    }
+    let Some(view) = crate::ai::SettingsView::ready(&ai) else {
+        return;
+    };
+    let Ok(dek) = crate::auth::AuthState::get_user_dek(db, user_id).await else {
+        return;
+    };
+    let Ok(key) = view.decrypt_key(&dek) else {
+        return;
+    };
+
+    let Ok(rows) = unjudged_rows(db, user_id, "inbox", AI_SPAM_PASS_CAP as u64).await else {
+        return;
+    };
+    for row in rows {
+        let Some(from) = row.from_email.as_deref() else {
+            continue;
+        };
+        let verdict = crate::ai::spam_assist::auto_judge(
+            &view,
+            &key,
+            row.subject.as_deref().unwrap_or(""),
+            from,
+            row.body_head.as_deref().unwrap_or(""),
+        )
+        .await;
+        match verdict {
+            Ok(Some(v)) if v.is_spam => {
+                // Stamp first: a failed move must not re-judge forever.
+                if set_spam_verdict(db, &row.id, "ai_spam").await.is_ok()
+                    && let Err(err) = move_row_to_spam(db, user_id, &row.id).await
+                {
+                    tracing::warn!(message_id = %row.id, error = %err, "AI spam move failed");
+                }
+            }
+            Ok(Some(_)) => {
+                let _ = set_spam_verdict(db, &row.id, "ai_clean").await;
+            }
+            Ok(None) | Err(_) => {
+                // Unparseable/failed verdict: leave unjudged for the next
+                // pass; one warning per pass is enough signal.
+                tracing::warn!(message_id = %row.id, "AI spam verdict unavailable");
+            }
+        }
+    }
 }
 
 /// Judge one batch of unjudged inbox messages; spam/blocked verdicts move
@@ -2635,6 +2698,8 @@ struct SpamCandidate {
     date: Option<String>,
     /// Stored `spam_verdict` (null = never judged).
     verdict: Option<String>,
+    /// First ~600 chars of the body (AI spam pass only).
+    body_head: Option<String>,
 }
 
 /// Read the `date` column dialect-aware (TEXT on SQLite, timestamp on PG).
@@ -2666,7 +2731,11 @@ async fn folder_role_rows(
         .expr_as(aliased_col("m", "from_address"), Alias::new("from_address"))
         .expr_as(aliased_col("m", "subject"), Alias::new("subject"))
         .expr_as(aliased_col("m", "date"), Alias::new("date"))
-        .expr_as(aliased_col("m", "spam_verdict"), Alias::new("spam_verdict"));
+        .expr_as(aliased_col("m", "spam_verdict"), Alias::new("spam_verdict"))
+        .expr_as(
+            Expr::cust("substr(m.body_text, 1, 600)"),
+            Alias::new("body_head"),
+        );
     add_message_account_join(&mut q);
     add_message_folder_join(&mut q);
     q.and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)))
@@ -2691,6 +2760,7 @@ async fn folder_role_rows(
             subject: row.try_get("", "subject").ok().flatten(),
             date: row_date_text(row),
             verdict: row.try_get("", "spam_verdict").ok().flatten(),
+            body_head: row.try_get("", "body_head").ok().flatten(),
         })
         .collect())
 }
@@ -2933,6 +3003,7 @@ async fn spam_folder_rows(db: &DbPool, user_id: &str) -> Result<Vec<SpamCandidat
             subject: None,
             date: row_date_text(row),
             verdict: None,
+            body_head: None,
         })
         .collect())
 }
@@ -3143,6 +3214,7 @@ mod rejudge_tests {
             subject: None,
             date: None,
             verdict: verdict.map(str::to_string),
+            body_head: None,
         }
     }
 
@@ -3631,5 +3703,115 @@ mod draft_attachment_tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "postgres")] // gating not needed; keep the mod test-only
+mod ai_spam_live_tests {
+    //! Live auto-mode round trip (needs DASHSCOPE_API_KEY). Mirrors the
+    //! `postgres_live` harness: ignored in CI, run manually.
+
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "needs DASHSCOPE_API_KEY"]
+    async fn auto_pass_files_ai_spam() {
+        let key = std::env::var("DASHSCOPE_API_KEY").unwrap();
+        let storage = crate::storage::Storage::new("sqlite::memory:")
+            .await
+            .unwrap();
+        storage.run_migrations().await.unwrap();
+        let db = storage.pool().clone();
+        let DbPool::Sqlite(p) = &db else {
+            panic!("sqlite")
+        };
+        crate::auth::install_test_master_key();
+        let dek = crate::crypto::generate_key();
+        let kek = crate::crypto::derive_user_kek(crate::auth::TEST_MASTER_KEY, "u1");
+        let wrapped = crate::crypto::wrap_dek(&kek, &dek).unwrap();
+        sqlx::query("INSERT INTO lyra_user (id, username, password_hash, encrypted_dek) VALUES ('u1','t','h',?)")
+            .bind(&wrapped)
+            .execute(p)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO mail_account (id,user_id,display_name,email_address,protocol,auth_type,credential,is_active,sync_enabled,created_at,updated_at,receive_protocol) VALUES ('a1','u1','T','t@x.dev','imap','password','{}',1,0,datetime('now'),datetime('now'),'imap')")
+            .execute(p)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO folder (id,account_id,external_id,name,role,sort_order,total_messages,unread_messages,created_at,updated_at) VALUES ('f1','a1','1','INBOX','inbox',0,2,2,datetime('now'),datetime('now')),('fs','a1','2','Junk','spam',1,0,0,datetime('now'),datetime('now'))")
+            .execute(p)
+            .await
+            .unwrap();
+        for (id, subject, from, body) in [
+            (
+                "s1",
+                "恭喜获得iPhone 17 Pro抽奖资格!!",
+                r#"{"raw":"promo@spammy.example.net"}"#,
+                "恭喜获得iPhone 17 Pro抽奖资格!点击链接领取,限时24小时!!",
+            ),
+            (
+                "s2",
+                "八月账单已出",
+                r#"{"raw":"billing@corp.example.com"}"#,
+                "您的八月账单已出,金额41,200元,到期日9月20日。",
+            ),
+        ] {
+            sqlx::query("INSERT INTO message (id,account_id,folder_id,external_id,subject,from_address,date,body_text,is_read,is_starred,is_draft,is_deleted,has_attachments,created_at,updated_at) VALUES (?,?,?,?,?,?,datetime('now'),?,0,0,0,0,0,datetime('now'),datetime('now'))")
+                .bind(id)
+                .bind("a1")
+                .bind("f1")
+                .bind(id)
+                .bind(subject)
+                .bind(from)
+                .bind(body)
+                .execute(p)
+                .await
+                .unwrap();
+        }
+
+        // AI settings on, auto mode, real DashScope key (DEK-encrypted).
+        let settings = crate::ai::AiSettings::from_columns(
+            true,
+            crate::ai::AiDialect::OpenAiChat,
+            "https://dashscope.aliyuncs.com/compatible-mode/v1".into(),
+            "qwen3-max".into(),
+            {
+                let enc = crate::crypto::encrypt(&dek, key.as_bytes()).unwrap();
+                serde_json::to_string(&enc).unwrap()
+            },
+            crate::ai::AiFeatures::default(),
+            crate::ai::SpamMode::Auto,
+        );
+        crate::ai::save_settings(&db, "u1", &settings)
+            .await
+            .unwrap();
+
+        super::spam_pass(&db, "u1").await;
+
+        let (s1_role, s1_verdict): (String, String) = sqlx::query_as(
+            "SELECT COALESCE(f.role,''), COALESCE(m.spam_verdict,'') FROM message m JOIN folder f ON f.id=m.folder_id WHERE m.id='s1'",
+        )
+        .fetch_one(p)
+        .await
+        .unwrap();
+        // Offline account: the server-side move cannot complete, so the
+        // designed failure mode applies — verdict stamped (never re-judged),
+        // row stays put. The move seam itself is exercised against real
+        // IMAP/JMAP accounts by the heuristic engine in production.
+        assert_eq!(s1_verdict, "ai_spam", "lottery mail must be AI-flagged");
+        assert_eq!(
+            s1_role, "inbox",
+            "offline move fails open: row stays, verdict holds"
+        );
+
+        let (s2_role, s2_verdict): (String, String) = sqlx::query_as(
+            "SELECT COALESCE(f.role,''), COALESCE(m.spam_verdict,'') FROM message m JOIN folder f ON f.id=m.folder_id WHERE m.id='s2'",
+        )
+        .fetch_one(p)
+        .await
+        .unwrap();
+        assert_eq!(s2_verdict, "ai_clean", "bill must be AI-cleared");
+        assert_eq!(s2_role, "inbox", "bill must stay in the inbox");
     }
 }

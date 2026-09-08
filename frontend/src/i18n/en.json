@@ -168,7 +168,9 @@
     "removeLabel": "Remove label",
     "labelsBestEffort": "Labels sync to servers that support custom keywords; otherwise they stay on this server.",
     "aiDraft": "Draft with AI",
-    "aiDraftFailed": "AI draft failed"
+    "aiDraftFailed": "AI draft failed",
+    "aiSpamCheck": "AI spam check",
+    "aiSpamMove": "Move to junk"
   },
   "auth": {
     "tagline": "Mail you host yourself.",
@@ -564,6 +566,12 @@
       "draftReplyDesc": "Add an AI button in compose that drafts suggested text. You always edit and send.",
       "privacy": "While a feature is on, Lyra sends the minimum needed message content to the endpoint configured above.",
       "assistant": "Assistant chat",
+      "assistantDesc": "A chat bubble that can search your mail and discuss the open message.",
+      "spamMode": "Spam assist",
+      "spamModeDesc": "Suggest: judge on demand. Auto: file AI-spam after each sync.",
+      "spamMode_off": "Off",
+      "spamMode_suggest": "Suggest",
+      "spamMode_auto": "Auto → Spam",
       "assistantDesc": "A chat bubble that can search your mail and discuss the open message."
     },
     "backup": {

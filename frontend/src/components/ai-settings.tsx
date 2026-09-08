@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { Sparkles } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { invalidateAiSettingsCache } from '@/lib/use-ai-settings';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { t, type SupportedLocale } from '@/i18n';
@@ -14,9 +15,11 @@ import {
   testAiConnection,
   type AiDialect,
   type AiSettings,
+  type AiSpamMode,
 } from '@/lib/ai-api';
 
 const DIALECTS: AiDialect[] = ['openai_chat', 'openai_responses', 'anthropic'];
+const SPAM_MODES: AiSpamMode[] = ['off', 'suggest', 'auto'];
 
 const inputClass =
   'h-8 w-full max-w-md rounded-lg border border-input bg-background px-2.5 text-[13px]';
@@ -41,6 +44,7 @@ export function AiSettingsCard({ locale }: { locale: SupportedLocale }) {
           model: '',
           hasKey: false,
           features: { draftReply: false, assistant: false },
+          spamMode: 'off',
         });
         setError(e instanceof Error ? e.message : String(e));
       });
@@ -52,6 +56,7 @@ export function AiSettingsCard({ locale }: { locale: SupportedLocale }) {
     setError(null);
     try {
       setSettings(await saveAiSettings(update));
+      invalidateAiSettingsCache();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -211,6 +216,26 @@ export function AiSettingsCard({ locale }: { locale: SupportedLocale }) {
               void patch({ features: { ...s.features, draftReply } })
             }
           />
+        </div>
+        <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+          <div>
+            <div className="text-[13px] font-medium">{t(locale, 'settings.ai.spamMode')}</div>
+            <div className="text-xs text-muted-foreground">
+              {t(locale, 'settings.ai.spamModeDesc')}
+            </div>
+          </div>
+          <select
+            className="h-8 rounded-lg border border-input bg-background px-2 text-[13px]"
+            value={s.spamMode}
+            disabled={saving}
+            onChange={(e) => void patch({ spamMode: e.target.value as AiSpamMode })}
+          >
+            {SPAM_MODES.map((m) => (
+              <option key={m} value={m}>
+                {t(locale, `settings.ai.spamMode_${m}`)}
+              </option>
+            ))}
+          </select>
         </div>
         <p className="border-t border-border pt-3 text-xs text-muted-foreground">
           {t(locale, 'settings.ai.privacy')}

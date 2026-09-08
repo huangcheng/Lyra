@@ -11,10 +11,12 @@ pub mod chat;
 pub mod client;
 pub mod http;
 mod settings;
+pub mod spam_assist;
 mod store;
 mod tools;
 
-pub use settings::{AiDialect, AiSettings, AiSettingsError};
+pub use settings::{AiDialect, AiFeatures, AiSettings, AiSettingsError};
+pub use spam_assist::SpamMode;
 pub use store::{load_settings, save_settings};
 
 use crate::auth::AuthState;
@@ -85,7 +87,7 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    fn ready(s: &AiSettings) -> Option<Self> {
+    pub(crate) fn ready(s: &AiSettings) -> Option<Self> {
         if !s.enabled || s.base_url.trim().is_empty() || s.model.trim().is_empty() {
             return None;
         }
@@ -98,7 +100,7 @@ impl SettingsView {
         })
     }
 
-    fn decrypt_key(&self, dek: &[u8]) -> Result<String, AiError> {
+    pub(crate) fn decrypt_key(&self, dek: &[u8]) -> Result<String, AiError> {
         let encrypted: crate::crypto::EncryptedCredential =
             serde_json::from_str(&self.api_key_cipher)
                 .map_err(|e| AiError::InvalidInput(format!("stored key blob invalid: {e}")))?;

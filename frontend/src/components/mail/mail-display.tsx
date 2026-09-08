@@ -19,6 +19,7 @@ import {
   Forward,
   Copy,
   Inbox,
+  ShieldQuestion,
   MailOpen,
   MoreVertical,
   Reply,
@@ -53,6 +54,9 @@ import { api } from '@/lib/api-client';
 import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import { baseSubject, conversationMembers, groupIntoConversations } from '@/lib/conversation';
 import { messageActionUrl } from '@/lib/conversation-actions';
+import { suggestAiSpam } from '@/lib/ai-api';
+import { useAiSettings } from '@/lib/use-ai-settings';
+import { suggestLabel, verdictTone, type SpamSuggestion } from '@/lib/spam-assist';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { buildForwardDraft, buildReplyDraft, inlineSourcesOf } from '@/lib/compose-draft';
@@ -60,6 +64,7 @@ import { textToHtml } from '@/lib/compose-html';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { buildAccountMoveFolderEntries, type MoveFolderEntry } from '@/lib/folder-tree';
 import { useMediaQuery } from '@/lib/use-media-query';
+import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
@@ -286,6 +291,24 @@ export function MailDisplay() {
     }
   };
 
+  const aiSettings = useAiSettings();
+  const [aiVerdict, setAiVerdict] = useState<SpamSuggestion | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+
+  /** Suggest-mode spam check: verdict only — filing stays a user action. */
+  const handleAiSpamCheck = async () => {
+    if (!mail || aiBusy) return;
+    setAiBusy(true);
+    setAiVerdict(null);
+    try {
+      setAiVerdict(await suggestAiSpam(mail.id));
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : t(locale, 'common.error'));
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
   const handleAction = async (action: 'trash' | 'archive' | 'spam' | 'notSpam') => {
     if (!token || !mail || busy) return;
     if (action === 'trash' && !(await confirmMoveToTrash(locale))) return;
@@ -495,6 +518,26 @@ export function MailDisplay() {
                     </TooltipTrigger>
                     <TooltipContent>{t(locale, 'mail.archive')}</TooltipContent>
                   </Tooltip>
+                  {aiSettings?.enabled && aiSettings.spamMode === 'suggest' ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={toolbarIconClass}
+                          disabled={disabled || aiBusy}
+                          onClick={() => void handleAiSpamCheck()}
+                        >
+                          <ShieldQuestion
+                            className={cn('h-4 w-4', aiBusy && 'animate-pulse')}
+                            aria-hidden
+                          />
+                          <span className="sr-only">{t(locale, 'mail.aiSpamCheck')}</span>
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{t(locale, 'mail.aiSpamCheck')}</TooltipContent>
+                    </Tooltip>
+                  ) : null}
                   {folders[mail.folderId]?.role === 'spam' ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -826,6 +869,27 @@ export function MailDisplay() {
           </div>
           <Separator />
         </>
+      ) : null}
+      {aiVerdict ? (
+        <div className="flex items-start gap-2 border-b border-border/60 bg-accent/40 px-4 py-2 text-xs">
+          <span
+            className={cn('font-medium', verdictTone(aiVerdict) === 'spam' && 'text-destructive')}
+          >
+            {suggestLabel(verdictTone(aiVerdict), locale)} · {aiVerdict.confidence}%
+          </span>
+          <span className="min-w-0 flex-1 text-muted-foreground">{aiVerdict.reason}</span>
+          {verdictTone(aiVerdict) === 'spam' ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 rounded-full px-2"
+              disabled={busy}
+              onClick={() => void handleAction('spam')}
+            >
+              {t(locale, 'mail.aiSpamMove')}
+            </Button>
+          ) : null}
+        </div>
       ) : null}
       {actionError ? (
         <div className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">
