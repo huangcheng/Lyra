@@ -16,6 +16,7 @@ import {
   Copy,
   FolderInput,
   Forward,
+  Inbox,
   MailOpen,
   Mail,
   PenSquare,
@@ -172,9 +173,13 @@ export function ConversationContextMenu({
   children: ReactNode;
 }) {
   const locale = useUIStore((s) => s.locale);
+  const folders = useMailStore((s) => s.folders);
   const latest = convo.latest;
   const ids = convo.messages.map((m) => m.id);
   const today = new Date();
+  // Reading a spam-folder conversation flips the junk action into its
+  // opposite: "Not spam" rescues it back to the inbox and allow-learns.
+  const inSpamFolder = folders[latest.folderId]?.role === 'spam';
 
   // Notification mute state for the conversation's thread (null when the
   // messages are not threaded yet — then mute only hides them session-locally).
@@ -228,10 +233,17 @@ export function ConversationContextMenu({
           <Archive />
           {t(locale, 'mail.archive')}
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => run(actOnMessages(ids, 'spam'))}>
-          <ArchiveX />
-          {t(locale, 'mail.moveToJunk')}
-        </ContextMenuItem>
+        {inSpamFolder ? (
+          <ContextMenuItem onSelect={() => run(actOnMessages(ids, 'notSpam'))}>
+            <Inbox />
+            {t(locale, 'mail.notSpam')}
+          </ContextMenuItem>
+        ) : (
+          <ContextMenuItem onSelect={() => run(actOnMessages(ids, 'spam'))}>
+            <ArchiveX />
+            {t(locale, 'mail.moveToJunk')}
+          </ContextMenuItem>
+        )}
         <ContextMenuItem
           variant="destructive"
           onSelect={() => {

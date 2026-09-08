@@ -44,6 +44,7 @@
     "selectMessage": "Select a message to read",
     "bodyUnavailable": "This message's content has not been downloaded yet. It will appear after the next successful sync.",
     "moveToJunk": "Move to junk",
+    "notSpam": "Not spam",
     "moveToTrash": "Move to trash",
     "confirmTrash": "Move this message to trash?",
     "confirmTrashMany": "Move {{count}} messages to trash?",

@@ -9,6 +9,7 @@ import {
   copyMessages,
   editDraftFromList,
   ensureFullMessage,
+  messageActionUrl,
   moveMessages,
   patchMessages,
   replyFromList,
@@ -97,6 +98,21 @@ describe('actOnMessages', () => {
     expect(res.error).toBeNull();
     expect(mockedApi).toHaveBeenCalledWith('/messages/m2/archive', { method: 'POST' });
     expect(useMailStore.getState().messages.m1).toBeUndefined();
+  });
+
+  it('maps notSpam to the not_spam endpoint', async () => {
+    const res = await actOnMessages(['m1'], 'notSpam');
+    expect(res.error).toBeNull();
+    expect(mockedApi).toHaveBeenCalledWith('/messages/m1/not_spam', { method: 'POST' });
+  });
+});
+
+describe('messageActionUrl', () => {
+  it('maps camelCase actions to their snake_case endpoints', () => {
+    expect(messageActionUrl('archive', 'm1')).toBe('/messages/m1/archive');
+    expect(messageActionUrl('spam', 'm1')).toBe('/messages/m1/spam');
+    expect(messageActionUrl('trash', 'm1')).toBe('/messages/m1/trash');
+    expect(messageActionUrl('notSpam', 'm1')).toBe('/messages/m1/not_spam');
   });
 });
 

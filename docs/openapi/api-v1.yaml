@@ -790,11 +790,37 @@ paths:
     post:
       tags: [messages]
       summary: Mark as spam
+      description: >
+        Moves the message to the account's Spam/Junk folder, stamps the
+        verdict `blocked`, and (when learning is on) blocks the sender.
       parameters:
         - $ref: "#/components/parameters/MessageId"
       responses:
-        "204":
-          description: Marked spam
+        "200":
+          description: Move outcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageActionResponse"
+
+  /api/v1/messages/{message_id}/not_spam:
+    post:
+      tags: [messages]
+      summary: Mark as not spam (rescue a false positive)
+      description: >
+        Stamps the verdict `allowed`, allow-learns the sender (when learning
+        is on), and — when the message sits in the spam folder — moves it back
+        to the account's inbox. Sender-list changes also re-judge that
+        sender's other mail in the background.
+      parameters:
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "200":
+          description: Move outcome (`action` is `moved` or `cleared`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageActionResponse"
 
   /api/v1/messages/{message_id}/snooze:
     post:
@@ -1673,6 +1699,10 @@ paths:
     post:
       tags: [settings]
       summary: Add a sender to a list (blocked or allowed)
+      description: >
+        Adding also re-judges that sender's existing mail in the background:
+        blocked pulls their unjudged/clean inbox mail into spam; allowed
+        rescues mail Lyra itself filed as spam back to the inbox.
       security:
         - bearerAuth: []
       requestBody:
@@ -2194,6 +2224,25 @@ components:
             $ref: "#/components/schemas/ApiError"
 
   schemas:
+    MessageActionResponse:
+      type: object
+      required: [status, action, role]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        action:
+          type: string
+          enum: [moved, cleared, soft_delete]
+          description: >
+            `cleared` — verdict stamped without a move (message was not in
+            the spam folder); `soft_delete` — no destination folder existed.
+        role:
+          type: string
+          description: Target role of the action
+        folderId:
+          type: string
+          description: Present when `action` is `moved`
     SpamSettings:
       type: object
       required: [enabled, learn, autoDelete, sensitivity]

@@ -84,6 +84,10 @@ pub fn routes() -> Router<AuthState> {
             post(archive_message),
         )
         .route("/api/v1/messages/{message_id}/spam", post(spam_message))
+        .route(
+            "/api/v1/messages/{message_id}/not_spam",
+            post(not_spam_message),
+        )
         .route("/api/v1/messages/{message_id}/snooze", post(snooze_message))
 }
 
@@ -1590,11 +1594,62 @@ pub(crate) async fn spam_message(
         .await
         .ok()
         .and_then(|row| crate::spam::from_json_email(row.from_address.as_deref()));
-    let res = move_message_to_role(state.clone(), message_id, user_id.clone(), "spam").await?;
+    let res =
+        move_message_to_role(state.clone(), message_id.clone(), user_id.clone(), "spam").await?;
+    // The user's own verdict outranks any earlier judgment.
+    set_spam_verdict(db, &message_id, "blocked").await?;
     if let Some(from) = sender {
-        crate::spam::learn_sender(db, &user_id, &from, true).await;
+        learn_and_rejudge(db, &user_id, &from, true).await;
     }
     Ok(res)
+}
+
+/// POST /api/v1/messages/{id}/not_spam — the false-positive loop-closer:
+/// allow-learn the sender, stamp the verdict `allowed`, and — when the
+/// message sits in the spam folder — move it back to the account's inbox.
+pub(crate) async fn not_spam_message(
+    State(state): State<AuthState>,
+    Path(message_id): Path<String>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<serde_json::Value>, SyncError> {
+    let db = state.db();
+    let row = load_message_row(db, &user_id, &message_id).await?;
+    let sender = crate::spam::from_json_email(row.from_address.as_deref());
+    set_spam_verdict(db, &row.id, "allowed").await?;
+
+    if row.folder_role.as_deref() != Some("spam") {
+        // Nothing to rescue — the move below is what allow-learns when the
+        // message does sit in spam; here the verdict alone carries it.
+        if let Some(from) = &sender {
+            learn_and_rejudge(db, &user_id, from, false).await;
+        }
+        return Ok(Json(serde_json::json!({
+            "status": "ok",
+            "action": "cleared",
+            "role": "inbox",
+        })));
+    }
+
+    // Unlike `move_message_to_role`, a missing inbox folder is an error —
+    // falling back to soft-delete would destroy the message the user just
+    // asked to keep. The move itself allow-learns the sender.
+    let dest = role_folder_for_account(db, &row.account_id, "inbox").await?;
+    apply_user_move(
+        db,
+        &user_id,
+        &row,
+        &dest.id,
+        dest.external_id.clone(),
+        dest.external_id.clone().unwrap_or(dest.name),
+        Some("inbox"),
+    )
+    .await?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "action": "moved",
+        "role": "inbox",
+        "folderId": dest.id,
+    })))
 }
 
 /// POST /api/v1/messages/{id}/snooze — hide locally until `until`, then unsnooze via job.
@@ -1695,7 +1750,7 @@ pub(crate) async fn move_message_to_role(
     let name: String = dest.try_get("", "name").map_err(orm_err)?;
     let dest_name = external_id.clone().unwrap_or(name);
 
-    apply_message_move(
+    apply_user_move(
         db,
         &user_id,
         &row,
@@ -1781,7 +1836,7 @@ pub(crate) async fn move_message(
     .await?
     .and_then(|row| row.try_get::<Option<String>>("", "role").ok().flatten());
 
-    apply_message_move(
+    apply_user_move(
         db,
         &user_id,
         &row,
@@ -2358,7 +2413,12 @@ pub(crate) async fn message_id_by_server_id(
 /// Server-side move (IMAP UID MOVE / JMAP `mailboxIds` update) plus the local
 /// `folder_id` rewrite and folder count refresh. `dest_external` is the
 /// protocol-level destination id; IMAP tolerates `None` (name fallback).
-pub(crate) async fn apply_message_move(
+/// User-driven move: applies the move and — when it leaves the spam
+/// folder — runs the "not spam" learn hook, so the sender's other false
+/// positives follow it back to the inbox. Engine moves (the spam pass and
+/// sender-list re-judges) call `apply_message_move` directly: they are
+/// consequences of the lists and must not re-trigger learning.
+async fn apply_user_move(
     db: &DbPool,
     user_id: &str,
     row: &MessageRow,
@@ -2367,15 +2427,25 @@ pub(crate) async fn apply_message_move(
     dest_name: String,
     dest_role: Option<&str>,
 ) -> Result<(), SyncError> {
-    // Learn: moving out of the spam folder is the "not spam" signal.
     if row.folder_role.as_deref() == Some("spam")
         && dest_role.is_some_and(|r| r != "spam")
         && !row.is_draft
         && let Some(from) = crate::spam::from_json_email(row.from_address.as_deref())
     {
-        let learned = crate::spam::learn_sender(db, user_id, &from, false).await;
+        let learned = learn_and_rejudge(db, user_id, &from, false).await;
         tracing::info!(learned, from = %from, "spam learn outcome");
     }
+    apply_message_move(db, user_id, row, dest_id, dest_external, dest_name).await
+}
+
+pub(crate) async fn apply_message_move(
+    db: &DbPool,
+    user_id: &str,
+    row: &MessageRow,
+    dest_id: &str,
+    dest_external: Option<String>,
+    dest_name: String,
+) -> Result<(), SyncError> {
     match row.protocol.as_str() {
         "imap" => {
             let uid = parse_imap_uid(row.external_id.as_deref())?;
@@ -2515,7 +2585,7 @@ async fn judge_inbox_batch(
     for row in rows {
         let env = crate::spam::SpamEnvelope {
             from_email: row.from_email.as_deref(),
-            from_name: None,
+            from_name: row.from_name.as_deref(),
             subject: row.subject.as_deref(),
         };
         let Some(verdict) = crate::spam::judge_message(&env, settings, senders) else {
@@ -2541,8 +2611,11 @@ async fn judge_inbox_batch(
 struct SpamCandidate {
     id: String,
     from_email: Option<String>,
+    from_name: Option<String>,
     subject: Option<String>,
     date: Option<String>,
+    /// Stored `spam_verdict` (null = never judged).
+    verdict: Option<String>,
 }
 
 /// Read the `date` column dialect-aware (TEXT on SQLite, timestamp on PG).
@@ -2558,27 +2631,33 @@ fn row_date_text(row: &sea_orm::QueryResult) -> Option<String> {
         })
 }
 
-/// Messages in folders with `role` that have no spam verdict yet.
-async fn unjudged_rows(
+/// Messages in folders with `role`. `only_unjudged` keeps rows without a
+/// spam verdict (the sync pass); otherwise every verdict comes back so a
+/// sender-list re-judge can see what the engine already decided.
+async fn folder_role_rows(
     db: &DbPool,
     user_id: &str,
     role: &str,
     limit: u64,
+    only_unjudged: bool,
 ) -> Result<Vec<SpamCandidate>, SyncError> {
     let user_value = id_value(db, user_id)?;
     let mut q = Sq::select();
     q.expr_as(aliased_col("m", "id"), Alias::new("id"))
         .expr_as(aliased_col("m", "from_address"), Alias::new("from_address"))
         .expr_as(aliased_col("m", "subject"), Alias::new("subject"))
-        .expr_as(aliased_col("m", "date"), Alias::new("date"));
+        .expr_as(aliased_col("m", "date"), Alias::new("date"))
+        .expr_as(aliased_col("m", "spam_verdict"), Alias::new("spam_verdict"));
     add_message_account_join(&mut q);
     add_message_folder_join(&mut q);
     q.and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)))
         .and_where(aliased_col("m", "is_deleted").eq(Expr::val(false)))
-        .and_where(aliased_col("m", "spam_verdict").is_null())
         .and_where(Expr::cust("COALESCE(f.role_override, f.role)").eq(Expr::val(role)))
         .order_by_expr(Expr::cust("m.date"), Order::Desc)
         .limit(limit);
+    if only_unjudged {
+        q.and_where(aliased_col("m", "spam_verdict").is_null());
+    }
     let rows = db.orm().query_all(&q).await.map_err(orm_err)?;
     Ok(rows
         .iter()
@@ -2587,10 +2666,24 @@ async fn unjudged_rows(
             from_email: row_json_text(row, "from_address")
                 .ok()
                 .and_then(|raw| crate::spam::from_json_email(raw.as_deref())),
+            from_name: row_json_text(row, "from_address")
+                .ok()
+                .and_then(|raw| crate::spam::from_json_display_name(raw.as_deref())),
             subject: row.try_get("", "subject").ok().flatten(),
             date: row_date_text(row),
+            verdict: row.try_get("", "spam_verdict").ok().flatten(),
         })
         .collect())
+}
+
+/// Messages in folders with `role` that have no spam verdict yet.
+async fn unjudged_rows(
+    db: &DbPool,
+    user_id: &str,
+    role: &str,
+    limit: u64,
+) -> Result<Vec<SpamCandidate>, SyncError> {
+    folder_role_rows(db, user_id, role, limit, true).await
 }
 
 async fn set_spam_verdict(db: &DbPool, message_id: &str, verdict: &str) -> Result<(), SyncError> {
@@ -2606,7 +2699,33 @@ async fn set_spam_verdict(db: &DbPool, message_id: &str, verdict: &str) -> Resul
 /// Full-row move of one message to its account's spam folder.
 async fn move_row_to_spam(db: &DbPool, user_id: &str, message_id: &str) -> Result<(), SyncError> {
     let row = load_message_row(db, user_id, message_id).await?;
-    let account_value = id_value(db, &row.account_id)?;
+    let dest = role_folder_for_account(db, &row.account_id, "spam").await?;
+    apply_message_move(
+        db,
+        user_id,
+        &row,
+        &dest.id,
+        dest.external_id.clone(),
+        dest.external_id.clone().unwrap_or(dest.name),
+    )
+    .await
+}
+
+/// A folder resolved for a role move: local id plus the server-side ids
+/// `apply_message_move` needs.
+struct RoleFolder {
+    id: String,
+    external_id: Option<String>,
+    name: String,
+}
+
+/// The account's folder with `role` (lowest sort order wins), or an error.
+async fn role_folder_for_account(
+    db: &DbPool,
+    account_id: &str,
+    role: &str,
+) -> Result<RoleFolder, SyncError> {
+    let account_value = id_value(db, account_id)?;
     let dest = query_first(db, |q| {
         q.expr_as(Expr::col(folder::Column::Id), Alias::new("id"))
             .expr_as(
@@ -2616,25 +2735,137 @@ async fn move_row_to_spam(db: &DbPool, user_id: &str, message_id: &str) -> Resul
             .expr_as(Expr::col(folder::Column::Name), Alias::new("name"))
             .from(folder::Entity)
             .and_where(Expr::col(folder::Column::AccountId).eq(account_value))
-            .and_where(Expr::cust("COALESCE(role_override, role)").eq(Expr::val("spam")))
+            .and_where(Expr::cust("COALESCE(role_override, role)").eq(Expr::val(role)))
             .order_by_expr(Expr::col(folder::Column::SortOrder), Order::Asc)
             .limit(1);
     })
-    .await?
-    .ok_or_else(|| SyncError::InvalidInput("account has no spam folder".into()))?;
-    let dest_id = row_id(&dest, "id").map_err(orm_err)?;
-    let external: Option<String> = dest.try_get("", "external_id").map_err(orm_err)?;
-    let name: String = dest.try_get("", "name").map_err(orm_err)?;
+    .await?;
+    let dest =
+        dest.ok_or_else(|| SyncError::InvalidInput(format!("account has no {role} folder")))?;
+    Ok(RoleFolder {
+        id: row_id(&dest, "id").map_err(orm_err)?,
+        external_id: dest.try_get("", "external_id").map_err(orm_err)?,
+        name: dest.try_get("", "name").map_err(orm_err)?,
+    })
+}
+
+/// Full-row move of one message to its account's inbox folder.
+async fn move_row_to_inbox(db: &DbPool, user_id: &str, message_id: &str) -> Result<(), SyncError> {
+    let row = load_message_row(db, user_id, message_id).await?;
+    let dest = role_folder_for_account(db, &row.account_id, "inbox").await?;
     apply_message_move(
         db,
         user_id,
         &row,
-        &dest_id,
-        external.clone(),
-        external.unwrap_or(name),
-        Some("spam"),
+        &dest.id,
+        dest.external_id.clone(),
+        dest.external_id.clone().unwrap_or(dest.name),
     )
     .await
+}
+
+/// Learn a sender from a user action and — when learning stuck — re-judge
+/// their other mail in the background. Wrap every learn call site in this
+/// so settings edits, mark-as-spam, and move-out-of-spam all behave the
+/// same: the list changes *and* existing mail follows it.
+async fn learn_and_rejudge(db: &DbPool, user_id: &str, email: &str, block: bool) -> bool {
+    let learned = crate::spam::learn_sender(db, user_id, email, block).await;
+    if learned {
+        let db = db.clone();
+        let (owner, sender) = (user_id.to_string(), email.to_string());
+        let list = if block {
+            crate::spam::SenderList::Blocked
+        } else {
+            crate::spam::SenderList::Allowed
+        };
+        tokio::spawn(async move {
+            apply_sender_list_change(&db, &owner, &sender, list).await;
+        });
+    }
+    learned
+}
+
+/// Cap on per-edit re-judge moves: each move is a server round-trip, so a
+/// domain-list edit must not hammer the account for minutes. The rest
+/// re-judges on later edits or learn actions.
+const REJUDGE_MOVE_CAP: usize = 25;
+
+/// Candidate window scanned per edit (sender matching happens in Rust
+/// because `sender_matches` understands address and domain entries).
+const REJUDGE_SCAN_LIMIT: u64 = 500;
+
+/// Pick which candidate rows a sender-list edit should act on.
+/// - blocked → inbox mail not yet judged (or judged clean) moves to spam;
+/// - allowed → mail *our engine* filed as spam (`spam`/`blocked` verdicts)
+///   is rescued. Server-filed spam (null verdict) stays put: the provider
+///   put it there, not Lyra, and only the user should override that.
+fn rejudge_ids(
+    rows: &[SpamCandidate],
+    entry_email: &str,
+    list: crate::spam::SenderList,
+) -> Vec<String> {
+    use crate::spam::SenderList;
+    rows.iter()
+        .filter(|r| {
+            let Some(from) = &r.from_email else {
+                return false;
+            };
+            crate::spam::sender_matches(entry_email, from)
+                && match list {
+                    SenderList::Blocked => {
+                        matches!(r.verdict.as_deref(), None | Some("clean"))
+                    }
+                    SenderList::Allowed => {
+                        matches!(r.verdict.as_deref(), Some("spam" | "blocked"))
+                    }
+                }
+        })
+        .take(REJUDGE_MOVE_CAP)
+        .map(|r| r.id.clone())
+        .collect()
+}
+
+/// Apply a sender-list edit to that sender's existing mail. Runs in the
+/// background (spawned): moves hit the mail server, so callers must not
+/// await it on a request path.
+pub(crate) async fn apply_sender_list_change(
+    db: &DbPool,
+    user_id: &str,
+    entry_email: &str,
+    list: crate::spam::SenderList,
+) {
+    let role = match list {
+        crate::spam::SenderList::Blocked => "inbox",
+        crate::spam::SenderList::Allowed => "spam",
+    };
+    let rows = match folder_role_rows(db, user_id, role, REJUDGE_SCAN_LIMIT, false).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(user_id, error = %err, "sender-list re-judge fetch failed");
+            return;
+        }
+    };
+    let ids = rejudge_ids(&rows, entry_email, list);
+    for id in ids {
+        let outcome = match list {
+            crate::spam::SenderList::Blocked => {
+                // Stamp first: a failed move must not re-trigger forever.
+                let stamp = set_spam_verdict(db, &id, "blocked").await.err();
+                (stamp, move_row_to_spam(db, user_id, &id).await.err())
+            }
+            crate::spam::SenderList::Allowed => {
+                // Move first: only stamp `allowed` once it actually left the
+                // spam folder, so a failed rescue stays eligible for retry.
+                match move_row_to_inbox(db, user_id, &id).await {
+                    Ok(()) => (set_spam_verdict(db, &id, "allowed").await.err(), None),
+                    Err(err) => (None, Some(err)),
+                }
+            }
+        };
+        for err in outcome.0.into_iter().chain(outcome.1) {
+            tracing::warn!(message_id = %id, error = %err, "re-judge failed");
+        }
+    }
 }
 
 /// Destroy spam-folder messages older than the purge window, server-side
@@ -2679,8 +2910,10 @@ async fn spam_folder_rows(db: &DbPool, user_id: &str) -> Result<Vec<SpamCandidat
         .map(|row| SpamCandidate {
             id: row_id(row, "id").map_err(orm_err).unwrap_or_default(),
             from_email: None,
+            from_name: None,
             subject: None,
             date: row_date_text(row),
+            verdict: None,
         })
         .collect())
 }
@@ -2880,6 +3113,67 @@ mod lazy_fill_sql_tests {
 }
 
 #[cfg(test)]
+mod rejudge_tests {
+    use super::*;
+
+    fn candidate(id: &str, from: Option<&str>, verdict: Option<&str>) -> SpamCandidate {
+        SpamCandidate {
+            id: id.into(),
+            from_email: from.map(str::to_string),
+            from_name: None,
+            subject: None,
+            date: None,
+            verdict: verdict.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn blocked_takes_unjudged_and_clean_inbox_mail() {
+        let rows = vec![
+            candidate("fresh", Some("promo@x.com"), None),
+            candidate("clean", Some("promo@x.com"), Some("clean")),
+            candidate("allowed", Some("promo@x.com"), Some("allowed")),
+            candidate("other", Some("info@y.com"), None),
+            candidate("noaddr", None, None),
+        ];
+        let ids = rejudge_ids(&rows, "promo@x.com", crate::spam::SenderList::Blocked);
+        assert_eq!(ids, vec!["fresh".to_string(), "clean".to_string()]);
+    }
+
+    #[test]
+    fn blocked_domain_entry_matches_subdomains() {
+        let rows = vec![
+            candidate("eu", Some("n@eu.mail.example.com"), None),
+            candidate("off", Some("n@example.org"), None),
+        ];
+        let ids = rejudge_ids(&rows, "@mail.example.com", crate::spam::SenderList::Blocked);
+        assert_eq!(ids, vec!["eu".to_string()]);
+    }
+
+    #[test]
+    fn allowed_rescues_only_engine_filed_spam() {
+        let rows = vec![
+            candidate("ours", Some("friend@x.com"), Some("spam")),
+            candidate("listed", Some("friend@x.com"), Some("blocked")),
+            // Server-filed spam: the provider put it there, not Lyra.
+            candidate("server", Some("friend@x.com"), None),
+            candidate("clean", Some("friend@x.com"), Some("clean")),
+        ];
+        let ids = rejudge_ids(&rows, "friend@x.com", crate::spam::SenderList::Allowed);
+        assert_eq!(ids, vec!["ours".to_string(), "listed".to_string()]);
+    }
+
+    #[test]
+    fn rejudge_moves_are_capped() {
+        let rows: Vec<SpamCandidate> = (0..(REJUDGE_MOVE_CAP + 10))
+            .map(|i| candidate(&format!("m{i}"), Some("promo@x.com"), None))
+            .collect();
+        let ids = rejudge_ids(&rows, "promo@x.com", crate::spam::SenderList::Blocked);
+        assert_eq!(ids.len(), REJUDGE_MOVE_CAP);
+    }
+}
+
+#[cfg(test)]
 mod learn_hook_tests {
     use super::*;
     use crate::sync::queries::MessageRow;
@@ -2962,7 +3256,7 @@ mod learn_hook_tests {
         .unwrap();
 
         // Protocol move fails (no server); the learn hook must still fire.
-        let _ = apply_message_move(
+        let _ = apply_user_move(
             &db,
             "u1",
             &spam_row(),

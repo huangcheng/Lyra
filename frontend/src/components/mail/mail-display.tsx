@@ -18,6 +18,7 @@ import {
   FolderInput,
   Forward,
   Copy,
+  Inbox,
   MailOpen,
   MoreVertical,
   Reply,
@@ -51,6 +52,7 @@ import { t, type SupportedLocale } from '@/i18n';
 import { api } from '@/lib/api-client';
 import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import { baseSubject, conversationMembers, groupIntoConversations } from '@/lib/conversation';
+import { messageActionUrl } from '@/lib/conversation-actions';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { buildForwardDraft, buildReplyDraft, inlineSourcesOf } from '@/lib/compose-draft';
@@ -284,13 +286,13 @@ export function MailDisplay() {
     }
   };
 
-  const handleAction = async (action: 'trash' | 'archive' | 'spam') => {
+  const handleAction = async (action: 'trash' | 'archive' | 'spam' | 'notSpam') => {
     if (!token || !mail || busy) return;
     if (action === 'trash' && !(await confirmMoveToTrash(locale))) return;
     setBusy(true);
     setActionError(null);
     try {
-      await api(`/messages/${mail.id}/${action}`, { method: 'POST' });
+      await api(messageActionUrl(action, mail.id), { method: 'POST' });
       removeMessage(mail.id);
       setSelectedMessage(null);
     } catch (err: unknown) {
@@ -493,21 +495,39 @@ export function MailDisplay() {
                     </TooltipTrigger>
                     <TooltipContent>{t(locale, 'mail.archive')}</TooltipContent>
                   </Tooltip>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className={toolbarIconClass}
-                        disabled={disabled}
-                        onClick={() => void handleAction('spam')}
-                      >
-                        <ArchiveX className="h-4 w-4" />
-                        <span className="sr-only">{t(locale, 'mail.moveToJunk')}</span>
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{t(locale, 'mail.moveToJunk')}</TooltipContent>
-                  </Tooltip>
+                  {folders[mail.folderId]?.role === 'spam' ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={toolbarIconClass}
+                          disabled={disabled}
+                          onClick={() => void handleAction('notSpam')}
+                        >
+                          <Inbox className="h-4 w-4" />
+                          <span className="sr-only">{t(locale, 'mail.notSpam')}</span>
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{t(locale, 'mail.notSpam')}</TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={toolbarIconClass}
+                          disabled={disabled}
+                          onClick={() => void handleAction('spam')}
+                        >
+                          <ArchiveX className="h-4 w-4" />
+                          <span className="sr-only">{t(locale, 'mail.moveToJunk')}</span>
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{t(locale, 'mail.moveToJunk')}</TooltipContent>
+                    </Tooltip>
+                  )}
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button

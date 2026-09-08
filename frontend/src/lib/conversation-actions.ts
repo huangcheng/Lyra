@@ -22,6 +22,9 @@ export interface BatchResult {
   error: string | null;
 }
 
+/** Per-message role actions (URL segment differs only for `notSpam`). */
+export type MessageAction = 'archive' | 'spam' | 'notSpam' | 'trash';
+
 async function runBatch(
   messageIds: string[],
   fn: (id: string) => Promise<void>,
@@ -79,13 +82,16 @@ export function copyMessages(
   );
 }
 
-/** Archive / spam / trash every message. */
-export function actOnMessages(
-  messageIds: string[],
-  action: 'archive' | 'spam' | 'trash',
-): Promise<BatchResult> {
+/** Endpoint for a per-message role action (`notSpam` maps to `not_spam`). */
+export function messageActionUrl(action: MessageAction, id: string): string {
+  const segment = action === 'notSpam' ? 'not_spam' : action;
+  return `/messages/${id}/${segment}`;
+}
+
+/** Archive / spam / not-spam / trash every message. */
+export function actOnMessages(messageIds: string[], action: MessageAction): Promise<BatchResult> {
   return runBatch(messageIds, async (id) => {
-    await api(`/messages/${id}/${action}`, { method: 'POST' });
+    await api(messageActionUrl(action, id), { method: 'POST' });
     removeLocally(id);
   });
 }

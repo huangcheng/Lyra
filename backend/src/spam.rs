@@ -158,7 +158,7 @@ fn heuristic_score(env: &SpamEnvelope) -> u8 {
 
 /// Does `sender` (an email) match a list entry? Entries may be a full
 /// address (`a@b.com`) or a domain (`@b.com` / `b.com`).
-fn sender_matches(entry_email: &str, sender: &str) -> bool {
+pub(crate) fn sender_matches(entry_email: &str, sender: &str) -> bool {
     let entry = entry_email.trim().to_lowercase();
     let sender = sender.trim().to_lowercase();
     if entry == sender {
@@ -781,6 +781,16 @@ async fn post_sender(
     add_sender(state.db(), &user_id, &email, body.list)
         .await
         .map_err(spam_store_err)?;
+    // A list edit re-judges that sender's existing mail in the background
+    // (blocked pulls inbox mail into spam; allowed rescues false positives
+    // our filter filed there). Moves hit the mail server, so it must not
+    // block the settings response.
+    let db = state.db().clone();
+    let owner = user_id.clone();
+    let list = body.list;
+    tokio::spawn(async move {
+        crate::sync::http::apply_sender_list_change(&db, &owner, &email, list).await;
+    });
     response_for(state.db(), &user_id).await
 }
 
@@ -882,6 +892,21 @@ pub fn from_json_email(raw: Option<&str>) -> Option<String> {
     }
 }
 
+/// Parse the display name out of a stored `from_address` JSON text
+/// (`{"raw": "Name <a@b.com>"}`). Bare addresses yield no name — the
+/// heuristic scorer only wants real bait like "CASINO WINNER".
+#[must_use]
+pub fn from_json_display_name(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let raw_str = v.get("raw")?.as_str()?;
+    let name = raw_str.split('<').next()?.trim();
+    if name.is_empty() || name.contains('@') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 #[cfg(test)]
 mod from_json_email_tests {
     use super::from_json_email;
@@ -916,5 +941,33 @@ mod from_json_email_tests {
         assert_eq!(from_json_email(Some("not json")), None);
         assert_eq!(from_json_email(Some(r#"{"raw": "no-address"}"#)), None);
         assert_eq!(from_json_email(None), None);
+    }
+}
+
+#[cfg(test)]
+mod from_json_display_name_tests {
+    use super::from_json_display_name;
+
+    #[test]
+    fn angled_name_is_parsed() {
+        assert_eq!(
+            from_json_display_name(Some(r#"{"raw": "CASINO WINNER <promo@x.com>"}"#)),
+            Some("CASINO WINNER".into())
+        );
+    }
+
+    #[test]
+    fn bare_and_nameless_shapes_yield_none() {
+        // Bare address (the common IMAP upsert shape) and missing fields.
+        assert_eq!(
+            from_json_display_name(Some(r#"{"raw": "cheng@x.com"}"#)),
+            None
+        );
+        assert_eq!(
+            from_json_display_name(Some(r#"{"email": "a@b.com"}"#)),
+            None
+        );
+        assert_eq!(from_json_display_name(Some("not json")), None);
+        assert_eq!(from_json_display_name(None), None);
     }
 }

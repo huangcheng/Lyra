@@ -7,7 +7,7 @@
 
 #![allow(clippy::doc_markdown)]
 
-mod http;
+pub(crate) mod http;
 mod imap_loop;
 pub(crate) mod jmap_client;
 mod jmap_loop;
