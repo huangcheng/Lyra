@@ -1468,7 +1468,41 @@ pub(crate) async fn update_dkim_verdict(
     Ok(())
 }
 
-/// Refresh read/star/flags state plus fill-in semantics for a matched message.
+/// Record where a message's raw RFC822 bytes landed in the blob store.
+pub(crate) async fn set_message_raw_blob(
+    db: &DbPool,
+    message_id: &str,
+    rel_path: &str,
+) -> Result<(), SyncError> {
+    let mut update = Sq::update();
+    update
+        .table(message::Entity)
+        .value(message::Column::RawBlobPath, Expr::val(rel_path))
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, message_id)?));
+    db.orm().execute(&update).await.map_err(orm_err)?;
+    Ok(())
+}
+
+/// Blob-store relative path of a message's raw RFC822 bytes, when fetched.
+#[cfg(test)]
+pub(crate) async fn get_message_raw_blob_path(
+    db: &DbPool,
+    message_id: &str,
+) -> Result<Option<String>, SyncError> {
+    let mut sel = Sq::select();
+    sel.column(message::Column::RawBlobPath)
+        .from(message::Entity)
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, message_id)?));
+    let row = db.orm().query_one(&sel).await.map_err(orm_err)?;
+    match row {
+        Some(r) => r
+            .try_get::<Option<String>>("", "raw_blob_path")
+            .map_err(orm_err),
+        None => Ok(None),
+    }
+}
+
 ///
 /// `flags = excluded.flags`, while subject/snippet/address columns only move
 /// off RFC-2047-encoded placeholders or U+FFFD mojibake and date/header
@@ -2042,7 +2076,10 @@ mod stale_imap_row_tests {
 
 #[cfg(test)]
 mod dkim_verdict_tests {
-    use super::{get_folder_id, new_uuid_text, update_dkim_verdict, upsert_folder, upsert_message};
+    use super::{
+        get_folder_id, get_message_raw_blob_path, new_uuid_text, set_message_raw_blob,
+        update_dkim_verdict, upsert_folder, upsert_message,
+    };
     use crate::imap::ImapMessage;
     use crate::storage::{DbPool, Storage};
 
@@ -2144,6 +2181,18 @@ mod dkim_verdict_tests {
         );
         assert!(row.dkim_signed_at.is_some());
         assert!(row.dkim_expires_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_message_raw_blob_records_path() {
+        let (db, _user_id, message_id) = seed().await;
+        let before = get_message_raw_blob_path(&db, &message_id).await.unwrap();
+        assert!(before.is_none());
+        set_message_raw_blob(&db, &message_id, "blobs/acc/ab/hash")
+            .await
+            .unwrap();
+        let got = get_message_raw_blob_path(&db, &message_id).await.unwrap();
+        assert_eq!(got.as_deref(), Some("blobs/acc/ab/hash"));
     }
 
     #[tokio::test]

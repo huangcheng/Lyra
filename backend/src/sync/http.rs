@@ -1022,7 +1022,15 @@ pub(crate) async fn get_message(
     let mut row = load_message_row(db, &session.user_id, &message_id).await?;
     let fill_verified =
         maybe_fill_imap_body(db, &state.data_dir, &session.user_id, &mut row).await?;
-    maybe_verify_dkim(db, state.kv(), &session.user_id, &mut row, fill_verified).await;
+    maybe_verify_dkim(
+        db,
+        &state.data_dir,
+        state.kv(),
+        &session.user_id,
+        &mut row,
+        fill_verified,
+    )
+    .await;
 
     let allow_remote = query.remote_content.as_deref() == Some("allow");
     let mut response = finalize_message_response_with_opengpg(
@@ -1063,6 +1071,7 @@ const DKIM_TEMPERROR_RETRY_BACKOFF_SECS: u64 = 60 * 60;
 /// message and only set when the retry again lands on `temperror`.
 async fn maybe_verify_dkim(
     db: &DbPool,
+    data_dir: &std::path::Path,
     kv: &std::sync::Arc<dyn crate::kv::KvStore>,
     user_id: &str,
     row: &mut MessageRow,
@@ -1117,6 +1126,11 @@ async fn maybe_verify_dkim(
         _ => None,
     };
     let Some(raw) = raw else { return };
+    // Keep the raw RFC822 bytes for backup export; persistence must never
+    // break the view/DKIM flow.
+    if let Ok(rel) = crate::blobs::store(data_dir, &row.account_id, &raw).await {
+        let _ = crate::sync::store::set_message_raw_blob(db, &row.id, &rel).await;
+    }
     let verdict = crate::dkim::verify_raw(&raw, &from_domain_of(row)).await;
     if verdict.status == crate::dkim::DkimStatus::TempError {
         // Only retriable verdicts back off; pass/fail persist and never
@@ -1250,6 +1264,11 @@ async fn maybe_fill_imap_body(
 
     // DKIM: the raw RFC 822 bytes are in hand exactly once — verify now.
     let dkim_verdict = if let Some(raw) = &fetched.body {
+        // Keep the raw bytes for backup export; persistence must never
+        // break the view flow.
+        if let Ok(rel) = crate::blobs::store(data_dir, &row.account_id, raw).await {
+            let _ = crate::sync::store::set_message_raw_blob(db, &row.id, &rel).await;
+        }
         Some(crate::dkim::verify_raw(raw, &from_domain_of(row)).await)
     } else {
         None
