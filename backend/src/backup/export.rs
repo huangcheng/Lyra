@@ -593,10 +593,22 @@ struct MailRow {
     to_addresses: Option<String>,
     cc_addresses: Option<String>,
     date: Option<String>,
+    received_at: Option<String>,
     is_read: bool,
     is_starred: bool,
     body_text: Option<String>,
     body_html: Option<String>,
+}
+
+impl MailRow {
+    /// mbox separator epoch: message date, then `received_at`, then 0.
+    fn epoch(&self) -> i64 {
+        self.date
+            .as_deref()
+            .and_then(parse_ts)
+            .or_else(|| self.received_at.as_deref().and_then(parse_ts))
+            .map_or(0, |d| d.timestamp())
+    }
 }
 
 async fn load_folder_messages(db: &DbPool, folder_id: &str) -> Result<Vec<MailRow>, BackupError> {
@@ -610,6 +622,7 @@ async fn load_folder_messages(db: &DbPool, folder_id: &str) -> Result<Vec<MailRo
         message::Column::ToAddresses,
         message::Column::CcAddresses,
         message::Column::Date,
+        message::Column::ReceivedAt,
         message::Column::IsRead,
         message::Column::IsStarred,
         message::Column::BodyText,
@@ -630,6 +643,7 @@ async fn load_folder_messages(db: &DbPool, folder_id: &str) -> Result<Vec<MailRo
                 to_addresses: row_json_text(row, "to_addresses")?,
                 cc_addresses: row_json_text(row, "cc_addresses")?,
                 date: row_opt_ts(row, "date")?,
+                received_at: row_opt_ts(row, "received_at")?,
                 is_read: row_bool(row, "is_read")?,
                 is_starred: row_bool(row, "is_starred")?,
                 body_text: row_opt_str(row, "body_text")?,
@@ -693,7 +707,10 @@ pub(crate) async fn collect_mail(
     Ok(total)
 }
 
-/// Export one folder's messages; returns how many were written.
+/// Export one folder's messages, streaming: each message's raw bytes are
+/// resolved, written to mbox + sidecar, then dropped — peak memory is
+/// O(one message), or O(one ≤50-message batch) during a server fetch.
+/// Returns how many were written.
 async fn export_folder(
     state: &AuthState,
     user_id: &str,
@@ -704,57 +721,73 @@ async fn export_folder(
 ) -> Result<u64, BackupError> {
     let db = &state.db;
     let rows = load_folder_messages(db, &folder.id).await?;
+    let mbox = tokio::fs::File::create(dir.join(format!("{}.mbox", folder.id))).await?;
+    let mut writer = FolderWriter {
+        state,
+        user_id,
+        account,
+        folder_wire: folder.external_id.as_deref(),
+        allow_server_fetch,
+        fetcher: ServerFetch::Unconnected,
+        mbox,
+        meta: String::new(),
+        written: 0,
+    };
 
-    // Path (a): stored raw blobs.
-    let mut resolved: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut unresolved: Vec<usize> = Vec::new();
+    let mut pending: Vec<usize> = Vec::new();
     for (i, row) in rows.iter().enumerate() {
+        // Path (a): stored raw blob.
         let path = store::get_message_raw_blob_path(db, &row.id)
             .await
             .map_err(sync_err)?;
-        let bytes = match path {
+        let stored = match path {
             Some(p) => blobs::read(&state.data_dir, &p).await.ok(),
             None => None,
         };
-        match bytes {
-            Some(b) => {
-                resolved.insert(row.id.clone(), b);
+        if let Some(raw) = stored {
+            writer.write_entry(row, &raw, false).await?;
+        } else {
+            pending.push(i);
+            if pending.len() >= SERVER_FETCH_BATCH {
+                writer.flush_pending(&rows, &mut pending).await?;
             }
-            None => unresolved.push(i),
         }
     }
+    writer.flush_pending(&rows, &mut pending).await?;
 
-    // Path (b): one batched server fetch per folder; failures leave the
-    // message for reconstruction. Successful fetches backfill raw_blob_path.
-    if allow_server_fetch && !unresolved.is_empty() {
-        let refs: Vec<&MailRow> = unresolved.iter().map(|&i| &rows[i]).collect();
-        let fetched =
-            fetch_raw_from_server(db, user_id, account, folder.external_id.as_deref(), &refs).await;
-        for (row_id, bytes) in fetched {
-            if let Ok(rel) = blobs::store(&state.data_dir, &account.id, &bytes).await {
-                let _ = store::set_message_raw_blob(db, &row_id, &rel).await;
-            }
-            resolved.insert(row_id, bytes);
-        }
-    }
+    writer.mbox.flush().await?;
+    tokio::fs::write(dir.join(format!("{}.meta.jsonl", folder.id)), writer.meta).await?;
+    Ok(writer.written)
+}
 
-    let mut mbox = tokio::fs::File::create(dir.join(format!("{}.mbox", folder.id))).await?;
-    let mut meta = String::new();
-    for row in &rows {
-        // Path (c): reconstruct from parsed columns.
-        let (raw, reconstructed) = match resolved.get(&row.id) {
-            Some(b) => (b.clone(), false),
-            None => (reconstruct_message(row), true),
-        };
+/// Server-fetch batch size (also the pending-write buffer bound).
+const SERVER_FETCH_BATCH: usize = 50;
+
+/// Streaming per-folder mbox + sidecar writer.
+struct FolderWriter<'a> {
+    state: &'a AuthState,
+    user_id: &'a str,
+    account: &'a AccountRow,
+    folder_wire: Option<&'a str>,
+    allow_server_fetch: bool,
+    fetcher: ServerFetch,
+    mbox: tokio::fs::File,
+    meta: String,
+    written: u64,
+}
+
+impl FolderWriter<'_> {
+    /// Write one message to mbox + sidecar and drop its bytes.
+    async fn write_entry(
+        &mut self,
+        row: &MailRow,
+        raw: &[u8],
+        reconstructed: bool,
+    ) -> Result<(), BackupError> {
         let from_addr = mbox_from_addr(row.from_address.as_deref());
-        let epoch = row
-            .date
-            .as_deref()
-            .and_then(parse_ts)
-            .map_or(0, |d| d.timestamp());
         let mut buf = Vec::new();
-        write_mbox_message(&mut buf, &from_addr, epoch, &raw).map_err(BackupError::Io)?;
-        mbox.write_all(&buf).await?;
+        write_mbox_message(&mut buf, &from_addr, row.epoch(), raw).map_err(BackupError::Io)?;
+        self.mbox.write_all(&buf).await?;
 
         let mut flags = Vec::new();
         if row.is_read {
@@ -771,107 +804,166 @@ async fn export_folder(
                 .as_deref()
                 .and_then(parse_ts)
                 .map(|d| d.to_rfc3339()),
-            sha256: blobs::sha256_hex(&raw),
+            sha256: blobs::sha256_hex(raw),
             reconstructed,
         };
-        meta.push_str(&serde_json::to_string(&line)?);
-        meta.push('\n');
+        self.meta.push_str(&serde_json::to_string(&line)?);
+        self.meta.push('\n');
+        self.written += 1;
+        Ok(())
     }
-    mbox.flush().await?;
-    tokio::fs::write(dir.join(format!("{}.meta.jsonl", folder.id)), meta).await?;
-    Ok(u64::try_from(rows.len()).unwrap_or(u64::MAX))
+
+    /// Resolve + write the pending batch: path (b) server fetch (one batch,
+    /// written out immediately after it resolves), path (c) reconstruction
+    /// for the rest. Successful fetches backfill `raw_blob_path`.
+    async fn flush_pending(
+        &mut self,
+        rows: &[MailRow],
+        pending: &mut Vec<usize>,
+    ) -> Result<(), BackupError> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut fetched: HashMap<String, Vec<u8>> = HashMap::new();
+        if self.allow_server_fetch {
+            if matches!(self.fetcher, ServerFetch::Unconnected) {
+                self.fetcher = ServerFetch::connect(
+                    &self.state.db,
+                    self.user_id,
+                    self.account,
+                    self.folder_wire,
+                )
+                .await;
+            }
+            let batch: Vec<&MailRow> = pending.iter().map(|&i| &rows[i]).collect();
+            fetched = self.fetcher.fetch_batch(&batch).await.into_iter().collect();
+        }
+        for &i in pending.iter() {
+            let row = &rows[i];
+            if let Some(raw) = fetched.remove(&row.id) {
+                if let Ok(rel) = blobs::store(&self.state.data_dir, &self.account.id, &raw).await {
+                    let _ = store::set_message_raw_blob(&self.state.db, &row.id, &rel).await;
+                }
+                self.write_entry(row, &raw, false).await?;
+            } else {
+                let raw = reconstruct_message(row);
+                self.write_entry(row, &raw, true).await?;
+            }
+        }
+        pending.clear();
+        Ok(())
+    }
 }
 
-/// Path (b): batch-fetch raw RFC822 from the source server. Never fails the
-/// export — any connection/fetch error leaves those rows for reconstruction.
-async fn fetch_raw_from_server(
-    db: &DbPool,
-    user_id: &str,
-    account: &AccountRow,
-    folder_wire: Option<&str>,
-    rows: &[&MailRow],
-) -> HashMap<String, Vec<u8>> {
-    match account.protocol.as_str() {
-        "imap" => fetch_raw_imap(db, user_id, account, folder_wire, rows).await,
-        "jmap" => fetch_raw_jmap(db, user_id, account, rows).await,
-        _ => HashMap::new(),
+/// Per-folder server fetcher: connected lazily once, reused across batches.
+/// `Unavailable` after any connection failure — messages then fall through
+/// to reconstruction. Never fails the export.
+enum ServerFetch {
+    Unconnected,
+    Imap(Box<crate::imap::ImapClient>),
+    Jmap(Arc<crate::sync::jmap_client::JmapSeam>),
+    Unavailable,
+}
+
+impl ServerFetch {
+    /// IMAP: connect + select the folder. JMAP: connect the seam.
+    async fn connect(
+        db: &DbPool,
+        user_id: &str,
+        account: &AccountRow,
+        folder_wire: Option<&str>,
+    ) -> Self {
+        match account.protocol.as_str() {
+            "imap" => {
+                let Some(wire) = folder_wire else {
+                    return Self::Unavailable;
+                };
+                let Ok((mut client, _)) =
+                    crate::sync::http::connect_imap_for_account(db, user_id, &account.id).await
+                else {
+                    return Self::Unavailable;
+                };
+                if client.select(wire).await.is_err() {
+                    return Self::Unavailable;
+                }
+                Self::Imap(Box::new(client))
+            }
+            "jmap" => {
+                match crate::sync::http::connect_jmap_for_account(db, user_id, &account.id).await {
+                    Ok(seam) => Self::Jmap(seam),
+                    Err(_) => Self::Unavailable,
+                }
+            }
+            _ => Self::Unavailable,
+        }
+    }
+
+    /// Fetch raw RFC822 for one batch (≤ [`SERVER_FETCH_BATCH`] rows); rows
+    /// that fail are simply absent from the result.
+    async fn fetch_batch(&mut self, rows: &[&MailRow]) -> Vec<(String, Vec<u8>)> {
+        match self {
+            Self::Imap(client) => {
+                let pairs = imap_uid_row_pairs(rows);
+                let uids: Vec<u32> = pairs.iter().map(|(uid, _)| *uid).collect();
+                match client.fetch_bodies(&uids).await {
+                    Ok(bodies) => collect_fetched_bodies(bodies, &pairs),
+                    Err(_) => Vec::new(),
+                }
+            }
+            Self::Jmap(seam) => {
+                let id_rows: Vec<(&str, &str)> = rows
+                    .iter()
+                    .filter_map(|r| r.external_id.as_deref().map(|ext| (ext, r.id.as_str())))
+                    .collect();
+                let ids: Vec<String> = id_rows.iter().map(|(ext, _)| (*ext).to_string()).collect();
+                let Ok((emails, _)) = seam.get_emails(&ids).await else {
+                    return Vec::new();
+                };
+                let row_by_ext: HashMap<&str, &str> = id_rows.iter().copied().collect();
+                let mut out = Vec::new();
+                for email in emails {
+                    let (Some(blob_id), Some(row_id)) =
+                        (email.blob_id, row_by_ext.get(email.id.as_str()))
+                    else {
+                        continue;
+                    };
+                    if let Ok(bytes) = seam.download_blob(&blob_id).await {
+                        out.push(((*row_id).to_string(), bytes));
+                    }
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
     }
 }
 
-/// IMAP: connect once, select the folder, `fetch_bodies` in chunks of ≤50.
-async fn fetch_raw_imap(
-    db: &DbPool,
-    user_id: &str,
-    account: &AccountRow,
-    folder_wire: Option<&str>,
-    rows: &[&MailRow],
-) -> HashMap<String, Vec<u8>> {
-    let mut out = HashMap::new();
-    let Some(wire) = folder_wire else { return out };
-    let Ok((mut client, _)) =
-        crate::sync::http::connect_imap_for_account(db, user_id, &account.id).await
-    else {
-        return out;
-    };
-    if client.select(wire).await.is_err() {
-        return out;
-    }
-    let uid_rows: Vec<(u32, &str)> = rows
-        .iter()
+/// Pair each parseable IMAP UID with its message row id (skips drafts and
+/// legacy unparseable external ids).
+fn imap_uid_row_pairs<'a>(rows: &[&'a MailRow]) -> Vec<(u32, &'a str)> {
+    rows.iter()
         .filter_map(|r| {
             store::parse_imap_uid(r.external_id.as_deref())
                 .ok()
                 .map(|uid| (uid, r.id.as_str()))
         })
-        .collect();
-    for chunk in uid_rows.chunks(50) {
-        let uids: Vec<u32> = chunk.iter().map(|(uid, _)| *uid).collect();
-        let Ok(bodies) = client.fetch_bodies(&uids).await else {
-            continue;
-        };
-        let row_by_uid: HashMap<u32, &str> = chunk.iter().copied().collect();
-        for msg in bodies {
-            if let (Some(body), Some(row_id)) = (msg.body, row_by_uid.get(&msg.uid)) {
-                out.insert((*row_id).to_string(), body);
-            }
-        }
-    }
-    out
+        .collect()
 }
 
-/// JMAP: `Email/get` for blobIds (≤50 per call) + `download_blob` per id.
-async fn fetch_raw_jmap(
-    db: &DbPool,
-    user_id: &str,
-    account: &AccountRow,
-    rows: &[&MailRow],
-) -> HashMap<String, Vec<u8>> {
-    let mut out = HashMap::new();
-    let Ok(seam) = crate::sync::http::connect_jmap_for_account(db, user_id, &account.id).await
-    else {
-        return out;
-    };
-    let id_rows: Vec<(&str, &str)> = rows
-        .iter()
-        .filter_map(|r| r.external_id.as_deref().map(|ext| (ext, r.id.as_str())))
-        .collect();
-    for chunk in id_rows.chunks(50) {
-        let ids: Vec<String> = chunk.iter().map(|(ext, _)| (*ext).to_string()).collect();
-        let Ok((emails, _)) = seam.get_emails(&ids).await else {
-            continue;
-        };
-        let row_by_ext: HashMap<&str, &str> = chunk.iter().copied().collect();
-        for email in emails {
-            let (Some(blob_id), Some(row_id)) = (email.blob_id, row_by_ext.get(email.id.as_str()))
-            else {
-                continue;
-            };
-            if let Ok(bytes) = seam.download_blob(&blob_id).await {
-                out.insert((*row_id).to_string(), bytes);
-            }
-        }
-    }
-    out
+/// Associate fetched IMAP bodies back to row ids, uid-keyed; bodies without
+/// bytes or without a matching row are dropped.
+fn collect_fetched_bodies(
+    bodies: Vec<crate::imap::ImapMessage>,
+    pairs: &[(u32, &str)],
+) -> Vec<(String, Vec<u8>)> {
+    let row_by_uid: HashMap<u32, &str> = pairs.iter().copied().collect();
+    bodies
+        .into_iter()
+        .filter_map(|msg| match (msg.body, row_by_uid.get(&msg.uid)) {
+            (Some(body), Some(row_id)) => Some(((*row_id).to_string(), body)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Minimal RFC822 message rebuilt from parsed columns (path c). Column
@@ -920,14 +1012,33 @@ fn push_header(out: &mut String, name: &str, value: &str) {
     out.push_str("\r\n");
 }
 
-/// RFC 2047 encoded-word for non-ASCII header text; ASCII passes through.
+/// Max base64 payload per encoded word: the RFC 2047 §2 75-char cap minus
+/// the 12-char `=?UTF-8?B?…?=` wrapper is 63, rounded down to a whole
+/// 4-char base64 group → 60 (45 bytes of UTF-8 per word).
+const ENCODED_WORD_PAYLOAD_CHARS: usize = 60;
+
+/// RFC 2047 encoded-words for non-ASCII header text; ASCII passes through.
+/// Long values are split into independent ≤75-char words joined by folding
+/// whitespace, never splitting a multi-byte character mid-word.
 fn encode_header_value(value: &str) -> String {
     let clean = sanitize_header(value);
     if clean.is_ascii() {
-        clean
-    } else {
-        format!("=?UTF-8?B?{}?=", B64.encode(clean.as_bytes()))
+        return clean;
     }
+    let mut words: Vec<String> = Vec::new();
+    let mut chunk = String::new();
+    for ch in clean.chars() {
+        let next_bytes = chunk.len() + ch.len_utf8();
+        if !chunk.is_empty() && 4 * next_bytes.div_ceil(3) > ENCODED_WORD_PAYLOAD_CHARS {
+            words.push(format!("=?UTF-8?B?{}?=", B64.encode(chunk.as_bytes())));
+            chunk.clear();
+        }
+        chunk.push(ch);
+    }
+    if !chunk.is_empty() {
+        words.push(format!("=?UTF-8?B?{}?=", B64.encode(chunk.as_bytes())));
+    }
+    words.join("\r\n ")
 }
 
 /// Split a display address into (name, email): `Name <email>`, bare email,
@@ -984,12 +1095,40 @@ fn address_entries(json_text: Option<&str>) -> Vec<(Option<String>, Option<Strin
     }
 }
 
+/// Display name for an address header: RFC 2047 encoded-word when non-ASCII
+/// (the base64 output needs no quoting); quoted with `\` escapes when it
+/// carries specials (`,` `;` `"` `<` `>` `@` `\`); bare otherwise.
+fn format_display_name(name: &str) -> String {
+    let clean = sanitize_header(name);
+    if clean.is_empty() {
+        return String::new();
+    }
+    if !clean.is_ascii() {
+        return encode_header_value(&clean);
+    }
+    if clean
+        .chars()
+        .any(|c| matches!(c, ',' | ';' | '"' | '<' | '>' | '@' | '\\'))
+    {
+        let escaped = clean.replace('\\', "\\\\").replace('"', "\\\"");
+        return format!("\"{escaped}\"");
+    }
+    clean
+}
+
 /// One mailbox as an RFC 5322 address; only the display name is encoded.
 fn format_mailbox(name: Option<&str>, email: Option<&str>) -> String {
     match (name, email) {
-        (Some(n), Some(e)) => format!("{} <{e}>", encode_header_value(n)),
+        (Some(n), Some(e)) => {
+            let display = format_display_name(n);
+            if display.is_empty() {
+                sanitize_header(e)
+            } else {
+                format!("{display} <{e}>")
+            }
+        }
         (None, Some(e)) => sanitize_header(e),
-        (Some(n), None) => encode_header_value(n),
+        (Some(n), None) => format_display_name(n),
         (None, None) => String::new(),
     }
 }
@@ -1371,10 +1510,12 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        // msg3: fully empty → headers-only reconstruction.
+        // msg3: fully empty → headers-only reconstruction; received_at set so
+        // the mbox separator epoch falls back to it (date is NULL).
         sqlx::query(
             "UPDATE message SET subject = NULL, from_address = NULL, to_addresses = NULL, \
-             date = NULL, message_id_header = NULL WHERE external_id = ?",
+             date = NULL, message_id_header = NULL, received_at = '2026-09-03 08:30:00' \
+             WHERE external_id = ?",
         )
         .bind(store::imap_message_external_id(&folder_id, 3))
         .execute(&pool)
@@ -1401,6 +1542,10 @@ mod tests {
         assert!(text.contains("<p>你好</p>")); // reconstructed html body
         assert!(text.contains("Subject: =?UTF-8?B?")); // non-ASCII encoded-word
         assert!(text.contains("From: unknown@localhost")); // empty sender placeholder
+
+        // msg3's mbox separator epoch falls back to received_at (date NULL).
+        let epoch3 = parse_ts("2026-09-03 08:30:00").unwrap().timestamp();
+        assert!(text.contains(&format!("From unknown@localhost {epoch3}\r\n")));
 
         let meta =
             std::fs::read_to_string(mail_dir.join(format!("{folder_id}.meta.jsonl"))).unwrap();
@@ -1444,6 +1589,7 @@ mod tests {
             to_addresses: Some(r#"[{"name":"鲍勃","email":"bob@example.com"}]"#.into()),
             cc_addresses: None,
             date: Some("2026-09-01 10:00:00".into()),
+            received_at: None,
             is_read: false,
             is_starred: false,
             body_text: Some("plain body".into()),
@@ -1472,6 +1618,7 @@ mod tests {
             to_addresses: None,
             cc_addresses: None,
             date: None,
+            received_at: None,
             is_read: false,
             is_starred: false,
             body_text: Some("text".into()),
@@ -1505,5 +1652,137 @@ mod tests {
             header_address_list(Some(r#"{"raw":"QQ邮箱管理员 <10000@qq.com>"}"#)).unwrap(),
             format!("{} <10000@qq.com>", encode_header_value("QQ邮箱管理员"))
         );
+    }
+
+    #[test]
+    fn encode_header_value_splits_long_subjects_into_75_char_words() {
+        // 100 CJK chars = 300 UTF-8 bytes → must span multiple words.
+        let long = "好".repeat(100);
+        let encoded = encode_header_value(&long);
+        let words: Vec<&str> = encoded.split("\r\n ").collect();
+        assert!(words.len() > 1);
+        let mut decoded = Vec::new();
+        for word in &words {
+            assert!(word.len() <= 75, "word too long: {word}");
+            let payload = word
+                .strip_prefix("=?UTF-8?B?")
+                .and_then(|w| w.strip_suffix("?="))
+                .unwrap();
+            // Each word decodes independently to valid UTF-8 (no mid-char split).
+            decoded.extend(
+                String::from_utf8(B64.decode(payload).unwrap())
+                    .unwrap()
+                    .into_bytes(),
+            );
+        }
+        assert_eq!(String::from_utf8(decoded).unwrap(), long);
+    }
+
+    #[test]
+    fn encode_header_value_short_values_stay_one_word() {
+        assert_eq!(encode_header_value("plain ascii"), "plain ascii");
+        let encoded = encode_header_value("你好 世界");
+        assert!(!encoded.contains("\r\n"));
+        assert!(encoded.starts_with("=?UTF-8?B?"));
+    }
+
+    #[test]
+    fn format_mailbox_quotes_special_display_names() {
+        assert_eq!(
+            format_mailbox(Some("Doe, John"), Some("doe@example.com")),
+            "\"Doe, John\" <doe@example.com>"
+        );
+        assert_eq!(
+            format_mailbox(Some("He said \"hi\""), Some("x@y.example.com")),
+            "\"He said \\\"hi\\\"\" <x@y.example.com>"
+        );
+        assert_eq!(
+            format_mailbox(Some("a;b@c"), Some("x@y.example.com")),
+            "\"a;b@c\" <x@y.example.com>"
+        );
+        // Plain and non-ASCII names keep their existing forms.
+        assert_eq!(
+            format_mailbox(Some("Plain Name"), Some("p@example.com")),
+            "Plain Name <p@example.com>"
+        );
+        assert_eq!(
+            format_mailbox(Some("鲍勃"), Some("bob@example.com")),
+            format!("{} <bob@example.com>", encode_header_value("鲍勃"))
+        );
+    }
+
+    #[test]
+    fn epoch_falls_back_to_received_at_then_zero() {
+        let mut row = MailRow {
+            id: "r".into(),
+            external_id: None,
+            message_id_header: None,
+            subject: None,
+            from_address: None,
+            to_addresses: None,
+            cc_addresses: None,
+            date: Some("2026-09-01 10:00:00".into()),
+            received_at: Some("2026-09-02 11:00:00".into()),
+            is_read: false,
+            is_starred: false,
+            body_text: None,
+            body_html: None,
+        };
+        assert_eq!(
+            row.epoch(),
+            parse_ts("2026-09-01 10:00:00").unwrap().timestamp()
+        );
+        row.date = None;
+        assert_eq!(
+            row.epoch(),
+            parse_ts("2026-09-02 11:00:00").unwrap().timestamp()
+        );
+        row.received_at = None;
+        assert_eq!(row.epoch(), 0);
+    }
+
+    fn bare_row(id: &str, external_id: Option<&str>) -> MailRow {
+        MailRow {
+            id: id.into(),
+            external_id: external_id.map(str::to_owned),
+            message_id_header: None,
+            subject: None,
+            from_address: None,
+            to_addresses: None,
+            cc_addresses: None,
+            date: None,
+            received_at: None,
+            is_read: false,
+            is_starred: false,
+            body_text: None,
+            body_html: None,
+        }
+    }
+
+    #[test]
+    fn imap_uid_row_pairs_skips_unparseable_external_ids() {
+        let rows = [
+            bare_row("row-a", Some("INBOX:10")),
+            bare_row("row-draft", None),
+            bare_row("row-junk", Some("not-a-uid")),
+            bare_row("row-b", Some("INBOX:11")),
+        ];
+        let refs: Vec<&MailRow> = rows.iter().collect();
+        assert_eq!(
+            imap_uid_row_pairs(&refs),
+            vec![(10, "row-a"), (11, "row-b")]
+        );
+    }
+
+    #[test]
+    fn collect_fetched_bodies_maps_bodies_back_by_uid() {
+        let pairs = [(10u32, "row-a"), (11, "row-b")];
+        let mut with_body = imap_msg(11);
+        with_body.body = Some(b"raw-eleven".to_vec());
+        let no_body = imap_msg(10); // body None → dropped
+        let mut unknown_uid = imap_msg(99); // no matching row → dropped
+        unknown_uid.body = Some(b"stray".to_vec());
+        let got = collect_fetched_bodies(vec![with_body, no_body, unknown_uid], &pairs);
+        assert_eq!(got, vec![("row-b".to_string(), b"raw-eleven".to_vec())]);
     }
 }
