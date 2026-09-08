@@ -303,6 +303,13 @@ async fn start_upload(
     State(state): State<AuthState>,
     AuthUser(user_id): AuthUser,
 ) -> Result<(StatusCode, Json<JsonValue>), BackupHttpError> {
+    // Cheap GC while we're already touching the staging dir: abandoned
+    // uploads (kv entry long expired) leave up-to-4 GiB files behind.
+    if let Err(err) =
+        upload::sweep_stale_uploads(&state.data_dir, std::time::SystemTime::now()).await
+    {
+        tracing::warn!(error = %err, "stale upload sweep failed");
+    }
     let upload_id = upload::start(state.kv(), &state.data_dir, &user_id).await?;
     Ok((
         StatusCode::CREATED,
@@ -607,5 +614,15 @@ mod tests {
         let json: JsonValue = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "internal error");
         assert_eq!(json["code"], "internal_error");
+    }
+
+    #[tokio::test]
+    async fn upload_error_incomplete_maps_to_400_with_missing_list() {
+        let res = UploadError::Incomplete(vec![0, 2]).into_response();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let json: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "upload_incomplete");
+        assert!(json["error"].as_str().unwrap().contains("[0, 2]"));
     }
 }

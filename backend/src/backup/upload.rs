@@ -2,13 +2,15 @@
 //! `data_dir/backups/staging/upload-<id>.part` (0600) and are renamed to
 //! `upload-<id>.lyra` on finish; the per-user registry
 //! `backup:uploads:{user_id}` (JSON map id → [`UploadMeta`]) tracks the
-//! received-chunk bitmap. Chunking sidesteps the Cloudflare 100 MB body cap
-//! on production deploys.
+//! received size of each chunk (0 = not received, so a short non-final
+//! chunk can never hide a zero-filled hole). Chunking sidesteps the
+//! Cloudflare 100 MB body cap on production deploys.
 //! Spec: docs/superpowers/specs/2026-09-08-lyra-backup-export-import-design.md §6.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
@@ -21,11 +23,15 @@ use super::BackupError;
 pub const CHUNK_SIZE: usize = 8 * 1024 * 1024;
 /// 512 chunks × 8 MiB = 4 GiB archive cap.
 pub const MAX_CHUNKS: u32 = 512;
+/// Abandoned uploads (kv entry expired, file left behind) are swept once
+/// their mtime is this old.
+const STALE_UPLOAD_AGE: Duration = Duration::from_hours(24);
 
-/// Registry entry: `received[i]` is true once chunk `i` has been written.
+/// Registry entry: `chunk_sizes[i]` is the byte length of chunk `i` once
+/// written; 0 means not received.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UploadMeta {
-    pub received: Vec<bool>,
+    pub chunk_sizes: Vec<u32>,
     pub created_at: String, // RFC3339
 }
 
@@ -112,7 +118,7 @@ pub async fn start(
     map.insert(
         id.clone(),
         UploadMeta {
-            received: Vec::new(),
+            chunk_sizes: Vec::new(),
             created_at: chrono::Utc::now().to_rfc3339(),
         },
     );
@@ -157,17 +163,19 @@ pub async fn put_chunk(
     file.flush().await?;
 
     let idx = n as usize;
-    if meta.received.len() <= idx {
-        meta.received.resize(idx + 1, false);
+    if meta.chunk_sizes.len() <= idx {
+        meta.chunk_sizes.resize(idx + 1, 0);
     }
-    meta.received[idx] = true;
+    meta.chunk_sizes[idx] = u32::try_from(bytes.len()).expect("chunk length fits u32");
     save(kv, user_id, &map).await?;
     Ok(())
 }
 
-/// Verify all chunks `0..total_chunks` arrived and the staged file size
-/// matches, then rename `.part` → `.lyra` and drop the registry entry.
-/// Returns the final staged path for the import job.
+/// Verify every chunk `0..total_chunks` arrived with the right length (all
+/// non-final chunks exactly `CHUNK_SIZE`, final chunk 1..=`CHUNK_SIZE`) and
+/// the staged file size matches the recorded sizes, then rename
+/// `.part` → `.lyra` and drop the registry entry. Returns the final staged
+/// path for the import job.
 pub async fn finish(
     kv: &Arc<dyn KvStore>,
     data_dir: &Path,
@@ -183,19 +191,31 @@ pub async fn finish(
     let Some(meta) = map.get(upload_id) else {
         return Err(UploadError::NotFound);
     };
-    let missing: Vec<u32> = (0..total_chunks)
-        .filter(|i| meta.received.get(*i as usize) != Some(&true))
+    let last = (total_chunks - 1) as usize;
+    let bad: Vec<u32> = (0..total_chunks)
+        .filter(|i| {
+            let size = meta.chunk_sizes.get(*i as usize).copied().unwrap_or(0) as usize;
+            if *i as usize == last {
+                // Final chunk: anything from 1 byte to a full chunk.
+                size == 0 || size > CHUNK_SIZE
+            } else {
+                // A short non-final chunk would leave a zero-filled hole.
+                size != CHUNK_SIZE
+            }
+        })
         .collect();
-    if !missing.is_empty() {
-        return Err(UploadError::Incomplete(missing));
+    if !bad.is_empty() {
+        return Err(UploadError::Incomplete(bad));
     }
 
     let part = upload_path(data_dir, upload_id, "part")?;
     let file_len = tokio::fs::metadata(&part).await?.len();
-    // Every chunk but the last must be full-size, so the file must reach
-    // into the last chunk's range.
-    let min_expected = u64::from(total_chunks - 1) * CHUNK_SIZE as u64 + 1;
-    if file_len < min_expected {
+    let expected: u64 = (0..total_chunks)
+        .map(|i| u64::from(meta.chunk_sizes[i as usize]))
+        .sum();
+    if file_len != expected {
+        // Registry and file disagree (crash between write and kv save, or
+        // external truncation) — the client must re-send everything.
         return Err(UploadError::Incomplete((0..total_chunks).collect()));
     }
 
@@ -206,23 +226,58 @@ pub async fn finish(
     Ok(final_path)
 }
 
-/// Best-effort cleanup of an abandoned upload (kv entry + `.part`/`.lyra`).
-#[allow(dead_code)] // used by staged-upload GC (later task)
-pub async fn discard(
-    kv: &Arc<dyn KvStore>,
-    data_dir: &Path,
-    user_id: &str,
-    upload_id: &str,
-) -> Result<(), BackupError> {
-    let mut map = load(kv, user_id).await?;
-    map.remove(upload_id);
-    save(kv, user_id, &map).await?;
-    for ext in ["part", "lyra"] {
-        if let Ok(path) = upload_path(data_dir, upload_id, ext) {
-            let _ = tokio::fs::remove_file(path).await;
+/// Delete every `upload-*.part` / `upload-*.lyra` staging file whose mtime
+/// is older than [`STALE_UPLOAD_AGE`] relative to `now` — abandoned chunked
+/// uploads and leftovers from crashed imports. The kv registry entry
+/// expires after 24 h on its own; this reclaims the (up to 4 GiB) file.
+/// `now` is a parameter so tests can sweep with a future instant. Returns
+/// the number of files removed.
+pub async fn sweep_stale_uploads(data_dir: &Path, now: SystemTime) -> Result<u64, BackupError> {
+    let dir = staging_dir(data_dir);
+    let mut entries = match tokio::fs::read_dir(&dir).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
+    let mut removed = 0u64;
+    while let Some(entry) = entries.next_entry().await? {
+        // Only upload staging FILES; export staging dirs and temp zips are
+        // owned (and cleaned) by the export job.
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let is_upload = name.starts_with("upload-")
+            && Path::new(&name).extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("part") || ext.eq_ignore_ascii_case("lyra")
+            });
+        if !is_upload {
+            continue;
+        }
+        let Ok(meta) = entry.metadata().await else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .is_some_and(|age| age >= STALE_UPLOAD_AGE);
+        if !stale {
+            continue;
+        }
+        match tokio::fs::remove_file(entry.path()).await {
+            Ok(()) => {
+                removed += 1;
+                tracing::info!(file = %name, "swept stale upload staging file");
+            }
+            Err(e) => {
+                tracing::warn!(file = %name, error = %e, "stale upload sweep failed to remove file");
+            }
         }
     }
-    Ok(())
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -287,7 +342,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let upload_id = start(&kv, dir.path(), "u1").await.unwrap();
 
-        put_chunk(&kv, dir.path(), "u1", &upload_id, 0, b"chunk0")
+        // Non-final chunks must be full-size, so chunk 0 fills CHUNK_SIZE.
+        put_chunk(&kv, dir.path(), "u1", &upload_id, 0, &vec![7u8; CHUNK_SIZE])
             .await
             .unwrap();
         put_chunk(&kv, dir.path(), "u1", &upload_id, 2, b"chunk2")
@@ -300,6 +356,111 @@ mod tests {
         assert!(matches!(err, UploadError::Incomplete(missing) if missing == vec![1]));
         // Registry entry survives an incomplete finish so the client can retry.
         assert!(load(&kv, "u1").await.unwrap().contains_key(&upload_id));
+    }
+
+    /// A short NON-final chunk leaves a zero-filled hole in the file; the
+    /// per-chunk size record must catch it even though the byte count and
+    /// the file length both "reach" the final chunk.
+    #[tokio::test]
+    async fn finish_rejects_short_non_final_chunk() {
+        let kv = kv();
+        let dir = tempfile::tempdir().unwrap();
+        let upload_id = start(&kv, dir.path(), "u1").await.unwrap();
+
+        put_chunk(
+            &kv,
+            dir.path(),
+            "u1",
+            &upload_id,
+            0,
+            b"only-100-bytes-would-hole",
+        )
+        .await
+        .unwrap();
+        put_chunk(&kv, dir.path(), "u1", &upload_id, 1, b"final")
+            .await
+            .unwrap();
+
+        let err = finish(&kv, dir.path(), "u1", &upload_id, 2)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UploadError::Incomplete(bad) if bad == vec![0]));
+
+        // Re-sending chunk 0 at full size fixes the upload.
+        put_chunk(&kv, dir.path(), "u1", &upload_id, 0, &vec![3u8; CHUNK_SIZE])
+            .await
+            .unwrap();
+        let final_path = finish(&kv, dir.path(), "u1", &upload_id, 2).await.unwrap();
+        let assembled = tokio::fs::read(&final_path).await.unwrap();
+        assert_eq!(assembled.len(), CHUNK_SIZE + 5);
+        assert!(assembled[..CHUNK_SIZE].iter().all(|&b| b == 3));
+        assert_eq!(&assembled[CHUNK_SIZE..], b"final");
+    }
+
+    /// A registry/file size mismatch (crash between write and kv save, or
+    /// external truncation) is reported as incomplete, never imported.
+    #[tokio::test]
+    async fn finish_rejects_registry_file_size_mismatch() {
+        let kv = kv();
+        let dir = tempfile::tempdir().unwrap();
+        let upload_id = start(&kv, dir.path(), "u1").await.unwrap();
+        put_chunk(&kv, dir.path(), "u1", &upload_id, 0, b"final")
+            .await
+            .unwrap();
+        // Truncate the file behind the registry's back.
+        tokio::fs::write(upload_path(dir.path(), &upload_id, "part").unwrap(), b"")
+            .await
+            .unwrap();
+
+        let err = finish(&kv, dir.path(), "u1", &upload_id, 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UploadError::Incomplete(bad) if bad == vec![0]));
+    }
+
+    #[tokio::test]
+    async fn sweep_removes_only_stale_upload_files() {
+        let kv = kv();
+        let dir = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+
+        let stale_part = staging_dir(dir.path()).join(format!("upload-{}.part", Uuid::now_v7()));
+        let stale_lyra = staging_dir(dir.path()).join(format!("upload-{}.lyra", Uuid::now_v7()));
+        let export_zip = staging_dir(dir.path()).join("some-job.zip");
+        tokio::fs::create_dir_all(staging_dir(dir.path()))
+            .await
+            .unwrap();
+        tokio::fs::write(&stale_part, b"old").await.unwrap();
+        tokio::fs::write(&stale_lyra, b"old").await.unwrap();
+        tokio::fs::write(&export_zip, b"export-owned")
+            .await
+            .unwrap();
+
+        // Everything is fresh relative to real now: nothing is swept.
+        assert_eq!(sweep_stale_uploads(dir.path(), now).await.unwrap(), 0);
+        assert!(stale_part.exists());
+
+        // 48 h later: both stale upload files are gone; the export-owned
+        // zip (name does not match `upload-*`) survives.
+        let later = now + Duration::from_hours(48);
+        assert_eq!(sweep_stale_uploads(dir.path(), later).await.unwrap(), 2);
+        assert!(!stale_part.exists());
+        assert!(!stale_lyra.exists());
+        assert!(export_zip.exists());
+
+        // A genuinely fresh upload started after the sweep is untouched.
+        let fresh_id = start(&kv, dir.path(), "u1").await.unwrap();
+        assert_eq!(
+            sweep_stale_uploads(dir.path(), SystemTime::now())
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(upload_path(dir.path(), &fresh_id, "part").unwrap().exists());
+
+        // A missing staging dir is not an error.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(sweep_stale_uploads(empty.path(), later).await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -326,7 +487,7 @@ mod tests {
 
         // Nothing was marked received.
         let map = load(&kv, "u1").await.unwrap();
-        assert!(map[&upload_id].received.is_empty());
+        assert!(map[&upload_id].chunk_sizes.is_empty());
     }
 
     #[tokio::test]
