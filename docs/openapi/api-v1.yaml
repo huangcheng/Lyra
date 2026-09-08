@@ -39,6 +39,11 @@ tags:
     description: Read-only message analytics
   - name: push
     description: Web Push subscriptions, mute prefs, test delivery
+  - name: backup
+    description: >
+      Encrypted full-instance backup export/import (job-based, age-encrypted
+      `.lyra` archives). Account credentials inside the archive are plaintext
+      within the encryption layer — treat downloaded archives like secrets.
 
 paths:
   /health:
@@ -2288,6 +2293,329 @@ paths:
                     type: integer
         "401":
           $ref: "#/components/responses/Error"
+
+  /api/v1/backup/export:
+    post:
+      tags: [backup]
+      summary: Enqueue an encrypted full-instance export
+      description: |
+        Starts a background job that collects settings, accounts, mail
+        (mbox + metadata sidecars), contacts, calendars, and blobs into a
+        zip, encrypts it with age (scrypt passphrase recipient) as a `.lyra`
+        artifact, and registers it for download. Poll
+        `GET /api/v1/backup/jobs/{job_id}` for progress and the final
+        report.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password:
+                  type: string
+                  minLength: 8
+                  description: Archive encryption password (minimum 8 characters)
+      responses:
+        "202":
+          description: Export job enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [job_id, artifact_id]
+                properties:
+                  job_id:
+                    type: string
+                  artifact_id:
+                    type: string
+                    description: Id the artifact is registered under on completion
+        "400":
+          description: 'Password shorter than 8 characters (`code: bad_request`)'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/backup/jobs/{job_id}:
+    get:
+      tags: [backup]
+      summary: Backup job status, progress, and final report
+      description: |
+        `progress` and `report` come from kv and are `null` until the job
+        writes them. Only backup jobs owned by the caller are visible —
+        unknown, foreign, or non-backup job ids all answer 404.
+
+        Progress shapes: `{"phase":"queued"}` / `{"phase":"collecting"}` /
+        `{"phase":"mail","account":…,"folder":…,"messages_done":…}` while
+        exporting; `{"phase":"decrypting"}` /
+        `{"phase":"merging","section":…}` while importing.
+
+        Report shapes: export success
+        `{"ok":true,"artifact_id":…,"sections":{settings,accounts,messages,contacts,calendars,blobs},"warnings":[…]}`;
+        import success `{"ok":true,"report":{settings,accounts,folders,messages,contacts,calendars,errors}}`
+        with per-section `inserted`/`skipped`/`repaired`/`failed` merge
+        tallies; any failure `{"ok":false,"error":…}` (scrubbed).
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Job status with live progress and final report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, progress, report]
+                properties:
+                  status:
+                    type: string
+                    enum: [pending, running, completed, failed]
+                  progress:
+                    type: object
+                    nullable: true
+                    description: Live progress payload (see above)
+                  report:
+                    type: object
+                    nullable: true
+                    description: Final report payload (see above)
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          description: Job not found, not owned by the caller, or not a backup job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/backup/artifacts:
+    get:
+      tags: [backup]
+      summary: List completed backup archives (oldest first)
+      responses:
+        "200":
+          description: Registered artifacts for the current user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [artifacts]
+                properties:
+                  artifacts:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, filename, size_bytes, created_at]
+                      properties:
+                        id:
+                          type: string
+                        filename:
+                          type: string
+                          description: Server-generated, `lyra-backup-YYYYMMDD-HHmmss.lyra`
+                        size_bytes:
+                          type: integer
+                        created_at:
+                          type: string
+                          format: date-time
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/backup/artifacts/{id}/download:
+    get:
+      tags: [backup]
+      summary: Download a backup archive
+      description: |
+        Serves the age-encrypted `.lyra` file as `application/octet-stream`
+        with a `Content-Disposition: attachment` filename. The archive holds
+        account credentials in plaintext within the encryption layer —
+        store it somewhere safe.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 'Archive bytes (`Content-Disposition: attachment`)'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          description: Artifact not registered for the caller (or file missing)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/backup/artifacts/{id}:
+    delete:
+      tags: [backup]
+      summary: Delete a backup archive
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Artifact removed (registry entry and file)
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          description: Artifact not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/backup/import/uploads:
+    post:
+      tags: [backup]
+      summary: Start a chunked import upload
+      description: |
+        Mints an upload id and an empty staging file. Send the archive as
+        `chunk_size`-byte chunks (8 MiB, at most 512 chunks = 4 GiB), then
+        call `finish`. Chunked upload sidesteps reverse-proxy body caps.
+        Abandoned uploads expire from the registry after 24 h and their
+        staging files are swept.
+      responses:
+        "201":
+          description: Upload created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [upload_id, chunk_size]
+                properties:
+                  upload_id:
+                    type: string
+                  chunk_size:
+                    type: integer
+                    description: Bytes per chunk (currently 8 MiB); the final chunk may be short
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/backup/import/uploads/{id}/chunks/{n}:
+    put:
+      tags: [backup]
+      summary: Upload one archive chunk
+      description: |
+        Raw chunk bytes (1…`chunk_size`); chunks may arrive in any order
+        and are written at offset `n * chunk_size`. A short non-final chunk
+        makes `finish` fail with `upload_incomplete`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: n
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+            description: 0-based chunk index (max 511)
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "204":
+          description: Chunk stored
+        "400":
+          description: 'Empty, oversized, or out-of-range chunk (`code: bad_request`)'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          description: Unknown upload id (or another user's upload)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /api/v1/backup/import/uploads/{id}/finish:
+    post:
+      tags: [backup]
+      summary: Complete the upload and enqueue the import job
+      description: |
+        Verifies every chunk `0..total_chunks` arrived intact (all
+        non-final chunks exactly `chunk_size`), then enqueues a background
+        import job that age-decrypts the archive with `password` and merges
+        it additively into the instance (existing rows are skipped or
+        repaired, never overwritten). Poll
+        `GET /api/v1/backup/jobs/{job_id}` for the merge report. A wrong
+        password or a corrupt/foreign archive fails the job (typed codes
+        `invalid_backup_password`, `unsupported_backup_format`,
+        `corrupt_archive`).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, total_chunks]
+              properties:
+                password:
+                  type: string
+                  description: Archive decryption password
+                total_chunks:
+                  type: integer
+                  minimum: 1
+                  maximum: 512
+      responses:
+        "202":
+          description: Import job enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [job_id]
+                properties:
+                  job_id:
+                    type: string
+        "400":
+          description: >
+            Missing or malformed chunks (`code: upload_incomplete`; the
+            message lists the missing chunk indices) or an invalid
+            `total_chunks` (`code: bad_request`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          description: Unknown upload id (or another user's upload)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
 
 components:
   securitySchemes:

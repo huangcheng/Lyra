@@ -55,6 +55,7 @@ Install commit hooks: `make pre-commit-install` (gitleaks on every commit).
 - Conversations, search, move / **same-account copy**, trash / archive / spam
 - Sync progress + Settings → Accounts **error log** (scrubbed IMAP/JMAP detail)
 - OpenGPG keys, remote-image privacy controls, Microsoft / Yandex mail OAuth
+- Encrypted full-instance backup & restore (age-encrypted archives, Settings → Backup)
 - SQLite (default) or PostgreSQL; Redis optional for sessions/jobs
 
 ## Docs

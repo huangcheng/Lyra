@@ -11,7 +11,7 @@
 | Prefix | Purpose |
 |--------|---------|
 | `/health`, `/version` | Unversioned ops probes only. No product data, no auth. |
-| `/api/v1/...` | All product capability: auth, mail, sync, accounts, settings, OpenGPG, OAuth, etc. |
+| `/api/v1/...` | All product capability: auth, mail, sync, accounts, settings, OpenGPG, OAuth, push, backup (`/api/v1/backup/...`: job-based export, artifact list/download/delete, chunked import upload), etc. |
 
 Breaking changes ship under **`/api/v2/...`** (see [v2 seam policy](#v2-seam-policy) below). `/api/v1` stays available until clients migrate.
 

@@ -115,6 +115,7 @@ Lyra/
       ai/                        ← AI assist (BYOK): settings, LLM dialect adapters, draft/reply
       oauth/                    ← Microsoft + Yandex mail OAuth (PKCE) + XOAUTH2
       push/                     ← Web Push (RFC 8030/8291/8292): fan-out on sync events, kv subscriptions
+      backup/                   ← Backup export/import: age-encrypted `.lyra` archives, artifact registry, chunked import uploads, additive merge
       jobs.rs / scheduler.rs / kernel/
     migrations/
       sqlite/                   ← SQLite migration SQL files
