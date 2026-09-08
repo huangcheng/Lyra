@@ -900,34 +900,55 @@ fn parse_header_metadata(header_bytes: &[u8]) -> HeaderMetadata {
             decode_mime_header_bytes(&header_bytes[h.offset_start as usize..h.offset_end as usize])
         })
         .filter(|s| !s.is_empty());
-    let format_addrs = |addr: Option<&mail_parser::Address>| -> Option<String> {
-        let parts: Vec<String> = addr?
+    // Address fields stay display strings (`Name <email>, …`), so decode the
+    // raw header bytes like the subject instead of trusting mail-parser's
+    // structured parse: raw 8-bit CJK bytes (QQ/Coremail send GBK with no
+    // RFC 2047 encoding) come out of mail-parser as U+FFFD mojibake, while
+    // decode_mime_header_bytes has the GB18030 fallback.
+    let addr_text = |name: mail_parser::HeaderName<'_>| -> Option<String> {
+        msg.headers()
             .iter()
-            .filter_map(|a| {
-                let email = a.address.as_deref()?;
-                Some(match a.name.as_deref().filter(|n| !n.is_empty()) {
-                    Some(name) => format!("{name} <{email}>"),
-                    None => email.to_string(),
-                })
+            .find(|h| h.name == name)
+            .map(|h| {
+                decode_mime_header_bytes(&unfold_bytes(
+                    &header_bytes[h.offset_start as usize..h.offset_end as usize],
+                ))
             })
-            .collect();
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(", "))
-        }
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     };
 
     (
         raw_text(mail_parser::HeaderName::MessageId),
         subject,
-        format_addrs(msg.from()),
-        format_addrs(msg.to()),
-        format_addrs(msg.cc()),
+        addr_text(mail_parser::HeaderName::From),
+        addr_text(mail_parser::HeaderName::To),
+        addr_text(mail_parser::HeaderName::Cc),
         raw_text(mail_parser::HeaderName::Date),
         raw_text(mail_parser::HeaderName::InReplyTo),
         raw_text(mail_parser::HeaderName::References),
     )
+}
+
+/// Collapse RFC 5322 folding (CRLF + whitespace) at the byte level. Safe
+/// for raw 8-bit encodings like GB18030: trail bytes are ≥ 0x40, so CR, LF,
+/// space and tab only ever appear as real ASCII.
+fn unfold_bytes(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'\r' && raw.get(i + 1) == Some(&b'\n') {
+            i += 2;
+            while matches!(raw.get(i), Some(b' ' | b'\t')) {
+                i += 1;
+            }
+            out.push(b' ');
+        } else {
+            out.push(raw[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Collapse RFC 5322 folding (CRLF + whitespace) into a single space.
@@ -1197,6 +1218,22 @@ mod tests {
     fn parse_header_metadata_empty_on_garbage() {
         let out = parse_header_metadata(b"not a header block");
         assert_eq!(out, Default::default());
+    }
+
+    #[test]
+    fn parse_header_metadata_decodes_raw_8bit_address_names() {
+        // QQ/Coremail sometimes send the display name as raw GBK bytes
+        // (no RFC 2047 encoding, no declared charset) — RFC-violating but
+        // common from legacy CJK senders. The name must come out decoded,
+        // never as U+FFFD replacement mojibake.
+        let (gbk, _, _) = encoding_rs::GB18030.encode("腾讯企业微信");
+        let mut headers = Vec::new();
+        headers.extend_from_slice(b"From: ");
+        headers.extend_from_slice(&gbk);
+        headers.extend_from_slice(b" <10000@qq.com>\r\nTo: a@b.com\r\n\r\n");
+        let (_, _, from, to, _, _, _, _) = parse_header_metadata(&headers);
+        assert_eq!(from.as_deref(), Some("腾讯企业微信 <10000@qq.com>"));
+        assert_eq!(to.as_deref(), Some("a@b.com"));
     }
 
     #[test]

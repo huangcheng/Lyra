@@ -25,7 +25,7 @@
  */
 
 import { api } from '@/lib/api-client';
-import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
+import { mapApiMessage, parseAddress, type ApiMessage } from '@/lib/mail-api';
 import { syncPushPrefs } from '@/lib/push';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
@@ -189,14 +189,19 @@ function writeBaseline(baseline: Record<string, string[]>): void {
 /** Display label for a message's sender (exported for tests). */
 export function senderLabel(msg: ApiMessage): string {
   const from = msg.fromAddress ?? '';
-  // `fromAddress` is a JSON-encoded address array (or a bare string); show
-  // the first entry's display form.
+  // `fromAddress` is the persist layer's `{"raw": "Name <email>"}` object,
+  // a JSON-encoded address array, or a bare string; show the first entry's
+  // display form.
   try {
     const parsed = JSON.parse(from) as unknown;
     if (Array.isArray(parsed) && parsed.length > 0) {
       const first = parsed[0] as { name?: string; email?: string } | string;
       if (typeof first === 'string') return first;
       return first.name ?? first.email ?? '';
+    }
+    if (parsed && typeof parsed === 'object') {
+      const addr = parseAddress(from);
+      if (addr.email !== 'unknown') return addr.name ?? addr.email;
     }
   } catch {
     // bare string

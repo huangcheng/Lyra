@@ -44,24 +44,51 @@ fn identity(m: &MessageResponse) -> String {
 /// Display label for the sender, mirroring the frontend `senderLabel`:
 /// JSON array → first entry (a bare string is returned as-is; an object
 /// yields `name ?? email ?? ''`, where an empty-string name is returned
-/// unchanged); anything else (non-array, empty array, unparseable) → the
-/// raw string. `from_address` is a JSON array string (or bare).
+/// unchanged); a JSON object is the persist layer's `{"raw": "Name
+/// <email>"}` shape → the display name, else the bare address; anything
+/// else (empty array, unparseable) → the raw string.
 fn sender_label(from_address: Option<&str>) -> String {
     let raw = from_address.unwrap_or("");
-    if let Ok(serde_json::Value::Array(entries)) = serde_json::from_str::<serde_json::Value>(raw)
-        && let Some(first) = entries.first()
-    {
-        if let Some(entry) = first.as_str() {
-            return entry.to_string();
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Array(entries)) => {
+            let Some(first) = entries.first() else {
+                return raw.to_string();
+            };
+            if let Some(entry) = first.as_str() {
+                return entry.to_string();
+            }
+            first
+                .get("name")
+                .and_then(|v| v.as_str())
+                .or_else(|| first.get("email").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string()
         }
-        return first
-            .get("name")
-            .and_then(|v| v.as_str())
-            .or_else(|| first.get("email").and_then(|v| v.as_str()))
-            .unwrap_or("")
-            .to_string();
+        Ok(serde_json::Value::Object(obj)) => {
+            let text = obj
+                .get("raw")
+                .and_then(|v| v.as_str())
+                .or_else(|| obj.get("email").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            display_from_address(text)
+        }
+        _ => raw.to_string(),
     }
-    raw.to_string()
+}
+
+/// `"Name <email>"` → `Name`; anything else is returned unchanged.
+/// Mirrors the frontend `parseOneAddress` + label choice (`name ?? email`).
+fn display_from_address(text: &str) -> String {
+    if let Some(start) = text.rfind('<')
+        && text.ends_with('>')
+    {
+        let name = text[..start].trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+        return text[start + 1..text.len() - 1].trim().to_string();
+    }
+    text.to_string()
 }
 
 /// Diff the account's newest messages (already newest-first) against the
@@ -106,5 +133,41 @@ pub(crate) fn diff_new_messages(
         fresh,
         new_baseline,
         seeded: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sender_label;
+
+    #[test]
+    fn sender_label_unwraps_raw_object() {
+        // The persist layer stores `from` as `{"raw": "Name <email>"}` for
+        // both IMAP and JMAP — the label must never leak the JSON wrapper.
+        assert_eq!(
+            sender_label(Some(r#"{"raw":"QQ邮箱管理员 <10000@qq.com>"}"#)),
+            "QQ邮箱管理员"
+        );
+        assert_eq!(
+            sender_label(Some(r#"{"raw":"10000@qq.com"}"#)),
+            "10000@qq.com"
+        );
+    }
+
+    #[test]
+    fn sender_label_array_and_bare_forms() {
+        assert_eq!(
+            sender_label(Some(
+                r#"[{"name":"Ada Lovelace","email":"ada@example.com"}]"#
+            )),
+            "Ada Lovelace"
+        );
+        assert_eq!(
+            sender_label(Some(r#"[{"email":"ada@example.com"}]"#)),
+            "ada@example.com"
+        );
+        assert_eq!(sender_label(Some("grace@example.com")), "grace@example.com");
+        assert_eq!(sender_label(Some("")), "");
+        assert_eq!(sender_label(None), "");
     }
 }

@@ -123,6 +123,11 @@ describe('senderLabel', () => {
     expect(senderLabel(msg(''))).toBe('');
     expect(senderLabel(msg(undefined))).toBe('');
   });
+
+  it('unwraps the {"raw": "Name <email>"} object form', () => {
+    expect(senderLabel(msg('{"raw":"QQ邮箱管理员 <10000@qq.com>"}'))).toBe('QQ邮箱管理员');
+    expect(senderLabel(msg('{"raw":"10000@qq.com"}'))).toBe('10000@qq.com');
+  });
 });
 
 describe('isIncomingFolderRole', () => {
