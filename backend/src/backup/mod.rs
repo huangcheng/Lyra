@@ -4,6 +4,7 @@
 // Consumed by export/import (later tasks); remove once wired up.
 #![allow(dead_code)]
 
+pub mod artifacts;
 pub mod crypto;
 pub mod export;
 pub mod format;

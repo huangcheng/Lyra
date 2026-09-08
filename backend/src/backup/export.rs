@@ -29,8 +29,8 @@ use crate::kv::KvStore;
 use crate::storage::DbPool;
 use crate::sync::store;
 
-use super::BackupError;
-use super::format::{MetaLine, write_mbox_message};
+use super::format::{FORMAT_VERSION, Manifest, MetaLine, Sections, write_mbox_message};
+use super::{BackupError, artifacts};
 
 /// Section counts for the manifest plus non-fatal warnings (missing blobs).
 #[derive(Debug, Default)]
@@ -56,6 +56,195 @@ pub(crate) async fn create_staging_dir(data_dir: &Path) -> Result<PathBuf, Backu
         tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).await?;
     }
     Ok(dir)
+}
+
+// ── Top-level run: collect → manifest → zip → age → registry ────────
+
+/// Full export: stage every section, zip, age-encrypt to
+/// `data_dir/backups/<artifact_id>.lyra`, then register the artifact.
+/// Progress and the final report live in kv (`backup:progress:<job_id>` /
+/// `backup:report:<job_id>`). On ANY error the staging dir and temp zip are
+/// removed best-effort and a `{"ok":false,"error":…}` report is written
+/// before the error propagates.
+pub async fn run(
+    state: &AuthState,
+    user_id: &str,
+    job_id: &str,
+    artifact_id: &str,
+    password: &str,
+) -> Result<(), BackupError> {
+    let kv = state.kv();
+    let progress = json!({"phase": "collecting"});
+    let _ = kv
+        .set(
+            &format!("backup:progress:{job_id}"),
+            &progress.to_string(),
+            Some(3600),
+        )
+        .await;
+
+    match run_inner(state, user_id, job_id, artifact_id, password).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let report = json!({"ok": false, "error": err.to_string()});
+            let _ = kv
+                .set(
+                    &format!("backup:report:{job_id}"),
+                    &report.to_string(),
+                    None,
+                )
+                .await;
+            Err(err)
+        }
+    }
+}
+
+/// Staging + cleanup wrapper: the staging dir and the temp zip are removed
+/// in all outcomes (the zip sits next to the staging dir, never inside it).
+async fn run_inner(
+    state: &AuthState,
+    user_id: &str,
+    job_id: &str,
+    artifact_id: &str,
+    password: &str,
+) -> Result<(), BackupError> {
+    let staging = create_staging_dir(&state.data_dir).await?;
+    let zip_path = staging
+        .parent()
+        .ok_or_else(|| BackupError::Internal("staging dir has no parent".into()))?
+        .join(format!("{job_id}.zip"));
+    let outcome = collect_and_archive(
+        state,
+        user_id,
+        job_id,
+        artifact_id,
+        password,
+        &staging,
+        &zip_path,
+    )
+    .await;
+    let _ = tokio::fs::remove_file(&zip_path).await;
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    outcome
+}
+
+async fn collect_and_archive(
+    state: &AuthState,
+    user_id: &str,
+    job_id: &str,
+    artifact_id: &str,
+    password: &str,
+    staging: &Path,
+    zip_path: &Path,
+) -> Result<(), BackupError> {
+    let kv = state.kv();
+    let counts = collect(state, user_id, staging).await?;
+    let messages = collect_mail(state, user_id, job_id, kv, staging, true).await?;
+
+    let created = chrono::Utc::now();
+    let sections = Sections {
+        settings: true,
+        accounts: counts.accounts,
+        messages,
+        contacts: counts.contacts,
+        calendars: counts.calendars,
+        blobs: counts.blobs,
+    };
+    let manifest = Manifest {
+        format: FORMAT_VERSION,
+        app: "lyra".into(),
+        app_version: env!("CARGO_PKG_VERSION").into(),
+        created_at: created.to_rfc3339(),
+        sections,
+    };
+    write_json(
+        staging.join("manifest.json"),
+        &serde_json::to_value(&manifest)?,
+    )
+    .await?;
+
+    // Zip + age are blocking (age reads the whole zip into memory for v1).
+    let artifact = artifacts::artifact_path(&state.data_dir, artifact_id)?;
+    let staging_owned = staging.to_path_buf();
+    let zip_owned = zip_path.to_path_buf();
+    let artifact_owned = artifact.clone();
+    let password_owned = password.to_string();
+    tokio::task::spawn_blocking(move || {
+        zip_dir(&staging_owned, &zip_owned)?;
+        super::crypto::encrypt_file(&zip_owned, &artifact_owned, &password_owned)
+    })
+    .await
+    .map_err(|e| BackupError::Internal(format!("zip/encrypt task failed: {e}")))??;
+    // Artifacts hold decrypted credentials under the age layer only: 0600.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).await?;
+    }
+
+    let size_bytes = tokio::fs::metadata(&artifact).await?.len();
+    artifacts::add(
+        kv,
+        user_id,
+        artifacts::ArtifactMeta {
+            id: artifact_id.to_string(),
+            filename: format!("lyra-backup-{}.lyra", created.format("%Y%m%d-%H%M%S")),
+            size_bytes,
+            created_at: created.to_rfc3339(),
+        },
+    )
+    .await?;
+
+    let report = json!({
+        "ok": true,
+        "artifact_id": artifact_id,
+        "sections": serde_json::to_value(&manifest.sections)?,
+        "warnings": counts.warnings,
+    });
+    kv.set(
+        &format!("backup:report:{job_id}"),
+        &report.to_string(),
+        None,
+    )
+    .await
+    .map_err(|e| BackupError::Internal(e.to_string()))?;
+    Ok(())
+}
+
+/// Zip every file under `src` into `dst`; entry names are paths relative to
+/// `src` joined with forward slashes. Streaming per file; call from
+/// `spawn_blocking`.
+fn zip_dir(src: &Path, dst: &Path) -> Result<(), BackupError> {
+    let file = std::fs::File::create(dst)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut stack = vec![src.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)?
+            .map(|e| e.map(|entry| entry.path()))
+            .collect::<Result<_, _>>()?;
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let rel = path
+                .strip_prefix(src)
+                .map_err(|e| BackupError::Internal(e.to_string()))?;
+            let name = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            zip.start_file(name, options)?;
+            let mut input = std::fs::File::open(&path)?;
+            std::io::copy(&mut input, &mut zip)?;
+        }
+    }
+    zip.finish()?;
+    Ok(())
 }
 
 /// Collect the non-mail sections into `staging`. Returns counts for the manifest.
@@ -1784,5 +1973,151 @@ mod tests {
         unknown_uid.body = Some(b"stray".to_vec());
         let got = collect_fetched_bodies(vec![with_body, no_body, unknown_uid], &pairs);
         assert_eq!(got, vec![("row-b".to_string(), b"raw-eleven".to_vec())]);
+    }
+
+    /// Seed one message whose raw RFC822 bytes are already in the blob store,
+    /// so `run` never attempts a server fetch (none reachable in tests).
+    async fn seed_raw_backed_message(fx: &Fixture) -> String {
+        let pool = sqlite_pool(&fx.db).clone();
+        let folder_id = store::get_folder_id(&fx.db, &fx.account_id, "INBOX")
+            .await
+            .unwrap();
+        store::upsert_message(&fx.db, &fx.account_id, &folder_id, &imap_msg(1))
+            .await
+            .unwrap();
+        let raw = b"From: a@example.com\r\nSubject: archived\r\n\r\nraw bytes\r\n".to_vec();
+        let rel = blobs::store(fx.data_dir.path(), &fx.account_id, &raw)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE message SET raw_blob_path = ? WHERE account_id = ?")
+            .bind(&rel)
+            .bind(&fx.account_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        folder_id
+    }
+
+    #[tokio::test]
+    async fn run_produces_encrypted_artifact_report_and_registry_entry() {
+        use std::io::Read as _;
+        let fx = seed().await;
+        let folder_id = seed_raw_backed_message(&fx).await;
+
+        let job_id = store::new_uuid_text();
+        let artifact_id = store::new_uuid_text();
+        run(
+            &fx.state,
+            &fx.user_id,
+            &job_id,
+            &artifact_id,
+            "test-password-9",
+        )
+        .await
+        .unwrap();
+
+        // Artifact decrypts and holds the manifest + the folder mbox.
+        let artifact =
+            crate::backup::artifacts::artifact_path(fx.data_dir.path(), &artifact_id).unwrap();
+        assert!(artifact.is_file());
+        let zip_path = fx.data_dir.path().join("decrypted.zip");
+        crate::backup::crypto::decrypt_file(&artifact, &zip_path, "test-password-9").unwrap();
+        let file = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut manifest_text = String::new();
+        archive
+            .by_name("manifest.json")
+            .unwrap()
+            .read_to_string(&mut manifest_text)
+            .unwrap();
+        let manifest: Json = serde_json::from_str(&manifest_text).unwrap();
+        assert_eq!(manifest["app"], json!("lyra"));
+        assert_eq!(manifest["format"], json!(FORMAT_VERSION));
+        assert_eq!(manifest["sections"]["messages"], json!(1));
+        assert_eq!(manifest["sections"]["accounts"], json!(1));
+        let mut mbox = String::new();
+        archive
+            .by_name(&format!("mail/0/{folder_id}.mbox"))
+            .unwrap()
+            .read_to_string(&mut mbox)
+            .unwrap();
+        assert!(mbox.contains("Subject: archived"));
+
+        // Registry entry matches the encrypted file on disk.
+        let kv = fx.state.kv();
+        let items = crate::backup::artifacts::list(kv, &fx.user_id)
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, artifact_id);
+        assert!(items[0].filename.starts_with("lyra-backup-"));
+        assert!(
+            std::path::Path::new(&items[0].filename)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("lyra"))
+        );
+        assert_eq!(
+            items[0].size_bytes,
+            std::fs::metadata(&artifact).unwrap().len()
+        );
+
+        // Success report.
+        let report: Json = serde_json::from_str(
+            &kv.get(&format!("backup:report:{job_id}"))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["ok"], json!(true));
+        assert_eq!(report["artifact_id"], json!(artifact_id));
+        assert_eq!(report["sections"]["accounts"], json!(1));
+        assert_eq!(report["warnings"], json!([]));
+
+        // Staging dir and temp zip are gone.
+        let staging_parent = fx.data_dir.path().join("backups/staging");
+        let leftovers: Vec<_> = std::fs::read_dir(&staging_parent).unwrap().collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging must be cleaned: {leftovers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_failure_writes_report_and_cleans_staging() {
+        let fx = seed().await;
+        let job_id = store::new_uuid_text();
+        // A non-UUID artifact id fails at path validation, after staging.
+        let err = run(&fx.state, &fx.user_id, &job_id, "not-a-uuid", "pw")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackupError::Internal(_)), "{err:?}");
+
+        let kv = fx.state.kv();
+        let report: Json = serde_json::from_str(
+            &kv.get(&format!("backup:report:{job_id}"))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["ok"], json!(false));
+        assert!(
+            report["error"].as_str().unwrap().contains("artifact id"),
+            "{report}"
+        );
+        // No registry entry, staging cleaned.
+        assert!(
+            crate::backup::artifacts::list(kv, &fx.user_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let staging_parent = fx.data_dir.path().join("backups/staging");
+        let leftovers: Vec<_> = std::fs::read_dir(&staging_parent).unwrap().collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging must be cleaned: {leftovers:?}"
+        );
     }
 }
