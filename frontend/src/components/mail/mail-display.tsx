@@ -18,6 +18,7 @@ import {
   FolderInput,
   Forward,
   Copy,
+  CalendarPlus,
   Inbox,
   ShieldQuestion,
   MailOpen,
@@ -55,6 +56,7 @@ import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import { baseSubject, conversationMembers, groupIntoConversations } from '@/lib/conversation';
 import { messageActionUrl } from '@/lib/conversation-actions';
 import { suggestAiSpam } from '@/lib/ai-api';
+import { AiEventDialog } from '@/components/mail/ai-event-dialog';
 import { useAiSettings } from '@/lib/use-ai-settings';
 import { suggestLabel, verdictTone, type SpamSuggestion } from '@/lib/spam-assist';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
@@ -293,6 +295,7 @@ export function MailDisplay() {
 
   const aiSettings = useAiSettings();
   const [aiVerdict, setAiVerdict] = useState<SpamSuggestion | null>(null);
+  const [eventDialogFor, setEventDialogFor] = useState<string | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
 
   /** Suggest-mode spam check: verdict only — filing stays a user action. */
@@ -518,6 +521,24 @@ export function MailDisplay() {
                     </TooltipTrigger>
                     <TooltipContent>{t(locale, 'mail.archive')}</TooltipContent>
                   </Tooltip>
+                  {aiSettings?.enabled && aiSettings.features.calendar ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={toolbarIconClass}
+                          disabled={disabled}
+                          title={t(locale, 'aiEvent.open')}
+                          onClick={() => mail && setEventDialogFor(mail.id)}
+                        >
+                          <CalendarPlus className="h-4 w-4" aria-hidden />
+                          <span className="sr-only">{t(locale, 'aiEvent.open')}</span>
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{t(locale, 'aiEvent.open')}</TooltipContent>
+                    </Tooltip>
+                  ) : null}
                   {aiSettings?.enabled && aiSettings.spamMode === 'suggest' ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -895,6 +916,13 @@ export function MailDisplay() {
         <div className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">
           {actionError}
         </div>
+      ) : null}
+      {eventDialogFor ? (
+        <AiEventDialog
+          messageId={eventDialogFor}
+          locale={locale}
+          onClose={() => setEventDialogFor(null)}
+        />
       ) : null}
       {mail ? (
         <div className="flex min-h-0 flex-1 flex-col">

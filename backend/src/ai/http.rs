@@ -234,6 +234,20 @@ struct AiChatRequest {
     message_id: Option<String>,
 }
 
+async fn post_calendar_suggest(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<crate::ai::calendar::EventSuggestion>, crate::ai::AiError> {
+    let Some(message_id) = body.get("messageId").and_then(|v| v.as_str()) else {
+        return Err(crate::ai::AiError::InvalidInput(
+            "messageId required".into(),
+        ));
+    };
+    let suggestion = crate::ai::calendar::suggest_event(&state, &user_id, message_id).await?;
+    Ok(Json(suggestion))
+}
+
 async fn post_chat(
     State(state): State<AuthState>,
     AuthUser(user_id): AuthUser,
@@ -264,6 +278,7 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/v1/settings/ai/test", post(test_ai))
         .route("/api/v1/ai/draft", post(post_draft))
         .route("/api/v1/ai/spam/suggest", post(post_spam_suggest))
+        .route("/api/v1/ai/calendar/suggest", post(post_calendar_suggest))
         .route(
             "/api/v1/ai/chat",
             get(get_chat).post(post_chat).delete(delete_chat),

@@ -53,6 +53,8 @@ pub struct AiFeatures {
     /// P3-lite: the assistant chat panel (bubble button → dialog), with the
     /// mail-search tool.
     pub assistant: bool,
+    /// P5: calendar-from-email suggestions (confirm-first).
+    pub calendar: bool,
 }
 
 /// The loaded settings row (api key stays the encrypted blob here; only

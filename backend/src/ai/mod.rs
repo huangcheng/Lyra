@@ -7,6 +7,7 @@
 //! no background LLM calls. Roadmap: `docs/product/2026-08-21-lyra-ai-assist-roadmap.md`,
 //! spec: `docs/specs/2026-09-08-lyra-ai-byok-spec.md`.
 
+pub mod calendar;
 pub mod chat;
 pub mod client;
 pub mod http;

@@ -1862,6 +1862,53 @@ paths:
                     type: string
         "403":
           description: Suggest mode not active (`ai_feature_disabled`)
+  /api/v1/ai/calendar/suggest:
+    post:
+      tags: [ai]
+      summary: Propose a calendar event detected in one message (confirm-first)
+      description: >
+        Suggest-only: the reply matches the create-event request shape; the
+        user edits and confirms in a dialog, creation goes through
+        POST /calendars/{id}/events (CalDAV). The LLM never writes calendars.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messageId]
+              properties:
+                messageId:
+                  type: string
+      responses:
+        "200":
+          description: Proposed event (RFC3339 timed or YYYY-MM-DD all-day)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  summary:
+                    type: string
+                  dtstart:
+                    type: string
+                  dtend:
+                    type: string
+                    nullable: true
+                  isAllDay:
+                    type: boolean
+                  location:
+                    type: string
+                    nullable: true
+                  description:
+                    type: string
+                    nullable: true
+        "400":
+          description: No schedulable event found
+        "403":
+          description: Calendar feature disabled (`ai_feature_disabled`)
   /api/v1/settings/spam:
     get:
       tags: [settings]
@@ -2783,6 +2830,9 @@ components:
             assistant:
               type: boolean
               description: Assistant chat bubble with the mail-search tool
+            calendar:
+              type: boolean
+              description: Calendar-from-email suggestions (confirm-first)
         spamMode:
           type: string
           enum: [off, suggest, auto]
@@ -2808,6 +2858,8 @@ components:
             draftReply:
               type: boolean
             assistant:
+              type: boolean
+            calendar:
               type: boolean
         spamMode:
           type: string

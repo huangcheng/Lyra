@@ -8,7 +8,7 @@ const base = {
   baseUrl: 'https://x/v1',
   model: 'qwen3-max',
   hasKey: true,
-  features: { draftReply: false, assistant: true },
+  features: { draftReply: false, assistant: true, calendar: false },
   spamMode: 'off' as const,
 };
 

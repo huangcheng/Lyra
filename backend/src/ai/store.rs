@@ -172,6 +172,7 @@ mod tests {
             AiFeatures {
                 draft_reply: true,
                 assistant: true,
+                calendar: true,
             },
             crate::ai::spam_assist::SpamMode::Suggest,
         );

@@ -572,6 +572,9 @@
       "spamMode_off": "Off",
       "spamMode_suggest": "Suggest",
       "spamMode_auto": "Auto → Spam",
+      "calendar": "Calendar from email",
+      "calendarDesc": "Propose calendar events detected in messages; you confirm before creation.",
+      "spamMode_auto": "Auto → Spam",
       "assistantDesc": "A chat bubble that can search your mail and discuss the open message."
     },
     "backup": {
@@ -790,5 +793,19 @@
     "summarize": "Summarize",
     "context": "Reading",
     "emptyHint": "Ask anything — e.g. find last month's invoice, or summarize the open email."
+  },
+  "aiEvent": {
+    "title": "Create event from email",
+    "detecting": "Detecting schedule…",
+    "summary": "Title",
+    "start": "Start",
+    "end": "End",
+    "allDay": "All day",
+    "location": "Location",
+    "calendar": "Calendar",
+    "noCalendar": "No writable calendar",
+    "create": "Create event",
+    "created": "Event created",
+    "open": "Create event from email"
   }
 }

@@ -11,6 +11,8 @@ export interface AiFeatures {
   draftReply: boolean;
   /** P3-lite: assistant chat bubble with the mail-search tool. */
   assistant: boolean;
+  /** P5: calendar-from-email suggestions (confirm-first). */
+  calendar: boolean;
 }
 
 export interface AiChatMessage {
@@ -68,6 +70,23 @@ export async function sendAiChat(message: string, messageId?: string): Promise<s
     body: JSON.stringify({ message, messageId }),
   });
   return res.reply;
+}
+
+/** Proposed calendar event from one message (confirm-first). */
+export interface AiEventSuggestion {
+  summary: string;
+  dtstart: string;
+  dtend?: string | null;
+  isAllDay: boolean;
+  location?: string | null;
+  description?: string | null;
+}
+
+export async function suggestAiEvent(messageId: string): Promise<AiEventSuggestion> {
+  return api<AiEventSuggestion>('/ai/calendar/suggest', {
+    method: 'POST',
+    body: JSON.stringify({ messageId }),
+  });
 }
 
 /** Suggest-mode verdict for one message (never files anything). */
