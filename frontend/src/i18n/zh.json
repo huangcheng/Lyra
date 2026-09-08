@@ -562,6 +562,10 @@
       "features": "功能",
       "draftReply": "辅助撰写回复/转发",
       "draftReplyDesc": "在写信界面添加 AI 按钮，生成建议文本。始终由你编辑并发送。",
+      "privacy": "While a feature is on, Lyra sends the minimum needed message content to the endpoint configured above.",
+      "privacy": "功能开启期间，Lyra 只会把所需的最少邮件内容发送到上方配置的服务。",
+      "assistant": "助手对话",
+      "assistantDesc": "聊天气泡：可搜索邮件、讨论当前打开的邮件。",
       "privacy": "功能开启期间，Lyra 只会把所需的最少邮件内容发送到上方配置的服务。"
     },
     "backup": {
@@ -771,5 +775,14 @@
     "open": "打开选中的邮件",
     "back": "返回列表",
     "help": "本帮助"
+  },
+  "assistant": {
+    "title": "AI 助手",
+    "placeholder": "问问你的邮件……",
+    "send": "发送",
+    "clear": "清空对话",
+    "summarize": "总结",
+    "context": "正在读",
+    "emptyHint": "随便问 —— 比如「找上个月的发票」或「总结这封邮件」。"
   }
 }

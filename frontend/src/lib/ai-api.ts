@@ -9,6 +9,14 @@ export type AiDialect = 'openai_chat' | 'openai_responses' | 'anthropic';
 
 export interface AiFeatures {
   draftReply: boolean;
+  /** P3-lite: assistant chat bubble with the mail-search tool. */
+  assistant: boolean;
+}
+
+export interface AiChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: string;
 }
 
 export interface AiSettings {
@@ -44,6 +52,22 @@ export async function testAiConnection(): Promise<{ ok: boolean; reply: string; 
   return api<{ ok: boolean; reply: string; model: string }>('/settings/ai/test', {
     method: 'POST',
   });
+}
+
+export async function fetchAiChat(): Promise<AiChatMessage[]> {
+  return api<AiChatMessage[]>('/ai/chat');
+}
+
+export async function sendAiChat(message: string, messageId?: string): Promise<string> {
+  const res = await api<{ reply: string }>('/ai/chat', {
+    method: 'POST',
+    body: JSON.stringify({ message, messageId }),
+  });
+  return res.reply;
+}
+
+export async function clearAiChat(): Promise<void> {
+  await api('/ai/chat', { method: 'DELETE' });
 }
 
 /** Suggest reply/forward text for one message (user always edits and sends). */

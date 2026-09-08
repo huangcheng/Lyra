@@ -50,6 +50,9 @@ impl AiDialect {
 pub struct AiFeatures {
     /// P2: compose reply/forward suggestion.
     pub draft_reply: bool,
+    /// P3-lite: the assistant chat panel (bubble button → dialog), with the
+    /// mail-search tool.
+    pub assistant: bool,
 }
 
 /// The loaded settings row (api key stays the encrypted blob here; only

@@ -159,7 +159,10 @@ mod tests {
             "https://api.anthropic.com".into(),
             "claude-sonnet-4-5".into(),
             r#"{"ciphertext":"abc","nonce":"n"}"#.into(),
-            AiFeatures { draft_reply: true },
+            AiFeatures {
+                draft_reply: true,
+                assistant: true,
+            },
         );
         save_settings(&db, "u1", &on).await.unwrap();
         assert_eq!(load_settings(&db, "u1").await.unwrap(), on);

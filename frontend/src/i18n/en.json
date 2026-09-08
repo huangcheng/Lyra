@@ -562,7 +562,9 @@
       "features": "Features",
       "draftReply": "Assist replies and forwards",
       "draftReplyDesc": "Add an AI button in compose that drafts suggested text. You always edit and send.",
-      "privacy": "While a feature is on, Lyra sends the minimum needed message content to the endpoint configured above."
+      "privacy": "While a feature is on, Lyra sends the minimum needed message content to the endpoint configured above.",
+      "assistant": "Assistant chat",
+      "assistantDesc": "A chat bubble that can search your mail and discuss the open message."
     },
     "backup": {
       "title": "Backup",
@@ -771,5 +773,14 @@
     "open": "Open selected message",
     "back": "Back to list",
     "help": "This help"
+  },
+  "assistant": {
+    "title": "AI Assistant",
+    "placeholder": "Ask about your mail…",
+    "send": "Send",
+    "clear": "Clear conversation",
+    "summarize": "Summarize",
+    "context": "Reading",
+    "emptyHint": "Ask anything — e.g. find last month's invoice, or summarize the open email."
   }
 }

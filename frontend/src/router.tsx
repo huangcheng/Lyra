@@ -26,6 +26,7 @@ import { useEventNotifications } from '@/lib/use-event-notifications';
 import { useGlobalShortcuts } from '@/lib/use-global-shortcuts';
 import { CommandPaletteRoot } from '@/components/command-palette';
 import { ShortcutHelp } from '@/components/shortcut-help';
+import { AssistantWidget } from '@/components/assistant-widget';
 
 // ── Routes ─────────────────────────────────────────────────────
 
@@ -44,6 +45,7 @@ function RootLayout() {
       <ConfirmDialogHost />
       <CommandPaletteRoot />
       <ShortcutHelp />
+      <AssistantWidget />
     </div>
   );
 }

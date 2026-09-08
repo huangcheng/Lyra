@@ -12,6 +12,10 @@ use thiserror::Error;
 use crate::db_row::id_param;
 use crate::storage::DbPool;
 
+/// LIKE escape char for the CJK fallback paths (kept a constant so the
+/// SQL literal and the Rust-side escaping can never drift apart).
+const LIKE_ESCAPE: char = '\\';
+
 /// One ranked search hit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
@@ -191,11 +195,21 @@ pub async fn search_message_ids(
     let folder = opt_id_value(db, folder_id)?;
     let limit = limit.clamp(1, 500);
 
+    // unicode61/simple tokenizers index whole CJK runs as single tokens, so
+    // FTS never matches Chinese substrings (e.g. 发票 inside a longer run).
+    // Non-ASCII queries fall back to LIKE semantics on either backend.
+    let cjk_query = !query.is_ascii();
     let hits = match db.backend() {
+        DbBackend::Sqlite if cjk_query => {
+            sqlite_like_search_message_ids(db, query, &user, &account, &folder, limit).await?
+        }
         DbBackend::Sqlite => {
             sqlite_search_message_ids(db, query, &user, &account, &folder, limit).await?
         }
         #[cfg(feature = "postgres")]
+        DbBackend::Postgres if cjk_query => {
+            postgres_like_search_message_ids(db, query, &user, &account, &folder, limit).await?
+        }
         DbBackend::Postgres => {
             postgres_search_message_ids(db, query, &user, &account, &folder, limit).await?
         }
@@ -249,6 +263,143 @@ async fn sqlite_search_message_ids(
     );
     let rows = db.orm().query_all_raw(stmt).await.map_err(orm_err)?;
     rows.iter().map(hit_from_row).collect()
+}
+
+/// LIKE-based search for non-ASCII (CJK) queries: every whitespace token
+/// must appear in some searched column. Slower than FTS, correct for
+/// substring languages; the result cap keeps it bounded.
+#[allow(clippy::ref_option)]
+async fn sqlite_like_search_message_ids(
+    db: &DbPool,
+    query: &str,
+    user: &Value,
+    account: &Option<Value>,
+    folder: &Option<Value>,
+    limit: i64,
+) -> Result<Vec<SearchHit>, SearchError> {
+    const COLUMNS: [&str; 4] = ["m.subject", "m.snippet", "m.body_text", "m.from_address"];
+    let tokens: Vec<&str> = query.split_whitespace().filter(|t| !t.is_empty()).collect();
+    if tokens.is_empty() {
+        return Err(SearchError::InvalidQuery);
+    }
+    // One `(col LIKE ? OR …)` group per token, ANDed across tokens.
+    let mut conditions = Vec::new();
+    for _token in &tokens {
+        let per_col = COLUMNS
+            .iter()
+            .map(|c| format!("{c} LIKE ? ESCAPE '{LIKE_ESCAPE}'"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        conditions.push(format!("({per_col})"));
+    }
+    let sql = format!(
+        r"
+        SELECT m.id AS message_id
+        FROM message m
+        JOIN mail_account a ON m.account_id = a.id
+        WHERE a.user_id = ?
+          AND m.is_deleted = 0
+          AND (? IS NULL OR m.account_id = ?)
+          AND (? IS NULL OR m.folder_id = ?)
+          AND {}
+        ORDER BY m.date DESC
+        LIMIT ?
+        ",
+        conditions.join(" AND ")
+    );
+    let mut binds: Vec<Value> = vec![
+        user.clone(),
+        value_or_null(account.as_ref()),
+        value_or_null(account.as_ref()),
+        value_or_null(folder.as_ref()),
+        value_or_null(folder.as_ref()),
+    ];
+    for token in &tokens {
+        let escaped = token
+            .replace(LIKE_ESCAPE, "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
+        for _ in COLUMNS {
+            binds.push(Value::from(pattern.clone()));
+        }
+    }
+    binds.push(Value::from(limit));
+    let stmt = Statement::from_sql_and_values(DbBackend::Sqlite, sql.as_str(), binds);
+    let rows = db.orm().query_all_raw(stmt).await.map_err(orm_err)?;
+    Ok(rows
+        .iter()
+        .map(|row| SearchHit {
+            message_id: row.try_get::<String>("", "message_id").unwrap_or_default(),
+            rank: 0.0,
+        })
+        .collect())
+}
+
+/// LIKE variant for CJK on PostgreSQL (`simple` tsvector has the same
+/// whole-run tokenization problem; ILIKE restores substring semantics).
+#[cfg(feature = "postgres")]
+#[allow(clippy::ref_option)]
+async fn postgres_like_search_message_ids(
+    db: &DbPool,
+    query: &str,
+    user: &Value,
+    account: &Option<Value>,
+    folder: &Option<Value>,
+    limit: i64,
+) -> Result<Vec<SearchHit>, SearchError> {
+    const COLUMNS: [&str; 4] = ["m.subject", "m.snippet", "m.body_text", "m.from_address"];
+    let tokens: Vec<&str> = query.split_whitespace().filter(|t| !t.is_empty()).collect();
+    if tokens.is_empty() {
+        return Err(SearchError::InvalidQuery);
+    }
+    let mut conditions = Vec::new();
+    for _token in &tokens {
+        let per_col = COLUMNS
+            .iter()
+            .map(|c| format!("{c} ILIKE ?"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        conditions.push(format!("({per_col})"));
+    }
+    let sql = format!(
+        r"
+        SELECT m.id AS message_id
+        FROM message m
+        JOIN mail_account a ON m.account_id = a.id
+        WHERE a.user_id = ?
+          AND m.is_deleted = FALSE
+          AND (? IS NULL OR m.account_id = ?)
+          AND (? IS NULL OR m.folder_id = ?)
+          AND {}
+        ORDER BY m.date DESC
+        LIMIT ?
+        ",
+        conditions.join(" AND ")
+    );
+    let mut binds: Vec<Value> = vec![
+        user.clone(),
+        value_or_null(account.as_ref()),
+        value_or_null(account.as_ref()),
+        value_or_null(folder.as_ref()),
+        value_or_null(folder.as_ref()),
+    ];
+    for token in &tokens {
+        let pattern = format!("%{token}%");
+        for _ in COLUMNS {
+            binds.push(Value::from(pattern.clone()));
+        }
+    }
+    binds.push(Value::from(limit));
+    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql.as_str(), binds);
+    let rows = db.orm().query_all_raw(stmt).await.map_err(orm_err)?;
+    Ok(rows
+        .iter()
+        .map(|row| SearchHit {
+            message_id: row.try_get::<String>("", "message_id").unwrap_or_default(),
+            rank: 0.0,
+        })
+        .collect())
 }
 
 #[cfg(feature = "postgres")]
@@ -757,6 +908,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ids.len(), 1);
+    }
+
+    /// unicode61 indexes whole CJK runs as single tokens, so FTS never
+    /// matches Chinese *substrings*. Non-ASCII queries must fall back to
+    /// LIKE semantics (regression: assistant search found nothing for 发票).
+    #[tokio::test]
+    async fn sqlite_cjk_substring_finds_message() {
+        let db = test_db().await;
+        let user_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let account_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        let folder_id = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).to_string();
+        seed_message(
+            &db,
+            &user_id,
+            &account_id,
+            &folder_id,
+            "六月光纤施工发票",
+            "六月份光纤施工发票,金额38,000元,请于7月15日前支付。",
+            r#"{"email":"billing@corp.example.com"}"#,
+        )
+        .await;
+
+        // Two-character substring of a longer run.
+        let ids = search_message_ids(&db, &user_id, "发票", None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 1, "two-char CJK substring must match");
+
+        // Multi-token CJK query (AND semantics).
+        let ids = search_message_ids(&db, &user_id, "光纤 施工", None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 1, "multi-token CJK query must match");
+
+        // ASCII queries still go through FTS.
+        let ids = search_message_ids(&db, &user_id, "quarterly", None, None, 10)
+            .await
+            .unwrap();
+        assert!(ids.is_empty(), "ascii query stays on the FTS path");
     }
 }
 

@@ -40,7 +40,7 @@ export function AiSettingsCard({ locale }: { locale: SupportedLocale }) {
           baseUrl: '',
           model: '',
           hasKey: false,
-          features: { draftReply: false },
+          features: { draftReply: false, assistant: false },
         });
         setError(e instanceof Error ? e.message : String(e));
       });

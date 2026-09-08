@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('@/lib/api-client', () => ({ api: vi.fn().mockResolvedValue({}) }));
 
 import { api } from '@/lib/api-client';
-import { requestAiDraft, saveAiSettings } from '@/lib/ai-api';
+import { clearAiChat, requestAiDraft, saveAiSettings, sendAiChat } from '@/lib/ai-api';
 
 const mockedApi = vi.mocked(api);
 
@@ -40,5 +40,23 @@ describe('requestAiDraft', () => {
         body: JSON.stringify({ messageId: 'm-1', mode: 'forward', instruction: undefined }),
       }),
     );
+  });
+});
+
+describe('chat methods', () => {
+  it('posts the message with optional context id', async () => {
+    await sendAiChat('find my invoice', 'm-9');
+    expect(mockedApi).toHaveBeenLastCalledWith(
+      '/ai/chat',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ message: 'find my invoice', messageId: 'm-9' }),
+      }),
+    );
+  });
+
+  it('clears via DELETE', async () => {
+    await clearAiChat();
+    expect(mockedApi).toHaveBeenLastCalledWith('/ai/chat', { method: 'DELETE' });
   });
 });

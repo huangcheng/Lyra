@@ -192,9 +192,54 @@ async fn post_draft(
     Ok(Json(serde_json::json!({ "text": text })))
 }
 
+async fn get_chat(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<Vec<crate::ai::chat::ChatHistoryEntry>>, crate::ai::AiError> {
+    Ok(Json(
+        crate::ai::chat::load_history(state.db(), &user_id).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiChatRequest {
+    message: String,
+    /// Open message the panel attached as context (optional).
+    message_id: Option<String>,
+}
+
+async fn post_chat(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<AiChatRequest>,
+) -> Result<Json<serde_json::Value>, crate::ai::AiError> {
+    let message = body.message.trim().to_string();
+    if message.is_empty() || message.chars().count() > 8000 {
+        return Err(crate::ai::AiError::InvalidInput(
+            "message must be 1-8000 characters".into(),
+        ));
+    }
+    let reply =
+        crate::ai::chat::chat(&state, &user_id, &message, body.message_id.as_deref()).await?;
+    Ok(Json(serde_json::json!({ "reply": reply })))
+}
+
+async fn delete_chat(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<serde_json::Value>, crate::ai::AiError> {
+    crate::ai::chat::clear(state.db(), &user_id).await?;
+    Ok(Json(serde_json::json!({ "cleared": true })))
+}
+
 pub fn routes() -> Router<AuthState> {
     Router::new()
         .route("/api/v1/settings/ai", get(get_ai).put(put_ai))
         .route("/api/v1/settings/ai/test", post(test_ai))
         .route("/api/v1/ai/draft", post(post_draft))
+        .route(
+            "/api/v1/ai/chat",
+            get(get_chat).post(post_chat).delete(delete_chat),
+        )
 }

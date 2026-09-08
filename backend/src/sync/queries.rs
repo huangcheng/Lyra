@@ -559,6 +559,62 @@ pub(super) async fn search_like_fallback(
 
 /// Fetch FTS hits (in rank order), mapping each to a response the requesting
 /// user owns and that is not soft-deleted.
+/// Compact search hit for the AI assistant's `search_mail` tool — enough
+/// for the model to answer, without body payloads.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct AiMailHit {
+    pub(crate) id: String,
+    pub(crate) subject: Option<String>,
+    /// Parsed sender address (`{"raw": …}` → `a@b.com`).
+    pub(crate) from: Option<String>,
+    pub(crate) date: Option<String>,
+    pub(crate) snippet: Option<String>,
+    /// Folder role (`inbox`, `spam`, …; null for custom folders).
+    pub(crate) folder_role: Option<String>,
+    pub(crate) is_read: bool,
+}
+
+/// The assistant's mail search: same FTS/LIKE branch as
+/// `GET /messages/search`, projected to compact hits.
+pub(crate) async fn ai_search_mail(
+    db: &DbPool,
+    user_id: &str,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<AiMailHit>, SyncError> {
+    let user_value = id_value(db, user_id)?;
+    let messages = if crate::search::fts_available(db).await? {
+        let ids = crate::search::search_message_ids(db, user_id, query, None, None, limit)
+            .await
+            .map_err(|e| match e {
+                crate::search::SearchError::InvalidQuery
+                | crate::search::SearchError::InvalidId(_) => {
+                    SyncError::InvalidInput("invalid search query".into())
+                }
+                crate::search::SearchError::Database(err) => SyncError::Database(err),
+            })?;
+        if ids.is_empty() {
+            Vec::new()
+        } else {
+            fetch_messages_by_ids(db, &ids, user_id).await?
+        }
+    } else {
+        search_like_fallback(db, query, user_value, None, None, limit).await?
+    };
+    Ok(messages
+        .into_iter()
+        .map(|m| AiMailHit {
+            id: m.id,
+            subject: m.subject,
+            from: crate::spam::from_json_email(m.from_address.as_deref()),
+            date: m.date,
+            snippet: m.snippet,
+            folder_role: m.folder_role,
+            is_read: m.is_read,
+        })
+        .collect())
+}
+
 pub(super) async fn fetch_messages_by_ids(
     db: &DbPool,
     ids: &[String],
