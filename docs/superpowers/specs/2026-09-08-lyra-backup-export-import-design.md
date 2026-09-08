@@ -74,33 +74,45 @@ Format version gates import: unknown major `format` → hard error.
   internal date, Message-ID, and the SHA-256 of the raw bytes (import
   verifies integrity per message; mismatch → skip + report, never abort).
 
-## 4. Raw RFC822 storage (sync change)
+## 4. Raw RFC822 storage
 
 **Today Lyra does not keep raw messages** (parsed `body_html`/`body_text` +
-attachment blobs only), so a true backup requires a sync change:
+attachment blobs only; IMAP sync fetches `HEADER.FIELDS` metadata only,
+JMAP sync fetches parsed body values — raw bytes exist only transiently at
+view/DKIM time). Backup therefore works like this:
 
-- IMAP body fetch (`BODY.PEEK[]`) and JMAP blob download already produce the
-  raw bytes; persist them via the existing content-addressed blob store
-  (`blobs::store`) and record the path in a new `message.raw_blob_path`
-  column (dual-DB + MySQL migrations).
-- Export resolution order per message: **stored raw blob** → **lazy fetch
-  from the source server** (reachable accounts, fills the blob for next
-  time) → **reconstruct** from parsed parts (marked `reconstructed: true`
-  in the sidecar and counted in the report).
+- A new `message.raw_blob_path` column (SQLite + PostgreSQL + MySQL
+  migrations) records a content-addressed blob (`blobs::store`) holding the
+  raw RFC822 bytes.
+- Raw is persisted **whenever it is already fetched**: the lazy body-fill
+  path and the DKIM path store the bytes they downloaded instead of
+  dropping them. The sync loop's fetch profile is unchanged (no bulk body
+  fetch during sync).
+- Export resolution order per message: **stored raw blob** → **fetch from
+  the source server at export time** (batch per folder for reachable
+  accounts; also fills `raw_blob_path` for next time) → **reconstruct**
+  from parsed parts (marked `reconstructed: true` in the sidecar and
+  counted in the report). A dead/decommissioned account still exports its
+  parsed content instead of vanishing silently.
 
 ## 5. Export flow
 
 `POST /api/v1/backup/export {password}` enqueues a `backup_export` job
-(existing `jobs.rs` worker pool; new `JobPayload` variant):
+(existing `jobs.rs` worker pool; new `JobPayload` variant). The password
+travels in the job payload **encrypted with the user's DEK** (the jobs
+table never holds it in plaintext):
 
 1. Snapshot reads per table (accounts, folders, messages, attachments,
    contacts, calendars, user ui_state).
-2. Decrypt account credentials in memory only (existing master-key KEK
-   helpers); write them into `accounts/<n>.json` — protected by the
-   archive-level age layer, never logged.
+2. Decrypt account credentials in memory only (existing user-DEK helpers);
+   write them into `accounts/<n>.json` — protected by the archive-level
+   age layer, never logged.
 3. Stream zip into `data/backups/staging/<job>.zip`, then age-encrypt to
    `data/backups/<id>.lyra`, then delete the staging zip.
-4. Job record carries progress (bytes/messages done) and the artifact id.
+4. Progress and the final report live in kv (`backup:progress:<job_id>` /
+   `backup:report:<job_id>`) — the jobs table has no result columns; the
+   artifact registry is kv `backup:artifacts:<user_id>` (JSON list of
+   `{id, filename, size, created_at}`).
 
 `GET /api/v1/backup/jobs/<id>` → status/progress.
 `GET /api/v1/backup/artifacts` → list; `GET …/artifacts/<id>/download` →
