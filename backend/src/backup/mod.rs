@@ -8,6 +8,9 @@ pub mod artifacts;
 pub mod crypto;
 pub mod export;
 pub mod format;
+mod http;
+
+pub(crate) use http::routes;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {

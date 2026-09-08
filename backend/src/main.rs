@@ -179,6 +179,7 @@ fn api_router(auth_state: auth::AuthState) -> Router {
         .merge(oauth::routes())
         .merge(auth::routes())
         .merge(push::routes())
+        .merge(backup::routes())
         .layer(body_limit)
         .with_state(auth_state)
 }

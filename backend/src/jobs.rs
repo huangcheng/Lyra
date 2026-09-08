@@ -192,6 +192,40 @@ pub async fn enqueue(
     Ok(id)
 }
 
+/// Read view of one job row for the backup job-status endpoint. The payload
+/// is deserialized only for the caller-ownership check; malformed JSON
+/// yields `None` (the row then never matches a backup variant, so the
+/// endpoint answers 404 rather than leaking the row).
+pub(crate) struct JobStatus {
+    pub status: String,
+    #[allow(dead_code)]
+    pub last_error: Option<String>,
+    pub payload: Option<JobPayload>,
+}
+
+/// Look up one job's status by id. Columns are selected individually (like
+/// the other job paths) so TEXT stamps never decode through the entity model.
+pub(crate) async fn job_status(
+    db: &DbPool,
+    job_id: &str,
+) -> Result<Option<JobStatus>, sqlx::Error> {
+    let row = jobs::Entity::find()
+        .filter(jobs::Column::Id.eq(job_id))
+        .select_only()
+        .column(jobs::Column::Status)
+        .column(jobs::Column::LastError)
+        .column(jobs::Column::Payload)
+        .into_tuple::<(String, Option<String>, String)>()
+        .one(&db.orm())
+        .await
+        .map_err(orm_err)?;
+    Ok(row.map(|(status, last_error, payload_json)| JobStatus {
+        status,
+        last_error,
+        payload: serde_json::from_str(&payload_json).ok(),
+    }))
+}
+
 /// SQL for [`claim_due`] per engine. The updated stamp is bound (not a
 /// literal) because the column is TEXT on both engines; only placeholders
 /// differ.
@@ -978,6 +1012,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "running");
+    }
+
+    #[tokio::test]
+    async fn job_status_reads_row_and_parses_payload() {
+        let db = test_pool().await;
+        let now = "2026-08-22T00:00:00+00:00";
+        let payload = JobPayload::ExportBackup {
+            user_id: "user-1".into(),
+            artifact_id: "art-1".into(),
+            password_wrapped: "{}".into(),
+        };
+
+        let job_id = enqueue(&db, &payload, now).await.unwrap();
+        let status = job_status(&db, &job_id).await.unwrap().expect("row exists");
+        assert_eq!(status.status, "pending");
+        assert_eq!(status.last_error, None);
+        assert!(matches!(
+            status.payload,
+            Some(JobPayload::ExportBackup { ref user_id, .. }) if user_id == "user-1"
+        ));
+
+        assert!(job_status(&db, "no-such-job").await.unwrap().is_none());
     }
 
     #[tokio::test]
