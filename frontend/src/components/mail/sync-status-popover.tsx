@@ -97,7 +97,10 @@ export function SyncStatusPopover() {
                 </div>
               </div>
               {status?.state === 'syncing' ? (
-                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+                // Same 28px box as the idle sync button so both states align.
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                </span>
               ) : (
                 <Button
                   variant="ghost"
