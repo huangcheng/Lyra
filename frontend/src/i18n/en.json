@@ -567,6 +567,7 @@
     "backup": {
       "title": "Backup",
       "subtitle": "Export an encrypted archive of this instance, or merge one back in",
+      "pollFailed": "Lost contact with the backup job — it may still be running on the server.",
       "export": {
         "title": "Create backup",
         "hint": "Bundle the whole instance into an encrypted .lyra archive. The password encrypts it — there is no recovery if you lose it.",

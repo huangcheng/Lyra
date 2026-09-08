@@ -14,6 +14,7 @@ import {
   backupJobStatus,
   deleteArtifact,
   downloadArtifact,
+  isExportReport,
   isImportReport,
   listArtifacts,
   startExport,
@@ -30,7 +31,12 @@ const inputClass =
 
 const POLL_MS = 2000;
 
+/** Consecutive status-read failures before a flow settles with an error. */
+const MAX_POLL_FAILURES = 5;
+
 const MERGE_SECTIONS = ['accounts', 'folders', 'messages', 'contacts', 'calendars'] as const;
+
+type PollTimer = { current: ReturnType<typeof setInterval> | null };
 
 export function BackupSettings({ locale }: { locale: SupportedLocale }) {
   const [artifacts, setArtifacts] = useState<BackupArtifact[] | null>(null);
@@ -44,6 +50,8 @@ export function BackupSettings({ locale }: { locale: SupportedLocale }) {
   const [exportPhase, setExportPhase] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportDone, setExportDone] = useState(false);
+  /** The artifact a finished export produced — drives the direct download. */
+  const [exportArtifact, setExportArtifact] = useState<BackupArtifact | null>(null);
 
   const [importFile, setImportFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
@@ -54,20 +62,27 @@ export function BackupSettings({ locale }: { locale: SupportedLocale }) {
   const [importError, setImportError] = useState<string | null>(null);
   const [importReport, setImportReport] = useState<ImportMergeReport | null>(null);
 
-  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Export and import poll independently — a shared timer would let one
+  // flow cancel the other's poll and strand its busy flag.
+  const exportPollTimer: PollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const importPollTimer: PollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(
     () => () => {
-      if (pollTimer.current) clearInterval(pollTimer.current);
+      if (exportPollTimer.current) clearInterval(exportPollTimer.current);
+      if (importPollTimer.current) clearInterval(importPollTimer.current);
     },
     [],
   );
 
-  const refreshArtifacts = async () => {
+  const refreshArtifacts = async (): Promise<BackupArtifact[] | null> => {
     try {
-      setArtifacts(await listArtifacts());
+      const items = await listArtifacts();
+      setArtifacts(items);
       setListError(null);
+      return items;
     } catch (e) {
       setListError(e instanceof Error ? e.message : String(e));
+      return null;
     }
   };
 
@@ -80,28 +95,39 @@ export function BackupSettings({ locale }: { locale: SupportedLocale }) {
       .catch((e: unknown) => setListError(e instanceof Error ? e.message : String(e)));
   }, []);
 
-  const stopPolling = () => {
-    if (pollTimer.current) clearInterval(pollTimer.current);
-    pollTimer.current = null;
+  const stopPoll = (timer: PollTimer) => {
+    if (timer.current) clearInterval(timer.current);
+    timer.current = null;
   };
 
-  /** Poll until the job settles; transient read failures keep the timer. */
+  /** Poll until the job settles; after MAX_POLL_FAILURES consecutive read
+   * failures the flow settles via `onPollFailed` instead of polling forever. */
   const pollJob = (
+    timer: PollTimer,
     jobId: string,
     onPhase: (phase: string | null) => void,
     onSettled: (s: BackupJobStatus) => void,
+    onPollFailed: () => void,
   ) => {
-    stopPolling();
-    pollTimer.current = setInterval(() => {
+    stopPoll(timer);
+    let failures = 0;
+    timer.current = setInterval(() => {
       void backupJobStatus(jobId)
         .then((s) => {
+          failures = 0;
           onPhase(s.progress?.phase ?? null);
           if (s.status === 'completed' || s.status === 'failed') {
-            stopPolling();
+            stopPoll(timer);
             onSettled(s);
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          failures += 1;
+          if (failures >= MAX_POLL_FAILURES) {
+            stopPoll(timer);
+            onPollFailed();
+          }
+        });
     }, POLL_MS);
   };
 
@@ -130,24 +156,37 @@ export function BackupSettings({ locale }: { locale: SupportedLocale }) {
     setExportBusy(true);
     setExportError(null);
     setExportDone(false);
+    setExportArtifact(null);
     setExportPhase('queued');
     try {
       const { job_id } = await startExport(exportPw);
-      pollJob(job_id, setExportPhase, (s) => {
-        setExportBusy(false);
-        setExportPhase(null);
-        const report = s.report;
-        if (s.status === 'completed' && report && report.ok) {
-          setExportDone(true);
-          setExportPw('');
-          setExportPw2('');
-          void refreshArtifacts();
-        } else {
-          setExportError(
-            report && !report.ok ? report.error : t(locale, 'settings.backup.export.failed'),
-          );
-        }
-      });
+      pollJob(
+        exportPollTimer,
+        job_id,
+        setExportPhase,
+        (s) => {
+          setExportBusy(false);
+          setExportPhase(null);
+          const report = s.report;
+          if (s.status === 'completed' && report && isExportReport(report)) {
+            setExportDone(true);
+            setExportPw('');
+            setExportPw2('');
+            void refreshArtifacts().then((items) => {
+              setExportArtifact(items?.find((a) => a.id === report.artifact_id) ?? null);
+            });
+          } else {
+            setExportError(
+              report && !report.ok ? report.error : t(locale, 'settings.backup.export.failed'),
+            );
+          }
+        },
+        () => {
+          setExportBusy(false);
+          setExportPhase(null);
+          setExportError(t(locale, 'settings.backup.pollFailed'));
+        },
+      );
     } catch (e) {
       setExportBusy(false);
       setExportPhase(null);
@@ -185,6 +224,7 @@ export function BackupSettings({ locale }: { locale: SupportedLocale }) {
     try {
       await deleteArtifact(artifact.id);
       await refreshArtifacts();
+      if (exportArtifact?.id === artifact.id) setExportArtifact(null);
     } catch (e) {
       setListError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -207,21 +247,31 @@ export function BackupSettings({ locale }: { locale: SupportedLocale }) {
       const { jobId } = await uploadBackup(importFile, importPw, setUploadPct);
       setUploadPct(null);
       setImportPhase('decrypting');
-      pollJob(jobId, setImportPhase, (s) => {
-        setImportBusy(false);
-        setImportPhase(null);
-        const report = s.report;
-        if (s.status === 'completed' && report && isImportReport(report)) {
-          setImportReport(report.report);
-          setImportFile(null);
-          setImportPw('');
-          setFileInputKey((k) => k + 1);
-        } else {
-          setImportError(
-            report && !report.ok ? report.error : t(locale, 'settings.backup.import.failed'),
-          );
-        }
-      });
+      pollJob(
+        importPollTimer,
+        jobId,
+        setImportPhase,
+        (s) => {
+          setImportBusy(false);
+          setImportPhase(null);
+          const report = s.report;
+          if (s.status === 'completed' && report && isImportReport(report)) {
+            setImportReport(report.report);
+            setImportFile(null);
+            setImportPw('');
+            setFileInputKey((k) => k + 1);
+          } else {
+            setImportError(
+              report && !report.ok ? report.error : t(locale, 'settings.backup.import.failed'),
+            );
+          }
+        },
+        () => {
+          setImportBusy(false);
+          setImportPhase(null);
+          setImportError(t(locale, 'settings.backup.pollFailed'));
+        },
+      );
     } catch (e) {
       setImportBusy(false);
       setUploadPct(null);
@@ -291,6 +341,16 @@ export function BackupSettings({ locale }: { locale: SupportedLocale }) {
           ) : null}
           {exportDone ? (
             <span className="text-xs text-ok">{t(locale, 'settings.backup.export.success')}</span>
+          ) : null}
+          {exportDone && exportArtifact ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={downloadingId === exportArtifact.id}
+              onClick={() => void handleDownload(exportArtifact)}
+            >
+              {t(locale, 'settings.backup.archives.download')}
+            </Button>
           ) : null}
           {exportError ? <span className="text-xs text-destructive">{exportError}</span> : null}
         </div>
