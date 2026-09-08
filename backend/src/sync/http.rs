@@ -3780,7 +3780,7 @@ mod ai_spam_live_tests {
                 let enc = crate::crypto::encrypt(&dek, key.as_bytes()).unwrap();
                 serde_json::to_string(&enc).unwrap()
             },
-            crate::ai::AiFeatures::default(),
+            crate::ai::settings::AiFeatures::default(),
             crate::ai::SpamMode::Auto,
         );
         crate::ai::save_settings(&db, "u1", &settings)

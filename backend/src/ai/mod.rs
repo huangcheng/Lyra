@@ -10,12 +10,13 @@
 pub mod chat;
 pub mod client;
 pub mod http;
-mod settings;
+
+pub mod settings;
 pub mod spam_assist;
 mod store;
 mod tools;
 
-pub use settings::{AiDialect, AiFeatures, AiSettings, AiSettingsError};
+pub use settings::{AiDialect, AiSettings, AiSettingsError};
 pub use spam_assist::SpamMode;
 pub use store::{load_settings, save_settings};
 
