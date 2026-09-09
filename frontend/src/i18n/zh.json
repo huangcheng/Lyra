@@ -40,7 +40,7 @@
     "conversationCount": "共 {{count}} 封邮件",
     "selectionCount": "已选 {{count}} 项",
     "clearSelection": "清除选择",
-    "skippedOtherAccounts": "{{count}} 个其他账户的会话未移动",
+    "skippedOtherAccounts": "已跳过 {{count}} 个其他账户的会话",
     "noMessages": "没有邮件",
     "noMessagesHint": "下次同步后，新邮件会显示在这里。",
     "noMessagesSyncing": "正在同步账户…",

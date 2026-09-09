@@ -207,6 +207,20 @@ export function ConversationContextMenu({
     clearSelection();
     run(p);
   };
+  /** Move/Copy stay account-scoped to the right-clicked convo; other-account
+   *  conversations in the selection are skipped with a notice. The notice is
+   *  reported only after the batch resolves, so a null (success) error from
+   *  the batch doesn't erase it. */
+  const sameAccountBatch = () => {
+    const sameAccount = targets.filter((c) => c.latest.accountId === convo.latest.accountId);
+    const skipped = targets.length - sameAccount.length;
+    return {
+      ids: sameAccount.flatMap((c) => c.messages.map((m) => m.id)),
+      skipNotice: skipped > 0 ? t(locale, 'mail.skippedOtherAccounts', { count: skipped }) : null,
+    };
+  };
+  const runWithSkipNotice = (p: Promise<{ error: string | null }>, skipNotice: string | null) =>
+    void p.then((r) => report(r.error ?? skipNotice));
 
   const snoozeOptions: Array<{ key: string; until: Date }> = [
     { key: 'mail.laterToday', until: addHours(today, 4) },
@@ -273,19 +287,9 @@ export function ConversationContextMenu({
           labelKey="mail.moveToFolder"
           icon={<FolderInput />}
           onPick={(folderId) => {
-            const sameAccount = targets.filter(
-              (c) => c.latest.accountId === convo.latest.accountId,
-            );
-            const skipped = targets.length - sameAccount.length;
-            if (skipped > 0) {
-              report(t(locale, 'mail.skippedOtherAccounts', { count: skipped }));
-            }
-            runRemoving(
-              moveMessages(
-                sameAccount.flatMap((c) => c.messages.map((m) => m.id)),
-                folderId,
-              ),
-            );
+            const { ids, skipNotice } = sameAccountBatch();
+            clearSelection();
+            runWithSkipNotice(moveMessages(ids, folderId), skipNotice);
           }}
         />
         <FolderPickerSub
@@ -293,19 +297,8 @@ export function ConversationContextMenu({
           labelKey="mail.copyToFolder"
           icon={<Copy />}
           onPick={(folderId) => {
-            const sameAccount = targets.filter(
-              (c) => c.latest.accountId === convo.latest.accountId,
-            );
-            const skipped = targets.length - sameAccount.length;
-            if (skipped > 0) {
-              report(t(locale, 'mail.skippedOtherAccounts', { count: skipped }));
-            }
-            run(
-              copyMessages(
-                sameAccount.flatMap((c) => c.messages.map((m) => m.id)),
-                folderId,
-              ),
-            );
+            const { ids, skipNotice } = sameAccountBatch();
+            runWithSkipNotice(copyMessages(ids, folderId), skipNotice);
           }}
         />
         <ContextMenuSeparator />
