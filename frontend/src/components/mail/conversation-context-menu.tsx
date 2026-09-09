@@ -164,10 +164,13 @@ function FolderPickerSub({
 
 export function ConversationContextMenu({
   convo,
+  multiConvos,
   onActionError,
   children,
 }: {
   convo: Conversation;
+  /** Non-null when the right-clicked row is part of a multi-selection. */
+  multiConvos?: Conversation[];
   /** Surface a failure in the list's error line (null clears it). */
   onActionError: (message: string | null) => void;
   children: ReactNode;
@@ -175,7 +178,10 @@ export function ConversationContextMenu({
   const locale = useUIStore((s) => s.locale);
   const folders = useMailStore((s) => s.folders);
   const latest = convo.latest;
-  const ids = convo.messages.map((m) => m.id);
+  const targets = multiConvos && multiConvos.length > 1 ? multiConvos : [convo];
+  const targetIds = targets.flatMap((c) => c.messages.map((m) => m.id));
+  const anyUnread = targets.some((c) => c.unreadCount > 0);
+  const anyUnstarred = targets.some((c) => !c.anyStarred);
   const today = new Date();
   // Reading a spam-folder conversation flips the junk action into its
   // opposite: "Not spam" rescues it back to the inbox and allow-learns.
@@ -195,6 +201,12 @@ export function ConversationContextMenu({
 
   const report = (error: string | null) => onActionError(error);
   const run = (p: Promise<{ error: string | null }>) => void p.then((r) => report(r.error));
+  const clearSelection = useUIStore((s) => s.clearConversationSelection);
+  /** Removing actions drop the selection once the batch starts. */
+  const runRemoving = (p: Promise<{ error: string | null }>) => {
+    clearSelection();
+    run(p);
+  };
 
   const snoozeOptions: Array<{ key: string; until: Date }> = [
     { key: 'mail.laterToday', until: addHours(today, 4) },
@@ -229,17 +241,17 @@ export function ConversationContextMenu({
           </>
         )}
         <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => run(actOnMessages(ids, 'archive'))}>
+        <ContextMenuItem onSelect={() => runRemoving(actOnMessages(targetIds, 'archive'))}>
           <Archive />
           {t(locale, 'mail.archive')}
         </ContextMenuItem>
         {inSpamFolder ? (
-          <ContextMenuItem onSelect={() => run(actOnMessages(ids, 'notSpam'))}>
+          <ContextMenuItem onSelect={() => runRemoving(actOnMessages(targetIds, 'notSpam'))}>
             <Inbox />
             {t(locale, 'mail.notSpam')}
           </ContextMenuItem>
         ) : (
-          <ContextMenuItem onSelect={() => run(actOnMessages(ids, 'spam'))}>
+          <ContextMenuItem onSelect={() => runRemoving(actOnMessages(targetIds, 'spam'))}>
             <ArchiveX />
             {t(locale, 'mail.moveToJunk')}
           </ContextMenuItem>
@@ -248,8 +260,8 @@ export function ConversationContextMenu({
           variant="destructive"
           onSelect={() => {
             void (async () => {
-              if (!(await confirmMoveToTrash(locale, ids.length))) return;
-              run(actOnMessages(ids, 'trash'));
+              if (!(await confirmMoveToTrash(locale, targetIds.length))) return;
+              runRemoving(actOnMessages(targetIds, 'trash'));
             })();
           }}
         >
@@ -260,48 +272,83 @@ export function ConversationContextMenu({
           convo={convo}
           labelKey="mail.moveToFolder"
           icon={<FolderInput />}
-          onPick={(folderId) => run(moveMessages(ids, folderId))}
+          onPick={(folderId) => {
+            const sameAccount = targets.filter(
+              (c) => c.latest.accountId === convo.latest.accountId,
+            );
+            const skipped = targets.length - sameAccount.length;
+            if (skipped > 0) {
+              report(t(locale, 'mail.skippedOtherAccounts', { count: skipped }));
+            }
+            runRemoving(
+              moveMessages(
+                sameAccount.flatMap((c) => c.messages.map((m) => m.id)),
+                folderId,
+              ),
+            );
+          }}
         />
         <FolderPickerSub
           convo={convo}
           labelKey="mail.copyToFolder"
           icon={<Copy />}
-          onPick={(folderId) => run(copyMessages(ids, folderId))}
+          onPick={(folderId) => {
+            const sameAccount = targets.filter(
+              (c) => c.latest.accountId === convo.latest.accountId,
+            );
+            const skipped = targets.length - sameAccount.length;
+            if (skipped > 0) {
+              report(t(locale, 'mail.skippedOtherAccounts', { count: skipped }));
+            }
+            run(
+              copyMessages(
+                sameAccount.flatMap((c) => c.messages.map((m) => m.id)),
+                folderId,
+              ),
+            );
+          }}
         />
         <ContextMenuSeparator />
-        {convo.unreadCount > 0 ? (
-          <ContextMenuItem onSelect={() => run(patchMessages(ids, { isRead: true }))}>
+        {anyUnread ? (
+          <ContextMenuItem onSelect={() => run(patchMessages(targetIds, { isRead: true }))}>
             <MailOpen />
             {t(locale, 'mail.markRead')}
           </ContextMenuItem>
         ) : (
-          <ContextMenuItem onSelect={() => run(patchMessages(ids, { isRead: false }))}>
+          <ContextMenuItem onSelect={() => run(patchMessages(targetIds, { isRead: false }))}>
             <Mail />
             {t(locale, 'mail.markUnread')}
           </ContextMenuItem>
         )}
-        <ContextMenuItem onSelect={() => run(patchMessages(ids, { isStarred: !convo.anyStarred }))}>
-          {convo.anyStarred ? <StarOff /> : <Star />}
-          {t(locale, convo.anyStarred ? 'mail.unstar' : 'mail.star')}
+        <ContextMenuItem
+          onSelect={() => run(patchMessages(targetIds, { isStarred: anyUnstarred }))}
+        >
+          {anyUnstarred ? <Star /> : <StarOff />}
+          {t(locale, anyUnstarred ? 'mail.star' : 'mail.unstar')}
         </ContextMenuItem>
         <ContextMenuItem
           onSelect={() => {
             const ui = useUIStore.getState();
-            if (notifyMuted) {
-              // Unmute: banners resume and the messages return to the list.
-              if (notifyThreadId) setThreadMuted(notifyThreadId, false);
-              for (const id of ids) {
-                if (ui.mutedMessageIds.includes(id)) ui.toggleMuteMessage(id);
-              }
-            } else {
-              // Mute: hide from the list (session-local) and stop new-mail
-              // banners for this thread (persisted in notification prefs).
-              if (notifyThreadId) setThreadMuted(notifyThreadId, true);
-              for (const id of ids) {
-                if (!ui.mutedMessageIds.includes(id)) ui.toggleMuteMessage(id);
-              }
-              if (ui.selectedMessageId && ids.includes(ui.selectedMessageId)) {
-                ui.setSelectedMessage(null);
+            for (const c of targets) {
+              const threadId =
+                c.latest.threadId ?? c.messages.find((m) => m.threadId)?.threadId ?? null;
+              const messageIds = c.messages.map((m) => m.id);
+              if (notifyMuted) {
+                // Unmute: banners resume and the messages return to the list.
+                if (threadId) setThreadMuted(threadId, false);
+                for (const id of messageIds) {
+                  if (ui.mutedMessageIds.includes(id)) ui.toggleMuteMessage(id);
+                }
+              } else {
+                // Mute: hide from the list (session-local) and stop new-mail
+                // banners for this thread (persisted in notification prefs).
+                if (threadId) setThreadMuted(threadId, true);
+                for (const id of messageIds) {
+                  if (!ui.mutedMessageIds.includes(id)) ui.toggleMuteMessage(id);
+                }
+                if (ui.selectedMessageId && messageIds.includes(ui.selectedMessageId)) {
+                  ui.setSelectedMessage(null);
+                }
               }
             }
           }}
@@ -316,7 +363,10 @@ export function ConversationContextMenu({
           </ContextMenuSubTrigger>
           <ContextMenuSubContent className="w-48">
             {snoozeOptions.map((opt) => (
-              <ContextMenuItem key={opt.key} onSelect={() => run(snoozeMessages(ids, opt.until))}>
+              <ContextMenuItem
+                key={opt.key}
+                onSelect={() => runRemoving(snoozeMessages(targetIds, opt.until))}
+              >
                 {t(locale, opt.key)}
                 <span className="ml-auto text-xs text-muted-foreground">
                   {format(opt.until, 'h:mm a')}

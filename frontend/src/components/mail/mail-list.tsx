@@ -290,6 +290,10 @@ export function MailList() {
   // One row per conversation; the latest message drives the row.
   const conversations = useMemo(() => groupIntoConversations(filtered), [filtered]);
   const visibleKeys = useMemo(() => conversations.map((c) => c.key), [conversations]);
+  const selectedConvos = useMemo(
+    () => conversations.filter((c) => selectedConversationKeys.includes(c.key)),
+    [conversations, selectedConversationKeys],
+  );
 
   /** Current selection snapshot from the store (handlers read it lazily). */
   const currentSelection = (): ConversationSelection => {
@@ -505,7 +509,16 @@ export function MailList() {
             };
             return (
               <DraggableConversationRow key={convo.key} convo={convo}>
-                <ConversationContextMenu convo={convo} onActionError={setActionError}>
+                <ConversationContextMenu
+                  convo={convo}
+                  multiConvos={
+                    selectedConversationKeys.length > 1 &&
+                    selectedConversationKeys.includes(convo.key)
+                      ? selectedConvos
+                      : undefined
+                  }
+                  onActionError={setActionError}
+                >
                   <div
                     role="button"
                     tabIndex={0}
