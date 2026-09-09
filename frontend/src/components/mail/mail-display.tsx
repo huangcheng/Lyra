@@ -144,7 +144,7 @@ export function MailDisplay() {
     mutedMessageIdsList,
   ]);
 
-  const multi = selectedConversationKeys.length > 1;
+  const multi = selectedConversationKeys.length > 1 && searchQuery.trim().length < 2;
   const selectedConvos = useMemo(
     () => viewConversations.filter((c) => selectedConversationKeys.includes(c.key)),
     [viewConversations, selectedConversationKeys],
@@ -179,7 +179,12 @@ export function MailDisplay() {
     const next = viewConversations[convoPosition.index + delta];
     if (!next) return;
     const target = next.messages.find((m) => !m.isRead) ?? next.latest;
-    setSelectedMessage(target.id);
+    useUIStore
+      .getState()
+      .applyConversationSelection(
+        { keys: [next.key], anchor: next.key, focus: next.key },
+        target.id,
+      );
   };
 
   const conversation = useMemo(

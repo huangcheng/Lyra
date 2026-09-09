@@ -164,7 +164,15 @@ export const useUIStore = create<UIState>((set) => ({
       selectionFocusKey: null,
     }),
 
-  setSelectedMessage: (id) => set({ selectedMessageId: id }),
+  // Direct message selection (palette open, notification click, pager, quick
+  // actions) always collapses any conversation multi-selection.
+  setSelectedMessage: (id) =>
+    set({
+      selectedMessageId: id,
+      selectedConversationKeys: [],
+      selectionAnchorKey: null,
+      selectionFocusKey: null,
+    }),
 
   applyConversationSelection: (sel, messageId) =>
     set({

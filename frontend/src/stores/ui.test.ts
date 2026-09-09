@@ -58,4 +58,16 @@ describe('conversation multi-select', () => {
     expect(useUIStore.getState().selectionAnchorKey).toBeNull();
     expect(useUIStore.getState().selectionFocusKey).toBeNull();
   });
+
+  it('setSelectedMessage collapses the conversation selection', () => {
+    useUIStore
+      .getState()
+      .applyConversationSelection({ keys: ['a', 'b'], anchor: 'a', focus: 'b' }, 'msg-1');
+    useUIStore.getState().setSelectedMessage('x');
+    const s = useUIStore.getState();
+    expect(s.selectedConversationKeys).toEqual([]);
+    expect(s.selectionAnchorKey).toBeNull();
+    expect(s.selectionFocusKey).toBeNull();
+    expect(s.selectedMessageId).toBe('x');
+  });
 });
