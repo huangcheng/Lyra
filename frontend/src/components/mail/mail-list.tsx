@@ -95,13 +95,21 @@ function ListAvatar({ email, label }: { email: string; label: string }) {
 /** Draggable wrapper around a conversation row. */
 function DraggableConversationRow({
   convo,
+  dragConvos,
   children,
 }: {
   convo: Conversation;
+  /** Non-null when dragging a row that is part of a multi-selection. */
+  dragConvos?: Conversation[];
   children: React.ReactNode;
 }) {
-  const messageIds = convo.messages.map((m) => m.id);
-  const folderIds = [...new Set(convo.messages.map((m) => m.folderId))];
+  // Cross-account moves are rejected per folder, so a mixed-account drag
+  // only carries the dragged row's own account.
+  const dragged = (dragConvos ?? [convo]).filter(
+    (c) => c.latest.accountId === convo.latest.accountId,
+  );
+  const messageIds = dragged.flatMap((c) => c.messages.map((m) => m.id));
+  const folderIds = [...new Set(dragged.flatMap((c) => c.messages.map((m) => m.folderId)))];
   // No `attributes` spread: without a KeyboardSensor they would only add a
   // duplicate role="button" tab stop around the row's own interactive div.
   const { listeners, setNodeRef, isDragging } = useDraggable({
@@ -112,7 +120,8 @@ function DraggableConversationRow({
       messageIds,
       folderIds,
       subject: convo.latest.subject,
-      count: convo.messages.length,
+      count: messageIds.length,
+      selectionDrag: dragged.length > 1,
     } satisfies ConversationDragData,
   });
   return (
@@ -508,7 +517,16 @@ export function MailList() {
               })();
             };
             return (
-              <DraggableConversationRow key={convo.key} convo={convo}>
+              <DraggableConversationRow
+                key={convo.key}
+                convo={convo}
+                dragConvos={
+                  selectedConversationKeys.length > 1 &&
+                  selectedConversationKeys.includes(convo.key)
+                    ? selectedConvos
+                    : undefined
+                }
+              >
                 <ConversationContextMenu
                   convo={convo}
                   multiConvos={

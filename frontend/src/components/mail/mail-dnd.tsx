@@ -214,6 +214,7 @@ export function MailDndProvider({ children }: { children: ReactNode }) {
       setProgress({ done, total: ids.length }),
     );
     setProgress(null);
+    if (data.selectionDrag) useUIStore.getState().clearConversationSelection();
     if (res.error) setError(res.error);
   };
 

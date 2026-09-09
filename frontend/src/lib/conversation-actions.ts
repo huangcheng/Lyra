@@ -197,6 +197,8 @@ export interface ConversationDragData {
   folderIds: string[];
   subject: string;
   count: number;
+  /** True when the payload carries a multi-selection (cleared after drop). */
+  selectionDrag?: boolean;
 }
 
 /** Drop validation: same account, not already in the target folder. */
