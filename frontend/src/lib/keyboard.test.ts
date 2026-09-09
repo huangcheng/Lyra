@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { isEditableTarget, matchGlobalShortcut, matchMailListShortcut } from './keyboard';
+import {
+  isEditableTarget,
+  matchGlobalShortcut,
+  matchMailListShortcut,
+  matchMailSelectionShortcut,
+} from './keyboard';
 
 const INPUT = Object.assign(document.createElement('input'), {});
 const BODY = document.createElement('div');
@@ -57,5 +62,50 @@ describe('matchMailListShortcut', () => {
     expect(matchMailListShortcut({ key: 'Escape' }, BODY)).toBe('back');
     expect(matchMailListShortcut({ key: 'z' }, BODY)).toBeNull();
     expect(matchMailListShortcut({ key: 'j' }, INPUT)).toBeNull();
+  });
+});
+
+describe('matchMailSelectionShortcut', () => {
+  const noMod = { metaKey: false, ctrlKey: false };
+
+  it('maps mod+A to select-all', () => {
+    expect(
+      matchMailSelectionShortcut({ key: 'a', ...noMod, metaKey: true, shiftKey: false }, null),
+    ).toBe('select-all');
+    expect(
+      matchMailSelectionShortcut(
+        { key: 'a', ...noMod, ctrlKey: true, shiftKey: false },
+        null,
+        false,
+      ),
+    ).toBe('select-all');
+  });
+
+  it('maps shift+arrows and shift+J/K to extend', () => {
+    const ev = (key: string) => ({ key, ...noMod, shiftKey: true });
+    expect(matchMailSelectionShortcut(ev('ArrowDown'), null)).toBe('extend-next');
+    expect(matchMailSelectionShortcut(ev('ArrowUp'), null)).toBe('extend-prev');
+    expect(matchMailSelectionShortcut(ev('J'), null)).toBe('extend-next');
+    expect(matchMailSelectionShortcut(ev('K'), null)).toBe('extend-prev');
+  });
+
+  it('ignores plain keys, mod+shift+A, and editable targets', () => {
+    expect(matchMailSelectionShortcut({ key: 'a', ...noMod, shiftKey: false }, null)).toBeNull();
+    expect(
+      matchMailSelectionShortcut({ key: 'a', metaKey: true, ctrlKey: false, shiftKey: true }, null),
+    ).toBeNull();
+    const input = document.createElement('input');
+    expect(
+      matchMailSelectionShortcut(
+        { key: 'a', metaKey: true, ctrlKey: false, shiftKey: false },
+        input,
+      ),
+    ).toBeNull();
+  });
+
+  it('plain navigation ignores shift (handled by the selection matcher)', () => {
+    expect(matchMailListShortcut({ key: 'j', shiftKey: true }, null)).toBeNull();
+    expect(matchMailListShortcut({ key: 'ArrowDown', shiftKey: true }, null)).toBeNull();
+    expect(matchMailListShortcut({ key: 'j', shiftKey: false }, null)).toBe('next');
   });
 });

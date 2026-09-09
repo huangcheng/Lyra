@@ -57,10 +57,10 @@ export function matchGlobalShortcut(
 export type MailListShortcut = 'next' | 'prev' | 'open' | 'back' | null;
 
 export function matchMailListShortcut(
-  event: { key: string },
+  event: { key: string; shiftKey?: boolean },
   target: EventTarget | null,
 ): MailListShortcut {
-  if (isEditableTarget(target)) return null;
+  if (isEditableTarget(target) || event.shiftKey) return null;
   switch (event.key) {
     case 'j':
     case 'ArrowDown':
@@ -77,4 +77,28 @@ export function matchMailListShortcut(
     default:
       return null;
   }
+}
+
+/**
+ * Multi-select chords: ⌘A/Ctrl+A select-all, shift+↑/↓ (or shift+J/K)
+ * extend. Returns null for anything else (or when typing).
+ */
+export type MailSelectionShortcut = 'select-all' | 'extend-next' | 'extend-prev' | null;
+
+export function matchMailSelectionShortcut(
+  event: { key: string; metaKey: boolean; ctrlKey: boolean; shiftKey: boolean },
+  target: EventTarget | null,
+  isMac = true,
+): MailSelectionShortcut {
+  if (isEditableTarget(target)) return null;
+  const mod = isMac ? event.metaKey : event.ctrlKey;
+  const other = isMac ? event.ctrlKey : event.metaKey;
+  if (mod && !other && !event.shiftKey && (event.key === 'a' || event.key === 'A')) {
+    return 'select-all';
+  }
+  if (event.shiftKey && !mod && !other) {
+    if (event.key === 'ArrowDown' || event.key === 'J') return 'extend-next';
+    if (event.key === 'ArrowUp' || event.key === 'K') return 'extend-prev';
+  }
+  return null;
 }
