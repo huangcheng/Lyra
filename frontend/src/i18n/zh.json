@@ -38,6 +38,9 @@
     "muteThread": "静音此会话",
     "unmuteThread": "取消静音",
     "conversationCount": "共 {{count}} 封邮件",
+    "selectionCount": "已选 {{count}} 项",
+    "clearSelection": "清除选择",
+    "skippedOtherAccounts": "{{count}} 个其他账户的会话未移动",
     "noMessages": "没有邮件",
     "noMessagesHint": "下次同步后，新邮件会显示在这里。",
     "noMessagesSyncing": "正在同步账户…",
@@ -785,6 +788,8 @@
     "nextPrev": "下一条 / 上一封邮件",
     "open": "打开选中的邮件",
     "back": "返回列表",
+    "selectAll": "全选会话",
+    "extendSelection": "扩展选择",
     "help": "本帮助"
   },
   "assistant": {
