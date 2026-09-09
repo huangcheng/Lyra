@@ -5,6 +5,7 @@
 import { create } from 'zustand';
 
 import { ALL_ACCOUNTS } from '@/lib/mail-api';
+import type { ConversationSelection } from '@/lib/multi-select';
 import { applyTheme, getStoredTheme, storeTheme, type ThemeMode } from '@/lib/theme';
 import type { MarkReadPolicy, SupportedLocale } from '@/types';
 import type { CommandDef } from '@/lib/commands';
@@ -48,6 +49,10 @@ interface UIState {
   /** Standard role used in unified view (`inbox`, `sent`, …). */
   selectedFolderRole: string | null;
   selectedMessageId: string | null;
+  /** Conversation-level multi-select (empty = single-select mode). Not persisted. */
+  selectedConversationKeys: string[];
+  selectionAnchorKey: string | null;
+  selectionFocusKey: string | null;
   searchQuery: string;
   listTab: 'all' | 'unread';
   composeOpen: boolean;
@@ -77,6 +82,10 @@ interface UIState {
   setSelectedFolder: (id: string | null) => void;
   setSelectedFolderRole: (role: string | null) => void;
   setSelectedMessage: (id: string | null) => void;
+  /** Set the conversation selection and the reader's message in one update. */
+  applyConversationSelection: (sel: ConversationSelection, messageId: string | null) => void;
+  /** Empty the conversation selection (keeps `selectedMessageId`). */
+  clearConversationSelection: () => void;
   setPaletteOpen: (open: boolean, seed?: string) => void;
   setPaletteSearch: (search: string) => void;
   setShortcutHelpOpen: (open: boolean) => void;
@@ -104,6 +113,9 @@ export const useUIStore = create<UIState>((set) => ({
   selectedFolderId: null,
   selectedFolderRole: 'inbox',
   selectedMessageId: null,
+  selectedConversationKeys: [],
+  selectionAnchorKey: null,
+  selectionFocusKey: null,
   searchQuery: '',
   listTab: 'all',
   composeOpen: false,
@@ -127,15 +139,43 @@ export const useUIStore = create<UIState>((set) => ({
       selectedFolderId: null,
       selectedFolderRole: id === ALL_ACCOUNTS ? 'inbox' : null,
       selectedMessageId: null,
+      selectedConversationKeys: [],
+      selectionAnchorKey: null,
+      selectionFocusKey: null,
     }),
 
   setSelectedFolder: (id) =>
-    set({ selectedFolderId: id, selectedFolderRole: null, selectedMessageId: null }),
+    set({
+      selectedFolderId: id,
+      selectedFolderRole: null,
+      selectedMessageId: null,
+      selectedConversationKeys: [],
+      selectionAnchorKey: null,
+      selectionFocusKey: null,
+    }),
 
   setSelectedFolderRole: (role) =>
-    set({ selectedFolderRole: role, selectedFolderId: null, selectedMessageId: null }),
+    set({
+      selectedFolderRole: role,
+      selectedFolderId: null,
+      selectedMessageId: null,
+      selectedConversationKeys: [],
+      selectionAnchorKey: null,
+      selectionFocusKey: null,
+    }),
 
   setSelectedMessage: (id) => set({ selectedMessageId: id }),
+
+  applyConversationSelection: (sel, messageId) =>
+    set({
+      selectedConversationKeys: sel.keys,
+      selectionAnchorKey: sel.anchor,
+      selectionFocusKey: sel.focus,
+      selectedMessageId: messageId,
+    }),
+
+  clearConversationSelection: () =>
+    set({ selectedConversationKeys: [], selectionAnchorKey: null, selectionFocusKey: null }),
 
   setSearchQuery: (query) => set({ searchQuery: query }),
   setPaletteOpen: (open, seed) =>
