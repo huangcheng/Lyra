@@ -8,7 +8,17 @@ import { formatDistanceToNow, isSameDay, isSameMonth, subDays } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { Archive, CornerUpLeft, Inbox, Paperclip, SearchX, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { matchMailListShortcut } from '@/lib/keyboard';
+import { matchMailListShortcut, matchMailSelectionShortcut } from '@/lib/keyboard';
+import {
+  applyCmdShiftClick,
+  applyShiftClick,
+  extendSelection,
+  selectAll,
+  singleSelect,
+  targetMessageId,
+  toggleKey,
+  type ConversationSelection,
+} from '@/lib/multi-select';
 
 import { EmptyState } from '@/components/empty-state';
 import { ErrorBanner, type ErrorBannerVariant } from '@/components/error-banner';
@@ -117,6 +127,8 @@ export function MailList() {
   const selectedFolderId = useUIStore((s) => s.selectedFolderId);
   const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
   const selectedMessageId = useUIStore((s) => s.selectedMessageId);
+  const selectedConversationKeys = useUIStore((s) => s.selectedConversationKeys);
+  const applyConversationSelection = useUIStore((s) => s.applyConversationSelection);
   const setSelectedMessage = useUIStore((s) => s.setSelectedMessage);
   const searchQuery = useUIStore((s) => s.searchQuery);
   const listTab = useUIStore((s) => s.listTab);
@@ -276,31 +288,67 @@ export function MailList() {
   );
   // One row per conversation; the latest message drives the row.
   const conversations = useMemo(() => groupIntoConversations(filtered), [filtered]);
+  const visibleKeys = useMemo(() => conversations.map((c) => c.key), [conversations]);
 
-  // Gmail-style list navigation: j/k move selection between conversations
-  // (their latest message), o/Enter keeps it open, u/Esc clears it.
+  /** Current selection snapshot from the store (handlers read it lazily). */
+  const currentSelection = (): ConversationSelection => {
+    const s = useUIStore.getState();
+    return {
+      keys: s.selectedConversationKeys,
+      anchor: s.selectionAnchorKey,
+      focus: s.selectionFocusKey,
+    };
+  };
+
+  /** Apply a new selection and point the reader at the anchor conversation. */
+  const commitSelection = (sel: ConversationSelection) => {
+    const anchorConvo = sel.anchor ? conversations.find((c) => c.key === sel.anchor) : undefined;
+    applyConversationSelection(sel, anchorConvo ? targetMessageId(anchorConvo) : null);
+  };
+
+  // Gmail-style list navigation (j/k, o/Enter, u/Esc) plus multi-select
+  // chords (⌘A, shift+↑/↓). Esc collapses an active multi-selection to its
+  // anchor before falling back to the plain back behavior.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
+      const selAction = matchMailSelectionShortcut(e, e.target, isMac);
+      if (selAction && conversations.length > 0) {
+        e.preventDefault();
+        if (selAction === 'select-all') {
+          commitSelection(selectAll(visibleKeys));
+        } else {
+          commitSelection(
+            extendSelection(visibleKeys, currentSelection(), selAction === 'extend-next' ? 1 : -1),
+          );
+        }
+        return;
+      }
       const action = matchMailListShortcut(e, e.target);
       if (!action || conversations.length === 0) return;
-      const latestIds = conversations.map((c) => c.messages[0]?.id ?? '');
-      const currentIdx = Math.max(0, latestIds.indexOf(selectedMessageId ?? ''));
-      if (action === 'next') {
+      const currentIdx = Math.max(
+        0,
+        conversations.findIndex((c) => c.messages.some((m) => m.id === selectedMessageId)),
+      );
+      if (action === 'next' || action === 'prev') {
         e.preventDefault();
-        const next = latestIds[Math.min(currentIdx + 1, latestIds.length - 1)];
-        if (next) setSelectedMessage(next);
-      } else if (action === 'prev') {
-        e.preventDefault();
-        const prev = latestIds[Math.max(currentIdx - 1, 0)];
-        if (prev) setSelectedMessage(prev);
+        const idx =
+          action === 'next'
+            ? Math.min(currentIdx + 1, conversations.length - 1)
+            : Math.max(currentIdx - 1, 0);
+        commitSelection(singleSelect(conversations[idx].key));
       } else if (action === 'open') {
-        const current = latestIds[currentIdx];
-        if (current && selectedMessageId !== current) {
+        const current = conversations[currentIdx];
+        if (current && !current.messages.some((m) => m.id === selectedMessageId)) {
           e.preventDefault();
-          setSelectedMessage(current);
+          commitSelection(singleSelect(current.key));
         }
       } else if (action === 'back') {
-        if (selectedMessageId) {
+        const sel = currentSelection();
+        if (sel.keys.length > 1 && sel.anchor) {
+          e.preventDefault();
+          commitSelection(singleSelect(sel.anchor));
+        } else if (selectedMessageId) {
           e.preventDefault();
           setSelectedMessage(null);
         }
@@ -308,7 +356,31 @@ export function MailList() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [conversations, selectedMessageId, setSelectedMessage]);
+    // oxlint-disable-next-line exhaustive-deps
+  }, [conversations, visibleKeys, selectedMessageId, setSelectedMessage]);
+
+  // Selection pruning: conversations that left the view (archived, moved,
+  // tab/filter change) drop out of the selection; the anchor falls back to
+  // the last surviving key.
+  useEffect(() => {
+    const s = useUIStore.getState();
+    if (s.selectedConversationKeys.length === 0) return;
+    const visible = new Set(visibleKeys);
+    const keys = s.selectedConversationKeys.filter((k) => visible.has(k));
+    if (keys.length === s.selectedConversationKeys.length) return;
+    const anchor =
+      s.selectionAnchorKey && visible.has(s.selectionAnchorKey)
+        ? s.selectionAnchorKey
+        : (keys[keys.length - 1] ?? null);
+    const focus =
+      s.selectionFocusKey && visible.has(s.selectionFocusKey) ? s.selectionFocusKey : anchor;
+    const anchorConvo = anchor ? conversations.find((c) => c.key === anchor) : undefined;
+    // oxlint-disable-next-line set-state-in-effect
+    s.applyConversationSelection(
+      { keys, anchor, focus },
+      anchorConvo ? targetMessageId(anchorConvo) : null,
+    );
+  }, [conversations, visibleKeys]);
 
   // Interleave sticky day-group headers (Today / Yesterday / This week …).
   const listRows = useMemo(() => {
@@ -392,7 +464,10 @@ export function MailList() {
             const accountLabel = account?.displayName || account?.emailAddress;
             const labels = messageLabels(item);
             const fromLabel = item.from.name ?? item.from.email;
-            const isSelected = convo.messages.some((m) => m.id === selectedMessageId);
+            const isSelected =
+              selectedConversationKeys.length > 0
+                ? selectedConversationKeys.includes(convo.key)
+                : convo.messages.some((m) => m.id === selectedMessageId);
             const isUnread = convo.unreadCount > 0;
             let relative = '';
             try {
@@ -433,19 +508,34 @@ export function MailList() {
                       isSelected &&
                         'bg-secondary shadow-[inset_2px_0_0_var(--color-foreground)] hover:bg-secondary',
                     )}
-                    onClick={() => {
-                      const target = convo.messages.find((m) => !m.isRead) ?? convo.latest;
-                      setSelectedMessage(target.id);
+                    onClick={(e) => {
+                      const sel = currentSelection();
+                      if (e.shiftKey && (e.metaKey || e.ctrlKey)) {
+                        commitSelection(applyCmdShiftClick(sel, visibleKeys, convo.key));
+                      } else if (e.shiftKey) {
+                        commitSelection(applyShiftClick(sel, visibleKeys, convo.key));
+                      } else if (e.metaKey || e.ctrlKey) {
+                        commitSelection(toggleKey(sel, convo.key));
+                      } else {
+                        commitSelection(singleSelect(convo.key));
+                      }
                     }}
                     onContextMenu={() => {
-                      const target = convo.messages.find((m) => !m.isRead) ?? convo.latest;
-                      setSelectedMessage(target.id);
+                      // Apple Mail: right-click inside the selection keeps it;
+                      // right-click elsewhere collapses the selection to that row.
+                      if (!currentSelection().keys.includes(convo.key)) {
+                        commitSelection(singleSelect(convo.key));
+                      }
                     }}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
+                      if (
+                        (e.key === 'Enter' || e.key === ' ') &&
+                        !e.shiftKey &&
+                        !e.metaKey &&
+                        !e.ctrlKey
+                      ) {
                         e.preventDefault();
-                        const target = convo.messages.find((m) => !m.isRead) ?? convo.latest;
-                        setSelectedMessage(target.id);
+                        commitSelection(singleSelect(convo.key));
                       }
                     }}
                   >
