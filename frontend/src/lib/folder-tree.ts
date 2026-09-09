@@ -2,6 +2,7 @@
  * Build a nested folder tree for the sidebar from flat folder rows.
  */
 
+import { t, type SupportedLocale } from '@/i18n';
 import type { StandardFolderRole } from '@/lib/mail-api';
 import type { MailFolder } from '@/types';
 
@@ -105,6 +106,11 @@ export interface MoveFolderEntry {
   name: string;
   role?: string | null;
   depth: number;
+}
+
+/** Display label for a move-to row: localized role name, else the folder name. */
+export function moveFolderEntryLabel(entry: MoveFolderEntry, locale: SupportedLocale): string {
+  return entry.role ? t(locale, `mail.folder.${entry.role}`) : entry.name;
 }
 
 function flattenTree(nodes: FolderTreeNode[], depth: number): MoveFolderEntry[] {

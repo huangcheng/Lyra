@@ -29,6 +29,7 @@ function msg(id: string, isRead = true): MailMessage {
     snippet: '',
     isRead,
     isStarred: false,
+    isDraft: false,
     hasAttachments: false,
   } as MailMessage;
 }

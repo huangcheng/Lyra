@@ -39,7 +39,7 @@ import {
   ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
-import { t, type SupportedLocale } from '@/i18n';
+import { t } from '@/i18n';
 import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import { isThreadMuted, setThreadMuted, subscribeNotificationPrefs } from '@/lib/notifications';
 import {
@@ -53,13 +53,9 @@ import {
   snoozeMessages,
 } from '@/lib/conversation-actions';
 import type { Conversation } from '@/lib/conversation';
-import { buildAccountMoveFolderEntries, type MoveFolderEntry } from '@/lib/folder-tree';
+import { buildAccountMoveFolderEntries, moveFolderEntryLabel } from '@/lib/folder-tree';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
-
-function folderPickerLabel(entry: MoveFolderEntry, locale: SupportedLocale): string {
-  return entry.role ? t(locale, `mail.folder.${entry.role}`) : entry.name;
-}
 
 /** Filter input that focuses itself on mount (i.e. when the submenu opens).
  *  Radix omits `onOpenAutoFocus` from SubContent props, and its own mount
@@ -114,7 +110,7 @@ function FolderPickerSub({
   const shown = q
     ? entries
         .filter((e) => {
-          const label = folderPickerLabel(e, locale).toLowerCase();
+          const label = moveFolderEntryLabel(e, locale).toLowerCase();
           return label.includes(q) || e.name.toLowerCase().includes(q);
         })
         .map((e) => ({ ...e, depth: 0 }))
@@ -151,7 +147,7 @@ function FolderPickerSub({
                 onSelect={() => onPick(f.id)}
                 style={{ paddingLeft: `${0.5 + f.depth * 0.75}rem` }}
               >
-                <span className="truncate">{folderPickerLabel(f, locale)}</span>
+                <span className="truncate">{moveFolderEntryLabel(f, locale)}</span>
                 {currentFolderIds.has(f.id) ? <Check className="ml-auto" /> : null}
               </ContextMenuItem>
             ))

@@ -27,37 +27,33 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { t, type SupportedLocale } from '@/i18n';
+import { t } from '@/i18n';
 import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import { actOnMessages, moveMessages, patchMessages } from '@/lib/conversation-actions';
 import type { Conversation } from '@/lib/conversation';
-import { buildAccountMoveFolderEntries, type MoveFolderEntry } from '@/lib/folder-tree';
+import { buildAccountMoveFolderEntries, moveFolderEntryLabel } from '@/lib/folder-tree';
 import { useMailStore } from '@/stores/mail';
 import { useUIStore } from '@/stores/ui';
 
 /** Front card + up to two offset pseudo-cards suggesting the stack. */
 export function SelectionStackFrame({ count, children }: { count: number; children: ReactNode }) {
   return (
-    <div className="relative min-h-0 flex-1">
+    <div className="relative flex min-h-0 flex-1 flex-col pt-3">
       {count > 2 ? (
         <div
           aria-hidden
-          className="absolute inset-x-4 top-0 h-3 rounded-t-xl border border-b-0 border-border/50 bg-background/60"
+          className="pointer-events-none absolute inset-x-4 top-0 h-3 rounded-t-xl border border-b-0 border-border/50 bg-background/60"
         />
       ) : null}
       <div
         aria-hidden
-        className="absolute inset-x-2 top-0.5 h-3 rounded-t-xl border border-b-0 border-border/60 bg-background/80"
+        className="pointer-events-none absolute inset-x-2 top-1.5 h-3 rounded-t-xl border border-b-0 border-border/60 bg-background/80"
       />
-      <div className="relative flex h-full flex-col border-t border-border/60 bg-background pt-1">
+      <div className="relative flex min-h-0 flex-1 flex-col border-t border-border/60 bg-background">
         {children}
       </div>
     </div>
   );
-}
-
-function folderLabel(entry: MoveFolderEntry, locale: SupportedLocale): string {
-  return entry.role ? t(locale, `mail.folder.${entry.role}`) : entry.name;
 }
 
 /** Toolbar shown while a multi-selection is active; actions hit every selected conversation. */
@@ -94,16 +90,21 @@ export function BulkActionBar({
     folders,
   );
 
-  /** Removing actions: run, then drop the selection and the reader. */
-  const runRemoving = async (p: () => Promise<{ error: string | null }>) => {
-    if (busy) return;
-    setBusy(true);
+  /** Removing actions with busy already held by the caller (post-confirm). */
+  const runRemovingBusy = async (p: () => Promise<{ error: string | null }>) => {
     onError(null);
     const res = await p();
     setBusy(false);
     clearConversationSelection();
     setSelectedMessage(null);
     if (res.error) onError(res.error);
+  };
+
+  /** Removing actions: run, then drop the selection and the reader. */
+  const runRemoving = async (p: () => Promise<{ error: string | null }>) => {
+    if (busy) return;
+    setBusy(true);
+    await runRemovingBusy(p);
   };
 
   const moveTo = (folderId: string) => {
@@ -137,8 +138,8 @@ export function BulkActionBar({
           variant="ghost"
           size="icon"
           className={iconClass}
-          disabled={busy || position.index <= 0}
-          onClick={() => onStep(-1)}
+          disabled={busy || position.index >= position.total - 1}
+          onClick={() => onStep(1)}
           aria-label={t(locale, 'mail.prevConversation')}
         >
           <ChevronLeft className="h-4 w-4" />
@@ -150,8 +151,8 @@ export function BulkActionBar({
           variant="ghost"
           size="icon"
           className={iconClass}
-          disabled={busy || position.index >= position.total - 1}
-          onClick={() => onStep(1)}
+          disabled={busy || position.index <= 0}
+          onClick={() => onStep(-1)}
           aria-label={t(locale, 'mail.nextConversation')}
         >
           <ChevronRight className="h-4 w-4" />
@@ -190,9 +191,15 @@ export function BulkActionBar({
         title={t(locale, 'mail.moveToTrash')}
         aria-label={t(locale, 'mail.moveToTrash')}
         onClick={() => {
+          if (busy) return;
+          setBusy(true);
           void (async () => {
-            if (!(await confirmMoveToTrash(locale, ids.length))) return;
-            await runRemoving(() => actOnMessages(ids, 'trash'));
+            if (!(await confirmMoveToTrash(locale, ids.length))) {
+              setBusy(false);
+              return;
+            }
+            // runRemovingBusy manages busy from here on
+            await runRemovingBusy(() => actOnMessages(ids, 'trash'));
           })();
         }}
       >
@@ -257,7 +264,7 @@ export function BulkActionBar({
                 onSelect={() => moveTo(f.id)}
                 style={{ paddingLeft: `${0.5 + f.depth * 0.75}rem` }}
               >
-                <span className="truncate">{folderLabel(f, locale)}</span>
+                <span className="truncate">{moveFolderEntryLabel(f, locale)}</span>
               </DropdownMenuItem>
             ))
           )}
