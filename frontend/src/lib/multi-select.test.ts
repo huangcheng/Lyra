@@ -9,10 +9,40 @@ import {
   rangeKeys,
   selectAll,
   singleSelect,
+  targetMessageId,
   toggleKey,
 } from '@/lib/multi-select';
+import type { Conversation } from '@/lib/conversation';
+import type { MailMessage } from '@/types';
 
 const V = ['a', 'b', 'c', 'd', 'e'];
+
+function msg(id: string, isRead = true): MailMessage {
+  return {
+    id,
+    accountId: 'a1',
+    folderId: 'f1',
+    subject: id,
+    from: { email: 'a@example.com' },
+    to: [],
+    date: '2026-09-01T10:00:00Z',
+    snippet: '',
+    isRead,
+    isStarred: false,
+    hasAttachments: false,
+  } as MailMessage;
+}
+
+function convo(messages: MailMessage[]): Conversation {
+  return {
+    key: 'th:x',
+    messages,
+    latest: messages[messages.length - 1],
+    unreadCount: messages.filter((m) => !m.isRead).length,
+    anyStarred: false,
+    anyReplied: false,
+  };
+}
 
 describe('singleSelect', () => {
   it('selects exactly one key as anchor and focus', () => {
@@ -114,5 +144,17 @@ describe('isMultiSelection', () => {
   it('is true only with more than one key', () => {
     expect(isMultiSelection(singleSelect('a'))).toBe(false);
     expect(isMultiSelection({ keys: ['a', 'b'], anchor: 'a', focus: 'b' })).toBe(true);
+  });
+});
+
+describe('targetMessageId', () => {
+  it('returns the first unread message even when it is not the latest', () => {
+    const c = convo([msg('m1'), msg('m2', false), msg('m3')]);
+    expect(c.latest.id).toBe('m3');
+    expect(targetMessageId(c)).toBe('m2');
+  });
+  it('falls back to the latest message when all are read', () => {
+    const c = convo([msg('m1'), msg('m2'), msg('m3')]);
+    expect(targetMessageId(c)).toBe('m3');
   });
 });
