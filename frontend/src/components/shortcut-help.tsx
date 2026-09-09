@@ -28,6 +28,8 @@ export function ShortcutHelp() {
     ['J / K', t(locale, 'shortcuts.nextPrev')],
     ['O / Enter', t(locale, 'shortcuts.open')],
     ['U / Esc', t(locale, 'shortcuts.back')],
+    [`${mod} A`, t(locale, 'shortcuts.selectAll')],
+    [`⇧ ↑ / ↓`, t(locale, 'shortcuts.extendSelection')],
     ['?', t(locale, 'shortcuts.help')],
   ];
 
