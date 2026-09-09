@@ -179,15 +179,45 @@ describe('editDraftFromList', () => {
 });
 
 describe('canDropConversation', () => {
-  const drag = { accountId: 'acc1', folderIds: ['f1'] };
   it('rejects cross-account drops', () => {
-    expect(canDropConversation(drag, { accountId: 'acc2', folderId: 'f9' })).toBe(false);
+    expect(
+      canDropConversation(
+        { accountId: 'acc1', folderIds: ['f1'] },
+        { accountId: 'acc2', folderId: 'f9' },
+      ),
+    ).toBe(false);
   });
-  it('rejects dropping into the current folder', () => {
-    expect(canDropConversation(drag, { accountId: 'acc1', folderId: 'f1' })).toBe(false);
+  it('rejects when every dragged message already lives in the target', () => {
+    expect(
+      canDropConversation(
+        { accountId: 'acc1', folderIds: ['f1'] },
+        { accountId: 'acc1', folderId: 'f1' },
+      ),
+    ).toBe(false);
   });
   it('accepts a same-account different folder', () => {
-    expect(canDropConversation(drag, { accountId: 'acc1', folderId: 'f2' })).toBe(true);
+    expect(
+      canDropConversation(
+        { accountId: 'acc1', folderIds: ['f1'] },
+        { accountId: 'acc1', folderId: 'f2' },
+      ),
+    ).toBe(true);
+  });
+  it('accepts a multi-folder drag that includes the target (partial move)', () => {
+    expect(
+      canDropConversation(
+        { accountId: 'acc1', folderIds: ['f1', 'f2'] },
+        { accountId: 'acc1', folderId: 'f1' },
+      ),
+    ).toBe(true);
+  });
+  it('accepts a multi-folder drag that excludes the target', () => {
+    expect(
+      canDropConversation(
+        { accountId: 'acc1', folderIds: ['f1', 'f2'] },
+        { accountId: 'acc1', folderId: 'f3' },
+      ),
+    ).toBe(true);
   });
 });
 

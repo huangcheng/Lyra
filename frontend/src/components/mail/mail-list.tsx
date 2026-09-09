@@ -120,7 +120,7 @@ function DraggableConversationRow({
       messageIds,
       folderIds,
       subject: convo.latest.subject,
-      count: messageIds.length,
+      count: dragged.length > 1 ? dragged.length : messageIds.length,
       selectionDrag: dragged.length > 1,
     } satisfies ConversationDragData,
   });

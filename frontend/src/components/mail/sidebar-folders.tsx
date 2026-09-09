@@ -164,7 +164,13 @@ function useFolderDropTarget(drop: FolderDropData | UnifiedRoleDropData, dropId:
   if (isConvoDrag && drag) {
     if ('unified' in drop && drop.unified) {
       const target = resolveRoleFolder(useMailStore.getState().folders, drag.accountId, drop.role);
-      enabled = target !== null && !drag.folderIds.includes(target.id);
+      // resolveRoleFolder scopes to the drag account, so canDropConversation applies as-is.
+      enabled =
+        target !== null &&
+        canDropConversation(drag, {
+          accountId: drag.accountId,
+          folderId: target.id,
+        });
     } else {
       enabled = canDropConversation(drag, drop as FolderDropData);
     }

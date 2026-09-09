@@ -201,12 +201,14 @@ export interface ConversationDragData {
   selectionDrag?: boolean;
 }
 
-/** Drop validation: same account, not already in the target folder. */
+/** Drop validation: same account, and at least one dragged message would
+ *  actually move (messages already in the target are skipped by the handler). */
 export function canDropConversation(
   drag: Pick<ConversationDragData, 'accountId' | 'folderIds'>,
   target: { accountId: string; folderId: string },
 ): boolean {
-  return drag.accountId === target.accountId && !drag.folderIds.includes(target.folderId);
+  if (drag.accountId !== target.accountId) return false;
+  return !(drag.folderIds.length === 1 && drag.folderIds[0] === target.folderId);
 }
 
 /** Resolve the concrete folder holding `role` for an account (unified row drop targets). */
