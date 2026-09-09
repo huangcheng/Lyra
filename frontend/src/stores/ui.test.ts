@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
+import { ALL_ACCOUNTS } from '@/lib/mail-api';
 import { singleSelect } from '@/lib/multi-select';
 import { useUIStore } from '@/stores/ui';
 
@@ -13,6 +14,12 @@ describe('accountOrder', () => {
 });
 
 describe('conversation multi-select', () => {
+  // Reset everything the tests touch: account/folder/role back to defaults,
+  // selection emptied, reader message cleared.
+  afterEach(() => {
+    useUIStore.getState().setSelectedAccount(ALL_ACCOUNTS);
+  });
+
   it('applyConversationSelection sets keys, anchor, focus, and message together', () => {
     useUIStore
       .getState()
@@ -38,11 +45,17 @@ describe('conversation multi-select', () => {
     useUIStore.getState().applyConversationSelection(singleSelect('a'), 'msg-1');
     useUIStore.getState().setSelectedFolder('f1');
     expect(useUIStore.getState().selectedConversationKeys).toEqual([]);
+    expect(useUIStore.getState().selectionAnchorKey).toBeNull();
+    expect(useUIStore.getState().selectionFocusKey).toBeNull();
     useUIStore.getState().applyConversationSelection(singleSelect('a'), 'msg-1');
     useUIStore.getState().setSelectedAccount('acc-1');
     expect(useUIStore.getState().selectedConversationKeys).toEqual([]);
+    expect(useUIStore.getState().selectionAnchorKey).toBeNull();
+    expect(useUIStore.getState().selectionFocusKey).toBeNull();
     useUIStore.getState().applyConversationSelection(singleSelect('a'), 'msg-1');
     useUIStore.getState().setSelectedFolderRole('inbox');
     expect(useUIStore.getState().selectedConversationKeys).toEqual([]);
+    expect(useUIStore.getState().selectionAnchorKey).toBeNull();
+    expect(useUIStore.getState().selectionFocusKey).toBeNull();
   });
 });
