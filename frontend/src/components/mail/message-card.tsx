@@ -190,7 +190,12 @@ export function MessageCard({
   const visibleAttachments = (mail.attachments ?? []).filter((a) => !a.isInline);
 
   const handleHeaderClick = () => {
-    setSelectedMessage(messageId);
+    // Expanding a card inside a multi-select stack must not collapse the
+    // selection (setSelectedMessage clears it); single-select re-points the
+    // reader to the clicked message as before.
+    if (useUIStore.getState().selectedConversationKeys.length === 0) {
+      setSelectedMessage(messageId);
+    }
     onToggle();
   };
 
