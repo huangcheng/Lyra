@@ -27,10 +27,11 @@ import {
   ReplyAll,
   Trash2,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
 import { MessageCard } from '@/components/mail/message-card';
+import { BulkActionBar, SelectionStackFrame } from '@/components/mail/multi-select-stack';
 
 import { Button } from '@/components/ui/button';
 import { Calendar } from '@/components/ui/calendar';
@@ -87,6 +88,8 @@ export function MailDisplay() {
   const markReadPolicy = useUIStore((s) => s.markReadPolicy);
   const selectedMessageId = useUIStore((s) => s.selectedMessageId);
   const setSelectedMessage = useUIStore((s) => s.setSelectedMessage);
+  const selectedConversationKeys = useUIStore((s) => s.selectedConversationKeys);
+  const selectionAnchorKey = useUIStore((s) => s.selectionAnchorKey);
   const openCompose = useUIStore((s) => s.openCompose);
   const mutedMessageIds = useUIStore((s) => s.mutedMessageIds);
   const toggleMuteMessage = useUIStore((s) => s.toggleMuteMessage);
@@ -141,6 +144,17 @@ export function MailDisplay() {
     mutedMessageIdsList,
   ]);
 
+  const multi = selectedConversationKeys.length > 1;
+  const selectedConvos = useMemo(
+    () => viewConversations.filter((c) => selectedConversationKeys.includes(c.key)),
+    [viewConversations, selectedConversationKeys],
+  );
+  /** Pager position within the selection while multi-selecting. */
+  const multiPosition = useMemo(() => {
+    const idx = selectedConvos.findIndex((c) => c.key === selectionAnchorKey);
+    return { index: Math.max(0, idx), total: selectedConvos.length };
+  }, [selectedConvos, selectionAnchorKey]);
+
   const convoPosition = useMemo(() => {
     if (!mail) return { index: -1, total: viewConversations.length };
     const idx = viewConversations.findIndex((c) => c.messages.some((m) => m.id === mail.id));
@@ -148,6 +162,20 @@ export function MailDisplay() {
   }, [viewConversations, mail]);
 
   const stepConversation = (delta: 1 | -1) => {
+    if (multi) {
+      const next = selectedConvos[multiPosition.index + delta];
+      if (!next) return;
+      const target = next.messages.find((m) => !m.isRead) ?? next.latest;
+      useUIStore.getState().applyConversationSelection(
+        {
+          keys: selectedConversationKeys,
+          anchor: next.key,
+          focus: next.key,
+        },
+        target.id,
+      );
+      return;
+    }
     const next = viewConversations[convoPosition.index + delta];
     if (!next) return;
     const target = next.messages.find((m) => !m.isRead) ?? next.latest;
@@ -457,9 +485,23 @@ export function MailDisplay() {
   // No selection: hide the ghost action bar on desktop (mobile keeps Back only).
   const showToolbar = Boolean(mail) || isMobile;
 
+  const wrapContent = (node: ReactNode) =>
+    multi && mail ? (
+      <SelectionStackFrame count={selectedConvos.length}>{node}</SelectionStackFrame>
+    ) : (
+      node
+    );
+
   return (
     <div className="flex h-full flex-col">
-      {showToolbar ? (
+      {multi && mail ? (
+        <BulkActionBar
+          convos={selectedConvos}
+          position={multiPosition}
+          onStep={stepConversation}
+          onError={setActionError}
+        />
+      ) : showToolbar ? (
         <>
           <div className="flex shrink-0 items-center overflow-x-auto p-2">
             <div className="flex items-center gap-1.5">
@@ -924,47 +966,49 @@ export function MailDisplay() {
           onClose={() => setEventDialogFor(null)}
         />
       ) : null}
-      {mail ? (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div
-            ref={bodyScrollRef}
-            className="min-h-0 flex-1 overflow-auto bg-secondary/60 [overflow-anchor:auto]"
-          >
-            <div className="w-full px-4 py-4">
-              {visibleConversation.length > 1 ? (
-                <div className="px-1.5 pb-3">
-                  <h2 className="font-display text-lg font-medium">
-                    {baseSubject(mail.subject) || mail.subject}
-                  </h2>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    {t(locale, 'mail.conversationCount', { count: visibleConversation.length })}
-                  </p>
+      {wrapContent(
+        mail ? (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div
+              ref={bodyScrollRef}
+              className="min-h-0 flex-1 overflow-auto bg-secondary/60 [overflow-anchor:auto]"
+            >
+              <div className="w-full px-4 py-4">
+                {visibleConversation.length > 1 ? (
+                  <div className="px-1.5 pb-3">
+                    <h2 className="font-display text-lg font-medium">
+                      {baseSubject(mail.subject) || mail.subject}
+                    </h2>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {t(locale, 'mail.conversationCount', { count: visibleConversation.length })}
+                    </p>
+                  </div>
+                ) : null}
+                <div className="space-y-3">
+                  {visibleConversation.map((member) => (
+                    <MessageCard
+                      key={member.id}
+                      messageId={member.id}
+                      expanded={isExpanded(member.id, member.isRead)}
+                      hideSubject={visibleConversation.length > 1}
+                      onToggle={() =>
+                        setExpandOverrides((prev) => ({
+                          ...prev,
+                          [member.id]: !isExpanded(member.id, member.isRead),
+                        }))
+                      }
+                      onReply={(all) => handleReplyFor(member.id, all)}
+                      onForward={() => handleForwardFor(member.id)}
+                      onTrash={() => void handleTrashFor(member.id)}
+                    />
+                  ))}
                 </div>
-              ) : null}
-              <div className="space-y-3">
-                {visibleConversation.map((member) => (
-                  <MessageCard
-                    key={member.id}
-                    messageId={member.id}
-                    expanded={isExpanded(member.id, member.isRead)}
-                    hideSubject={visibleConversation.length > 1}
-                    onToggle={() =>
-                      setExpandOverrides((prev) => ({
-                        ...prev,
-                        [member.id]: !isExpanded(member.id, member.isRead),
-                      }))
-                    }
-                    onReply={(all) => handleReplyFor(member.id, all)}
-                    onForward={() => handleForwardFor(member.id)}
-                    onTrash={() => void handleTrashFor(member.id)}
-                  />
-                ))}
               </div>
             </div>
           </div>
-        </div>
-      ) : (
-        <EmptyState icon={MailOpen} title={t(locale, 'mail.selectMessage')} quiet />
+        ) : (
+          <EmptyState icon={MailOpen} title={t(locale, 'mail.selectMessage')} quiet />
+        ),
       )}
       <Dialog open={labelsOpen && !!mail} onOpenChange={setLabelsOpen}>
         <DialogContent className="sm:max-w-sm">
