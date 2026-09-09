@@ -12,6 +12,7 @@ import { matchMailListShortcut, matchMailSelectionShortcut } from '@/lib/keyboar
 import {
   applyCmdShiftClick,
   applyShiftClick,
+  EMPTY_SELECTION,
   extendSelection,
   selectAll,
   singleSelect,
@@ -348,6 +349,11 @@ export function MailList() {
         if (sel.keys.length > 1 && sel.anchor) {
           e.preventDefault();
           commitSelection(singleSelect(sel.anchor));
+        } else if (sel.keys.length === 1) {
+          // Single selection made via the new key-based path: Esc clears
+          // keys and reader together so highlight and j/k stay in sync.
+          e.preventDefault();
+          applyConversationSelection(EMPTY_SELECTION, null);
         } else if (selectedMessageId) {
           e.preventDefault();
           setSelectedMessage(null);
