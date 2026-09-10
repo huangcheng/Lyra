@@ -219,6 +219,19 @@ export function AiSettingsCard({ locale }: { locale: SupportedLocale }) {
         </div>
         <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
           <div>
+            <div className="text-[13px] font-medium">{t(locale, 'settings.ai.assistant')}</div>
+            <div className="text-xs text-muted-foreground">
+              {t(locale, 'settings.ai.assistantDesc')}
+            </div>
+          </div>
+          <Switch
+            checked={s.features.assistant}
+            disabled={saving}
+            onCheckedChange={(assistant) => void patch({ features: { ...s.features, assistant } })}
+          />
+        </div>
+        <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+          <div>
             <div className="text-[13px] font-medium">{t(locale, 'settings.ai.calendar')}</div>
             <div className="text-xs text-muted-foreground">
               {t(locale, 'settings.ai.calendarDesc')}
