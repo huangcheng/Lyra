@@ -10,7 +10,7 @@
 
 import { format } from 'date-fns';
 import { File, Forward, Paperclip, Reply, ReplyAll, Shield, Trash2 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { OpengpgMessageBanner } from '@/components/mail/opengpg-message-banner';
 import { DkimStatus } from '@/components/mail/dkim-status';
@@ -25,7 +25,8 @@ import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { allowSenderPrivacy } from '@/lib/privacy-api';
-import { sanitizeEmailHtml } from '@/lib/sanitize-email-html';
+import { sanitizeEmailHtmlForFrame } from '@/lib/sanitize-email-html';
+import { MailBodyFrame } from '@/components/mail/mail-body-frame';
 import { cn, getInitials, avatarTone } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth';
 import { useMailStore } from '@/stores/mail';
@@ -65,7 +66,6 @@ export function MessageCard({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
-  const mailBodyRef = useRef<HTMLDivElement>(null);
   const autoMarkedRef = useRef(false);
   const avatarUrl = useAvatar(mail?.from.email);
 
@@ -124,7 +124,7 @@ export function MessageCard({
     if (!bodyHtml) return;
     let revoke: (() => void) | null = null;
     let cancelled = false;
-    const sanitized = sanitizeEmailHtml(bodyHtml);
+    const sanitized = sanitizeEmailHtmlForFrame(bodyHtml);
     void resolveInlineImages(sanitized, bodyAttachments).then((resolved) => {
       if (cancelled) {
         resolved.revoke();
@@ -145,43 +145,19 @@ export function MessageCard({
       : hasInlineCid
         ? null
         : bodyHtml
-          ? sanitizeEmailHtml(bodyHtml)
+          ? sanitizeEmailHtmlForFrame(bodyHtml)
           : null;
 
-  // Tracking-pixel advisory on the rendered body. The advisory resets
-  // when the rendered body changes (keyed during render), and the effect
-  // only scans/subscribes — state flips happen from image-load callbacks.
+  // Tracking-pixel advisory on the rendered body. MailBodyFrame scans the
+  // framed document and reports pixel-like images; the advisory resets when
+  // the rendered body changes (keyed during render).
   const [pixelAdvisory, setPixelAdvisory] = useState(false);
   const [advisoryFor, setAdvisoryFor] = useState<string | null>(renderHtml);
   if (renderHtml !== advisoryFor) {
     setAdvisoryFor(renderHtml);
     setPixelAdvisory(false);
   }
-  useEffect(() => {
-    if (!expanded || !bodyHtml) return;
-    const root = mailBodyRef.current;
-    if (!root) return;
-
-    const markIfPixel = (img: HTMLImageElement) => {
-      if (img.getAttribute('data-lyra-pixel') === '1') {
-        setPixelAdvisory(true);
-        return;
-      }
-      if (img.complete && img.naturalWidth > 0 && img.naturalWidth <= 4 && img.naturalHeight <= 4) {
-        img.setAttribute('data-lyra-pixel', '1');
-        setPixelAdvisory(true);
-      }
-    };
-
-    const onLoad = (ev: Event) => {
-      const target = ev.target;
-      if (target instanceof HTMLImageElement) markIfPixel(target);
-    };
-
-    root.querySelectorAll('img').forEach((img) => markIfPixel(img));
-    root.addEventListener('load', onLoad, true);
-    return () => root.removeEventListener('load', onLoad, true);
-  }, [expanded, bodyHtml, renderHtml, allowRemoteContent]);
+  const handleTrackingPixel = useCallback(() => setPixelAdvisory(true), []);
 
   if (!mail) return null;
 
@@ -364,13 +340,9 @@ export function MessageCard({
             <ThinkingOrb state="composing" size={64} />
           </div>
         ) : renderHtml ? (
-          <div
-            ref={mailBodyRef}
-            className="mail-body"
-            // Sanitized via sanitizeEmailHtml (class/style-tag stripped);
-            // inline cid: images resolved to object URLs after sanitize.
-            dangerouslySetInnerHTML={{ __html: renderHtml }}
-          />
+          // Sanitized via sanitizeEmailHtmlForFrame (class/style kept — the
+          // sandboxed frame isolates them); cid: images already resolved.
+          <MailBodyFrame html={renderHtml} onTrackingPixel={handleTrackingPixel} />
         ) : mail.bodyText ? (
           <div className="whitespace-pre-wrap">{mail.bodyText}</div>
         ) : (

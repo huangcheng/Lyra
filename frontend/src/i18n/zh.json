@@ -173,7 +173,8 @@
     "aiDraft": "AI 起草",
     "aiDraftFailed": "AI 起草失败",
     "aiSpamCheck": "AI 垃圾邮件判定",
-    "aiSpamMove": "移到垃圾邮件"
+    "aiSpamMove": "移到垃圾邮件",
+    "messageBody": "邮件正文"
   },
   "auth": {
     "tagline": "自己托管的邮件。",
@@ -567,7 +568,6 @@
       "features": "功能",
       "draftReply": "辅助撰写回复/转发",
       "draftReplyDesc": "在写信界面添加 AI 按钮，生成建议文本。始终由你编辑并发送。",
-      "privacy": "While a feature is on, Lyra sends the minimum needed message content to the endpoint configured above.",
       "privacy": "功能开启期间，Lyra 只会把所需的最少邮件内容发送到上方配置的服务。",
       "assistant": "助手对话",
       "assistantDesc": "聊天气泡：可搜索邮件、讨论当前打开的邮件。",
@@ -577,10 +577,7 @@
       "spamMode_suggest": "建议",
       "spamMode_auto": "自动 → 垃圾邮件",
       "calendar": "从邮件创建日程",
-      "calendarDesc": "从邮件中识别日程并建议事件；创建前需你确认。",
-      "spamMode_auto": "自动 → 垃圾邮件",
-      "assistantDesc": "聊天气泡：可搜索邮件、讨论当前打开的邮件。",
-      "privacy": "功能开启期间，Lyra 只会把所需的最少邮件内容发送到上方配置的服务。"
+      "calendarDesc": "从邮件中识别日程并建议事件；创建前需你确认。"
     },
     "backup": {
       "title": "备份",

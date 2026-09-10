@@ -173,7 +173,8 @@
     "aiDraft": "Draft with AI",
     "aiDraftFailed": "AI draft failed",
     "aiSpamCheck": "AI spam check",
-    "aiSpamMove": "Move to junk"
+    "aiSpamMove": "Move to junk",
+    "messageBody": "Message body"
   },
   "auth": {
     "tagline": "Mail you host yourself.",
@@ -576,9 +577,7 @@
       "spamMode_suggest": "Suggest",
       "spamMode_auto": "Auto → Spam",
       "calendar": "Calendar from email",
-      "calendarDesc": "Propose calendar events detected in messages; you confirm before creation.",
-      "spamMode_auto": "Auto → Spam",
-      "assistantDesc": "A chat bubble that can search your mail and discuss the open message."
+      "calendarDesc": "Propose calendar events detected in messages; you confirm before creation."
     },
     "backup": {
       "title": "Backup",

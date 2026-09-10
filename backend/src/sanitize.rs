@@ -25,12 +25,17 @@ static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| {
     // Keep `<style>` blocks and the `style` attribute: HTML email layout
     // depends on them (table-based templates, inline colors/sizing). CSS
     // cannot execute script in modern engines, and rendering happens inside a
-    // sandboxed iframe whose CSP confines network loads (see mail-display),
-    // so presentational CSS is safe to carry through. `style` is in ammonia's
+    // sandboxed iframe (frontend MailBodyFrame), so presentational CSS is safe
+    // to carry through. `style` is in ammonia's
     // default `clean_content_tags`, so move it to the keep set explicitly.
     builder.rm_clean_content_tags(["style"]);
     builder.add_tags(["style"]);
     builder.add_generic_attributes(["style"]);
+
+    // `<title>` is not an allowed tag, so ammonia would drop the tag but keep
+    // its text — leaking the document title as bare text at the top of the
+    // body. Treat it as clean-content so tag and text are removed together.
+    builder.add_clean_content_tags(["title"]);
 
     // URL scheme whitelist: no `javascript:`/`vbscript:`/`file:`.
     // `data:` is intentionally excluded: ammonia cannot restrict it to
@@ -87,6 +92,18 @@ mod tests {
         assert!(!out.contains("<script"), "got: {out}");
         assert!(!out.contains("alert(1)"), "got: {out}");
         assert!(out.contains("<p>hi</p>"), "got: {out}");
+    }
+
+    #[test]
+    fn drops_title_content_from_full_documents() {
+        // Real-world regression: a full HTML document's <title> text leaked
+        // into the stored body as bare text above the content (ammonia drops
+        // the tag but keeps its text unless it is a clean-content tag).
+        let doc = "<!DOCTYPE html><html><head><title>Invoice 42</title>\
+                   <meta charset=\"utf-8\"></head><body><p>body</p></body></html>";
+        let out = sanitize_email_html(doc);
+        assert!(!out.contains("Invoice 42"), "title text leaked: {out}");
+        assert!(out.contains("<p>body</p>"), "got: {out}");
     }
 
     #[test]

@@ -1,7 +1,9 @@
 # Lyra — In-Page Email HTML Rendering (Design)
 
 Date: 2026-08-25
-Status: approved by user (pending spec review)
+Status: SUPERSEDED (2026-09-10) — stripped `<style>`/`class` broke real email
+layout; the reader returned to a sandboxed iframe. See
+docs/superpowers/specs/2026-09-10-mail-iframe-render-design.md
 Supersedes: the sandboxed-iframe reader introduced with remote-image proxy M1
 
 ## Problem
