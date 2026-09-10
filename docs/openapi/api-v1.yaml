@@ -2165,7 +2165,9 @@ paths:
         media pipeline (SSRF guard, size caps, content sniffing); misses are
         negative-cached (24h clean miss, 10min upstream error). Responses
         carry `Cache-Control: private, max-age=86400`; BIMI SVG logos are
-        served with `Content-Security-Policy: script-src 'none'`.
+        served with `Content-Security-Policy: script-src 'none'`. A resolved
+        absence answers `204` (a miss is a successful empty answer, not a
+        missing resource — 404s spammed the browser console).
       parameters:
         - name: email
           in: path

@@ -22,6 +22,12 @@ export async function loadAvatar(email: string): Promise<string | null> {
   if (known !== undefined) return known;
   try {
     const blob = await apiBlob(`/avatars/${encodeURIComponent(key)}`);
+    // 204 "resolved: no avatar" arrives as an empty blob — treat as a miss
+    // so the initials fallback applies without a broken <img>.
+    if (blob.size === 0) {
+      cache.set(key, null);
+      return null;
+    }
     const url = URL.createObjectURL(blob);
     cache.set(key, url);
     return url;
