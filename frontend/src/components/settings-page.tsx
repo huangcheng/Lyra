@@ -274,7 +274,7 @@ export function SettingsPage() {
       window.history.replaceState({}, '', path);
     }
 
-    void fetchAccounts();
+    void fetchAccounts(true);
     void fetchPrivacySettings()
       .then(setPrivacySettings)
       .catch(() => {});
@@ -330,15 +330,18 @@ export function SettingsPage() {
     return () => sub.unsubscribe();
   }, [locale, errorLogOpenId]);
 
-  async function fetchAccounts() {
+  /** Load the account roster. `initial` swaps the list for a loading
+   * block — refreshes keep the stale rows mounted so sync completions
+   * don't bounce the whole page. */
+  async function fetchAccounts(initial = false) {
     try {
-      setLoading(true);
+      if (initial) setLoading(true);
       const data = await api<MailAccount[]>('/accounts');
       setAccounts(data);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (initial) setLoading(false);
     }
   }
 

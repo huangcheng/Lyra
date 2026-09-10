@@ -40,6 +40,11 @@
   animation-delay: 200ms;
 }
 
+/* Single-block gentle entrance (empty states, one-off surfaces). */
+.rise-in {
+  animation: lyra-rise-in 300ms cubic-bezier(0.23, 1, 0.32, 1) backwards;
+}
+
 /* Reduced motion: keep opacity/color feedback, drop movement.
    tw-animate-css defers this guard to the app. */
 @media (prefers-reduced-motion: reduce) {

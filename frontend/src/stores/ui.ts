@@ -250,7 +250,12 @@ export const useUIStore = create<UIState>((set) => ({
 
   setFavoritesAllInboxesExpanded: (expanded) => set({ favoritesAllInboxesExpanded: expanded }),
 
-  setLocale: (locale) => set({ locale }),
+  setLocale: (locale) => {
+    // Keep <html lang> truthful: correct CJK font selection, screen-reader
+    // pronunciation, and :lang() styling hooks.
+    document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
+    set({ locale });
+  },
 
   setMarkReadPolicy: (policy) => set({ markReadPolicy: policy }),
 

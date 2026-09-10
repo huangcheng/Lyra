@@ -12,10 +12,11 @@ import { reconcilePushSubscription } from './lib/push';
 import '@fontsource-variable/inter';
 import '@fontsource-variable/inter-tight';
 import '@fontsource/instrument-serif';
+import '@fontsource/instrument-serif/400-italic.css';
 import './index.css';
 
 initTheme();
-void Promise.all([restoreSession(), fetchVersionInfo()]).then(([_, versionInfo]) => {
+void Promise.all([restoreSession(), fetchVersionInfo()]).then(([, versionInfo]) => {
   // Errors from the very first paint reach Sentry too.
   initSentryFromVersion(versionInfo);
   // Subscribe only after the server state is applied, so the restore itself

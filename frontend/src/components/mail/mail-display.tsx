@@ -21,7 +21,6 @@ import {
   CalendarPlus,
   Inbox,
   ShieldQuestion,
-  MailOpen,
   MoreVertical,
   Reply,
   ReplyAll,
@@ -1014,7 +1013,7 @@ export function MailDisplay() {
             </div>
           </div>
         ) : (
-          <EmptyState icon={MailOpen} title={t(locale, 'mail.selectMessage')} quiet />
+          <EmptyState title={t(locale, 'mail.selectMessage')} quiet />
         ),
       )}
       <Dialog open={labelsOpen && !!mail} onOpenChange={setLabelsOpen}>
