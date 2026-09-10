@@ -1,29 +1,49 @@
 /**
- * App-wide AI settings fetch with a module-level cache: many surfaces
- * (bubble, reader suggest) need the same small GET — cache it for the
- * session; failures mean "AI off".
+ * App-wide AI settings with a reactive module-level cache: many surfaces
+ * (bubble, reader suggest, compose) need the same small GET. Invalidating
+ * after a settings save notifies every mounted subscriber, so toggles take
+ * effect immediately — no reload.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 
 import { fetchAiSettings, type AiSettings } from '@/lib/ai-api';
 
-let cached: Promise<AiSettings | null> | null = null;
+let cache: AiSettings | null = null;
+let inflight: Promise<AiSettings | null> | null = null;
+const listeners = new Set<() => void>();
+const emit = () => listeners.forEach((l) => l());
 
-function load(): Promise<AiSettings | null> {
-  cached ??= fetchAiSettings().catch(() => null);
-  return cached;
+function fetchOnce(): Promise<AiSettings | null> {
+    inflight ??= fetchAiSettings()
+        .then((s) => {
+            cache = s;
+            return s;
+        })
+        .catch(() => null)
+        .finally(() => {
+            inflight = null;
+            emit();
+        });
+    return inflight;
 }
 
-/** Invalidate after settings change (the settings page calls this). */
+/** Re-fetch and notify subscribers (the settings page calls this on save). */
 export function invalidateAiSettingsCache(): void {
-  cached = null;
+    inflight = null;
+    void fetchOnce();
 }
 
 export function useAiSettings(): AiSettings | null {
-  const [settings, setSettings] = useState<AiSettings | null>(null);
-  useEffect(() => {
-    void load().then(setSettings);
-  }, []);
-  return settings;
+    useEffect(() => {
+        void fetchOnce();
+    }, []);
+    return useSyncExternalStore(
+        (cb) => {
+            listeners.add(cb);
+            return () => listeners.delete(cb);
+        },
+        () => cache,
+        () => null,
+    );
 }
