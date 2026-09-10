@@ -38,18 +38,20 @@ import { useUIStore } from '@/stores/ui';
 /** Front card + up to two offset pseudo-cards suggesting the stack. */
 export function SelectionStackFrame({ count, children }: { count: number; children: ReactNode }) {
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col pt-3">
+    <div className="relative flex min-h-0 flex-1 flex-col px-1.5 pt-3">
       {count > 2 ? (
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-4 top-0 h-3 rounded-t-xl border border-b-0 border-border/50 bg-background/60"
+          className="pointer-events-none absolute inset-x-5 top-0 h-2.5 rounded-t-lg border border-b-0 border-border bg-secondary/70 shadow-sm"
         />
       ) : null}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-x-2 top-1.5 h-3 rounded-t-xl border border-b-0 border-border/60 bg-background/80"
-      />
-      <div className="relative flex min-h-0 flex-1 flex-col border-t border-border/60 bg-background">
+      {count > 1 ? (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-3 top-1.5 h-2.5 rounded-t-lg border border-b-0 border-border bg-secondary shadow-sm"
+        />
+      ) : null}
+      <div className="relative flex min-h-0 flex-1 flex-col rounded-t-xl border border-b-0 border-border bg-background shadow-[0_-2px_6px_rgba(0,0,0,0.08)]">
         {children}
       </div>
     </div>
