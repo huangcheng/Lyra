@@ -38,20 +38,22 @@ import { useUIStore } from '@/stores/ui';
 /** Front card + up to two offset pseudo-cards suggesting the stack. */
 export function SelectionStackFrame({ count, children }: { count: number; children: ReactNode }) {
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col px-1.5 pt-3">
+    // The muted backdrop makes the white cards read as a paper stack and
+    // doubles as a "multi-select mode is active" signal for the pane.
+    <div className="relative flex min-h-0 flex-1 flex-col bg-muted px-4 pt-5">
       {count > 2 ? (
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-5 top-0 h-2.5 rounded-t-lg border border-b-0 border-border bg-secondary/70 shadow-sm"
+          className="pointer-events-none absolute inset-x-9 top-0 h-4 rounded-t-lg border border-b-0 border-border bg-card shadow"
         />
       ) : null}
       {count > 1 ? (
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-3 top-1.5 h-2.5 rounded-t-lg border border-b-0 border-border bg-secondary shadow-sm"
+          className="pointer-events-none absolute inset-x-6 top-2.5 h-4 rounded-t-lg border border-b-0 border-border bg-card shadow-md"
         />
       ) : null}
-      <div className="relative flex min-h-0 flex-1 flex-col rounded-t-xl border border-b-0 border-border bg-background shadow-[0_-2px_6px_rgba(0,0,0,0.08)]">
+      <div className="relative flex min-h-0 flex-1 flex-col rounded-t-xl border border-b-0 border-border bg-background shadow-xl">
         {children}
       </div>
     </div>
