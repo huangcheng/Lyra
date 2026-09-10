@@ -16,8 +16,8 @@ use super::handlers::{
 };
 use super::password::{hash_password, validate_password, verify_password};
 use super::session::{
-    SessionStore, fetch_sess_epoch, is_rate_limited, pending_key, record_failed_attempt, sess_key,
-    tok_key,
+    SessionStore, fetch_sess_epoch, is_rate_limited, pending_key, record_failed_attempt,
+    refresh_key, sess_key, tok_key,
 };
 use super::state::AuthState;
 use super::totp::{build_totp, decrypt_totp_secret, encrypt_totp_secret};
@@ -560,6 +560,40 @@ async fn session_entries_carry_a_ttl() {
     let floor = std::time::Duration::from_secs(SESSION_TTL_SECS - 60);
     assert!(sess_ttl.unwrap() > floor);
     assert!(tok_ttl.unwrap() > floor);
+}
+
+#[tokio::test]
+async fn get_session_sliding_renews_ttl_once_per_window() {
+    let db = test_pool().await;
+    seed_user(&db, "user-1").await;
+    let kv = MemoryKv::new();
+    let store = SessionStore::new(db.clone(), Arc::new(kv.clone()));
+    let token = store.create_session("user-1").await.unwrap();
+    let epoch = fetch_sess_epoch(&db, "user-1").await.unwrap();
+
+    // Simulate an aged session with 1h left and the throttle marker lapsed
+    // (i.e. > half the window passed): a read renews it to full.
+    kv.del(&refresh_key(&token)).await.unwrap();
+    kv.set(&sess_key(epoch, &token), "user-1", Some(3600))
+        .await
+        .unwrap();
+    assert!(store.get_session(&token).await.is_some());
+    let renewed = kv.ttl_remaining(&sess_key(epoch, &token)).await.unwrap();
+    assert!(
+        renewed > std::time::Duration::from_secs(SESSION_TTL_SECS - 60),
+        "aged session must renew to the full window, got {renewed:?}"
+    );
+
+    // Inside the throttle window a second read must NOT rewrite the key.
+    kv.set(&sess_key(epoch, &token), "user-1", Some(3600))
+        .await
+        .unwrap();
+    assert!(store.get_session(&token).await.is_some());
+    let throttled = kv.ttl_remaining(&sess_key(epoch, &token)).await.unwrap();
+    assert!(
+        throttled <= std::time::Duration::from_hours(1),
+        "throttled read must not renew, got {throttled:?}"
+    );
 }
 
 #[tokio::test]

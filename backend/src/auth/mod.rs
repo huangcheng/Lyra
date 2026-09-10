@@ -36,10 +36,11 @@ use db::find_user_by_id;
 use password::verify_password;
 use session::{clear_failed_attempts, ensure_not_rate_limited, note_failed_attempt, pwd_rl_key};
 
-/// Sessions live for 7 days, fixed from creation. The kv seam has no
-/// touch/expire operation, so rolling renewal would cost a write on every
-/// authenticated request; a fixed TTL keeps session reads cheap.
-const SESSION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+/// Sessions live 30 days, sliding: a read renews the token to the full
+/// window, throttled by a marker key so the renewal write happens at most
+/// once per half-window per token (not on every authenticated request).
+/// Active daily use never logs out; an abandoned session dies in 30 days.
+const SESSION_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 /// Pending TOTP tokens (password ok, second factor outstanding) live 5 minutes.
 const PENDING_TTL_SECS: u64 = 5 * 60;
 /// Rate limit: 5 failed attempts within a 15-minute fixed window.

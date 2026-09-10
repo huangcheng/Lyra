@@ -27,6 +27,12 @@ pub(crate) fn pending_key(token: &str) -> String {
     format!("pending:{token}")
 }
 
+/// Throttle marker for sliding renewal: while present, `get_session` skips
+/// the renewal write. Lives for half the session window.
+pub(crate) fn refresh_key(token: &str) -> String {
+    format!("sess-refresh:{token}")
+}
+
 // ── Rate limiting (fixed window per key, via kv counters) ────────────
 
 // Keyed per username: an attacker who knows the (single, v1) username can
@@ -204,6 +210,15 @@ impl SessionStore {
                 tracing::error!("session tok index set failed: {e}");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
+        // Arm the renewal throttle: a fresh session needs no renewal until
+        // half the window has passed.
+        self.kv
+            .set(&refresh_key(&token), user_id, Some(SESSION_TTL_SECS / 2))
+            .await
+            .map_err(|e| {
+                tracing::error!("session refresh marker set failed: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
         Ok(token)
     }
 
@@ -223,11 +238,34 @@ impl SessionStore {
         let user_id = self.kv.get(&tok_key(token)).await.ok().flatten()?;
         let epoch = fetch_sess_epoch(&self.db, &user_id).await.ok()?;
         let stored = self.kv.get(&sess_key(epoch, token)).await.ok().flatten()?;
-        if stored == user_id {
-            Some(user_id)
-        } else {
-            None
+        if stored != user_id {
+            return None;
         }
+        // Sliding renewal: when the throttle marker is gone, extend both
+        // session keys to the full window and re-arm the marker for half of
+        // it. At most one renewal write burst per half-window per token.
+        if self
+            .kv
+            .get(&refresh_key(token))
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let _ = self
+                .kv
+                .set(&tok_key(token), &user_id, Some(SESSION_TTL_SECS))
+                .await;
+            let _ = self
+                .kv
+                .set(&sess_key(epoch, token), &user_id, Some(SESSION_TTL_SECS))
+                .await;
+            let _ = self
+                .kv
+                .set(&refresh_key(token), &user_id, Some(SESSION_TTL_SECS / 2))
+                .await;
+        }
+        Some(user_id)
     }
 
     pub async fn get_pending_session(&self, token: &str) -> Option<String> {
@@ -258,5 +296,6 @@ impl SessionStore {
             let _ = self.kv.del(&sess_key(epoch, token)).await;
         }
         let _ = self.kv.del(&tok_key(token)).await;
+        let _ = self.kv.del(&refresh_key(token)).await;
     }
 }
