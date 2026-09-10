@@ -15,35 +15,35 @@ const listeners = new Set<() => void>();
 const emit = () => listeners.forEach((l) => l());
 
 function fetchOnce(): Promise<AiSettings | null> {
-    inflight ??= fetchAiSettings()
-        .then((s) => {
-            cache = s;
-            return s;
-        })
-        .catch(() => null)
-        .finally(() => {
-            inflight = null;
-            emit();
-        });
-    return inflight;
+  inflight ??= fetchAiSettings()
+    .then((s) => {
+      cache = s;
+      return s;
+    })
+    .catch(() => null)
+    .finally(() => {
+      inflight = null;
+      emit();
+    });
+  return inflight;
 }
 
 /** Re-fetch and notify subscribers (the settings page calls this on save). */
 export function invalidateAiSettingsCache(): void {
-    inflight = null;
-    void fetchOnce();
+  inflight = null;
+  void fetchOnce();
 }
 
 export function useAiSettings(): AiSettings | null {
-    useEffect(() => {
-        void fetchOnce();
-    }, []);
-    return useSyncExternalStore(
-        (cb) => {
-            listeners.add(cb);
-            return () => listeners.delete(cb);
-        },
-        () => cache,
-        () => null,
-    );
+  useEffect(() => {
+    void fetchOnce();
+  }, []);
+  return useSyncExternalStore(
+    (cb) => {
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
+    () => cache,
+    () => null,
+  );
 }
