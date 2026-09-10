@@ -6,8 +6,9 @@
  */
 
 import { formatDistanceToNow } from 'date-fns';
-import { ChevronUp, Loader2, RefreshCw } from 'lucide-react';
+import { ChevronUp, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
+import { ThinkingOrb } from 'thinking-orbs';
 
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -99,7 +100,7 @@ export function SyncStatusPopover() {
               {status?.state === 'syncing' ? (
                 // Same 28px box as the idle sync button so both states align.
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                  <ThinkingOrb state="working" size={20} className="h-3.5 w-3.5" />
                 </span>
               ) : (
                 <Button
@@ -111,13 +112,13 @@ export function SyncStatusPopover() {
                   aria-label={t(locale, 'sync.syncAccount')}
                   title={failedIds.has(account.id) ? t(locale, 'mail.syncStartFailed') : undefined}
                 >
-                  <RefreshCw
-                    className={cn(
-                      'h-3.5 w-3.5',
-                      requested.has(account.id) && 'animate-spin',
-                      failedIds.has(account.id) && 'text-destructive',
-                    )}
-                  />
+                  {requested.has(account.id) ? (
+                    <ThinkingOrb state="working" size={20} className="h-3.5 w-3.5" />
+                  ) : (
+                    <RefreshCw
+                      className={cn('h-3.5 w-3.5', failedIds.has(account.id) && 'text-destructive')}
+                    />
+                  )}
                 </Button>
               )}
             </div>

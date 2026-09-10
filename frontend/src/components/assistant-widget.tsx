@@ -7,6 +7,7 @@
 
 import { Sparkles, Trash2, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { ThinkingOrb } from 'thinking-orbs';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -43,16 +44,10 @@ function Bubble({ open, onToggle }: { open: boolean; onToggle: () => void }) {
   );
 }
 
-function TypingDots() {
+function ThinkingIndicator() {
   return (
-    <span className="inline-flex items-center gap-1 px-1 py-2" aria-label="…">
-      {[0, 1, 2].map((i) => (
-        <span
-          key={i}
-          className="size-1.5 animate-pulse rounded-full bg-muted-foreground"
-          style={{ animationDelay: `${i * 160}ms` }}
-        />
-      ))}
+    <span className="inline-flex items-center px-1 py-2" aria-label="…">
+      <ThinkingOrb state="composing" size={20} />
     </span>
   );
 }
@@ -156,7 +151,7 @@ function ChatPanel({ locale, onClose }: { locale: SupportedLocale; onClose: () =
 
       <div ref={listRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-3">
         {history === null ? (
-          <TypingDots />
+          <ThinkingIndicator />
         ) : history.length === 0 ? (
           <p className="px-1 text-xs text-muted-foreground">{t(locale, 'assistant.emptyHint')}</p>
         ) : (
@@ -175,7 +170,7 @@ function ChatPanel({ locale, onClose }: { locale: SupportedLocale; onClose: () =
             </div>
           ))
         )}
-        {busy ? <TypingDots /> : null}
+        {busy ? <ThinkingIndicator /> : null}
         {error ? <div className="text-xs text-destructive">{error}</div> : null}
       </div>
 

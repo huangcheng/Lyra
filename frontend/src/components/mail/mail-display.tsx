@@ -28,6 +28,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { ThinkingOrb } from 'thinking-orbs';
 
 import { EmptyState } from '@/components/empty-state';
 import { MessageCard } from '@/components/mail/message-card';
@@ -596,10 +597,11 @@ export function MailDisplay() {
                           disabled={disabled || aiBusy}
                           onClick={() => void handleAiSpamCheck()}
                         >
-                          <ShieldQuestion
-                            className={cn('h-4 w-4', aiBusy && 'animate-pulse')}
-                            aria-hidden
-                          />
+                          {aiBusy ? (
+                            <ThinkingOrb state="solving" size={20} className="h-4 w-4" />
+                          ) : (
+                            <ShieldQuestion className="h-4 w-4" aria-hidden />
+                          )}
                           <span className="sr-only">{t(locale, 'mail.aiSpamCheck')}</span>
                         </Button>
                       </TooltipTrigger>

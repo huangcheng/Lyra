@@ -7,7 +7,8 @@
  * override for exotic providers, and a real Disconnect.
  */
 
-import { CalendarDays, ChevronDown, ChevronRight, Contact, KeyRound, Loader2 } from 'lucide-react';
+import { CalendarDays, ChevronDown, ChevronRight, Contact, KeyRound } from 'lucide-react';
+import { ThinkingOrb } from 'thinking-orbs';
 import { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -328,7 +329,7 @@ function PimDialogForm({ account, open, onOpenChange, onChanged }: PimDialogForm
               />
               <Button type="button" disabled={busy !== null} onClick={() => void connect()}>
                 {busy && connectStages.includes(busy) ? (
-                  <Loader2 className="size-3.5 animate-spin" />
+                  <ThinkingOrb state="connecting" size={20} className="size-3.5" />
                 ) : null}
                 {connectLabel}
               </Button>
@@ -413,7 +414,9 @@ function PimDialogForm({ account, open, onOpenChange, onChanged }: PimDialogForm
                 disabled={busy !== null}
                 onClick={() => void saveUrls()}
               >
-                {busy === 'savingUrls' ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                {busy === 'savingUrls' ? (
+                  <ThinkingOrb state="working" size={20} className="size-3.5" />
+                ) : null}
                 {t(locale, 'settings.pim.saveUrls')}
               </Button>
             </FieldGroup>
@@ -429,7 +432,9 @@ function PimDialogForm({ account, open, onOpenChange, onChanged }: PimDialogForm
               disabled={busy !== null}
               onClick={() => void disconnect()}
             >
-              {busy === 'disconnecting' ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              {busy === 'disconnecting' ? (
+                <ThinkingOrb state="working" size={20} className="size-3.5" />
+              ) : null}
               {t(locale, 'settings.pim.disconnect')}
             </Button>
           ) : (
@@ -443,7 +448,7 @@ function PimDialogForm({ account, open, onOpenChange, onChanged }: PimDialogForm
             onClick={() => void syncNow()}
           >
             {busy === 'syncingContacts' || busy === 'syncingCalendars' ? (
-              <Loader2 className="size-3.5 animate-spin" />
+              <ThinkingOrb state="working" size={20} className="size-3.5" />
             ) : null}
             {t(locale, 'settings.pim.syncNow')}
           </Button>

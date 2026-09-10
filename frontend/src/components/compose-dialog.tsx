@@ -16,6 +16,7 @@ import {
   Type,
   X,
 } from 'lucide-react';
+import { ThinkingOrb } from 'thinking-orbs';
 
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
@@ -958,7 +959,11 @@ export function ComposeDialog() {
                 aria-label={t(locale, 'mail.aiDraft')}
                 onClick={() => void handleAiDraft()}
               >
-                <Sparkles className={cn('size-4', aiBusy && 'animate-pulse')} aria-hidden />
+                {aiBusy ? (
+                  <ThinkingOrb state="composing" size={20} className="size-4" />
+                ) : (
+                  <Sparkles className="size-4" aria-hidden />
+                )}
               </button>
             ) : null}
             <button

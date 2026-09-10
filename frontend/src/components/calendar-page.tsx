@@ -28,6 +28,8 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { ThinkingOrb } from 'thinking-orbs';
+import { InlineOrb } from '@/components/ui/orb-state';
 import { t } from '../i18n';
 import type { SupportedLocale } from '../types';
 import { api } from '../lib/api-client';
@@ -899,7 +901,11 @@ export function CalendarPage() {
           {t(locale, 'calendar.sources')}
         </p>
         {loading ? (
-          <div className="px-2.5 text-sm text-muted-foreground">{t(locale, 'common.loading')}</div>
+          <InlineOrb
+            state="searching"
+            label={t(locale, 'common.loading')}
+            className="px-2.5 text-sm text-muted-foreground"
+          />
         ) : error ? (
           <div className="px-2.5 text-sm text-destructive">{t(locale, 'calendar.loadError')}</div>
         ) : sources.length === 0 ? (
@@ -1064,7 +1070,11 @@ export function CalendarPage() {
               onClick={() => void refresh()}
               aria-label={t(locale, 'calendar.refresh')}
             >
-              <RefreshCw className={cn('size-4', refreshing && 'animate-spin')} />
+              {refreshing ? (
+                <ThinkingOrb state="working" size={20} className="size-4" />
+              ) : (
+                <RefreshCw className="size-4" />
+              )}
             </Button>
           </div>
         </header>

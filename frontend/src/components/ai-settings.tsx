@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { Sparkles } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { InlineOrb } from '@/components/ui/orb-state';
 import { invalidateAiSettingsCache } from '@/lib/use-ai-settings';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -83,7 +84,11 @@ export function AiSettingsCard({ locale }: { locale: SupportedLocale }) {
   if (!s) {
     return (
       <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
-        <div className="text-[13px] text-muted-foreground">{t(locale, 'common.loading')}</div>
+        <InlineOrb
+          state="searching"
+          label={t(locale, 'common.loading')}
+          className="text-[13px] text-muted-foreground"
+        />
         {error ? <div className="text-xs text-destructive">{error}</div> : null}
       </section>
     );

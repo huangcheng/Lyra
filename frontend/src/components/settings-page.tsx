@@ -8,6 +8,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
+import { ThinkingOrb } from 'thinking-orbs';
+import { InlineOrb } from '@/components/ui/orb-state';
 import {
   DatabaseBackup,
   Flag,
@@ -1084,9 +1086,11 @@ export function SettingsPage() {
                     />
                   </div>
                   <Button type="submit" variant="outline" size="sm" disabled={changingPassword}>
-                    {changingPassword
-                      ? t(locale, 'common.loading')
-                      : t(locale, 'settings.security.changePassword')}
+                    {changingPassword ? (
+                      <InlineOrb state="working" label={t(locale, 'common.loading')} />
+                    ) : (
+                      t(locale, 'settings.security.changePassword')
+                    )}
                   </Button>
                 </form>
                 {totpEnabled && (
@@ -1112,9 +1116,11 @@ export function SettingsPage() {
                       />
                     </div>
                     <Button type="submit" variant="outline" size="sm" disabled={disablingTotp}>
-                      {disablingTotp
-                        ? t(locale, 'common.loading')
-                        : t(locale, 'settings.security.disableTotp')}
+                      {disablingTotp ? (
+                        <InlineOrb state="working" label={t(locale, 'common.loading')} />
+                      ) : (
+                        t(locale, 'settings.security.disableTotp')
+                      )}
                     </Button>
                   </form>
                 )}
@@ -1197,7 +1203,11 @@ export function SettingsPage() {
               )}
 
               {loading ? (
-                <div className="text-sm text-muted-foreground">{t(locale, 'common.loading')}</div>
+                <InlineOrb
+                  state="searching"
+                  label={t(locale, 'common.loading')}
+                  className="text-sm text-muted-foreground"
+                />
               ) : (
                 <TooltipProvider delayDuration={300}>
                   {accounts.length > 0 ? (
@@ -1300,12 +1310,11 @@ export function SettingsPage() {
                                     disabled={syncingId === account.id}
                                     onClick={() => void handleSync(account.id)}
                                   >
-                                    <RefreshCw
-                                      className={cn(
-                                        'size-3.5',
-                                        syncingId === account.id && 'animate-spin',
-                                      )}
-                                    />
+                                    {syncingId === account.id ? (
+                                      <ThinkingOrb state="working" size={20} className="size-3.5" />
+                                    ) : (
+                                      <RefreshCw className="size-3.5" />
+                                    )}
                                   </Button>
                                 </TooltipTrigger>
                                 <TooltipContent>{syncLabel}</TooltipContent>
@@ -1319,12 +1328,11 @@ export function SettingsPage() {
                                     disabled={pimBusyId === account.id}
                                     onClick={() => setPimDialogId(account.id)}
                                   >
-                                    <Radar
-                                      className={cn(
-                                        'size-3.5',
-                                        pimBusyId === account.id && 'animate-spin',
-                                      )}
-                                    />
+                                    {pimBusyId === account.id ? (
+                                      <ThinkingOrb state="working" size={20} className="size-3.5" />
+                                    ) : (
+                                      <Radar className="size-3.5" />
+                                    )}
                                   </Button>
                                 </TooltipTrigger>
                                 <TooltipContent>{t(locale, 'settings.pim.menu')}</TooltipContent>
@@ -1709,7 +1717,11 @@ export function SettingsPage() {
             </DialogHeader>
             <div className="min-h-0 overflow-y-auto px-5 py-3">
               {errorLogOpenId && errorLogLoadingId === errorLogOpenId ? (
-                <p className="text-sm text-muted-foreground">{t(locale, 'common.loading')}</p>
+                <InlineOrb
+                  state="searching"
+                  label={t(locale, 'common.loading')}
+                  className="text-sm text-muted-foreground"
+                />
               ) : errorLogOpenId && errorLogFetchError[errorLogOpenId] ? (
                 <p className="text-sm text-destructive">
                   {t(locale, 'settings.accounts.errorLogLoadError')}

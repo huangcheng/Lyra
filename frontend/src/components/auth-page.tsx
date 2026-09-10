@@ -12,6 +12,7 @@ import { useMachine } from '@xstate/react';
 import { useEffect, useRef } from 'react';
 
 import { t } from '@/i18n';
+import { OrbLoading } from '@/components/ui/orb-state';
 import { api, userFromMe, type AuthMeResponse } from '@/lib/api-client';
 import { applyMarkReadPolicy } from '@/lib/user-preferences';
 import { authMachine } from '../machines/auth';
@@ -87,9 +88,7 @@ export function AuthPage() {
 
   if (state.matches('authenticated')) {
     return (
-      <div className="flex min-h-svh items-center justify-center p-6 text-sm text-muted-foreground">
-        {t(locale, 'common.loading')}
-      </div>
+      <OrbLoading state="connecting" label={t(locale, 'common.loading')} className="min-h-svh" />
     );
   }
 

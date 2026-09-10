@@ -22,6 +22,7 @@ import { useNavigate } from '@tanstack/react-router';
 import { EmptyState } from './empty-state';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { InlineOrb } from '@/components/ui/orb-state';
 import {
   Dialog,
   DialogContent,
@@ -356,9 +357,11 @@ export function ContactsPage() {
           <section className="relative flex w-80 shrink-0 flex-col border-r">
             <div ref={listScrollRef} className="min-h-0 flex-1 overflow-y-auto">
               {loading ? (
-                <div className="p-4 text-sm text-muted-foreground">
-                  {t(locale, 'common.loading')}
-                </div>
+                <InlineOrb
+                  state="searching"
+                  label={t(locale, 'common.loading')}
+                  className="p-4 text-sm text-muted-foreground"
+                />
               ) : error ? (
                 <div className="p-4 text-sm text-destructive">{error}</div>
               ) : visible.length === 0 ? (

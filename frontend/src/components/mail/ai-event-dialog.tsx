@@ -3,7 +3,8 @@
  * confirms; creation goes through the existing CalDAV create endpoint.
  */
 
-import { CalendarPlus, Loader2 } from 'lucide-react';
+import { CalendarPlus } from 'lucide-react';
+import { ThinkingOrb } from 'thinking-orbs';
 import { useEffect, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -108,7 +109,7 @@ export function AiEventDialog({
 
         {busy ? (
           <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" aria-hidden />
+            <ThinkingOrb state="solving" size={20} className="size-4 shrink-0" aria-hidden />
             {t(locale, 'aiEvent.detecting')}
           </div>
         ) : error && !suggestion ? (

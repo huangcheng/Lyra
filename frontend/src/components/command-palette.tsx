@@ -16,6 +16,7 @@ import 'react-cmdk/dist/cmdk.css';
 import '@/lib/cmdk-overrides.css';
 
 import { t } from '../i18n';
+import { InlineOrb } from '@/components/ui/orb-state';
 import { api } from '@/lib/api-client';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
 import { mergeCommands, type CommandDef } from '@/lib/commands';
@@ -305,7 +306,7 @@ export function CommandPaletteRoot() {
           {searching ? (
             <CommandPalette.List heading="">
               <CommandPalette.ListItem showType={false} index={index++} disabled>
-                {t(locale, 'common.loading')}
+                <InlineOrb state="searching" label={t(locale, 'common.loading')} />
               </CommandPalette.ListItem>
             </CommandPalette.List>
           ) : null}

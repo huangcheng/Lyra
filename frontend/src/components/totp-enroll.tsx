@@ -5,6 +5,7 @@
  */
 
 import { useState } from 'react';
+import { InlineOrb } from '@/components/ui/orb-state';
 import { t } from '../i18n';
 import { api } from '../lib/api-client';
 import { useUIStore } from '../stores/ui';
@@ -74,7 +75,11 @@ export function TotpEnroll({ onComplete, onCancel }: TotpEnrollProps) {
             disabled={loading}
             className="rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {loading ? t(locale, 'common.loading') : t(locale, 'common.confirm')}
+            {loading ? (
+              <InlineOrb state="working" label={t(locale, 'common.loading')} />
+            ) : (
+              t(locale, 'common.confirm')
+            )}
           </button>
           <button
             onClick={onCancel}
@@ -137,7 +142,11 @@ export function TotpEnroll({ onComplete, onCancel }: TotpEnrollProps) {
             disabled={loading || code.length !== 6}
             className="rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {loading ? t(locale, 'common.loading') : t(locale, 'auth.totpEnrollConfirm')}
+            {loading ? (
+              <InlineOrb state="working" label={t(locale, 'common.loading')} />
+            ) : (
+              t(locale, 'auth.totpEnrollConfirm')
+            )}
           </button>
           <button
             type="button"

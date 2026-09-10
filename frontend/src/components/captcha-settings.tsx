@@ -12,6 +12,7 @@ import { useEffect, useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { InlineOrb } from '@/components/ui/orb-state';
 import { Input } from '@/components/ui/input';
 import {
   Select,
@@ -192,7 +193,11 @@ export function CaptchaSettingsCard() {
           }
           onClick={() => void handleSave()}
         >
-          {saving ? t(locale, 'common.loading') : t(locale, 'common.save')}
+          {saving ? (
+            <InlineOrb state="working" label={t(locale, 'common.loading')} />
+          ) : (
+            t(locale, 'common.save')
+          )}
         </Button>
       </div>
     </section>

@@ -1,11 +1,12 @@
 /**
  * Manual "sync every account" button for the sidebar footer.
  * Loops the per-account trigger; the backend dedups queued/running jobs.
- * Spins while any account reports sync activity on the SSE stream.
+ * Shows a working orb while any account reports sync activity on the SSE stream.
  */
 
 import { RefreshCw } from 'lucide-react';
 import { useState } from 'react';
+import { ThinkingOrb } from 'thinking-orbs';
 
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -46,9 +47,11 @@ export function SyncAllButton() {
           onClick={() => void onClick()}
           aria-label={t(locale, 'mail.syncAllAccounts')}
         >
-          <RefreshCw
-            className={cn('h-4 w-4', syncing && 'animate-spin', failed && 'text-destructive')}
-          />
+          {syncing ? (
+            <ThinkingOrb state="working" size={20} className="h-4 w-4" />
+          ) : (
+            <RefreshCw className={cn('h-4 w-4', failed && 'text-destructive')} />
+          )}
         </Button>
       </TooltipTrigger>
       <TooltipContent>

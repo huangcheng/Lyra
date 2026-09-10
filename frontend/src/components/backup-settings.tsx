@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Archive, Download, Trash2, Upload } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { InlineOrb } from '@/components/ui/orb-state';
 import { Input } from '@/components/ui/input';
 import { t, type SupportedLocale } from '@/i18n';
 import { formatBytes } from '@/lib/attachments';
@@ -369,7 +370,11 @@ export function BackupSettings({ locale }: { locale: SupportedLocale }) {
           </div>
         </div>
         {artifacts === null && !listError ? (
-          <p className="text-xs text-muted-foreground">{t(locale, 'common.loading')}</p>
+          <InlineOrb
+            state="working"
+            label={t(locale, 'common.loading')}
+            className="text-xs text-muted-foreground"
+          />
         ) : null}
         {artifacts !== null && artifacts.length === 0 ? (
           <p className="text-xs text-muted-foreground">

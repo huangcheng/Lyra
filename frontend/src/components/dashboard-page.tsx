@@ -14,6 +14,7 @@ import { zhCN } from 'date-fns/locale';
 import { ArrowLeft, BarChart3, Inbox, Users } from 'lucide-react';
 import { Link } from '@tanstack/react-router';
 import { EmptyState } from '@/components/empty-state';
+import { OrbLoading } from '@/components/ui/orb-state';
 import { SlimPageNav } from '@/components/slim-page-nav';
 import { StampLogo } from '@/components/stamp-logo';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -197,11 +198,7 @@ function DashboardBody({
   mobile = false,
 }: BodyProps) {
   if (loading && !stats) {
-    return (
-      <p className={cn('pt-6 text-sm text-muted-foreground', mobile ? 'px-4' : 'px-8')}>
-        {t(locale, 'common.loading')}
-      </p>
-    );
+    return <OrbLoading state="searching" label={t(locale, 'common.loading')} />;
   }
   if (error) {
     return <EmptyState icon={BarChart3} title={t(locale, 'common.error')} hint={error} />;

@@ -16,6 +16,7 @@ import { confirmAction } from '@/lib/confirm-action';
 import { useUIStore } from '@/stores/ui';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { InlineOrb } from '@/components/ui/orb-state';
 import {
   Dialog,
   DialogContent,
@@ -562,7 +563,11 @@ export function EncryptionSettings() {
         />
 
         {loading ? (
-          <div className="text-xs text-muted-foreground">{t(locale, 'common.loading')}</div>
+          <InlineOrb
+            state="searching"
+            label={t(locale, 'common.loading')}
+            className="text-xs text-muted-foreground"
+          />
         ) : !showGroups ? (
           <div className="text-xs text-muted-foreground">
             {t(locale, 'settings.encryption.empty')}
@@ -721,7 +726,11 @@ export function EncryptionSettings() {
               {t(locale, 'common.cancel')}
             </Button>
             <Button disabled={busy || !genPass} onClick={() => void onGenerate()}>
-              {busy ? t(locale, 'common.loading') : t(locale, 'settings.encryption.generate')}
+              {busy ? (
+                <InlineOrb state="shaping" label={t(locale, 'common.loading')} />
+              ) : (
+                t(locale, 'settings.encryption.generate')
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

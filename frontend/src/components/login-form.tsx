@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from 'react';
 import { CaptchaWidget, type CaptchaTokenFetcher } from '@/components/captcha-widget';
 import { StampLogo } from '@/components/stamp-logo';
 import { Button } from '@/components/ui/button';
+import { InlineOrb } from '@/components/ui/orb-state';
 import { Field, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { t } from '@/i18n';
@@ -190,7 +191,11 @@ export function LoginForm({
             {formError ? (
               <FieldError>{formError}</FieldError>
             ) : (
-              <p className="text-sm text-muted-foreground">{t(locale, 'common.loading')}</p>
+              <InlineOrb
+                state="connecting"
+                label={t(locale, 'common.loading')}
+                className="text-sm text-muted-foreground"
+              />
             )}
             {formError && onRetry ? (
               <Field>

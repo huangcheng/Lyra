@@ -31,6 +31,7 @@ import { t } from '@/i18n';
 import { ApiError, api } from '@/lib/api-client';
 import { useAvatar } from '@/lib/avatar';
 import { ThinkingOrb } from 'thinking-orbs';
+import { OrbLoading } from '@/components/ui/orb-state';
 import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import { groupIntoConversations, type Conversation } from '@/lib/conversation';
 import type { ConversationDragData } from '@/lib/conversation-actions';
@@ -419,9 +420,7 @@ export function MailList() {
   }, [conversations]);
 
   if (loading && filtered.length === 0 && !fetchError) {
-    return (
-      <div className="p-8 text-center text-muted-foreground">{t(locale, 'common.loading')}</div>
-    );
+    return <OrbLoading state="searching" label={t(locale, 'common.loading')} />;
   }
 
   if (filtered.length === 0 && !fetchError) {
