@@ -365,8 +365,11 @@ fn avatar_response(bytes: Vec<u8>, content_type: &str) -> Response {
     (StatusCode::OK, headers, bytes).into_response()
 }
 
-fn not_found_response() -> Response {
-    StatusCode::NOT_FOUND.into_response()
+/// "Resolved: this address has no avatar" — a successful empty answer, not
+/// a missing resource. 404 here meant every unknown sender spammed the
+/// browser console once per session; 204 is silent for apiBlob consumers.
+fn no_avatar_response() -> Response {
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Self-describing negative-cache key: the `{g}` segment is the Gravatar
@@ -468,7 +471,7 @@ async fn get_avatar(
 ) -> Result<Response, SyncError> {
     let email = email.trim().to_lowercase();
     if !email.contains('@') {
-        return Ok(not_found_response());
+        return Ok(no_avatar_response());
     }
 
     // 1. Contact photo (blob store, always preferred).
@@ -496,7 +499,7 @@ async fn get_avatar(
         .map_err(|e| SyncError::Internal(e.to_string()))?
         .is_some();
     if known_miss {
-        return Ok(not_found_response());
+        return Ok(no_avatar_response());
     }
 
     // 4. BIMI (DMARC gate + VMC validation), 5. opt-in Gravatar.
@@ -552,7 +555,7 @@ async fn get_avatar(
         .set(&miss_key, "1", Some(ttl))
         .await
         .map_err(|e| SyncError::Internal(e.to_string()))?;
-    Ok(not_found_response())
+    Ok(no_avatar_response())
 }
 
 /// Routes for the avatar resolver.
@@ -951,7 +954,7 @@ mod tests {
         seed_user_account(&state, "u1").await;
 
         let resp = call_avatar(&state, "u1", "ghost@example.com").await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
         // Clean miss (Gravatar off by default) → 24h negative marker; the
         // key embeds the opt-in state (`0`) and the hashed address.
@@ -960,13 +963,13 @@ mod tests {
 
         // Second call: still 404, short-circuited by the marker.
         let resp = call_avatar(&state, "u1", "ghost@example.com").await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[tokio::test]
-    async fn unreadable_contact_photo_falls_through_to_404() {
+    async fn unreadable_contact_photo_falls_through_to_no_avatar() {
         let data_dir = temp_data_dir();
         let state = test_auth_state(test_pool().await, &data_dir);
         let account_id = seed_user_account(&state, "u1").await;
@@ -979,7 +982,7 @@ mod tests {
         .await;
 
         let resp = call_avatar(&state, "u1", "broken@example.com").await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert!(
             state
                 .kv()
@@ -1091,7 +1094,7 @@ mod tests {
 
         // gravatar_avatars defaults to false: 404 without any fetch.
         let resp = call_avatar(&state, "u1", "ghost@example.com").await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             hits.load(Ordering::SeqCst),
             0,
@@ -1121,7 +1124,7 @@ mod tests {
         let _net = AvatarNet::enter(&base).await;
 
         let resp = call_avatar(&state, "u1", "ghost@example.com").await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
 
         // `d=404` means "this address has no Gravatar" — a clean miss
@@ -1148,7 +1151,7 @@ mod tests {
         let _net = AvatarNet::enter(&base).await;
 
         let resp = call_avatar(&state, "u1", "ghost@example.com").await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
         let key = miss_key("u1", true, "ghost@example.com");
         let ttl = kv.ttl_remaining(&key).await.expect("negative marker set");
