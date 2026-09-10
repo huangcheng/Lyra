@@ -80,7 +80,18 @@ const SPA_CSP: &str = "default-src 'self'; script-src 'self' https://challenges.
 
 /// Baseline security headers for API and static/SPA responses.
 async fn security_headers(req: Request, next: middleware::Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
     let mut res = next.run(req).await;
+    // capture_message without a bound client is a cheap no-op, so no
+    // guard is needed; the sentry-tower layer enriches the event with
+    // the request context.
+    if res.status().is_server_error() {
+        sentry::capture_message(
+            &format!("HTTP {} {} {}", res.status().as_u16(), method, path),
+            sentry::Level::Error,
+        );
+    }
     let headers = res.headers_mut();
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
