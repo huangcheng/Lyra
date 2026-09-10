@@ -479,13 +479,18 @@ export function CalendarPage() {
         key={event.id}
         type="button"
         className={cn(
-          'flex w-full items-center gap-1.5 overflow-hidden rounded-[4px] px-1.5 py-[2px] text-left text-[10.5px] leading-tight text-foreground transition-colors hover:brightness-95 dark:hover:brightness-110',
+          'flex w-full items-center gap-1.5 overflow-hidden rounded-[4px] px-1.5 py-[2px] text-left text-[11px] leading-tight text-foreground transition-colors hover:brightness-95 dark:hover:brightness-110',
           className,
         )}
         style={{ backgroundColor: tint(c, 14) }}
         onClick={() => setSelectedEvent(event)}
       >
         <span className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: c }} />
+        {!event.isAllDay && event.dtstart ? (
+          <span className="shrink-0 tabular-nums text-muted-foreground">
+            {formatEventTime(event)}
+          </span>
+        ) : null}
         <span className="truncate">{event.summary || t(locale, 'calendar.noTitle')}</span>
         {continued ? <span className="shrink-0 text-muted-foreground">→</span> : null}
       </button>
@@ -502,7 +507,10 @@ export function CalendarPage() {
       <div className="mb-3 px-2.5">
         <div className="grid grid-cols-7">
           {weekdayInitials(locTag).map((w, i) => (
-            <span key={i} className="pb-1 text-center text-[9.5px] text-muted-foreground/70">
+            <span
+              key={i}
+              className="pb-1.5 text-center text-[9px] font-medium tracking-[0.1em] text-muted-foreground/70 uppercase"
+            >
               {w}
             </span>
           ))}
@@ -514,7 +522,7 @@ export function CalendarPage() {
                 key={i}
                 type="button"
                 className={cn(
-                  'flex h-6 w-6 items-center justify-center justify-self-center rounded-full text-[10.5px] transition-colors hover:bg-accent',
+                  'flex h-7 w-7 items-center justify-center justify-self-center rounded-full text-[11px] tabular-nums transition-colors hover:bg-accent',
                   !inMonth && 'invisible',
                   isToday && 'bg-[var(--unread)] font-semibold text-[#1a1b1f]',
                 )}
@@ -584,7 +592,7 @@ export function CalendarPage() {
           {WEEKDAY_ORDER.map((day) => (
             <div
               key={day}
-              className="px-2.5 py-2 text-center text-[11px] font-medium text-muted-foreground"
+              className="px-2.5 py-2.5 text-center text-[10px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
             >
               {t(locale, `calendar.days.${day}`)}
             </div>
@@ -598,10 +606,10 @@ export function CalendarPage() {
                 {monthStart ? (
                   <button
                     type="button"
-                    className="sticky top-0 z-10 flex w-full items-center gap-2 bg-background/95 py-1 pr-2 pl-2.5 backdrop-blur"
+                    className="sticky top-0 z-10 flex w-full items-center gap-2.5 bg-background/95 py-1.5 pr-2 pl-2 backdrop-blur"
                     onClick={() => setView('year')}
                   >
-                    <span className="text-[11px] font-medium text-muted-foreground">
+                    <span className="text-[11px] font-semibold tracking-[0.08em] text-foreground/70">
                       {monthStart.toLocaleDateString(locTag, { month: 'long', year: 'numeric' })}
                     </span>
                     <span className="h-px flex-1 bg-border/70" />
@@ -614,22 +622,25 @@ export function CalendarPage() {
                   {week.map((day) => {
                     const inMonth = day.getMonth() === anchor.getMonth();
                     const isToday = sameLocalDay(day, now);
+                    const isWeekend = day.getDay() === 0 || day.getDay() === 6;
                     const dayEvents = eventsStartingOnDay(events, day);
                     return (
                       <div
                         key={day.toISOString()}
                         className={cn(
-                          'flex flex-col gap-1 border-r border-border/50 p-1.5 last:border-r-0',
-                          !inMonth && 'opacity-45',
+                          'flex flex-col gap-1 border-r border-border/50 p-2 transition-colors last:border-r-0 hover:bg-accent/40',
+                          isWeekend && 'bg-muted/60',
                         )}
                         style={{ height: rowH }}
                       >
                         <span
                           className={cn(
-                            'flex h-6 w-6 shrink-0 items-center justify-center self-end text-xs',
+                            'flex h-6 w-6 shrink-0 items-center justify-center text-[13px] tabular-nums',
                             isToday
                               ? 'rounded-full bg-[var(--unread)] font-semibold text-[#1a1b1f]'
-                              : 'text-foreground/75',
+                              : inMonth
+                                ? 'font-medium text-foreground'
+                                : 'text-muted-foreground/50',
                           )}
                         >
                           {day.getDate()}
@@ -749,8 +760,8 @@ export function CalendarPage() {
           {days.map((day) => {
             const isToday = sameLocalDay(day, now);
             return (
-              <div key={day.toISOString()} className="bg-background px-2 py-2 text-center">
-                <div className="text-[11px] text-muted-foreground">
+              <div key={day.toISOString()} className="bg-background px-2 py-2.5 text-center">
+                <div className="text-[10px] font-medium tracking-[0.12em] text-muted-foreground uppercase">
                   {day.toLocaleDateString(locTag, { weekday: 'short' })}
                 </div>
                 <div
@@ -826,7 +837,7 @@ export function CalendarPage() {
                     <button
                       key={event.id}
                       type="button"
-                      className="absolute right-1 left-1 overflow-hidden rounded-[4px] px-1.5 py-0.5 text-left text-[10.5px] leading-tight text-foreground"
+                      className="absolute right-1 left-1 overflow-hidden rounded-[5px] px-2 py-1 text-left text-[11px] leading-tight text-foreground transition-colors hover:brightness-95 dark:hover:brightness-110"
                       style={timedBlockStyle(event)}
                       onClick={() => setSelectedEvent(event)}
                     >
@@ -967,7 +978,7 @@ export function CalendarPage() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b px-5">
-          <h1 className="font-display truncate text-xl font-medium">
+          <h1 className="font-display truncate text-[22px] font-medium tracking-[-0.01em]">
             {viewTitle(anchor, view, locTag)}
           </h1>
           <div className="ml-auto flex items-center gap-1.5">
