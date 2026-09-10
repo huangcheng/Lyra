@@ -10,6 +10,7 @@
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   type CSSProperties,
@@ -144,6 +145,10 @@ export function CalendarPage() {
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<CalendarView>('month');
   const [anchor, setAnchor] = useState(() => new Date());
+  // Month-strip range anchor. Fixed when entering month view so title-tracking
+  // setAnchor calls during scroll don't rebuild the strip mid-gesture (which
+  // shifts rows out from under the viewport and breaks programmatic scrolls).
+  const [stripEpoch, setStripEpoch] = useState(() => new Date());
   const [selectedEvent, setSelectedEvent] = useState<CalEvent | null>(null);
   const [now, setNow] = useState(() => new Date());
   const [addOpen, setAddOpen] = useState(false);
@@ -158,6 +163,14 @@ export function CalendarPage() {
     const id = window.setInterval(() => setNow(new Date()), 60_000);
     return () => window.clearInterval(id);
   }, []);
+
+  // The month strip starts at anchor − 2 months; jump to the anchor month on
+  // mount and when switching back to month view, or today is out of view.
+  // Layout effect: scroll before paint so the leading months never flash.
+  useLayoutEffect(() => {
+    if (view === 'month') scrollToMonth(anchor, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- view transitions only; anchor changes come from scrolling
+  }, [view]);
 
   // Register this page's commands for the ⌘K palette.
   useEffect(() => {
@@ -185,11 +198,12 @@ export function CalendarPage() {
         label: t(useUIStore.getState().locale, `calendar.view.${v}`),
         icon: 'CalendarIcon' as const,
         keywords: ['view', '视图', v],
-        onSelect: () => setView(v),
+        onSelect: () => switchView(v),
       })),
     ]);
     return () => setPageCommands([]);
-  }, [view]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- switchView is a render-scope helper; anchor/view cover its captures
+  }, [view, anchor]);
 
   async function loadSources(): Promise<CalSource[]> {
     const [cals, subs] = await Promise.all([
@@ -425,18 +439,28 @@ export function CalendarPage() {
     });
   }
 
-  /** Instantly bring `d`'s month into view (mount / today jumps). */
+  /** Instantly bring `d`'s month into view (mount / today jumps). Scrolls to
+   * the month's label wrapper so the top visible week belongs to that month —
+   * keeps the title from flipping to the previous month. */
   function scrollToMonth(d: Date, smooth = true) {
     const el = stripRef.current;
     if (!el) return;
     const weekIso = startOfWeekMonday(new Date(d.getFullYear(), d.getMonth(), 1)).toISOString();
     const row = el.querySelector(`[data-week="${weekIso}"]`) as HTMLElement | null;
     if (row) {
+      const target = row.parentElement ?? row;
       el.scrollTo({
-        top: Math.max(0, row.offsetTop - row.offsetHeight),
+        top: Math.max(0, target.offsetTop),
         behavior: smooth ? 'smooth' : 'auto',
       });
     }
+  }
+
+  /** Switch views; entering month view re-anchors the strip range to the
+   * current anchor so the target month exists in the strip. */
+  function switchView(v: CalendarView) {
+    if (v === 'month') setStripEpoch(new Date(anchor.getFullYear(), anchor.getMonth(), 1));
+    setView(v);
   }
 
   /** Quiet event chip: source-colored dot on a tinted background. */
@@ -510,8 +534,8 @@ export function CalendarPage() {
    * strip of week rows. Toolbar arrows scroll a page; the title tracks the
    * month under the top of the viewport. */
   function renderMonth() {
-    const from = new Date(anchor.getFullYear(), anchor.getMonth() - 2, 1);
-    const to = new Date(anchor.getFullYear(), anchor.getMonth() + 9, 1);
+    const from = new Date(stripEpoch.getFullYear(), stripEpoch.getMonth() - 2, 1);
+    const to = new Date(stripEpoch.getFullYear(), stripEpoch.getMonth() + 9, 1);
     const weeks: Date[][] = [];
     for (const cur = startOfWeekMonday(from); cur < to; cur.setDate(cur.getDate() + 7)) {
       weeks.push(
@@ -527,9 +551,18 @@ export function CalendarPage() {
     const onScroll = () => {
       const el = stripRef.current;
       if (!el) return;
-      const rowHeight = el.clientHeight / 6;
-      const idx = Math.min(weeks.length - 1, Math.max(0, Math.floor(el.scrollTop / rowHeight)));
-      const week = weeks[idx];
+      // Find the week row crossing the viewport top edge. Row positions are
+      // measured directly — sticky month-label rows make scrollTop/rowHeight
+      // arithmetic drift.
+      const top = el.getBoundingClientRect().top;
+      const rows = el.querySelectorAll<HTMLElement>('[data-week]');
+      let week: Date[] | undefined;
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i]!.getBoundingClientRect().bottom > top + 2) {
+          week = weeks[i];
+          break;
+        }
+      }
       if (!week) return;
       // Title month: whichever month owns the most days of the top row.
       const counts = new Map<string, number>();
@@ -537,9 +570,9 @@ export function CalendarPage() {
         const key = `${d.getFullYear()}-${d.getMonth()}`;
         counts.set(key, (counts.get(key) ?? 0) + 1);
       }
-      const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]![0].split('-');
-      const y = Number(top[0]);
-      const m = Number(top[1]);
+      const topMonth = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]![0].split('-');
+      const y = Number(topMonth[0]);
+      const m = Number(topMonth[1]);
       if (y !== anchor.getFullYear() || m !== anchor.getMonth()) {
         setAnchor(new Date(y, m, 1));
       }
@@ -642,6 +675,7 @@ export function CalendarPage() {
                 className="self-start rounded-[5px] px-1.5 py-0.5 text-left text-[12.5px] font-medium hover:bg-accent"
                 onClick={() => {
                   setAnchor(m);
+                  setStripEpoch(new Date(m.getFullYear(), m.getMonth(), 1));
                   setView('month');
                 }}
               >
@@ -945,7 +979,7 @@ export function CalendarPage() {
                   variant={view === v ? 'secondary' : 'ghost'}
                   size="sm"
                   className="h-7 px-2.5 text-xs"
-                  onClick={() => setView(v)}
+                  onClick={() => switchView(v)}
                 >
                   {t(locale, `calendar.view.${v}`)}
                 </Button>
