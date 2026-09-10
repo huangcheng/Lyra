@@ -65,11 +65,14 @@ use axum::{
     extract::Request,
     http::{HeaderValue, StatusCode, header},
     middleware,
+    response::IntoResponse,
     response::Response,
 };
 use std::path::PathBuf;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Matches the CSP meta tag in `frontend/index.html`; sent as a real header
 /// because `frame-ancestors` is ignored in `<meta>` form.
@@ -88,20 +91,84 @@ async fn security_headers(req: Request, next: middleware::Next) -> Response {
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(SPA_CSP),
-    );
+    headers.insert(header::CONTENT_SECURITY_POLICY, spa_csp_header());
     res
+}
+
+/// The SPA CSP with the Sentry ingest origin appended to `connect-src`
+/// when the frontend DSN is configured — the SDK's envelope POSTs are
+/// blocked otherwise. Unset DSN ⇒ the stock CSP, byte-identical.
+fn spa_csp_header() -> HeaderValue {
+    let Some(dsn) = SENTRY_FRONTEND_DSN.get() else {
+        return HeaderValue::from_static(SPA_CSP);
+    };
+    let origin = sentry_origin(dsn).unwrap_or_default();
+    if origin.is_empty() {
+        return HeaderValue::from_static(SPA_CSP);
+    }
+    let csp = SPA_CSP.replace(
+        "connect-src 'self'",
+        &format!("connect-src 'self' {origin}"),
+    );
+    HeaderValue::from_str(&csp).unwrap_or_else(|_| HeaderValue::from_static(SPA_CSP))
+}
+
+/// `https://key@host/project` → `https://host`.
+fn sentry_origin(dsn: &str) -> Option<String> {
+    let rest = dsn.strip_prefix("https://")?;
+    let host = rest.split('@').nth(1)?.split('/').next()?;
+    (!host.is_empty()).then(|| format!("https://{host}"))
+}
+
+/// Process-wide Sentry guard: kept alive for the whole run. `None` when
+/// `SENTRY_DSN` is unset — the SDK never initializes and the tower/tracing
+/// layers below stay inert no-ops.
+static SENTRY_GUARD: std::sync::OnceLock<sentry::ClientInitGuard> = std::sync::OnceLock::new();
+/// DSN advertised to the SPA via `/version` (client DSNs are public keys).
+/// `SENTRY_FRONTEND_DSN`, falling back to `SENTRY_DSN`.
+static SENTRY_FRONTEND_DSN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Opt-in error reporting (`SENTRY_DSN`). Initialized *before* anything that
+/// can fail — DB connect, migrations — so boot crashes still reach Sentry.
+fn init_sentry(config: &config::Config) {
+    let Some(dsn) = config.sentry_dsn.as_deref() else {
+        return;
+    };
+    let mut options = sentry::ClientOptions::default();
+    options.release = sentry::release_name!();
+    options.traces_sampling_strategy =
+        sentry::TracesSamplingStrategy::FixedRate(config.sentry_traces_sample_rate);
+    let guard = sentry::init((dsn, options));
+    if guard.is_enabled() {
+        tracing::info!(
+            "Sentry error reporting enabled (traces_sample_rate={})",
+            config.sentry_traces_sample_rate
+        );
+        if SENTRY_GUARD.set(guard).is_err() {
+            tracing::warn!("Sentry guard already set; keeping the first client");
+        }
+    } else {
+        tracing::warn!("SENTRY_DSN set but invalid — Sentry stays disabled");
+    }
+    // Advertise the SPA DSN even when the backend client failed to init:
+    // they are separate projects with independent DSNs.
+    if let Some(frontend) = config.sentry_frontend_dsn.as_deref()
+        && SENTRY_FRONTEND_DSN.set(frontend.to_string()).is_err()
+    {
+        tracing::warn!("frontend DSN already set; ignoring re-set");
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
-
     let config = config::Config::from_env()?;
+    // Boot telemetry before anything fallible.
+    init_sentry(&config);
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::layer())
+        .with(sentry_tracing::layer())
+        .init();
     let storage = storage::Storage::new(&config.database_url).await?;
     storage.run_migrations().await?;
     let db = storage.pool().clone();
@@ -136,8 +203,16 @@ async fn main() -> anyhow::Result<()> {
     let frontend_dir = std::env::var("FRONTEND_DIR").unwrap_or_else(|_| "frontend/dist".into());
     let app = if PathBuf::from(&frontend_dir).is_dir() {
         let index = PathBuf::from(&frontend_dir).join("index.html");
+        // SPA shell goes through a handler (not ServeFile) so the CSP meta
+        // tag can gain the Sentry ingest origin when enabled — the header
+        // alone is not enough: browsers intersect meta + header CSPs.
+        let index_path = std::sync::Arc::new(index);
+        let spa = axum::routing::any(move || {
+            let path = std::sync::Arc::clone(&index_path);
+            async move { serve_spa_index(path).await }
+        });
         api.merge(pwa_routes(&frontend_dir))
-            .fallback_service(ServeDir::new(&frontend_dir).not_found_service(ServeFile::new(index)))
+            .fallback_service(ServeDir::new(&frontend_dir).not_found_service(spa))
     } else {
         tracing::warn!("FRONTEND_DIR {frontend_dir} missing; API-only mode");
         api
@@ -149,6 +224,31 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Serve the SPA shell, patching the CSP meta tag's `connect-src` with the
+/// Sentry ingest origin when configured (see `spa_csp_header`).
+async fn serve_spa_index(path: std::sync::Arc<PathBuf>) -> impl IntoResponse {
+    match tokio::fs::read(path.as_path()).await {
+        Ok(bytes) => {
+            let body = match SENTRY_FRONTEND_DSN.get().and_then(|d| sentry_origin(d)) {
+                Some(origin) => {
+                    let html = String::from_utf8_lossy(&bytes);
+                    html.replace(
+                        "connect-src 'self'",
+                        &format!("connect-src 'self' {origin}"),
+                    )
+                    .into_bytes()
+                }
+                None => bytes,
+            };
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body)
+        }
+        Err(_) => (
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "index.html missing".to_string().into_bytes(),
+        ),
+    }
 }
 
 /// Public HTTP surface: unversioned `/health` and `/version`, everything else under `/api/v1`.
@@ -180,6 +280,9 @@ fn api_router(auth_state: auth::AuthState) -> Router {
         .merge(auth::routes())
         .merge(push::routes())
         .merge(backup::routes())
+        .layer(sentry_tower::NewSentryLayer::<
+            axum::http::Request<axum::body::Body>,
+        >::new_from_top())
         .layer(body_limit)
         .with_state(auth_state)
 }
@@ -226,9 +329,13 @@ fn pwa_routes(frontend_dir: &str) -> Router {
 }
 
 async fn version() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
-    }))
+    });
+    if let Some(dsn) = SENTRY_FRONTEND_DSN.get() {
+        body["sentryDsn"] = serde_json::Value::String(dsn.clone());
+    }
+    Json(body)
 }
 
 #[cfg(test)]
@@ -372,6 +479,9 @@ mod tests {
             sync_poll_secs: 300,
             max_attachment_bytes: 25 * 1024 * 1024,
             redis_url: None,
+            sentry_dsn: None,
+            sentry_frontend_dsn: None,
+            sentry_traces_sample_rate: 0.0,
             master_key: auth::TEST_MASTER_KEY.to_vec(),
             ms_oauth: None,
             yandex_oauth: None,
@@ -968,5 +1078,44 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod sentry_csp_tests {
+    use super::*;
+
+    #[test]
+    fn sentry_origin_extracts_scheme_and_host() {
+        assert_eq!(
+            sentry_origin("https://key@o0.ingest.sentry.io/42").as_deref(),
+            Some("https://o0.ingest.sentry.io")
+        );
+        assert_eq!(sentry_origin("https://only-host/1"), None);
+        assert_eq!(sentry_origin("http://key@host/1"), None);
+    }
+
+    #[test]
+    fn csp_gains_ingest_origin_only_when_configured() {
+        // Default (no DSN): byte-identical stock CSP.
+        assert_eq!(spa_csp_header(), HeaderValue::from_static(SPA_CSP));
+    }
+}
+
+#[cfg(test)]
+mod sentry_verify {
+    //! Manual installation check (Sentry's "verify by sending a test event"
+    //! flow): `SENTRY_DSN=… cargo test sentry_verify -- --ignored`. The
+    //! guard flushes on drop, so the event is out before the process exits.
+
+    #[test]
+    #[ignore = "needs SENTRY_DSN"]
+    fn sends_a_test_event() {
+        let dsn = std::env::var("SENTRY_DSN").expect("SENTRY_DSN");
+        let _guard = sentry::init((dsn, sentry::ClientOptions::default()));
+        sentry::capture_message(
+            "Lyra backend — Sentry verification event",
+            sentry::Level::Info,
+        );
     }
 }

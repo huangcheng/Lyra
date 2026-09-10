@@ -27,6 +27,16 @@ pub struct Config {
     pub max_attachment_bytes: u64,
     /// Redis URL for session/kv store (`REDIS_URL`). When unset, boot uses in-memory kv.
     pub redis_url: Option<String>,
+    /// Sentry DSN for the backend project (`SENTRY_DSN`, e.g. "lyra-backend").
+    /// Opt-in crash/error reporting: unset ⇒ the SDK is never initialized and
+    /// nothing leaves the instance.
+    pub sentry_dsn: Option<String>,
+    /// Sentry DSN for the frontend project (`SENTRY_FRONTEND_DSN`, e.g.
+    /// "lyra-frontend"). Advertised to the SPA via `/version`; falls back to
+    /// `SENTRY_DSN` so a single-project setup also enables the SPA.
+    pub sentry_frontend_dsn: Option<String>,
+    /// Sentry trace sample rate (`SENTRY_TRACES_SAMPLE_RATE`, 0.0-1.0, default 0.0).
+    pub sentry_traces_sample_rate: f32,
     /// Master key for the per-user DEK hierarchy (`LYRA_MASTER_KEY`, 32+ bytes).
     /// Required: the backend refuses to start without it. Never logged.
     pub master_key: Vec<u8>,
@@ -271,6 +281,16 @@ impl Config {
 
         let redis_url = env::var("REDIS_URL").ok().filter(|s| !s.is_empty());
 
+        let sentry_dsn = env::var("SENTRY_DSN").ok().filter(|s| !s.is_empty());
+        let sentry_frontend_dsn = env::var("SENTRY_FRONTEND_DSN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| sentry_dsn.clone());
+        let sentry_traces_sample_rate: f32 = env::var("SENTRY_TRACES_SAMPLE_RATE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .map_or(0.0, |r| r.clamp(0.0, 1.0));
+
         let master_key = master_key_from_env()?;
         let public_url = normalize_public_url(
             &env::var("LYRA_PUBLIC_URL").map_err(|_| ConfigError::PublicUrlMissing)?,
@@ -308,6 +328,9 @@ impl Config {
             sync_poll_secs,
             max_attachment_bytes,
             redis_url,
+            sentry_dsn,
+            sentry_frontend_dsn,
+            sentry_traces_sample_rate,
             master_key,
             ms_oauth,
             yandex_oauth,

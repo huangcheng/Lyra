@@ -100,6 +100,9 @@ p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
 # Backup archives: zip container + age passphrase encryption (rage-compatible).
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 age = { version = "0.11", default-features = false, features = ["armor"] }
+sentry = { version = "0.49.2", features = ["tracing", "tower"] }
+sentry-tracing = "0.49.2"
+sentry-tower = "0.49.2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -298,7 +298,12 @@
       "allowlistEmpty": "允许列表为空。可在邮件阅读界面使用「始终允许此发件人」添加。",
       "removeAllowSender": "从允许列表移除发件人",
       "gravatarAvatars": "Gravatar 头像",
-      "gravatarAvatarsHint": "当没有联系人照片或品牌标识时，从 Gravatar 查询发件人头像。查询时 Gravatar 会看到发件人地址的哈希值。"
+      "gravatarAvatarsHint": "当没有联系人照片或品牌标识时，从 Gravatar 查询发件人头像。查询时 Gravatar 会看到发件人地址的哈希值。",
+      "errorReporting": "错误上报（Sentry）",
+      "errorReportingDesc": "向运营者配置的 Sentry 上报崩溃与错误。",
+      "errorReportingOn": "已启用",
+      "errorReportingOff": "关闭",
+      "errorReportingNote": "由服务器运营者通过 SENTRY_DSN / SENTRY_FRONTEND_DSN 环境变量配置——未配置时不会发送任何数据。"
     },
     "syncNow": "立即同步",
     "syncQueued": "已加入同步队列",

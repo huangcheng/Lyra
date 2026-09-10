@@ -52,6 +52,7 @@ import {
 } from '@/lib/privacy-api';
 import { fetchOAuthProviders, startOAuth } from '@/lib/oauth-api';
 import { confirmAction } from '@/lib/confirm-action';
+import { getVersionInfo, shouldInitSentry } from '@/lib/sentry';
 import {
   addSpamSender,
   fetchSpamSettings,
@@ -1535,6 +1536,26 @@ export function SettingsPage() {
 
           {section === 'privacy' && (
             <>
+              <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-[13px] font-medium">
+                      {t(locale, 'settings.privacy.errorReporting')}
+                    </h2>
+                    <p className="text-xs text-muted-foreground">
+                      {t(locale, 'settings.privacy.errorReportingDesc')}
+                    </p>
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    {shouldInitSentry(getVersionInfo()?.sentryDsn)
+                      ? t(locale, 'settings.privacy.errorReportingOn')
+                      : t(locale, 'settings.privacy.errorReportingOff')}
+                  </span>
+                </div>
+                <p className="border-t border-border pt-3 text-xs text-muted-foreground">
+                  {t(locale, 'settings.privacy.errorReportingNote')}
+                </p>
+              </section>
               <section className="space-y-3 rounded-[10px] border border-border bg-card px-5 py-4">
                 <h2 className="text-[13px] font-medium">
                   {t(locale, 'settings.privacy.remoteImages')}

@@ -298,7 +298,12 @@
       "allowlistEmpty": "No senders on the allow list yet. Use “Always allow this sender” in a message to add one.",
       "removeAllowSender": "Remove sender from allow list",
       "gravatarAvatars": "Gravatar avatars",
-      "gravatarAvatarsHint": "Look up sender photos from Gravatar when no contact photo or brand logo exists. Gravatar sees a hash of each sender's address on lookup."
+      "gravatarAvatarsHint": "Look up sender photos from Gravatar when no contact photo or brand logo exists. Gravatar sees a hash of each sender's address on lookup.",
+      "errorReporting": "Error reporting (Sentry)",
+      "errorReportingDesc": "Crash and error reporting to the operator's Sentry.",
+      "errorReportingOn": "Enabled",
+      "errorReportingOff": "Off",
+      "errorReportingNote": "Configured by the server operator via SENTRY_DSN / SENTRY_FRONTEND_DSN env vars — unset means nothing is ever sent."
     },
     "syncNow": "Sync now",
     "syncQueued": "Sync queued",
