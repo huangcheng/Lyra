@@ -190,7 +190,7 @@ export function CalendarPage() {
         keywords: ['today', '今天'],
         onSelect: () => {
           setAnchor(new Date());
-          if (view === 'month') scrollToMonth(new Date());
+          if (view === 'month') scrollToMonth(new Date(), false);
         },
       },
       ...VIEW_ORDER.map((v) => ({
@@ -1019,7 +1019,10 @@ export function CalendarPage() {
               className="h-8"
               onClick={() => {
                 setAnchor(new Date());
-                if (view === 'month') scrollToMonth(new Date());
+                // Instant jump: smooth scrolling silently no-ops in throttled
+                // (backgrounded/occluded) tabs, and a multi-month flight is
+                // janky anyway. Apple Calendar jumps instantly too.
+                if (view === 'month') scrollToMonth(new Date(), false);
               }}
             >
               {t(locale, 'calendar.today')}
