@@ -34,6 +34,10 @@ services:
       # refuses to start while it is unset.
       LYRA_MASTER_KEY: ${LYRA_MASTER_KEY:?set LYRA_MASTER_KEY in .env (openssl rand -base64 32)}
       LYRA_PUBLIC_URL: ${LYRA_PUBLIC_URL:?set LYRA_PUBLIC_URL in .env (e.g. http://localhost:3000)}
+      # Opt-in Sentry error reporting (.env; unset = fully disabled).
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_FRONTEND_DSN: ${SENTRY_FRONTEND_DSN:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.0}
       LYRA_OAUTH_CONFIG: /config/oauth-providers.toml
       # Optional — enables Settings → Sign in with Microsoft (Outlook / M365).
       LYRA_MS_OAUTH_CLIENT_ID: ${LYRA_MS_OAUTH_CLIENT_ID:-}
