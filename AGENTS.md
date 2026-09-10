@@ -77,6 +77,7 @@ Detail lives in specs; this file stays short and accurate.
 | **Web Push** — closed-app new-mail notifications (VAPID, kv subscriptions, sync-event fan-out) | `docs/superpowers/specs/2026-09-07-lyra-web-push-design.md` |
 | **Backup export/import** — full-instance age-encrypted archive, job-based, additive merge | `docs/superpowers/specs/2026-09-08-lyra-backup-export-import-design.md` |
 | Mail sidebar Favorites (Apple Mail–style; local views, expandable All Inboxes + Starred) | `docs/superpowers/specs/2026-09-03-lyra-favorites-sidebar-design.md` |
+| UI audit & polish plan (focus rings, target sizes, type floor, bundle split) | `docs/product/2026-09-10-lyra-ui-audit-polish-plan.md` |
 | **AI assist** — BYOK settings, LLM dialect seam, draft/reply suggest | `docs/specs/2026-09-08-lyra-ai-byok-spec.md` |
 | **AI assistant suite** — chat widget, tools (search/read/list), spam assist modes, calendar-from-email, confirm-first actions | `docs/specs/2026-09-08-lyra-ai-assistant-spec.md` |
 
