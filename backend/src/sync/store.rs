@@ -1344,6 +1344,8 @@ pub(crate) struct MessageInsert<'a> {
     pub(crate) size_bytes: Option<i32>,
     pub(crate) in_reply_to: Option<&'a str>,
     pub(crate) references_headers: Option<&'a str>,
+    /// Sender MUA self-identification (informational; spoofable).
+    pub(crate) mailer: Option<&'a str>,
     pub(crate) snippet: Option<&'a str>,
     pub(crate) has_attachments: bool,
     pub(crate) body_text: Option<&'a str>,
@@ -1376,6 +1378,7 @@ pub(crate) fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStateme
             message::Column::SizeBytes,
             message::Column::InReplyTo,
             message::Column::ReferencesHeaders,
+            message::Column::Mailer,
             message::Column::Snippet,
             message::Column::HasAttachments,
             message::Column::BodyText,
@@ -1407,6 +1410,7 @@ pub(crate) fn message_insert(db: &DbPool, m: MessageInsert<'_>) -> InsertStateme
             Expr::val(m.size_bytes),
             Expr::val(opt_str_value(m.in_reply_to)),
             Expr::val(opt_str_value(m.references_headers)),
+            Expr::val(opt_str_value(m.mailer)),
             Expr::val(opt_str_value(m.snippet)),
             Expr::val(m.has_attachments),
             Expr::val(opt_str_value(m.body_text)),
@@ -1480,6 +1484,23 @@ pub(crate) async fn set_message_raw_blob(
         .value(message::Column::RawBlobPath, Expr::val(rel_path))
         .value(message::Column::UpdatedAt, now_value(db))
         .and_where(Expr::col(message::Column::Id).eq(id_value(db, message_id)?));
+    db.orm().execute(&update).await.map_err(orm_err)?;
+    Ok(())
+}
+
+/// Fill the sender-MUA column once (lazy backfill on first view).
+pub(crate) async fn set_message_mailer(
+    db: &DbPool,
+    message_id: &str,
+    mailer: &str,
+) -> Result<(), SyncError> {
+    let mut update = Sq::update();
+    update
+        .table(message::Entity)
+        .value(message::Column::Mailer, Expr::val(mailer))
+        .value(message::Column::UpdatedAt, now_value(db))
+        .and_where(Expr::col(message::Column::Id).eq(id_value(db, message_id)?))
+        .and_where(Expr::col(message::Column::Mailer).is_null());
     db.orm().execute(&update).await.map_err(orm_err)?;
     Ok(())
 }
@@ -1569,6 +1590,15 @@ fn apply_fill_in_on_conflict(db: &DbPool, mut insert: InsertStatement) -> Insert
                 excluded_col(db, message::Column::MessageIdHeader),
             ]),
         )
+        // Heal rows synced before the mailer column existed: keep a stored
+        // value, else adopt the freshly fetched one.
+        .value(
+            message::Column::Mailer,
+            Func::coalesce([
+                cur_row_col(message::Column::Mailer),
+                excluded_col(db, message::Column::Mailer),
+            ]),
+        )
         .value(message::Column::UpdatedAt, Expr::current_timestamp())
         .to_owned();
     insert.on_conflict(conflict);
@@ -1630,6 +1660,7 @@ pub(crate) async fn upsert_message_in_tx(
                 size_bytes: msg.size.and_then(|s| i32::try_from(s).ok()),
                 in_reply_to: msg.in_reply_to.as_deref(),
                 references_headers: msg.references.as_deref(),
+                mailer: msg.mailer.as_deref(),
                 snippet: snippet.as_deref(),
                 has_attachments: msg.has_attachments,
                 body_text: msg.body_text.as_deref(),
@@ -1732,6 +1763,7 @@ pub(crate) async fn upsert_jmap_message_in_tx(
                 size_bytes: email.size.map(|s| i32::try_from(s).unwrap_or(i32::MAX)),
                 in_reply_to: in_reply_to.as_deref(),
                 references_headers: references.as_deref(),
+                mailer: email.mailer(),
                 snippet: snippet.as_deref(),
                 has_attachments: email.has_attachment.unwrap_or(false),
                 body_text: body_text.as_deref(),
@@ -2129,6 +2161,7 @@ mod dkim_verdict_tests {
             date: None,
             in_reply_to: None,
             references: None,
+            mailer: None,
             flags: vec!["\\Seen".into()],
             size: Some(1024),
             body: None,

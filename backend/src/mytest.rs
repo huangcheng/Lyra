@@ -120,6 +120,7 @@ mod mysql_live {
                 date: None,
                 in_reply_to: None,
                 references: None,
+                mailer: None,
                 flags: vec!["\\Seen".into()],
                 size: Some(1024),
                 body: None,

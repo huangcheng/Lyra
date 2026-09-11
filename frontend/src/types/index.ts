@@ -52,6 +52,8 @@ export interface MailMessage {
   opengpg?: MailOpengpgStatus;
   /** DKIM verification result from the detail payload (null when never verified). */
   dkim?: DkimInfo | null;
+  /** Sender MUA self-identification (raw User-Agent / X-Mailer header). */
+  mailer?: string | null;
   /** Thread was replied to (list status glyph). */
   isReplied?: boolean;
   labels?: string[];

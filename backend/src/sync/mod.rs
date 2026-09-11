@@ -679,6 +679,7 @@ mod tests {
             date: Some("2025-01-15T10:00:00Z".into()),
             in_reply_to: None,
             references: None,
+            mailer: None,
             flags: vec!["\\Seen".into()],
             size: Some(1234),
             body: None,
@@ -746,6 +747,7 @@ mod tests {
             date: None,
             in_reply_to: None,
             references: None,
+            mailer: None,
             flags: vec![],
             size: None,
             body: None,
@@ -1046,6 +1048,7 @@ mod tests {
             date: None,
             in_reply_to: None,
             references: None,
+            mailer: None,
             flags: vec![],
             size: None,
             body: None,
@@ -1123,6 +1126,7 @@ mod tests {
                 date: None,
                 in_reply_to: None,
                 references: None,
+                mailer: None,
                 flags: if i <= 2 {
                     vec!["\\Seen".into()]
                 } else {
@@ -1220,6 +1224,7 @@ mod tests {
             date: Some("2026-08-22T10:00:00Z".into()),
             in_reply_to: None,
             references: None,
+            mailer: None,
             flags: vec![],
             size: None,
             body: None,
@@ -1618,6 +1623,7 @@ mod tests {
             date: None,
             in_reply_to: None,
             references: None,
+            mailer: None,
             flags: vec![],
             size: None,
             body: None,

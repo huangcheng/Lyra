@@ -21,6 +21,7 @@ import { api } from '@/lib/api-client';
 import { downloadAttachment, formatBytes, resolveInlineImages } from '@/lib/attachments';
 import { useAvatar } from '@/lib/avatar';
 import { ThinkingOrb } from 'thinking-orbs';
+import { MailerChip } from '@/components/mailer-chip';
 import { MARK_READ_OPEN_DWELL_MS } from '@/lib/mark-read-policy';
 import { markMessageReadOnServer } from '@/lib/mark-message-read';
 import { mapApiMessage, type ApiMessage } from '@/lib/mail-api';
@@ -318,9 +319,10 @@ export function MessageCard({
           </div>
         </div>
       ) : null}
-      {mail.dkim ? (
-        <div className="px-4 pb-1">
-          <DkimStatus dkim={mail.dkim} locale={locale} />
+      {mail.dkim || mail.mailer ? (
+        <div className="flex flex-wrap items-center gap-2 px-4 pb-1">
+          {mail.dkim ? <DkimStatus dkim={mail.dkim} locale={locale} /> : null}
+          <MailerChip mailer={mail.mailer} locale={locale} />
         </div>
       ) : null}
       <div className="px-4 pt-1 pb-4 text-sm">

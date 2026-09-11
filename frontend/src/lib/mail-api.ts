@@ -35,6 +35,8 @@ export interface ApiMessage {
   threadId?: string | null;
   messageIdHeader?: string;
   inReplyTo?: string;
+  /** Sender MUA self-identification (raw User-Agent / X-Mailer header). */
+  mailer?: string | null;
   referencesHeaders?: string;
   labels?: string;
   subject?: string;
@@ -162,6 +164,7 @@ export function mapApiMessage(msg: ApiMessage | Record<string, unknown>): MailMe
     threadId: row.threadId ?? undefined,
     messageIdHeader: row.messageIdHeader ?? undefined,
     inReplyTo: row.inReplyTo ?? undefined,
+    mailer: row.mailer ?? null,
     referencesHeaders: row.referencesHeaders ?? undefined,
     labels: parseLabels(row.labels),
     subject: row.subject ?? '(no subject)',

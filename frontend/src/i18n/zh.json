@@ -45,6 +45,7 @@
     "noMessagesHint": "下次同步后，新邮件会显示在这里。",
     "noMessagesSyncing": "正在同步账户…",
     "selectMessage": "选择一封邮件以阅读",
+    "viaMailer": "经由 {{mailer}}",
     "bodyUnavailable": "这封邮件的内容尚未下载，将在下次同步成功后显示。",
     "moveToJunk": "移到垃圾邮件",
     "notSpam": "非垃圾邮件",

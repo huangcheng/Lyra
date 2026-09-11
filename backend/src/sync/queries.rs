@@ -209,6 +209,7 @@ const MESSAGE_LIST_COLS: &[message::Column] = &[
     message::Column::IsDraft,
     message::Column::HasAttachments,
     message::Column::Labels,
+    message::Column::Mailer,
 ];
 
 pub(super) fn add_message_list_columns(query: &mut SelectStatement) {
@@ -292,6 +293,7 @@ pub(super) fn message_response_from_query_row(
         references_headers: row
             .try_get::<Option<String>>("", "references_headers")?
             .map(|s| s.chars().take(2048).collect()),
+        mailer: row.try_get("", "mailer")?,
         subject: row
             .try_get::<Option<String>>("", "subject")?
             .map(|s| crate::imap::decode_mime_header(&s)),
@@ -408,6 +410,9 @@ pub struct MessageResponse {
     /// RFC 5322 References — ancestor Message-ID chain (capped to bound
     /// list payload weight).
     pub references_headers: Option<String>,
+    /// Sender MUA self-identification (User-Agent / X-Mailer). Informational
+    /// only — spoofable; clients render it as a "via …" hint.
+    pub mailer: Option<String>,
     pub subject: Option<String>,
     pub from_address: Option<String>,
     pub to_addresses: Option<String>,
@@ -715,6 +720,7 @@ pub(crate) struct MessageRow {
     pub(super) thread_id: Option<String>,
     pub(super) in_reply_to: Option<String>,
     pub(super) references_headers: Option<String>,
+    pub(super) mailer: Option<String>,
     pub(super) protocol: String,
     pub(super) body_text: Option<String>,
     pub(super) body_html: Option<String>,
@@ -770,6 +776,7 @@ pub(crate) fn message_response_from_row(row: &MessageRow) -> MessageResponse {
             .references_headers
             .as_deref()
             .map(|s| s.chars().take(2048).collect()),
+        mailer: row.mailer.clone(),
         subject: row.subject.as_deref().map(crate::imap::decode_mime_header),
         from_address: row
             .from_address
@@ -840,6 +847,7 @@ const MESSAGE_LOAD_COLS: &[message::Column] = &[
     message::Column::DkimSignedAt,
     message::Column::DkimExpiresAt,
     message::Column::Labels,
+    message::Column::Mailer,
 ];
 
 /// AI-assist context projection: just the prompt fields the `ai` module
@@ -909,6 +917,7 @@ pub(crate) async fn load_message_row(
         thread_id: row_opt_id(&row, "thread_id").map_err(orm_err)?,
         in_reply_to: row.try_get("", "in_reply_to").map_err(orm_err)?,
         references_headers: row.try_get("", "references_headers").map_err(orm_err)?,
+        mailer: row.try_get("", "mailer").map_err(orm_err)?,
         protocol: row.try_get("", "protocol").map_err(orm_err)?,
         body_text: row.try_get("", "body_text").map_err(orm_err)?,
         body_html: row.try_get("", "body_html").map_err(orm_err)?,

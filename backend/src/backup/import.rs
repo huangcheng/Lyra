@@ -1169,18 +1169,17 @@ async fn import_one_message(
     // the raw header line; parse_header_metadata trims the identity/address
     // fields (raw_text/addr_text) but NOT the subject — trim everything here
     // so imported rows are clean.
-    let (parsed_mid, subject, from, to, cc, parsed_date, in_reply_to, references) =
-        crate::imap::parse_header_metadata(raw);
+    let parsed = crate::imap::parse_header_metadata(raw);
     let trim = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let (subject, from, to, cc, parsed_date, in_reply_to, references) = (
-        trim(subject),
-        trim(from),
-        trim(to),
-        trim(cc),
-        trim(parsed_date),
-        trim(in_reply_to),
-        trim(references),
-    );
+    let parsed_mid = trim(parsed.message_id);
+    let subject = trim(parsed.subject);
+    let from = trim(parsed.from);
+    let to = trim(parsed.to);
+    let cc = trim(parsed.cc);
+    let parsed_date = trim(parsed.date);
+    let in_reply_to = trim(parsed.in_reply_to);
+    let references = trim(parsed.references);
+    let mailer = trim(parsed.mailer);
     let (body_text, body_html_raw, attachments) = crate::imap::extract_mime_parts(raw);
     let body_html = crate::sanitize::persist_body_html(body_html_raw.as_deref());
 
@@ -1222,6 +1221,7 @@ async fn import_one_message(
             size_bytes: Some(i32::try_from(raw.len()).unwrap_or(i32::MAX)),
             in_reply_to: in_reply_to.as_deref(),
             references_headers: references.as_deref(),
+            mailer: mailer.as_deref(),
             snippet: snippet.as_deref(),
             has_attachments: !attachments.is_empty(),
             body_text: body_text.as_deref(),
@@ -2376,6 +2376,7 @@ mod tests {
             date: None,
             in_reply_to: None,
             references: None,
+            mailer: None,
             flags: vec![],
             size: None,
             body: None,

@@ -53,6 +53,9 @@ pub struct Model {
     pub size_bytes: Option<i64>,
     pub in_reply_to: Option<String>,
     pub references_headers: Option<String>,
+    /// Sender MUA self-identification (User-Agent / X-Mailer / X-MimeOLE).
+    /// Informational only — trivially spoofable, never a security signal.
+    pub mailer: Option<String>,
     pub labels: Option<Json>,
     pub snippet: Option<String>,
     pub snoozed_until: Option<DateTimeUtc>,

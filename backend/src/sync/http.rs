@@ -1131,6 +1131,16 @@ async fn maybe_verify_dkim(
     if let Ok(rel) = crate::blobs::store(data_dir, &row.account_id, &raw).await {
         let _ = crate::sync::store::set_message_raw_blob(db, &row.id, &rel).await;
     }
+    // Backfill the sender MUA while the raw bytes are in hand (rows synced
+    // before the column existed); the body-fill path does the same.
+    if row.mailer.is_none()
+        && let Some(mailer) = crate::imap::parse_header_metadata(&raw).mailer
+        && crate::sync::store::set_message_mailer(db, &row.id, &mailer)
+            .await
+            .is_ok()
+    {
+        row.mailer = Some(mailer);
+    }
     let verdict = crate::dkim::verify_raw(&raw, &from_domain_of(row)).await;
     if verdict.status == crate::dkim::DkimStatus::TempError {
         // Only retriable verdicts back off; pass/fail persist and never
@@ -1383,6 +1393,15 @@ async fn maybe_fill_imap_body(
                 text_value(fetched.message_id.as_deref()),
             ),
         )
+        // Backfill the sender MUA on first body view: keep a stored value,
+        // else adopt the freshly parsed one (rows predate the column).
+        .value(
+            message::Column::Mailer,
+            coalesce_existing(
+                message::Column::Mailer,
+                text_value(fetched.mailer.as_deref()),
+            ),
+        )
         .value(message::Column::UpdatedAt, now_value(db))
         .and_where(Expr::col(message::Column::Id).eq(id_value(db, &row.id)?));
     if let Some(v) = &dkim_verdict {
@@ -1424,6 +1443,9 @@ async fn maybe_fill_imap_body(
     }
     if row.date.is_none() {
         row.date.clone_from(&fetched.date);
+    }
+    if row.mailer.is_none() {
+        row.mailer.clone_from(&fetched.mailer);
     }
     if header_needs_refresh(row.snippet.as_deref()) {
         row.snippet = snippet;
@@ -3274,6 +3296,7 @@ mod learn_hook_tests {
             id: "00000000-0000-7000-8000-0000000000aa".into(),
             in_reply_to: None,
             references_headers: None,
+            mailer: None,
             labels: None,
             account_id: "acc".into(),
             folder_id: "fld".into(),
@@ -3426,6 +3449,7 @@ mod dkim_lazy_tests {
             date: None,
             in_reply_to: None,
             references: None,
+            mailer: None,
             flags: vec!["\\Seen".into()],
             size: Some(1024),
             body: None,

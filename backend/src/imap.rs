@@ -197,6 +197,8 @@ pub struct ImapMessage {
     pub in_reply_to: Option<String>,
     /// References header.
     pub references: Option<String>,
+    /// Sender's MUA self-identification (User-Agent / X-Mailer / X-MimeOLE).
+    pub mailer: Option<String>,
     /// IMAP flags (`\Seen`, `\Flagged`, etc.).
     pub flags: Vec<String>,
     /// RFC822.SIZE if available.
@@ -509,7 +511,7 @@ impl ImapClient {
         timed(COMMAND_TIMEOUT, async {
             let uid_set = format_uid_set(uids);
             let fetch_items = parenthesize_fetch_atts(
-                "UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)]",
+                "UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES USER-AGENT X-MAILER X-MIMEOLE)]",
             );
 
             let stream = self
@@ -543,7 +545,7 @@ impl ImapClient {
 
         timed(COMMAND_TIMEOUT, async {
             let fetch_items = parenthesize_fetch_atts(
-                "UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)]",
+                "UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES USER-AGENT X-MAILER X-MIMEOLE)]",
             );
             let query = format!("{fetch_items} (CHANGEDSINCE {modseq})");
 
@@ -853,16 +855,20 @@ pub fn decode_mime_header_bytes(raw: &[u8]) -> String {
 }
 
 /// Metadata fields extracted from a message's header block.
-pub(crate) type HeaderMetadata = (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
+#[derive(Default, Debug, PartialEq, Eq)]
+pub(crate) struct HeaderMetadata {
+    pub message_id: Option<String>,
+    pub subject: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub cc: Option<String>,
+    pub date: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Option<String>,
+    /// Sender's mail client self-identification: `User-Agent`, else
+    /// `X-Mailer`, else `X-MimeOLE`. Informational only — spoofable.
+    pub mailer: Option<String>,
+}
 
 /// Parse message metadata from a `BODY[HEADER.FIELDS ...]` literal (or the
 /// header section of a full body).
@@ -918,16 +924,40 @@ pub(crate) fn parse_header_metadata(header_bytes: &[u8]) -> HeaderMetadata {
             .filter(|s| !s.is_empty())
     };
 
-    (
-        raw_text(mail_parser::HeaderName::MessageId),
+    // Mailer self-identification: prefer User-Agent, then X-Mailer, then
+    // X-MimeOLE (Outlook Express lineage). All optional, all spoofable.
+    // These are not mail-parser known headers, so they arrive as
+    // HeaderName::Other with the *original* case — match case-insensitively.
+    let mailer_header = |name: &str| -> Option<String> {
+        msg.headers()
+            .iter()
+            .find(|h| match &h.name {
+                mail_parser::HeaderName::Other(n) => n.eq_ignore_ascii_case(name),
+                known => known.as_static_str().eq_ignore_ascii_case(name),
+            })
+            .map(|h| {
+                unfold_header(&String::from_utf8_lossy(
+                    &header_bytes[h.offset_start as usize..h.offset_end as usize],
+                ))
+            })
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let mailer = mailer_header("User-Agent")
+        .or_else(|| mailer_header("X-Mailer"))
+        .or_else(|| mailer_header("X-MimeOLE"));
+
+    HeaderMetadata {
+        message_id: raw_text(mail_parser::HeaderName::MessageId),
         subject,
-        addr_text(mail_parser::HeaderName::From),
-        addr_text(mail_parser::HeaderName::To),
-        addr_text(mail_parser::HeaderName::Cc),
-        raw_text(mail_parser::HeaderName::Date),
-        raw_text(mail_parser::HeaderName::InReplyTo),
-        raw_text(mail_parser::HeaderName::References),
-    )
+        from: addr_text(mail_parser::HeaderName::From),
+        to: addr_text(mail_parser::HeaderName::To),
+        cc: addr_text(mail_parser::HeaderName::Cc),
+        date: raw_text(mail_parser::HeaderName::Date),
+        in_reply_to: raw_text(mail_parser::HeaderName::InReplyTo),
+        references: raw_text(mail_parser::HeaderName::References),
+        mailer,
+    }
 }
 
 /// Collapse RFC 5322 folding (CRLF + whitespace) at the byte level. Safe
@@ -977,7 +1007,7 @@ fn parse_fetch_to_message(fetch: &async_imap::types::Fetch, include_body: bool) 
 
     // Metadata comes from the header block: the dedicated HEADER.FIELDS
     // literal on metadata fetches, or the header section of BODY.PEEK[].
-    let (message_id, subject, from, to, cc, date, in_reply_to, references) = if include_body {
+    let meta = if include_body {
         fetch
             .body()
             .map_or_else(HeaderMetadata::default, parse_header_metadata)
@@ -1001,14 +1031,15 @@ fn parse_fetch_to_message(fetch: &async_imap::types::Fetch, include_body: bool) 
 
     ImapMessage {
         uid,
-        message_id,
-        subject,
-        from,
-        to,
-        cc,
-        date,
-        in_reply_to,
-        references,
+        message_id: meta.message_id,
+        subject: meta.subject,
+        from: meta.from,
+        to: meta.to,
+        cc: meta.cc,
+        date: meta.date,
+        in_reply_to: meta.in_reply_to,
+        references: meta.references,
+        mailer: meta.mailer,
         flags,
         size,
         body: body_bytes,
@@ -1196,30 +1227,36 @@ mod tests {
     fn parse_header_metadata_handles_nested_quote_message_id() {
         // The exact header block QQ sent for UID 8 (subject truncated).
         let headers = b"Date: Fri, 28 Jun 2024 14:19:59 +0800 (CST)\r\nSubject: =?utf-8?B?5bel5Lia?=\r\nFrom: =?utf-8?B?endmdy1pbmZv?= <zwfw-info@miit.gov.cn>\r\nTo: 491564601@qq.com\r\nMessage-ID: <1364539391.160358.1719555599402.JavaMail.\"zwfw-info@miit.gov.cn\"@jszt-idc07-msgcenter-5b6dc56f8f-v7cvc>\r\nIn-Reply-To: <prev@qq.com>\r\nReferences: <root@qq.com> <prev@qq.com>\r\n\r\n";
-        let (message_id, subject, from, to, cc, date, in_reply_to, references) =
-            parse_header_metadata(headers);
+        let meta = parse_header_metadata(headers);
         assert_eq!(
-            message_id.as_deref(),
+            meta.message_id.as_deref(),
             Some(
                 "<1364539391.160358.1719555599402.JavaMail.\"zwfw-info@miit.gov.cn\"@jszt-idc07-msgcenter-5b6dc56f8f-v7cvc>"
             )
         );
-        assert_eq!(subject.as_deref(), Some("工业"));
-        assert_eq!(from.as_deref(), Some("zwfw-info <zwfw-info@miit.gov.cn>"));
-        assert_eq!(to.as_deref(), Some("491564601@qq.com"));
-        assert_eq!(cc, None);
+        assert_eq!(meta.subject.as_deref(), Some("工业"));
         assert_eq!(
-            date.as_deref(),
+            meta.from.as_deref(),
+            Some("zwfw-info <zwfw-info@miit.gov.cn>")
+        );
+        assert_eq!(meta.to.as_deref(), Some("491564601@qq.com"));
+        assert_eq!(meta.cc, None);
+        assert_eq!(
+            meta.date.as_deref(),
             Some("Fri, 28 Jun 2024 14:19:59 +0800 (CST)")
         );
-        assert_eq!(in_reply_to.as_deref(), Some("<prev@qq.com>"));
-        assert_eq!(references.as_deref(), Some("<root@qq.com> <prev@qq.com>"));
+        assert_eq!(meta.in_reply_to.as_deref(), Some("<prev@qq.com>"));
+        assert_eq!(
+            meta.references.as_deref(),
+            Some("<root@qq.com> <prev@qq.com>")
+        );
+        assert_eq!(meta.mailer, None);
     }
 
     #[test]
     fn parse_header_metadata_empty_on_garbage() {
         let out = parse_header_metadata(b"not a header block");
-        assert_eq!(out, Default::default());
+        assert_eq!(out, HeaderMetadata::default());
     }
 
     #[test]
@@ -1233,9 +1270,39 @@ mod tests {
         headers.extend_from_slice(b"From: ");
         headers.extend_from_slice(&gbk);
         headers.extend_from_slice(b" <10000@qq.com>\r\nTo: a@b.com\r\n\r\n");
-        let (_, _, from, to, _, _, _, _) = parse_header_metadata(&headers);
-        assert_eq!(from.as_deref(), Some("腾讯企业微信 <10000@qq.com>"));
-        assert_eq!(to.as_deref(), Some("a@b.com"));
+        let meta = parse_header_metadata(&headers);
+        assert_eq!(meta.from.as_deref(), Some("腾讯企业微信 <10000@qq.com>"));
+        assert_eq!(meta.to.as_deref(), Some("a@b.com"));
+    }
+
+    #[test]
+    fn parse_header_metadata_extracts_mailer() {
+        // User-Agent wins; X-Mailer and X-MimeOLE are fallbacks. Header names
+        // arrive as HeaderName::Other with original case — match loosely.
+        let ua = b"From: a@b.com\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Thunderbird/128.0\r\nX-Mailer: ignored\r\n\r\n";
+        assert!(
+            parse_header_metadata(ua)
+                .mailer
+                .unwrap()
+                .contains("Thunderbird/128.0")
+        );
+
+        let xm = b"From: a@b.com\r\nX-Mailer: Foxmail 7.2.25.254[en]\r\n\r\n";
+        assert_eq!(
+            parse_header_metadata(xm).mailer.as_deref(),
+            Some("Foxmail 7.2.25.254[en]")
+        );
+
+        let lower = b"From: a@b.com\r\nuser-agent: Apple Mail (2.3774.400.31)\r\n\r\n";
+        assert!(
+            parse_header_metadata(lower)
+                .mailer
+                .unwrap()
+                .starts_with("Apple Mail")
+        );
+
+        let none = b"From: a@b.com\r\nSubject: hi\r\n\r\n";
+        assert_eq!(parse_header_metadata(none).mailer, None);
     }
 
     #[test]

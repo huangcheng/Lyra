@@ -646,6 +646,14 @@ paths:
               schema:
                 type: object
                 properties:
+                  mailer:
+                    type: string
+                    nullable: true
+                    description: >
+                      Sender MUA self-identification (raw `User-Agent` /
+                      `X-Mailer` / `X-MimeOLE` header), captured at sync or
+                      backfilled on first body view. Informational only —
+                      trivially spoofable; never a security signal.
                   attachments:
                     type: array
                     items:

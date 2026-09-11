@@ -234,6 +234,10 @@ pub struct JmapEmail {
     pub reply_to: Option<Vec<JmapEmailAddress>>,
     #[serde(default)]
     pub subject: Option<String>,
+    /// Sender MUA self-identification (resolved from User-Agent / X-Mailer
+    /// header pseudo-props in `map_email`). Spoofable — display only.
+    #[serde(default)]
+    pub mailer: Option<String>,
     #[serde(default)]
     pub body_structure: Option<serde_json::Value>,
     #[serde(default)]
@@ -313,6 +317,14 @@ impl JmapEmail {
     /// Extract the plain-text body from bodyValues.
     pub fn body_text(&self) -> Option<String> {
         extract_body_part(self, "text/plain")
+    }
+
+    /// Sender's mail client. Spoofable — informational display only.
+    pub fn mailer(&self) -> Option<&str> {
+        self.mailer
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 
     /// Extract the HTML body from bodyValues (unsanitized; persist via `persist_body_html`).
@@ -1524,6 +1536,20 @@ fn map_email(email: &Email<Get>) -> Option<JmapEmail> {
                 .collect(),
         ))
     };
+    let mailer_header = |name: &str| -> Option<String> {
+        let key = email::Header {
+            name: name.into(),
+            form: email::HeaderForm::Text,
+            all: false,
+        };
+        match email.header(&key) {
+            Some(email::HeaderValue::AsText(s)) => Some(s.trim().to_owned()),
+            Some(email::HeaderValue::AsTextAll(v)) => v.first().map(|s| s.trim().to_owned()),
+            _ => None,
+        }
+        .filter(|s| !s.is_empty())
+    };
+
     Some(JmapEmail {
         id: id.to_owned(),
         blob_id: email.blob_id().map(str::to_owned),
@@ -1545,6 +1571,7 @@ fn map_email(email: &Email<Get>) -> Option<JmapEmail> {
         bcc: email.bcc().map(map_addresses),
         reply_to: email.reply_to().map(map_addresses),
         subject: email.subject().map(str::to_owned),
+        mailer: mailer_header("User-Agent").or_else(|| mailer_header("X-Mailer")),
         body_structure: None, // never read by store.rs
         body_values: map_body_values(email),
         text_body: map_body_refs(email.text_body()),
@@ -1872,6 +1899,17 @@ fn email_get_properties() -> Vec<Property> {
         P::Attachments,
         P::HasAttachment,
         P::Preview,
+        // Sender MUA self-identification (displayed as a "via …" chip).
+        P::Header(email::Header {
+            name: "User-Agent".into(),
+            form: email::HeaderForm::Text,
+            all: false,
+        }),
+        P::Header(email::Header {
+            name: "X-Mailer".into(),
+            form: email::HeaderForm::Text,
+            all: false,
+        }),
     ]
 }
 
