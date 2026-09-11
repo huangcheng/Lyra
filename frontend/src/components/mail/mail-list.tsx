@@ -31,7 +31,6 @@ import { t } from '@/i18n';
 import { ApiError, api } from '@/lib/api-client';
 import { useAvatar } from '@/lib/avatar';
 import { ThinkingOrb } from 'thinking-orbs';
-import { OrbLoading } from '@/components/ui/orb-state';
 import { confirmMoveToTrash } from '@/lib/confirm-trash';
 import { groupIntoConversations, type Conversation } from '@/lib/conversation';
 import type { ConversationDragData } from '@/lib/conversation-actions';
@@ -90,6 +89,36 @@ function ListAvatar({ email, label }: { email: string; label: string }) {
         {getInitials(label)}
       </AvatarFallback>
     </Avatar>
+  );
+}
+
+/**
+ * View-switch placeholder: keeps the list's row geometry while the first
+ * fetch for a folder is in flight, so the panel doesn't pop from rows to a
+ * centered spinner and back.
+ */
+function ListSkeletonRows({ label }: { label: string }) {
+  return (
+    <div role="status" aria-label={label} className="flex h-full flex-col overflow-hidden">
+      {Array.from({ length: 9 }, (_, i) => (
+        <div
+          key={i}
+          aria-hidden
+          className="flex w-full animate-pulse gap-3 border-b border-border/60 px-4 py-2"
+        >
+          <div className="w-3 shrink-0" />
+          <div className="h-8 w-8 shrink-0 rounded-full bg-muted" />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <div className="h-3.5 w-2/5 max-w-40 rounded bg-muted" />
+              <div className="ml-auto h-3 w-12 rounded bg-muted" />
+            </div>
+            <div className="mt-1.5 h-3.5 w-3/4 rounded bg-muted" />
+            <div className="mt-1.5 h-3 w-full rounded bg-muted" />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -420,7 +449,7 @@ export function MailList() {
   }, [conversations]);
 
   if (loading && filtered.length === 0 && !fetchError) {
-    return <OrbLoading state="searching" label={t(locale, 'common.loading')} />;
+    return <ListSkeletonRows label={t(locale, 'common.loading')} />;
   }
 
   if (filtered.length === 0 && !fetchError) {
