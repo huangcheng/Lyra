@@ -25,6 +25,7 @@ const JMAP_TRANSIENT_ATTEMPTS: u32 = 3;
 /// Load a JMAP account and run the JMAP fetch loop.
 ///
 /// JMAP-then-IMAP fallback stays inside this plugin path, not core dispatch.
+#[tracing::instrument(name = "lyra.sync.jmap", skip_all, fields(account_id = account_id))]
 pub(crate) async fn jmap_sync_account(
     db: &DbPool,
     user_id: &str,

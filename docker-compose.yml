@@ -38,6 +38,11 @@ services:
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_FRONTEND_DSN: ${SENTRY_FRONTEND_DSN:-}
       SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.0}
+      # OpenTelemetry tracing (opt-in; see .env.example for Sentry URLs).
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_TRACES_SAMPLE_RATIO: ${OTEL_TRACES_SAMPLE_RATIO:-1.0}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-lyra-backend}
       LYRA_OAUTH_CONFIG: /config/oauth-providers.toml
       # Optional — enables Settings → Sign in with Microsoft (Outlook / M365).
       LYRA_MS_OAUTH_CLIENT_ID: ${LYRA_MS_OAUTH_CLIENT_ID:-}

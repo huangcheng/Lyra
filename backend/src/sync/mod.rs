@@ -61,12 +61,18 @@ use crate::storage::DbPool;
 ///
 /// Loads the account, resolves the receive plugin from `receive_protocol`
 /// (legacy `protocol` if empty), and dispatches to `plugin.sync_account`.
+/// OTel span root of every sync tree (HTTP-triggered, scheduled, or
+/// push-woken); `#[instrument]` is async-safe where a held `entered()`
+/// guard would make the future !Send.
+#[tracing::instrument(name = "lyra.sync.account", skip_all, fields(account_id, user_id))]
 pub async fn run_account_sync(
     db: &DbPool,
     app: &App,
     user_id: &str,
     account_id: &str,
 ) -> Result<SyncResponse, SyncError> {
+    tracing::Span::current().record("account_id", account_id);
+    tracing::Span::current().record("user_id", user_id);
     let id_value = bind_id(db, account_id)?;
     let user_value = bind_id(db, user_id)?;
     let row = account_entity::Entity::find()
@@ -362,6 +368,10 @@ mod tests {
             sync_poll_secs: 300,
             max_attachment_bytes: 25 * 1024 * 1024,
             redis_url: None,
+            otel_endpoint: None,
+            otel_headers: None,
+            otel_sample_ratio: 1.0,
+            otel_service_name: "lyra-backend".into(),
             sentry_dsn: None,
             sentry_frontend_dsn: None,
             sentry_traces_sample_rate: 0.0,

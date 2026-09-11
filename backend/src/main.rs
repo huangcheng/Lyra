@@ -39,6 +39,7 @@ mod mytest;
 mod netsec;
 mod oauth;
 mod opengpg;
+mod otel;
 #[cfg(test)]
 mod pgtest;
 mod pim;
@@ -173,12 +174,20 @@ fn init_sentry(config: &config::Config) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = config::Config::from_env()?;
-    // Boot telemetry before anything fallible.
+    // Boot telemetry before anything fallible. OTel provider first — the
+    // bridge layer needs a live tracer; the guard flushes on drop.
+    let otel_provider = otel::init_otel(&config);
+    let otel_layer = otel_provider.as_ref().map(|p| {
+        use opentelemetry::trace::TracerProvider as _;
+        let tracer = p.tracer("lyra");
+        tracing_opentelemetry::layer().with_tracer(tracer)
+    });
     init_sentry(&config);
     tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())
         .with(tracing_subscriber::fmt::layer())
         .with(sentry_tracing::layer())
+        .with(otel_layer)
         .init();
     let storage = storage::Storage::new(&config.database_url).await?;
     storage.run_migrations().await?;
@@ -490,6 +499,10 @@ mod tests {
             sync_poll_secs: 300,
             max_attachment_bytes: 25 * 1024 * 1024,
             redis_url: None,
+            otel_endpoint: None,
+            otel_headers: None,
+            otel_sample_ratio: 1.0,
+            otel_service_name: "lyra-backend".into(),
             sentry_dsn: None,
             sentry_frontend_dsn: None,
             sentry_traces_sample_rate: 0.0,

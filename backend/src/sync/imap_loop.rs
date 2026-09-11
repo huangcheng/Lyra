@@ -24,6 +24,7 @@ fn session_may_be_poisoned(err: &ImapError) -> bool {
 }
 
 /// Load an IMAP account and run the existing IMAP fetch loop.
+#[tracing::instrument(name = "lyra.sync.imap", skip_all, fields(account_id = account_id))]
 pub(crate) async fn imap_sync_account(
     db: &DbPool,
     user_id: &str,

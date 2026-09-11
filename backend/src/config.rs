@@ -37,6 +37,18 @@ pub struct Config {
     pub sentry_frontend_dsn: Option<String>,
     /// Sentry trace sample rate (`SENTRY_TRACES_SAMPLE_RATE`, 0.0-1.0, default 0.0).
     pub sentry_traces_sample_rate: f32,
+    /// OpenTelemetry OTLP endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT`). Opt-in
+    /// distributed tracing: unset ⇒ no exporter, zero overhead. Any OTLP
+    /// receiver works (Sentry's /otlp/, a collector, Jaeger…).
+    pub otel_endpoint: Option<String>,
+    /// Extra OTLP headers (`OTEL_EXPORTER_OTLP_HEADERS`, `k=v,k=v`) —
+    /// receiver auth (e.g. Sentry's x-sentry-auth).
+    pub otel_headers: Option<String>,
+    /// Trace sample ratio (`OTEL_TRACES_SAMPLE_RATIO`, 0.0-1.0, default 1.0
+    /// — single-user traffic is tiny).
+    pub otel_sample_ratio: f64,
+    /// Service name (`OTEL_SERVICE_NAME`, default `lyra-backend`).
+    pub otel_service_name: String,
     /// Master key for the per-user DEK hierarchy (`LYRA_MASTER_KEY`, 32+ bytes).
     /// Required: the backend refuses to start without it. Never logged.
     pub master_key: Vec<u8>,
@@ -291,6 +303,19 @@ impl Config {
             .and_then(|v| v.parse::<f32>().ok())
             .map_or(0.0, |r| r.clamp(0.0, 1.0));
 
+        let otel_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let otel_headers = env::var("OTEL_EXPORTER_OTLP_HEADERS")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let otel_sample_ratio: f64 = env::var("OTEL_TRACES_SAMPLE_RATIO")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map_or(1.0, |r| r.clamp(0.0, 1.0));
+        let otel_service_name =
+            env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "lyra-backend".into());
+
         let master_key = master_key_from_env()?;
         let public_url = normalize_public_url(
             &env::var("LYRA_PUBLIC_URL").map_err(|_| ConfigError::PublicUrlMissing)?,
@@ -331,6 +356,10 @@ impl Config {
             sentry_dsn,
             sentry_frontend_dsn,
             sentry_traces_sample_rate,
+            otel_endpoint,
+            otel_headers,
+            otel_sample_ratio,
+            otel_service_name,
             master_key,
             ms_oauth,
             yandex_oauth,

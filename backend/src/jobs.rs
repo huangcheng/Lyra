@@ -505,14 +505,31 @@ async fn revert_pending(db: &DbPool, id: &str) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+impl JobPayload {
+    /// Stable span attribute: the variant name without payload details.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::SyncAccount { .. } => "sync_account",
+            Self::UnsnoozeMessage { .. } => "unsnooze_message",
+            Self::SendMessage { .. } => "send_message",
+            Self::ExportBackup { .. } => "export_backup",
+            Self::ImportBackup { .. } => "import_backup",
+        }
+    }
+}
+
 /// Dispatch a claimed job. Plugin errors mark the job `failed` (no panic).
 /// `permit` must already be held; it is released when this future ends.
+#[tracing::instrument(name = "lyra.job.run", skip_all, fields(job_id, kind))]
 pub async fn process_job(
     state: &AuthState,
     inflight: &InFlight,
     _permit: OwnedSemaphorePermit,
     job: ClaimedJob,
 ) -> Result<(), sqlx::Error> {
+    let span = tracing::Span::current();
+    span.record("job_id", &job.id);
+    span.record("kind", job.payload.kind_name());
     let db = &state.db;
     let app: &App = &state.app;
     match job.payload {
@@ -894,6 +911,10 @@ mod tests {
             sync_poll_secs: 300,
             max_attachment_bytes: 25 * 1024 * 1024,
             redis_url: None,
+            otel_endpoint: None,
+            otel_headers: None,
+            otel_sample_ratio: 1.0,
+            otel_service_name: "lyra-backend".into(),
             sentry_dsn: None,
             sentry_frontend_dsn: None,
             sentry_traces_sample_rate: 0.0,
