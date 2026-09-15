@@ -517,6 +517,37 @@ pub(crate) async fn query_user_messages(
     .await
 }
 
+/// Sidebar Starred badge: COUNT over the same visibility rules as the
+/// starred view (`query_user_messages` with `is_starred = true`). The web
+/// client's partial message cache can't answer this — it only holds the
+/// folders visited this session.
+pub(crate) async fn count_starred_messages(
+    db: &DbPool,
+    user_id: &str,
+    account_id: Option<&str>,
+) -> Result<i64, SyncError> {
+    let user_value = id_value(db, user_id)?;
+    let account_value = opt_id_value(db, account_id)?;
+    let row = query_first(db, |q| {
+        q.expr_as(Expr::cust("COUNT(*)"), Alias::new("n"));
+        add_message_account_join(q);
+        q.and_where(aliased_col("a", "user_id").eq(Expr::val(user_value)))
+            .and_where(not_deleted_clause())
+            .and_where(snooze_visible_clause(db))
+            .and_where(aliased_col("m", "is_starred").eq(Expr::val(true)));
+        if let Some(account_value) = account_value {
+            q.and_where(aliased_col("m", "account_id").eq(Expr::val(account_value)));
+        }
+    })
+    .await?;
+    let count = row
+        .map(|r| r.try_get::<i64>("", "n"))
+        .transpose()
+        .map_err(orm_err)?
+        .unwrap_or(0);
+    Ok(count)
+}
+
 /// LIKE fallback branch (used only when the FTS index is unavailable).
 ///
 /// The keyword spelling follows the legacy rewrite exactly (SQLite `LIKE`,

@@ -31,16 +31,3 @@ export function accountInboxChildren(
   }
   return out;
 }
-
-/** Count starred messages visible for the current account switcher scope. */
-export function starredCount(
-  messages: Record<string, { accountId: string; isStarred: boolean }>,
-  accountId: string,
-  allAccountsSentinel: string,
-): number {
-  return Object.values(messages).filter((m) => {
-    if (!m.isStarred) return false;
-    if (accountId !== allAccountsSentinel && m.accountId !== accountId) return false;
-    return true;
-  }).length;
-}

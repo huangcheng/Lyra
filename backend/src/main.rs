@@ -7,6 +7,9 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::unnecessary_wraps)]
 #![allow(clippy::match_same_arms)]
+// Release-mode layout queries for the big async state machines (jobs::process_job)
+// sit right at rustc's default depth limit; headroom avoids spurious overflow.
+#![recursion_limit = "256"]
 
 #[macro_use]
 mod accounts;

@@ -20,11 +20,12 @@ use uuid::Uuid;
 
 use super::queries::{
     AttachmentResponse, FolderResponse, MessageResponse, MessageRow, add_folder_columns,
-    add_message_account_join, add_message_folder_join, aliased_col, fetch_messages_by_ids,
-    folder_response_from_row, header_needs_refresh, id_value, load_message_row,
-    message_response_from_row, not_deleted_clause, now_value, opt_id_value, opt_json_value,
-    orm_err, owned_text_value, query_first, query_user_messages, row_id, row_json_text,
-    run_message_list, search_like_fallback, snooze_visible_clause, text_value, ts_value,
+    add_message_account_join, add_message_folder_join, aliased_col, count_starred_messages,
+    fetch_messages_by_ids, folder_response_from_row, header_needs_refresh, id_value,
+    load_message_row, message_response_from_row, not_deleted_clause, now_value, opt_id_value,
+    opt_json_value, orm_err, owned_text_value, query_first, query_user_messages, row_id,
+    row_json_text, run_message_list, search_like_fallback, snooze_visible_clause, text_value,
+    ts_value,
 };
 use super::send::send_message;
 use super::store::{opt_str_value, parse_imap_uid, update_folder_counts};
@@ -48,6 +49,7 @@ pub fn routes() -> Router<AuthState> {
         .route("/api/v1/accounts/{account_id}/sync", post(trigger_sync))
         .route("/api/v1/messages/send", post(send_message))
         .route("/api/v1/messages/search", get(search_messages))
+        .route("/api/v1/messages/starred-count", get(starred_count))
         .route("/api/v1/messages", get(list_messages_query))
         .route("/api/v1/folders", get(list_folders))
         .route(
@@ -513,6 +515,32 @@ pub(crate) async fn list_messages_query(
     )
     .await?;
     Ok(Json(messages))
+}
+
+/// Query for GET /api/v1/messages/starred-count.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StarredCountQuery {
+    account_id: Option<String>,
+}
+
+/// Response for GET /api/v1/messages/starred-count.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StarredCountResponse {
+    count: i64,
+}
+
+/// Sidebar Starred badge — counts starred messages under the same
+/// visibility rules as the starred view.
+pub(crate) async fn starred_count(
+    State(state): State<AuthState>,
+    AuthUser(user_id): AuthUser,
+    Query(query): Query<StarredCountQuery>,
+) -> Result<Json<StarredCountResponse>, SyncError> {
+    let db = state.db();
+    let count = count_starred_messages(db, &user_id, query.account_id.as_deref()).await?;
+    Ok(Json(StarredCountResponse { count }))
 }
 
 /// Query for GET /api/v1/messages/search.

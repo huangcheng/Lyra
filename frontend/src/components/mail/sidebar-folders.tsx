@@ -48,7 +48,6 @@ import {
   resolveRoleFolder,
   type ConversationDragData,
 } from '@/lib/conversation-actions';
-import { starredCount } from '@/lib/favorites-sidebar';
 import {
   buildCustomFolderTree,
   buildRoleChildren,
@@ -57,6 +56,7 @@ import {
 } from '@/lib/folder-tree';
 import { ALL_ACCOUNTS, type StandardFolderRole } from '@/lib/mail-api';
 import { isFolderMuted, setFolderMuted, subscribeNotificationPrefs } from '@/lib/notifications';
+import { useStarredCount } from '@/lib/use-starred-count';
 import { useSyncProgress } from '@/lib/sync-progress';
 import { avatarTone, cn } from '@/lib/utils';
 import { useMailStore, type UnifiedFolder } from '@/stores/mail';
@@ -240,12 +240,11 @@ function StarredFavoriteRow({ count }: { count: number }) {
 function UnifiedMailboxBlock({ unifiedFolders }: { unifiedFolders: UnifiedFolder[] }) {
   const selectedAccountId = useUIStore((s) => s.selectedAccountId);
   const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
-  const messages = useMailStore((s) => s.messages);
   const inbox = unifiedFolders.find((f) => f.role === 'inbox');
   const tail = UNIFIED_ROLE_TAIL.map((role) => unifiedFolders.find((f) => f.role === role)).filter(
     (folder): folder is UnifiedFolder => Boolean(folder),
   );
-  const stars = starredCount(messages, selectedAccountId, ALL_ACCOUNTS);
+  const stars = useStarredCount();
 
   return (
     <>
@@ -624,8 +623,7 @@ function CollapsedFolders({ unifiedFolders }: { unifiedFolders: UnifiedFolder[] 
   const locale = useUIStore((s) => s.locale);
   const selectedAccountId = useUIStore((s) => s.selectedAccountId);
   const selectedFolderRole = useUIStore((s) => s.selectedFolderRole);
-  const messages = useMailStore((s) => s.messages);
-  const stars = starredCount(messages, selectedAccountId, ALL_ACCOUNTS);
+  const stars = useStarredCount();
 
   const items: Array<{
     key: string;

@@ -568,6 +568,31 @@ paths:
         "200":
           description: Search hits
 
+  /api/v1/messages/starred-count:
+    get:
+      tags: [messages]
+      summary: Starred message count (sidebar Starred badge)
+      description:
+        COUNT over the same visibility rules as the starred view
+        (`GET /api/v1/messages?isStarred=true`) — not deleted and not
+        snoozed. Clients must not derive this from their local message
+        cache, which only holds folders visited this session.
+      parameters:
+        - name: accountId
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Starred count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+
   /api/v1/messages/stats:
     get:
       tags: [stats]

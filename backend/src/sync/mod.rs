@@ -1332,6 +1332,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn count_starred_messages_matches_starred_view() {
+        let pool = test_pool().await;
+        let (user_id, account_id) = seed_user_and_account(&pool).await;
+        upsert_folder(&as_db(&pool), &account_id, "INBOX", Some("/"), &[])
+            .await
+            .unwrap();
+        let folder_id = get_folder_id(&as_db(&pool), &account_id, "INBOX")
+            .await
+            .unwrap();
+        for uid in [30, 31] {
+            let mut starred = sample_imap_message(uid);
+            starred.flags = vec!["\\Flagged".into()];
+            upsert_message(&as_db(&pool), &account_id, &folder_id, &starred)
+                .await
+                .unwrap();
+        }
+        upsert_message(
+            &as_db(&pool),
+            &account_id,
+            &folder_id,
+            &sample_imap_message(32),
+        )
+        .await
+        .unwrap();
+
+        // Snoozed-away and soft-deleted starred rows stay invisible to the badge.
+        let snoozed_id = message_id_for_uid(&pool, &account_id, &folder_id, 30).await;
+        let future = sqlite_utc_datetime(chrono::Utc::now() + chrono::Duration::hours(1));
+        sqlx::query("UPDATE message SET snoozed_until = ? WHERE id = ?")
+            .bind(&future)
+            .bind(&snoozed_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let deleted_id = message_id_for_uid(&pool, &account_id, &folder_id, 31).await;
+        sqlx::query("UPDATE message SET is_deleted = 1 WHERE id = ?")
+            .bind(&deleted_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let visible = queries::count_starred_messages(&as_db(&pool), &user_id, None)
+            .await
+            .unwrap();
+        assert_eq!(visible, 0);
+
+        sqlx::query("UPDATE message SET snoozed_until = NULL, is_deleted = 0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let all = queries::count_starred_messages(&as_db(&pool), &user_id, None)
+            .await
+            .unwrap();
+        assert_eq!(all, 2);
+        let scoped = queries::count_starred_messages(&as_db(&pool), &user_id, Some(&account_id))
+            .await
+            .unwrap();
+        assert_eq!(scoped, 2);
+        let other = queries::count_starred_messages(&as_db(&pool), &user_id, Some(&user_id))
+            .await
+            .unwrap();
+        assert_eq!(other, 0);
+    }
+
+    #[tokio::test]
     async fn inbox_shows_overdue_same_day_snooze() {
         let pool = test_pool().await;
         let (user_id, account_id) = seed_user_and_account(&pool).await;

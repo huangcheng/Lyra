@@ -87,6 +87,10 @@ interface MailState {
   markMessageRead: (id: string) => void;
   toggleStar: (id: string) => void;
   removeMessage: (id: string) => void;
+
+  /** Server-authoritative Starred badge total (null = not fetched yet). */
+  starredCount: number | null;
+  setStarredCount: (count: number | null) => void;
 }
 
 export const useMailStore = create<MailState>((set, get) => ({
@@ -199,13 +203,23 @@ export const useMailStore = create<MailState>((set, get) => ({
     set((state) => {
       const msg = state.messages[id];
       if (!msg) return state;
+      const starred = !msg.isStarred;
       return {
         messages: {
           ...state.messages,
-          [id]: { ...msg, isStarred: !msg.isStarred },
+          [id]: { ...msg, isStarred: starred },
         },
+        // Runs only after a successful server PATCH (see patchMessages /
+        // handlePatch), so the server-total badge can follow the flip.
+        starredCount:
+          state.starredCount === null
+            ? null
+            : Math.max(0, state.starredCount + (starred ? 1 : -1)),
       };
     }),
+
+  starredCount: null,
+  setStarredCount: (count) => set({ starredCount: count }),
 
   removeMessage: (id) => {
     set((state) => {

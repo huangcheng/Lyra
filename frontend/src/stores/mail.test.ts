@@ -64,3 +64,32 @@ describe('mail store message merge', () => {
     expect(useMailStore.getState().messages.m1.bodyHtml).toBeUndefined();
   });
 });
+
+describe('starredCount badge', () => {
+  beforeEach(() => {
+    useMailStore.setState({ accounts: [], folders: {}, messages: {}, threads: {} });
+    useMailStore.getState().setStarredCount(null);
+  });
+
+  it('toggleStar tracks the server total once it is known', () => {
+    useMailStore.getState().upsertMessage(makeMessage({ id: 'm1' }));
+    useMailStore.getState().setStarredCount(289);
+    useMailStore.getState().toggleStar('m1');
+    expect(useMailStore.getState().starredCount).toBe(290);
+    useMailStore.getState().toggleStar('m1');
+    expect(useMailStore.getState().starredCount).toBe(289);
+  });
+
+  it('toggleStar leaves an unknown total alone and never goes negative', () => {
+    useMailStore.getState().upsertMessage(makeMessage({ id: 'm1', isStarred: true }));
+    useMailStore.getState().toggleStar('m1');
+    expect(useMailStore.getState().starredCount).toBeNull();
+    useMailStore.getState().setStarredCount(0);
+    useMailStore.getState().toggleStar('m1');
+    expect(useMailStore.getState().starredCount).toBe(1);
+    // Unstarring when the total is already 0 clamps instead of drifting to -1.
+    useMailStore.getState().setStarredCount(0);
+    useMailStore.getState().toggleStar('m1');
+    expect(useMailStore.getState().starredCount).toBe(0);
+  });
+});
